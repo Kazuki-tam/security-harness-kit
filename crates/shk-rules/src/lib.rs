@@ -503,10 +503,10 @@ pub fn scan_content(content: &str, rel_path: &str, cfg: &RuleEngineConfig) -> Ve
             continue;
         }
         for m in r.re.find_iter(content) {
-            if let Some(validate) = r.validator {
-                if !validate(m.as_str()) {
-                    continue;
-                }
+            if let Some(validate) = r.validator
+                && !validate(m.as_str())
+            {
+                continue;
             }
             let (line, column) = line_col(content, m.start());
             out.push(RuleMatch {
