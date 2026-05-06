@@ -18,6 +18,13 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Create starter `shk.toml`
+    Init {
+        #[arg(long)]
+        strict: bool,
+        #[arg(long)]
+        force: bool,
+    },
     /// Scan repository or path for secrets and PII
     Scan {
         #[arg(value_name = "PATH", default_value = ".")]
@@ -107,6 +114,8 @@ impl AiTool {
 }
 #[derive(Subcommand)]
 pub enum DoctorCmd {
+    /// Check the latest released version
+    Version,
     /// Check ignore coverage for Git and AI tools
     Ignore {
         #[arg(value_name = "PATH")]

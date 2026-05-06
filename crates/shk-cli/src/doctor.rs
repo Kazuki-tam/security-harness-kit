@@ -1,3 +1,4 @@
+use crate::safety;
 use anyhow::Result;
 use serde_json::Value;
 use shk_core::git;
@@ -26,8 +27,11 @@ const DOTENVX_HINT_FILES: &[&str] = &[DOTENVX_PRIVATE_KEY_FILE, DOTENVX_VAULT_FI
 const CLAUDE_REQUIRED_DENY_PATTERNS: &[&str] = &[".env", ".env.*", "secrets/**", "credentials/**"];
 const CODEX_RISKY_SANDBOX_MODE: &str = "danger-full-access";
 const CODEX_RISKY_APPROVAL_POLICY: &str = "never";
-
 pub fn run_ignore(root: &Path, fix: bool) -> Result<()> {
+    if fix {
+        safety::require_project_policy(root, "doctor ignore --fix")?;
+        safety::ensure_writable_path_allowed(&root.join(".gitignore"))?;
+    }
     let (policy, _) = Policy::load_from_dir(root)?;
     let required = policy.doctor.ignore.required_patterns.clone();
     let gi_path = root.join(".gitignore");

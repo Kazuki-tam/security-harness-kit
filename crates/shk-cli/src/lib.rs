@@ -9,6 +9,8 @@ mod hook_output;
 mod hooks;
 mod output;
 mod policy_cmd;
+mod safety;
+mod version_check;
 
 use anyhow::{Context, Result};
 use args::{Cli, Commands, DoctorCmd, HooksCmd, PolicyCmd};
@@ -24,6 +26,7 @@ pub fn run() -> Result<()> {
     let cwd = std::env::current_dir().context("current directory")?;
 
     match cli.command {
+        Commands::Init { strict, force } => policy_cmd::init(&cwd, strict, force)?,
         Commands::Scan {
             path,
             staged,
@@ -56,6 +59,7 @@ pub fn run() -> Result<()> {
         } => commands::mask::run(&cwd, file, json, output, redaction, hook_mode, post)?,
         Commands::Doctor { cmd, json } => match cmd {
             None => doctor::run_all(&cwd, json)?,
+            Some(DoctorCmd::Version) => version_check::run(json)?,
             Some(DoctorCmd::Ignore { path, fix }) => {
                 let p = doctor::doctor_ignore_path(path);
                 doctor::run_ignore(&p, fix)?
@@ -69,6 +73,7 @@ pub fn run() -> Result<()> {
             HooksCmd::Install { .. } => {
                 let root =
                     shk_core::git::discover_repo_root(&cwd).context("not a git repository")?;
+                safety::require_project_policy(&root, "hooks install")?;
                 hooks::install_pre_commit(&root)?;
                 println!("Installed pre-commit hook under {}", root.display());
             }
@@ -79,7 +84,12 @@ pub fn run() -> Result<()> {
                 all,
                 tool,
                 fail_closed,
-            } => hooks::install_ai(&cwd, tool, all, audit, dry_run, global, fail_closed)?,
+            } => {
+                if !dry_run {
+                    safety::require_project_policy(&cwd, "hooks install-ai")?;
+                }
+                hooks::install_ai(&cwd, tool, all, audit, dry_run, global, fail_closed)?
+            }
         },
         Commands::Policy { cmd } => match cmd {
             PolicyCmd::Init { strict, force } => policy_cmd::init(&cwd, strict, force)?,

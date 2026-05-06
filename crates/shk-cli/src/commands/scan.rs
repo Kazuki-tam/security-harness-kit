@@ -1,6 +1,7 @@
 use crate::audit_log;
 use crate::hook_output;
 use crate::output;
+use crate::safety;
 use anyhow::{Context, Result, bail};
 use shk_core::policy::{ColorMode, Severity};
 use shk_core::scanner::{ScanOptions, scan_path, scan_string};
@@ -98,6 +99,9 @@ fn run_hook_mode(
     }
 
     let repo_root = resolve_repo_root(cwd, path_arg.as_path());
+    if audit {
+        safety::require_project_policy(&repo_root, "scan --audit")?;
+    }
 
     let (disp, body) = shk_integrations::stdin_to_hook_body(
         tool.integration_tool(),

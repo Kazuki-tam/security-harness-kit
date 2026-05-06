@@ -252,6 +252,7 @@ fn hook_mode_audit_creates_audit_log_in_isolated_tmp() {
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();
+    std::fs::write(repo.join("shk.toml"), "").unwrap();
     let fpath = repo.join("x.txt");
     // not real credential: synthetic detector fixture value only
     std::fs::write(
@@ -288,6 +289,140 @@ fn hook_mode_audit_creates_audit_log_in_isolated_tmp() {
 }
 
 #[test]
+fn init_creates_project_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(shk_bin())
+        .args(["init"])
+        .current_dir(dir.path())
+        .output()
+        .expect("init");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.path().join("shk.toml").is_file());
+}
+
+#[test]
+fn mask_output_requires_project_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.txt");
+    let output = dir.path().join("output.txt");
+    std::fs::write(&input, "hello@example.com\n").unwrap();
+    let out = Command::new(shk_bin())
+        .args([
+            "mask",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("mask output");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("requires a project shk.toml"), "{stderr}");
+    assert!(!output.exists());
+}
+
+#[test]
+fn mask_output_refuses_protected_home_config() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let input = project.path().join("input.txt");
+    let zshrc = home.path().join(".zshrc");
+    std::fs::write(project.path().join("shk.toml"), "").unwrap();
+    std::fs::write(&input, "hello@example.com\n").unwrap();
+    std::fs::write(&zshrc, "original\n").unwrap();
+
+    let out = Command::new(shk_bin())
+        .args([
+            "mask",
+            input.to_str().unwrap(),
+            "--output",
+            zshrc.to_str().unwrap(),
+        ])
+        .env("HOME", home.path())
+        .current_dir(project.path())
+        .output()
+        .expect("mask protected output");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("protected home configuration"), "{stderr}");
+    assert_eq!(std::fs::read_to_string(&zshrc).unwrap(), "original\n");
+}
+
+#[test]
+fn mask_output_refuses_tilde_home_config() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let input = project.path().join("input.txt");
+    let zshrc = home.path().join(".zshrc");
+    std::fs::write(project.path().join("shk.toml"), "").unwrap();
+    std::fs::write(&input, "hello@example.com\n").unwrap();
+    std::fs::write(&zshrc, "original\n").unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["mask", input.to_str().unwrap(), "--output", "~/.zshrc"])
+        .env("HOME", home.path())
+        .current_dir(project.path())
+        .output()
+        .expect("mask tilde protected output");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("protected home configuration"), "{stderr}");
+    assert_eq!(std::fs::read_to_string(&zshrc).unwrap(), "original\n");
+}
+
+#[test]
+fn mask_output_refuses_env_files() {
+    let project = tempfile::tempdir().unwrap();
+    let input = project.path().join("input.txt");
+    let dotenv = project.path().join(".env");
+    let dotenv_local = project.path().join(".env.local");
+    std::fs::write(project.path().join("shk.toml"), "").unwrap();
+    std::fs::write(&input, "hello@example.com\n").unwrap();
+    std::fs::write(&dotenv, "SECRET=original\n").unwrap();
+
+    for output in [&dotenv, &dotenv_local] {
+        let out = Command::new(shk_bin())
+            .args([
+                "mask",
+                input.to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap(),
+            ])
+            .current_dir(project.path())
+            .output()
+            .expect("mask env output");
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("sensitive env file"), "{stderr}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(&dotenv).unwrap(),
+        "SECRET=original\n"
+    );
+    assert!(!dotenv_local.exists());
+}
+
+#[test]
+fn hooks_install_requires_project_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    let out = Command::new(shk_bin())
+        .args(["hooks", "install"])
+        .current_dir(dir.path())
+        .output()
+        .expect("hooks install");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("requires a project shk.toml"), "{stderr}");
+    assert!(!dir.path().join(".git/hooks/pre-commit").exists());
+}
+
+#[test]
 fn doctor_env_reports_findings_without_values() {
     let dir = tempfile::tempdir().unwrap();
     let secret = "abcdefghijklmnop";
@@ -304,6 +439,45 @@ fn doctor_env_reports_findings_without_values() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains(".env (1 finding(s))"), "{stdout}");
     assert!(!stdout.contains(secret), "{stdout}");
+}
+
+#[test]
+fn doctor_version_reports_update_available_from_env() {
+    let out = Command::new(shk_bin())
+        .args(["doctor", "version"])
+        .env("SHK_UPDATE_CHECK_LATEST_TAG", "v0.1.1")
+        .env_remove("SHK_UPDATE_CHECK_URL")
+        .output()
+        .expect("doctor version");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("version: update available"), "{stdout}");
+    assert!(stdout.contains("current: 0.1.0"), "{stdout}");
+    assert!(stdout.contains("latest:  v0.1.1"), "{stdout}");
+}
+
+#[test]
+fn doctor_version_json_reports_current_status_from_env() {
+    let out = Command::new(shk_bin())
+        .args(["doctor", "--json", "version"])
+        .env("SHK_UPDATE_CHECK_LATEST_TAG", "v0.1.0")
+        .env_remove("SHK_UPDATE_CHECK_URL")
+        .output()
+        .expect("doctor version json");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["current"], "0.1.0");
+    assert_eq!(v["latest"], "v0.1.0");
+    assert_eq!(v["status"], "current");
+    assert_eq!(v["update_available"], false);
 }
 
 #[test]
@@ -357,6 +531,7 @@ fn doctor_env_dotenvx_accepts_vault_without_keys() {
 #[test]
 fn doctor_ignore_fix_adds_extended_recommended_patterns() {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
     std::fs::write(dir.path().join(".gitignore"), "node_modules/\n").unwrap();
     let out = Command::new(shk_bin())
         .args(["doctor", "ignore", dir.path().to_str().unwrap(), "--fix"])

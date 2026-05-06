@@ -133,6 +133,9 @@ Homebrew, npm wrappers, macOS notarization, and Windows Authenticode signing are
 ## Quick start
 
 ```bash
+# Create a project policy file first
+shk init
+
 # Scan the current project
 shk scan .
 
@@ -150,9 +153,6 @@ shk hooks install-ai --audit
 
 # Check ignore file coverage
 shk doctor ignore
-
-# Generate a starter policy file
-shk policy init
 ```
 
 ## Commands
@@ -181,7 +181,7 @@ Exit codes:
 | `1` | Findings at or above the fail threshold |
 | `2` | Blocking AI pre-hook triggered |
 
-In hook mode, `--audit` always exits `0` and appends metadata-only findings to `.shk/audit.log`.
+In hook mode, `--audit` always exits `0` and appends metadata-only findings to `.shk/audit.log`. Because this writes project metadata, it requires `shk.toml`; run `shk init` first.
 
 ### `shk mask`
 
@@ -198,6 +198,8 @@ shk mask --hook-mode cursor < payload.json
 
 Masking is line-oriented by default: any line with a match becomes `[REDACTED_LINE]`. `--redaction partial` masks only matched values and preserves the configured prefix/suffix (`preserve_prefix` / `preserve_suffix`, default `4` each).
 
+`mask --output` writes a file, so it requires a project `shk.toml` and refuses sensitive env files (`.env`, `.env.*`) and protected home configuration files such as `.zshrc`, `.bashrc`, `.profile`, `.ssh/config`, `.gitconfig`, and `.npmrc`.
+
 ### `shk doctor`
 
 Run all project security diagnostics.
@@ -209,11 +211,16 @@ shk doctor --json
 shk doctor ignore                   # check ignore file coverage
 shk doctor ignore ./path --fix      # append missing patterns to ignore files
 
+shk doctor version                  # check latest GitHub release
+shk doctor --json version
+
 shk doctor env                      # check .env file safety
 shk doctor env --dotenvx            # also inspect dotenvx artifact files
 ```
 
-`doctor ignore` checks ignore-style files such as `.gitignore`, `.cursorignore`, `.clineignore`, `.aiderignore`, `.continueignore`, `.codeiumignore`, `.tabnineignore`, `.ignore`, and `.aiignore`. It also inspects Claude Code `permissions.deny` entries in `.claude/settings.json` and Codex `.codex/config.toml` sandbox/hook settings. `--fix` appends missing patterns conservatively to `.gitignore` without removing existing entries.
+`doctor version` compares the installed CLI version with the latest GitHub release and reports whether an update is available. It does not modify the installed binary; rerun the install script or use your package manager to upgrade.
+
+`doctor ignore` checks ignore-style files such as `.gitignore`, `.cursorignore`, `.clineignore`, `.aiderignore`, `.continueignore`, `.codeiumignore`, `.tabnineignore`, `.ignore`, and `.aiignore`. It also inspects Claude Code `permissions.deny` entries in `.claude/settings.json` and Codex `.codex/config.toml` sandbox/hook settings. `--fix` requires `shk.toml` and appends missing patterns conservatively to `.gitignore` without removing existing entries.
 
 `doctor env --dotenvx` reports known dotenvx artifacts such as `.env.vault` and warns when `.env.keys` is present in the project because it may contain private key material.
 
@@ -225,7 +232,7 @@ Install a Git pre-commit hook that runs `shk scan --staged` before every commit.
 shk hooks install
 ```
 
-The hook uses managed markers (`# shk-managed-start` / `# shk-managed-end`) and is idempotent — re-running is safe.
+The hook uses managed markers (`# shk-managed-start` / `# shk-managed-end`) and is idempotent — re-running is safe. Installing hooks writes project files and requires `shk.toml`; run `shk init` first.
 
 ### `shk hooks install-ai`
 
@@ -269,18 +276,20 @@ Supported tools: `claude-code`, `cursor`, `codex`.
 
 Managed entries are tagged with `"_shk_managed": true` or `# shk-managed-start`. Re-running replaces managed entries only and leaves user-defined hooks untouched.
 
-### `shk policy init`
+### `shk init`
 
 Generate a starter `shk.toml` policy file.
 
 ```bash
-shk policy init           # default policy
-shk policy init --strict  # fail-on medium, full PII detection enabled
+shk init           # default policy
+shk init --strict  # fail-on medium, full PII detection enabled
 ```
+
+`shk policy init` remains available as a longer alias.
 
 ## Configuration
 
-Default policy file: `shk.toml` in the project root. All settings have built-in defaults so no config file is required.
+Default policy file: `shk.toml` in the project root. Read-only commands can use built-in defaults, but commands that write files require this file so accidental AI-initiated writes fail closed.
 
 ```toml
 [scan]

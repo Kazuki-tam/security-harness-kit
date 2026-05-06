@@ -1,5 +1,6 @@
 use crate::args::{AiTool, RedactionMode};
 use crate::hook_output;
+use crate::safety;
 use anyhow::{Context, Result, bail};
 use shk_core::finding::Finding;
 use shk_core::masker::MaskJsonOutput;
@@ -26,6 +27,10 @@ pub fn run(
     }
     if post {
         bail!("`mask --post` requires `--hook-mode <tool>`");
+    }
+    if let Some(outp) = output.as_ref() {
+        safety::require_project_policy(project_root, "mask --output")?;
+        safety::ensure_writable_path_allowed(outp)?;
     }
 
     let (rel_label, mut bytes) = read_mask_input(file.as_ref())?;
