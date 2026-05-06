@@ -155,7 +155,7 @@ struct PreparedScan<'a> {
 impl<'a> PreparedScan<'a> {
     fn new(policy: &'a Policy) -> Result<Self> {
         let cfg = policy.rule_engine_config();
-        let custom = custom_rules::compile(&filter_custom_rules(&policy.custom_rules, &cfg))?;
+        let custom = custom_rules::compile_for_policy(&policy.custom_rules, cfg.internal_terms)?;
         Ok(Self {
             policy,
             allowlist: suppression::compile_allowlist(&policy.allowlist)?,
@@ -163,20 +163,6 @@ impl<'a> PreparedScan<'a> {
             cfg,
         })
     }
-}
-
-fn filter_custom_rules(
-    rules: &[crate::policy::CustomRule],
-    cfg: &shk_rules::RuleEngineConfig,
-) -> Vec<crate::policy::CustomRule> {
-    if cfg.internal_terms {
-        return rules.to_vec();
-    }
-    rules
-        .iter()
-        .filter(|r| r.kind.trim().to_ascii_lowercase() != "internal")
-        .cloned()
-        .collect()
 }
 
 #[cfg(test)]
@@ -599,6 +585,27 @@ mod tests {
         assert_eq!(f.severity, "high");
         assert_eq!(f.kind, "internal");
         assert_eq!(f.redacted_value, "[REDACTED]");
+    }
+
+    #[test]
+    fn internal_custom_rules_are_disabled_by_default() {
+        let mut p = Policy::default();
+        p.custom_rules.push(CustomRule {
+            id: "internal.project_codename".into(),
+            pattern: "ProjectNebula".into(),
+            severity: "high".into(),
+            kind: "internal".into(),
+            message: None,
+            confidence: None,
+            case_insensitive: false,
+            enabled: true,
+        });
+
+        let (findings, suppressed) =
+            scan_text_content("notes.txt", "launch ProjectNebula\n", &p, false).unwrap();
+
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(suppressed, 0);
     }
 
     #[test]

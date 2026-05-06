@@ -205,6 +205,9 @@ fn scan_detects_custom_rule_from_policy() {
     std::fs::write(
         dir.path().join("shk.toml"),
         r#"
+[rules]
+internal_terms = true
+
 [[custom_rules]]
 id = "internal.project_codename"
 pattern = "ProjectNebula|社外秘"

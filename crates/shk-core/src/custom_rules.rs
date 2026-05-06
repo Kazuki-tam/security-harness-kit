@@ -24,12 +24,25 @@ pub(crate) struct CustomMatch {
     pub(crate) matched_text: String,
 }
 
-pub(crate) fn compile(rules: &[CustomRule]) -> Result<Vec<CompiledCustomRule>> {
+pub(crate) fn compile_for_policy(
+    rules: &[CustomRule],
+    include_internal_terms: bool,
+) -> Result<Vec<CompiledCustomRule>> {
     rules
         .iter()
         .filter(|rule| rule.enabled)
+        .filter(|rule| include_internal_terms || !is_internal_rule(rule))
         .map(compile_one)
         .collect()
+}
+
+fn normalized_kind(kind: &str) -> &str {
+    let kind = kind.trim();
+    if kind.is_empty() { "internal" } else { kind }
+}
+
+fn is_internal_rule(rule: &CustomRule) -> bool {
+    normalized_kind(&rule.kind).eq_ignore_ascii_case("internal")
 }
 
 fn compile_one(rule: &CustomRule) -> Result<CompiledCustomRule> {
@@ -50,7 +63,7 @@ fn compile_one(rule: &CustomRule) -> Result<CompiledCustomRule> {
         bail!("custom rule `{id}` pattern must not match empty text");
     }
 
-    let kind = rule.kind.trim();
+    let kind = normalized_kind(&rule.kind);
     let confidence = rule
         .confidence
         .filter(|c| c.is_finite())
@@ -60,11 +73,7 @@ fn compile_one(rule: &CustomRule) -> Result<CompiledCustomRule> {
     Ok(CompiledCustomRule {
         id: id.to_string(),
         severity,
-        kind: if kind.is_empty() {
-            "internal".into()
-        } else {
-            kind.to_string()
-        },
+        kind: kind.to_string(),
         re,
         message: rule
             .message
@@ -135,7 +144,7 @@ mod tests {
 
     #[test]
     fn rejects_empty_matching_patterns() {
-        let err = compile(&[custom_rule(".*")]).unwrap_err();
+        let err = compile_for_policy(&[custom_rule(".*")], true).unwrap_err();
         assert!(
             err.to_string().contains("must not match empty text"),
             "{err:#}"
@@ -150,11 +159,36 @@ mod tests {
         rule.message = Some(" Demo message ".into());
         rule.confidence = Some(2.0);
 
-        let compiled = compile(&[rule]).unwrap();
+        let compiled = compile_for_policy(&[rule], true).unwrap();
 
         assert_eq!(compiled[0].id, "internal.demo");
         assert_eq!(compiled[0].kind, "internal");
         assert_eq!(compiled[0].message, "Demo message");
         assert_eq!(compiled[0].confidence, 1.0);
+    }
+
+    #[test]
+    fn policy_compile_excludes_internal_rules_by_default() {
+        let internal = custom_rule("ProjectNebula");
+        let mut non_internal = custom_rule("CLIENT-[0-9]+");
+        non_internal.id = "custom.client_id".into();
+        non_internal.kind = "project".into();
+
+        let compiled = compile_for_policy(&[internal, non_internal], false).unwrap();
+
+        assert_eq!(compiled.len(), 1);
+        assert_eq!(compiled[0].id, "custom.client_id");
+    }
+
+    #[test]
+    fn policy_compile_treats_blank_kind_as_internal() {
+        let mut rule = custom_rule("ProjectNebula");
+        rule.kind.clear();
+
+        let disabled = compile_for_policy(&[rule.clone()], false).unwrap();
+        let enabled = compile_for_policy(&[rule], true).unwrap();
+
+        assert!(disabled.is_empty());
+        assert_eq!(enabled[0].kind, "internal");
     }
 }

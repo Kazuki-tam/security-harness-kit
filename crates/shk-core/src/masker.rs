@@ -136,17 +136,7 @@ pub fn mask_from_policy(
         );
     }
     let cfg = policy.rule_engine_config();
-    let filtered: Vec<_> = if cfg.internal_terms {
-        policy.custom_rules.clone()
-    } else {
-        policy
-            .custom_rules
-            .iter()
-            .filter(|r| r.kind.trim().to_ascii_lowercase() != "internal")
-            .cloned()
-            .collect()
-    };
-    let custom = custom_rules::compile(&filtered)?;
+    let custom = custom_rules::compile_for_policy(&policy.custom_rules, cfg.internal_terms)?;
     let redaction = if policy.mask.redaction.eq_ignore_ascii_case("partial") {
         MaskRedaction::Partial {
             preserve_prefix: policy.mask.preserve_prefix,
@@ -230,5 +220,26 @@ mod tests {
                 .any(|f| f.rule_id == "internal.project_codename"),
             "{findings:?}"
         );
+    }
+
+    #[test]
+    fn mask_from_policy_skips_internal_custom_rules_by_default() {
+        let mut policy = Policy::default();
+        policy.custom_rules.push(crate::policy::CustomRule {
+            id: "internal.project_codename".into(),
+            pattern: "ProjectNebula".into(),
+            severity: "high".into(),
+            kind: "internal".into(),
+            message: None,
+            confidence: None,
+            case_insensitive: false,
+            enabled: true,
+        });
+
+        let (out, findings) =
+            mask_from_policy("codename ProjectNebula\n", &policy, "<stdin>").unwrap();
+
+        assert_eq!(out, "codename ProjectNebula\n");
+        assert!(findings.is_empty(), "{findings:?}");
     }
 }
