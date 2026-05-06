@@ -99,6 +99,11 @@ jobs:
           cd release-assets
           sha256sum * > SHA256SUMS
 
+      - name: generate Scoop manifest
+        shell: bash
+        run: |
+          bash scripts/render-scoop-manifest.sh "${GITHUB_REF_NAME#v}" release-assets/SHA256SUMS release-assets/shk.json
+
       - name: upload release assets
         uses: actions/upload-artifact@v4
         with:

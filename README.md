@@ -69,6 +69,7 @@ shk-x86_64-apple-darwin.tar.gz
 shk-x86_64-pc-windows-msvc.zip
 shk-x86_64-unknown-linux-gnu.tar.gz
 shk-sbom.cdx.json
+shk.json
 SHA256SUMS
 *.bundle
 ```
@@ -92,6 +93,16 @@ cosign verify-blob \
 ```
 
 Releases also publish a CycloneDX SBOM (`shk-sbom.cdx.json`). Tagged releases generate GitHub artifact attestations for the release assets so provenance can be verified through GitHub's attestation tooling.
+
+### Scoop
+
+Windows releases include a generated Scoop manifest (`shk.json`) as a release asset. To test a release manifest locally:
+
+```powershell
+scoop install https://github.com/Kazuki-tam/security-harness-kit/releases/download/v0.1.0/shk.json
+```
+
+For long-term distribution, copy the generated `shk.json` into a Scoop bucket repository.
 
 ### Build from source
 

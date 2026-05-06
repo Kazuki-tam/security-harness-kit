@@ -1,0 +1,35 @@
+{
+  "version": "{{version}}",
+  "description": "Local-first security harness for AI-assisted development",
+  "homepage": "https://github.com/Kazuki-tam/security-harness-kit",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/Kazuki-tam/security-harness-kit/releases/download/v{{version}}/shk-x86_64-pc-windows-msvc.zip",
+      "hash": "{{sha256_x86_64_pc_windows_msvc}}"
+    }
+  },
+  "bin": [
+    [
+      "shk-x86_64-pc-windows-msvc/shk.exe",
+      "shk"
+    ],
+    [
+      "shk-x86_64-pc-windows-msvc/security-harness-kit.exe",
+      "security-harness-kit"
+    ]
+  ],
+  "checkver": {
+    "github": "https://github.com/Kazuki-tam/security-harness-kit"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/Kazuki-tam/security-harness-kit/releases/download/v$version/shk-x86_64-pc-windows-msvc.zip",
+        "hash": {
+          "url": "$baseurl/SHA256SUMS"
+        }
+      }
+    }
+  }
+}
