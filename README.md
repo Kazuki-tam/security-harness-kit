@@ -321,7 +321,7 @@ Raw secret values must never appear in `shk.toml`. Use `value_hash` for value-sp
 
 | Category | Description |
 |----------|-------------|
-| `secret` | OpenAI-style keys, AWS access key IDs, generic API key assignments, private key blocks |
+| `secret` | LLM/cloud/SaaS provider keys, database URLs, JWT/Bearer tokens, generic API key assignments, private key blocks |
 | `pii` | Email, credit card, IP addresses, English/Japanese personal information patterns |
 | `ignore` | Scanner skip notices and policy warnings |
 
@@ -330,10 +330,10 @@ Raw secret values must never appear in `shk.toml`. Use `value_hash` for value-sp
 Currently implemented PII rules:
 
 - Universal when `pii = true`: email, Luhn-validated credit card numbers, IPv4, IPv6
-- English (`pii_languages = ["en"]`): phone number, US SSN, and label-anchored ZIP/postal code, EIN, passport number, and personal name
-- Japanese (`pii_languages = ["ja"]`): phone number, label-anchored/`〒` postal code, passport number, label-anchored My Number, corporate number, driver license number, bank account, and personal name
+- English (`pii_languages = ["en"]`): phone number, US SSN, and label-anchored ZIP/postal code, EIN, passport number, street address, and personal name
+- Japanese (`pii_languages = ["ja"]`): phone number, label-anchored/`〒` postal code, passport number, label-anchored My Number, corporate number, driver license number, bank account, health insurance card, and personal name
 
-Personal names are label-anchored only; free-standing English or Japanese name detection is intentionally disabled to avoid high false positive rates.
+Personal names and English street addresses are label-anchored only; free-standing detection is intentionally disabled to avoid high false positive rates.
 
 ### JSON output
 

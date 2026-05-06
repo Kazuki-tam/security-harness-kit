@@ -72,7 +72,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible OpenAI API key detected",
             confidence: 0.9,
-            validator: None,
+            validator: Some(openai_key_valid),
         },
         CompiledRule {
             id: "secret.aws_access_key",
@@ -82,6 +82,88 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible AWS access key id",
             confidence: 0.88,
+            validator: None,
+        },
+        CompiledRule {
+            id: "secret.anthropic_api_key",
+            severity: Severity::High,
+            kind: Kind::Secret,
+            re: Regex::new(r"\bsk-ant-[a-zA-Z0-9_-]{20,}\b")
+                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Possible Anthropic API key detected",
+            confidence: 0.9,
+            validator: None,
+        },
+        CompiledRule {
+            id: "secret.google_api_key",
+            severity: Severity::High,
+            kind: Kind::Secret,
+            re: Regex::new(r"\bAIza[a-zA-Z0-9_-]{30,}\b")
+                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Possible Google API key detected",
+            confidence: 0.9,
+            validator: None,
+        },
+        CompiledRule {
+            id: "secret.github_token",
+            severity: Severity::High,
+            kind: Kind::Secret,
+            re: Regex::new(r"\bgh[ps]_[a-zA-Z0-9]{30,}\b")
+                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Possible GitHub token detected",
+            confidence: 0.9,
+            validator: None,
+        },
+        CompiledRule {
+            id: "secret.slack_token",
+            severity: Severity::High,
+            kind: Kind::Secret,
+            re: Regex::new(r"\bxox[bprs]-[a-zA-Z0-9-]{20,}\b")
+                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Possible Slack token detected",
+            confidence: 0.9,
+            validator: None,
+        },
+        CompiledRule {
+            id: "secret.stripe_api_key",
+            severity: Severity::High,
+            kind: Kind::Secret,
+            re: Regex::new(r"\b[rs]k_(?:live|test)_[a-zA-Z0-9]{20,}\b")
+                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Possible Stripe API key detected",
+            confidence: 0.9,
+            validator: None,
+        },
+        CompiledRule {
+            id: "secret.database_url",
+            severity: Severity::High,
+            kind: Kind::Secret,
+            re: Regex::new(
+                r#"(?i)\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|rediss?)://[^@\s"']+@[^\s"'<>]+"#,
+            )
+            .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Possible database connection URL detected",
+            confidence: 0.85,
+            validator: None,
+        },
+        CompiledRule {
+            id: "secret.jwt",
+            severity: Severity::Medium,
+            kind: Kind::Secret,
+            re: Regex::new(r"\beyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\b")
+                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Possible JWT detected",
+            confidence: 0.75,
+            validator: None,
+        },
+        CompiledRule {
+            id: "secret.bearer_token",
+            severity: Severity::Medium,
+            kind: Kind::Secret,
+            re: Regex::new(r"(?i)\bBearer\s+[a-zA-Z0-9._~+/=-]{20,}\b")
+                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Possible bearer token detected",
+            confidence: 0.7,
             validator: None,
         },
         CompiledRule {
@@ -199,6 +281,18 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             validator: None,
         },
         CompiledRule {
+            id: "pii.en.address",
+            severity: Severity::Info,
+            kind: Kind::Pii,
+            re: Regex::new(
+                r"(?i)\b(?:address|street address|mailing address)\s*[:#]\s*\d{1,6}\s+[A-Z][A-Za-z0-9.'-]*(?:\s+[A-Z][A-Za-z0-9.'-]*){0,5}\s+(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|boulevard|blvd|court|ct|way)\b",
+            )
+            .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "English street address label detected",
+            confidence: 0.45,
+            validator: None,
+        },
+        CompiledRule {
             id: "pii.en.ssn",
             severity: Severity::Medium,
             kind: Kind::Pii,
@@ -280,6 +374,18 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             validator: None,
         },
         CompiledRule {
+            id: "pii.ja.health_insurance",
+            severity: Severity::Low,
+            kind: Kind::Pii,
+            re: Regex::new(
+                r"(?:健康保険証|保険証|被保険者証)\s*[:：]?\s*[^\n]{0,40}(?:記号|番号)\s*[:：]?\s*[A-Za-z0-9\-]{4,20}",
+            )
+            .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Japanese health insurance card pattern detected",
+            confidence: 0.6,
+            validator: None,
+        },
+        CompiledRule {
             id: "pii.ja.name",
             severity: Severity::Info,
             kind: Kind::Pii,
@@ -312,6 +418,13 @@ fn luhn_valid(candidate: &str) -> bool {
         double = !double;
     }
     sum % 10 == 0
+}
+
+fn openai_key_valid(candidate: &str) -> bool {
+    !candidate
+        .get(..7)
+        .map(|prefix| prefix.eq_ignore_ascii_case("sk-ant-"))
+        .unwrap_or(false)
 }
 
 fn japanese_phone_valid(candidate: &str) -> bool {

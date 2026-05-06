@@ -66,6 +66,7 @@ fn pii_detection_fixtures_cover_expected_rules() {
         "pii.en.postal_code",
         "pii.en.passport",
         "pii.en.name",
+        "pii.en.address",
         "pii.en.ssn",
     ] {
         assert!(
@@ -85,6 +86,7 @@ fn pii_detection_fixtures_cover_expected_rules() {
         "pii.ja.corporate_number",
         "pii.ja.drivers_license",
         "pii.ja.bank_account",
+        "pii.ja.health_insurance",
         "pii.ja.name",
     ] {
         assert!(
@@ -111,6 +113,34 @@ fn pii_false_positive_fixture_stays_clean() {
     assert!(
         res.findings.iter().all(|f| f.kind != "pii"),
         "unexpected PII findings: {:?}",
+        res.findings
+    );
+}
+
+#[test]
+fn secret_provider_fixtures_cover_expected_rules() {
+    let res = scan_fixture("secrets");
+    let ids = finding_ids(&res);
+
+    for expected in [
+        "secret.anthropic_api_key",
+        "secret.google_api_key",
+        "secret.github_token",
+        "secret.slack_token",
+        "secret.stripe_api_key",
+        "secret.database_url",
+        "secret.jwt",
+        "secret.bearer_token",
+    ] {
+        assert!(
+            ids.contains(expected),
+            "missing {expected}: {:?}",
+            res.findings
+        );
+    }
+    assert!(
+        !ids.contains("secret.openai_api_key"),
+        "provider fixtures should not be classified as OpenAI keys: {:?}",
         res.findings
     );
 }

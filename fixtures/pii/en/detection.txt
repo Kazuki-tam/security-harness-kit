@@ -7,4 +7,5 @@ ein: 12-3456789
 zip: 10001-1234
 passport: 123456789
 name: Ada Lovelace
+address: 123 Main Street
 ssn: 123-45-6789

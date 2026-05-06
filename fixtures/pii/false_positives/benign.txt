@@ -3,6 +3,8 @@ Japanese test phone placeholder: 090-0000-0000
 Standalone Japanese name-like text: 山田太郎
 Unlabeled number group: 123456789012
 Unlabeled bank-account-like number: 1234567
+Unlabeled health-insurance-like code: AB12-345678
 Standalone English name-like text: Ada Lovelace
 Book attribution by Ada Lovelace
 Unlabeled passport-like number: 123456789
+Unlabeled street-like text: 123 Main Street
