@@ -275,6 +275,54 @@ fn doctor_env_reports_findings_without_values() {
 }
 
 #[test]
+fn doctor_env_dotenvx_flags_private_key_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let private_key = "DOTENV_PRIVATE_KEY=dotenvx-secret-demo-value";
+    std::fs::write(dir.path().join(".env.keys"), private_key).unwrap();
+    std::fs::write(dir.path().join(".env.vault"), "DOTENV_VAULT=encrypted").unwrap();
+    let out = Command::new(shk_bin())
+        .args(["doctor", "env", dir.path().to_str().unwrap(), "--dotenvx"])
+        .output()
+        .expect("doctor env dotenvx");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(".env.keys (private key material"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("warning: .env.keys should be stored outside"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("dotenvx-secret-demo-value"), "{stdout}");
+}
+
+#[test]
+fn doctor_env_dotenvx_accepts_vault_without_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".env.vault"), "DOTENV_VAULT=encrypted").unwrap();
+    let out = Command::new(shk_bin())
+        .args(["doctor", "env", dir.path().to_str().unwrap(), "--dotenvx"])
+        .output()
+        .expect("doctor env dotenvx");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(".env.vault (encrypted vault"), "{stdout}");
+    assert!(
+        stdout.contains("ok: encrypted vault present without local .env.keys"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn doctor_ignore_fix_adds_extended_recommended_patterns() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join(".gitignore"), "node_modules/\n").unwrap();

@@ -19,7 +19,9 @@ const IGNORE_CANDIDATES: &[&str] = &[
     ".aiignore",
 ];
 
-const DOTENVX_HINT_FILES: &[&str] = &[".env.keys", ".env.vault"];
+const DOTENVX_PRIVATE_KEY_FILE: &str = ".env.keys";
+const DOTENVX_VAULT_FILE: &str = ".env.vault";
+const DOTENVX_HINT_FILES: &[&str] = &[DOTENVX_PRIVATE_KEY_FILE, DOTENVX_VAULT_FILE];
 
 pub fn run_ignore(root: &Path, fix: bool) -> Result<()> {
     let (policy, _) = Policy::load_from_dir(root)?;
@@ -112,21 +114,44 @@ pub fn run_env(root: &Path, dotenvx: bool) -> Result<()> {
     }
 
     if dotenvx {
-        let present: Vec<&str> = DOTENVX_HINT_FILES
-            .iter()
-            .copied()
-            .filter(|p| root.join(p).is_file())
-            .collect();
-        if present.is_empty() {
-            println!("dotenvx: no known dotenvx artifact files detected");
-        } else {
-            println!("dotenvx: artifact files detected (verify private keys are not committed):");
-            for p in present {
-                println!("  - {p}");
-            }
-        }
+        run_dotenvx(root);
     }
     Ok(())
+}
+
+fn run_dotenvx(root: &Path) {
+    let present: Vec<&str> = DOTENVX_HINT_FILES
+        .iter()
+        .copied()
+        .filter(|p| root.join(p).is_file())
+        .collect();
+
+    if present.is_empty() {
+        println!("dotenvx: no known dotenvx artifact files detected");
+        return;
+    }
+
+    println!("dotenvx: artifact files detected:");
+    for p in &present {
+        match *p {
+            DOTENVX_PRIVATE_KEY_FILE => {
+                println!("  - {p} (private key material; do not commit or expose to AI tools)");
+            }
+            DOTENVX_VAULT_FILE => {
+                println!("  - {p} (encrypted vault; keep private keys separate)");
+            }
+            _ => println!("  - {p}"),
+        }
+    }
+
+    if root.join(DOTENVX_PRIVATE_KEY_FILE).is_file() {
+        println!(
+            "  warning: .env.keys should be stored outside the repository or explicitly ignored"
+        );
+    }
+    if root.join(DOTENVX_VAULT_FILE).is_file() && !root.join(DOTENVX_PRIVATE_KEY_FILE).is_file() {
+        println!("  ok: encrypted vault present without local .env.keys");
+    }
 }
 
 fn env_scan_options() -> ScanOptions {

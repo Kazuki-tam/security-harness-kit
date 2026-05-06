@@ -174,12 +174,12 @@ shk doctor ignore                   # check ignore file coverage
 shk doctor ignore ./path --fix      # append missing patterns to ignore files
 
 shk doctor env                      # check .env file safety
-shk doctor env --dotenvx            # accepted; dotenvx-specific checks are not wired yet
+shk doctor env --dotenvx            # also inspect dotenvx artifact files
 ```
 
 `doctor ignore` checks ignore-style files such as `.gitignore`, `.cursorignore`, `.clineignore`, `.aiderignore`, `.continueignore`, `.codeiumignore`, `.tabnineignore`, `.ignore`, and `.aiignore`. `--fix` appends missing patterns conservatively to `.gitignore` without removing existing entries.
 
-`doctor env --dotenvx` is accepted for CLI compatibility, but dotenvx-specific inspection is not implemented yet.
+`doctor env --dotenvx` reports known dotenvx artifacts such as `.env.vault` and warns when `.env.keys` is present in the project because it may contain private key material.
 
 ### `shk hooks install`
 
