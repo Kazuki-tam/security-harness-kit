@@ -14,7 +14,7 @@ Implementation priorities, terminology, exit codes, and distribution expectation
   - `crates/shk-rules` — built-in rules (secrets, PII, etc.).
   - `crates/shk-cli` — `clap`-based CLI (binaries `shk` and `security-harness-kit`).
     - **`src/lib.rs`** (crate `shk_cli`) — `run()` entry (tests and external callers).
-    - **`src/main.rs`** — thin wrapper calling `shk_cli::run()` (shared by both binaries).
+    - **`src/main.rs`** / **`src/bin/security-harness-kit.rs`** — thin wrappers calling `shk_cli::run()`.
     - **`src/args.rs`** — `clap` CLI definitions.
     - **`src/commands/`** — `scan`, `mask`, etc. (move `doctor` / others here if this layer grows).
     - Other modules: `color`, `doctor`, `hooks`, `hook_payload`, `hook_output`, `audit_log`, `output`, `policy_cmd`.

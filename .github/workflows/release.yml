@@ -58,7 +58,7 @@ jobs:
         run: bash scripts/package-release.sh "${{ matrix.target }}" "${GITHUB_REF_NAME#v}"
 
       - name: upload packaged artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: shk-${{ matrix.target }}
           path: |
@@ -73,7 +73,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: download packaged artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: artifacts
 
@@ -108,7 +108,7 @@ jobs:
           bash scripts/render-homebrew-formula.sh "${GITHUB_REF_NAME#v}" release-assets/SHA256SUMS release-assets/shk.rb
 
       - name: upload release assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-assets
           path: release-assets/*
@@ -120,7 +120,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - name: download release assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: release-assets
           path: release-assets

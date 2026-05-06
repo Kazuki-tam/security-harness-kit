@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "security-harness-kit"
-path = "src/main.rs"
+path = "src/bin/security-harness-kit.rs"
 
 [dependencies]
 shk-core = { path = "../shk-core" }
