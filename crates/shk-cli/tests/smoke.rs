@@ -211,10 +211,7 @@ fn hooks_install_ai_dry_run_cursor() {
         String::from_utf8_lossy(&out.stderr)
     );
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        s.replace('\\', "/").contains(".cursor/hooks.json"),
-        "{s}"
-    );
+    assert!(s.replace('\\', "/").contains(".cursor/hooks.json"), "{s}");
 }
 
 #[test]
