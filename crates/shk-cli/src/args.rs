@@ -54,6 +54,12 @@ pub enum Commands {
         output: Option<PathBuf>,
         #[arg(long, value_enum)]
         redaction: Option<RedactionMode>,
+        /// Interpret stdin as AI tool hook JSON and return masked hook output.
+        #[arg(long, value_enum)]
+        hook_mode: Option<AiTool>,
+        /// Post-tool hook inbound masking mode.
+        #[arg(long)]
+        post: bool,
     },
     /// Project diagnostics
     Doctor {

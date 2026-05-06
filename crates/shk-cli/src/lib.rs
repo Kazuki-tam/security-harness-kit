@@ -51,7 +51,9 @@ pub fn run() -> Result<()> {
             json,
             output,
             redaction,
-        } => commands::mask::run(&cwd, file, json, output, redaction)?,
+            hook_mode,
+            post,
+        } => commands::mask::run(&cwd, file, json, output, redaction, hook_mode, post)?,
         Commands::Doctor { cmd, json } => match cmd {
             None => doctor::run_all(&cwd, json)?,
             Some(DoctorCmd::Ignore { path, fix }) => {

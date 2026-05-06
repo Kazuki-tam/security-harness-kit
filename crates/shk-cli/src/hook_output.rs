@@ -59,6 +59,47 @@ pub fn allow_stdout(tool: AiTool, post: bool, info: Option<&str>) -> String {
     }
 }
 
+pub fn mask_stdout(
+    tool: AiTool,
+    post: bool,
+    finding_count: usize,
+    masked_content: Option<&str>,
+) -> String {
+    let event = hook_event_json_name(post);
+    let msg = if finding_count == 0 {
+        "shk mask: no sensitive content detected".to_string()
+    } else {
+        format!("shk mask: redacted {finding_count} finding(s)")
+    };
+
+    match tool {
+        AiTool::Cursor => {
+            let mut out = json!({
+                "permission": "allow",
+                "user_message": msg,
+                "agent_message": msg,
+            });
+            if let Some(content) = masked_content {
+                out["masked_content"] = json!(content);
+            }
+            out.to_string()
+        }
+        AiTool::Codex | AiTool::ClaudeCode => {
+            let mut out = json!({
+                "hookSpecificOutput": {
+                    "hookEventName": event,
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": msg,
+                },
+            });
+            if let Some(content) = masked_content {
+                out["masked_content"] = json!(content);
+            }
+            out.to_string()
+        }
+    }
+}
+
 pub fn audit_note(findings_len: usize, suppressed: u64, max_sev: Option<&str>) -> String {
     format!(
         "shk audit: findings={findings_len} suppressed={suppressed}{}",

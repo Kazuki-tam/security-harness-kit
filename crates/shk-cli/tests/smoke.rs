@@ -78,6 +78,73 @@ fn mask_binary_stdin_passes_through() {
 }
 
 #[test]
+fn mask_hook_mode_cursor_returns_masked_content() {
+    use std::io::Write;
+
+    let secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "prompt": format!("please inspect this token: {secret}")
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["mask", "--hook-mode", "cursor"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("mask hook");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["permission"], "allow");
+    let masked = v["masked_content"].as_str().unwrap_or_default();
+    assert!(masked.contains("[REDACTED_LINE]"), "{masked}");
+    assert!(!masked.contains(secret), "{masked}");
+}
+
+#[test]
+fn mask_hook_mode_clean_payload_does_not_echo_content() {
+    use std::io::Write;
+
+    let clean = "ordinary project note without sensitive values";
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "prompt": clean
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["mask", "--hook-mode", "cursor"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("mask hook");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["permission"], "allow");
+    assert!(v.get("masked_content").is_none(), "{v}");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains(clean),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
 fn scan_json_reports_suppressed_field() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
