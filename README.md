@@ -376,6 +376,7 @@ Raw secret values never appear in JSON output. `redacted_value` is always `[REDA
 
 - Local-first — no telemetry, no network access by default
 - Never prints raw secret values
+- Best-effort zeroization for raw match/input buffers in scanner and masker paths
 - Read-only integrations first
 - Conservative `--fix` behavior — appends only, never removes
 - Explicit opt-in for any provider or network access

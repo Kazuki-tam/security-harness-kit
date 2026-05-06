@@ -2,6 +2,7 @@ use crate::policy::Policy;
 use anyhow::Result;
 use serde::Serialize;
 use shk_rules::{RuleEngineConfig, scan_content};
+use zeroize::Zeroize;
 
 #[derive(Debug, Serialize)]
 pub struct MaskJsonOutput {
@@ -22,7 +23,7 @@ pub fn mask_text(
         if i > 0 {
             out.push('\n');
         }
-        let ms = scan_content(line, rel_path, cfg);
+        let mut ms = scan_content(line, rel_path, cfg);
         if ms.is_empty() {
             out.push_str(line);
         } else {
@@ -30,6 +31,9 @@ pub fn mask_text(
                 findings.push(crate::finding::Finding::from_rule_match(
                     rel_path, m, false, line, cfg,
                 ));
+            }
+            for m in &mut ms {
+                m.matched_text.zeroize();
             }
             out.push_str("[REDACTED_LINE]");
         }

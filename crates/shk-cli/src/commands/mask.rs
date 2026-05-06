@@ -7,6 +7,7 @@ use shk_core::policy::Policy;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use zeroize::Zeroize;
 
 pub fn run(
     project_root: &Path,
@@ -31,28 +32,47 @@ pub fn run(
         bail!("`mask --post` requires `--hook-mode <tool>`");
     }
 
-    let (rel_label, bytes) = read_mask_input(file.as_ref())?;
+    let (rel_label, mut bytes) = read_mask_input(file.as_ref())?;
     let (policy, _) = Policy::load_from_dir(project_root)?;
 
     if is_binary_or_non_utf8(&bytes, policy.scan.binary_detection_bytes) {
         let findings = vec![binary_passthrough_finding(&rel_label)];
-        if json {
+        let result: Result<()> = if json {
             let out = MaskJsonOutput {
                 masked_content: "[BINARY_PASSTHROUGH]".into(),
                 findings,
             };
-            println!("{}", serde_json::to_string_pretty(&out)?);
+            match serde_json::to_string_pretty(&out) {
+                Ok(s) => {
+                    println!("{s}");
+                    Ok(())
+                }
+                Err(e) => Err(e.into()),
+            }
         } else {
-            io::stdout().write_all(&bytes)?;
-        }
-        if let Some(outp) = output {
-            fs::write(&outp, &bytes)?;
-        }
+            match io::stdout().write_all(&bytes) {
+                Ok(()) => Ok(()),
+                Err(e) => Err(e.into()),
+            }
+        };
+        let output_result: Result<()> = if let Some(outp) = output {
+            match fs::write(&outp, &bytes) {
+                Ok(()) => Ok(()),
+                Err(e) => Err(e.into()),
+            }
+        } else {
+            Ok(())
+        };
+        bytes.zeroize();
+        result?;
+        output_result?;
         return Ok(());
     }
 
-    let buf = String::from_utf8(bytes).expect("checked above");
-    let (masked, findings) = shk_core::masker::mask_from_policy(&buf, &policy, &rel_label)?;
+    let mut buf = String::from_utf8(std::mem::take(&mut bytes)).expect("checked above");
+    let mask_result = shk_core::masker::mask_from_policy(&buf, &policy, &rel_label);
+    buf.zeroize();
+    let (masked, findings) = mask_result?;
     if json {
         let out = MaskJsonOutput {
             masked_content: masked.clone(),
@@ -84,23 +104,28 @@ fn read_mask_input(file: Option<&PathBuf>) -> Result<(String, Vec<u8>)> {
 fn run_hook_mode(cwd: &Path, tool: AiTool, post: bool) -> Result<()> {
     let mut stdin_raw = Vec::new();
     io::stdin().read_to_end(&mut stdin_raw)?;
-    let stdin_str = String::from_utf8_lossy(&stdin_raw);
+    let mut stdin_str = String::from_utf8_lossy(&stdin_raw).to_string();
+    stdin_raw.zeroize();
     let stdin_trim = stdin_str.trim();
     if stdin_trim.is_empty() {
+        stdin_str.zeroize();
         bail!("mask hook-mode requires hook JSON payload on stdin");
     }
 
     let repo_root = resolve_repo_root(cwd);
-    let (disp, body) = shk_integrations::stdin_to_hook_body(
+    let hook_body_result = shk_integrations::stdin_to_hook_body(
         tool.integration_tool(),
         post,
         stdin_trim,
         cwd,
         &repo_root,
-    )?;
+    );
+    stdin_str.zeroize();
+    let (disp, mut body) = hook_body_result?;
     let (policy, _) = Policy::load_from_dir(&repo_root)?;
-    let (masked, findings) =
-        shk_core::masker::mask_from_policy(&body, &policy, &disp).context("hook mask failed")?;
+    let mask_result = shk_core::masker::mask_from_policy(&body, &policy, &disp);
+    body.zeroize();
+    let (mut masked, findings) = mask_result.context("hook mask failed")?;
 
     println!(
         "{}",
@@ -111,6 +136,7 @@ fn run_hook_mode(cwd: &Path, tool: AiTool, post: bool) -> Result<()> {
             (!findings.is_empty()).then_some(masked.as_str()),
         )
     );
+    masked.zeroize();
     Ok(())
 }
 

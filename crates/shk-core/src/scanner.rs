@@ -9,6 +9,7 @@ use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use zeroize::Zeroize;
 
 pub struct ScanOptions {
     pub staged: bool,
@@ -155,8 +156,9 @@ pub(crate) fn scan_text_content(
     let mut suppressed = 0u64;
     let mut findings = Vec::new();
 
-    for m in shk_rules::scan_content(content, rel, &cfg) {
+    for mut m in shk_rules::scan_content(content, rel, &cfg) {
         if inline.is_suppressed(m.line, m.rule_id) {
+            m.matched_text.zeroize();
             suppressed += 1;
             continue;
         }
@@ -167,6 +169,7 @@ pub(crate) fn scan_text_content(
             &policy.allowlist,
             &compiled,
         ) {
+            m.matched_text.zeroize();
             suppressed += 1;
             continue;
         }
@@ -177,6 +180,7 @@ pub(crate) fn scan_text_content(
             content,
             &cfg,
         ));
+        m.matched_text.zeroize();
     }
     Ok((findings, suppressed))
 }
@@ -215,7 +219,7 @@ fn scan_one_path(
         }];
         return Ok((f, 0));
     }
-    let bytes = fs::read(&full).with_context(|| format!("read {}", full.display()))?;
+    let mut bytes = fs::read(&full).with_context(|| format!("read {}", full.display()))?;
     let take = policy.scan.binary_detection_bytes.min(bytes.len());
     if !policy.scan.include_binary && is_probably_binary(&bytes[..take]) {
         let f = vec![Finding {
@@ -231,10 +235,14 @@ fn scan_one_path(
             context_before: vec![],
             context_after: vec![],
         }];
+        bytes.zeroize();
         return Ok((f, 0));
     }
-    let text = String::from_utf8_lossy(&bytes);
-    scan_text_content(&rel, &text, policy, include_context)
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    let result = scan_text_content(&rel, &text, policy, include_context);
+    text.zeroize();
+    bytes.zeroize();
+    result
 }
 
 /// Scan a single synthetic path (stdin / AI hook payloads) relative to configured project root `root`.
