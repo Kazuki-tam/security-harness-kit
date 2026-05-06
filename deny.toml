@@ -1,15 +1,12 @@
 [advisories]
 version = 2
 db-urls = ["https://github.com/RustSec/advisory-db"]
-vulnerability = "deny"
 unmaintained = "workspace"
 yanked = "deny"
-notice = "warn"
 ignore = []
 
 [licenses]
 version = 2
-unlicensed = "deny"
 confidence-threshold = 0.8
 allow = [
   "Apache-2.0",

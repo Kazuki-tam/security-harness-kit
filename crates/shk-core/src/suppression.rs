@@ -113,19 +113,19 @@ pub fn parse_inline_suppressions(content: &str) -> InlineSuppressions {
             Some((body, rest))
         });
 
-        if let Some((body, tail)) = trailing_hash {
-            if !body.trim().is_empty() {
-                let rid = first_rule_token(tail);
-                match rid {
-                    Some(id) => {
-                        out.line_rules.entry(line_no).or_default().insert(id);
-                    }
-                    None => {
-                        out.line_all_rules.insert(line_no);
-                    }
+        if let Some((body, tail)) = trailing_hash
+            && !body.trim().is_empty()
+        {
+            let rid = first_rule_token(tail);
+            match rid {
+                Some(id) => {
+                    out.line_rules.entry(line_no).or_default().insert(id);
                 }
-                continue;
+                None => {
+                    out.line_all_rules.insert(line_no);
+                }
             }
+            continue;
         }
 
         let trailing_slash = trimmed_end.rfind("//").and_then(|idx| {
@@ -135,15 +135,15 @@ pub fn parse_inline_suppressions(content: &str) -> InlineSuppressions {
             Some((body, rest_after_kw))
         });
 
-        if let Some((body, tail)) = trailing_slash {
-            if !body.trim().is_empty() {
-                match first_rule_token(tail) {
-                    Some(id) => {
-                        out.line_rules.entry(line_no).or_default().insert(id);
-                    }
-                    None => {
-                        out.line_all_rules.insert(line_no);
-                    }
+        if let Some((body, tail)) = trailing_slash
+            && !body.trim().is_empty()
+        {
+            match first_rule_token(tail) {
+                Some(id) => {
+                    out.line_rules.entry(line_no).or_default().insert(id);
+                }
+                None => {
+                    out.line_all_rules.insert(line_no);
                 }
             }
         }
@@ -183,18 +183,18 @@ pub fn suppressed_by_allowlist(
     compiled: &[CompiledAllowlist],
 ) -> bool {
     for (e, c) in entries.iter().zip(compiled.iter()) {
-        if let Some(exp) = &e.expires {
-            if is_expired(exp) {
-                continue;
-            }
+        if let Some(exp) = &e.expires
+            && is_expired(exp)
+        {
+            continue;
         }
         if !c.matcher.is_match(rel_path) {
             continue;
         }
-        if let Some(ref rf) = c.rule_filter {
-            if rf != rule_id {
-                continue;
-            }
+        if let Some(ref rf) = c.rule_filter
+            && rf != rule_id
+        {
+            continue;
         }
         if let Some(ref expected) = c.value_hash {
             let actual = compute_value_hmac(rule_id, matched_text);
