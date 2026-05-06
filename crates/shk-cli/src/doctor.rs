@@ -1,4 +1,5 @@
 use anyhow::Result;
+use serde_json::Value;
 use shk_core::git;
 use shk_core::policy::Policy;
 use shk_core::scanner::{ScanOptions, scan_string};
@@ -22,6 +23,7 @@ const IGNORE_CANDIDATES: &[&str] = &[
 const DOTENVX_PRIVATE_KEY_FILE: &str = ".env.keys";
 const DOTENVX_VAULT_FILE: &str = ".env.vault";
 const DOTENVX_HINT_FILES: &[&str] = &[DOTENVX_PRIVATE_KEY_FILE, DOTENVX_VAULT_FILE];
+const CLAUDE_REQUIRED_DENY_PATTERNS: &[&str] = &[".env", ".env.*", "secrets/**", "credentials/**"];
 
 pub fn run_ignore(root: &Path, fix: bool) -> Result<()> {
     let (policy, _) = Policy::load_from_dir(root)?;
@@ -46,13 +48,13 @@ pub fn run_ignore(root: &Path, fix: bool) -> Result<()> {
     }
     if missing.is_empty() {
         println!("ignore: OK (required patterns present in ignore files)");
-        return Ok(());
+    } else {
+        println!("ignore: missing recommended patterns:");
+        for m in &missing {
+            println!("  - {m}");
+        }
     }
-    println!("ignore: missing recommended patterns:");
-    for m in &missing {
-        println!("  - {m}");
-    }
-    if fix {
+    if fix && !missing.is_empty() {
         let path = root.join(".gitignore");
         let mut body = if path.is_file() {
             fs::read_to_string(&path)?
@@ -70,7 +72,61 @@ pub fn run_ignore(root: &Path, fix: bool) -> Result<()> {
         fs::write(&path, body)?;
         println!("Wrote updates to {}", path.display());
     }
+    run_claude_permissions_check(root);
     Ok(())
+}
+
+fn run_claude_permissions_check(root: &Path) {
+    let path = root.join(".claude/settings.json");
+    if !path.is_file() {
+        return;
+    }
+
+    let Ok(text) = fs::read_to_string(&path) else {
+        println!("claude permissions: unable to read .claude/settings.json");
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        println!("claude permissions: unable to parse .claude/settings.json");
+        return;
+    };
+
+    let denies = value
+        .pointer("/permissions/deny")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<&str>>()
+        })
+        .unwrap_or_default();
+
+    let missing: Vec<&str> = CLAUDE_REQUIRED_DENY_PATTERNS
+        .iter()
+        .copied()
+        .filter(|pattern| !claude_deny_covers(&denies, pattern))
+        .collect();
+
+    if missing.is_empty() {
+        println!("claude permissions: OK (sensitive reads denied)");
+    } else {
+        println!("claude permissions: missing recommended Read deny entries:");
+        for pat in missing {
+            println!("  - Read(./{pat})");
+        }
+    }
+}
+
+fn claude_deny_covers(denies: &[&str], pattern: &str) -> bool {
+    denies.iter().any(|entry| {
+        let normalized = entry
+            .trim()
+            .trim_start_matches("Read(")
+            .trim_end_matches(')')
+            .trim_start_matches("./");
+        normalized == pattern || normalized.trim_end_matches('/') == pattern.trim_end_matches('/')
+    })
 }
 
 fn pattern_present(hay: &str, pat: &str) -> bool {

@@ -340,3 +340,54 @@ fn doctor_ignore_fix_adds_extended_recommended_patterns() {
     assert!(body.contains("*.mobileprovision"), "{body}");
     assert!(body.contains("*.log"), "{body}");
 }
+
+#[test]
+fn doctor_ignore_reports_missing_claude_read_denies() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".claude")).unwrap();
+    std::fs::write(
+        dir.path().join(".claude/settings.json"),
+        r#"{"permissions":{"deny":["Read(./.env)"]}}"#,
+    )
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["doctor", "ignore", dir.path().to_str().unwrap()])
+        .output()
+        .expect("doctor ignore");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("claude permissions: missing recommended Read deny entries"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Read(./secrets/**)"), "{stdout}");
+}
+
+#[test]
+fn doctor_ignore_accepts_claude_read_denies() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".claude")).unwrap();
+    std::fs::write(
+        dir.path().join(".claude/settings.json"),
+        r#"{"permissions":{"deny":["Read(./.env)","Read(./.env.*)","Read(./secrets/**)","Read(./credentials/**)"]}}"#,
+    )
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["doctor", "ignore", dir.path().to_str().unwrap()])
+        .output()
+        .expect("doctor ignore");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("claude permissions: OK (sensitive reads denied)"),
+        "{stdout}"
+    );
+}
