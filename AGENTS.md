@@ -2,10 +2,6 @@
 
 This repository is a **local-first security harness CLI for AI coding agents** (`shk` / `security-harness-kit`). This file is agent-oriented guidance (build, test, conventions), not a human-focused README. For the open format, see the [AGENTS.md project site](https://agents.md/).
 
-## Source of truth
-
-Implementation priorities, terminology, exit codes, and distribution expectations are defined in **`_llm-docs/cli-implementation-spec.md`**. If code and spec disagree, reconcile against the spec first, then change code or propose a spec update.
-
 ## Stack
 
 - **Language**: Rust (single-binary distribution; end users should not need Rust installed).
