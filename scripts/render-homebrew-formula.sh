@@ -31,7 +31,6 @@ mkdir -p "$(dirname "$output")"
 
 python3 - "$template" "$output" "$version" \
   "$(lookup_sha256 shk-aarch64-apple-darwin.tar.gz)" \
-  "$(lookup_sha256 shk-x86_64-apple-darwin.tar.gz)" \
   "$(lookup_sha256 shk-aarch64-unknown-linux-gnu.tar.gz)" \
   "$(lookup_sha256 shk-x86_64-unknown-linux-gnu.tar.gz)" <<'PY'
 import sys
@@ -42,16 +41,14 @@ from pathlib import Path
     output,
     version,
     sha_aarch64_apple,
-    sha_x86_64_apple,
     sha_aarch64_linux,
     sha_x86_64_linux,
-) = sys.argv[1:8]
+) = sys.argv[1:7]
 
 body = Path(template).read_text(encoding="utf-8")
 replacements = {
     "{{version}}": version,
     "{{sha256_aarch64_apple_darwin}}": sha_aarch64_apple,
-    "{{sha256_x86_64_apple_darwin}}": sha_x86_64_apple,
     "{{sha256_aarch64_unknown_linux_gnu}}": sha_aarch64_linux,
     "{{sha256_x86_64_unknown_linux_gnu}}": sha_x86_64_linux,
 }

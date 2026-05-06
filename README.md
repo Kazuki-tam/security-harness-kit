@@ -65,7 +65,6 @@ Tagged releases publish platform archives and a `SHA256SUMS` manifest:
 ```text
 shk-aarch64-unknown-linux-gnu.tar.gz
 shk-aarch64-apple-darwin.tar.gz
-shk-x86_64-apple-darwin.tar.gz
 shk-x86_64-pc-windows-msvc.zip
 shk-x86_64-unknown-linux-gnu.tar.gz
 shk-sbom.cdx.json
@@ -114,6 +113,8 @@ brew install --formula https://github.com/Kazuki-tam/security-harness-kit/releas
 ```
 
 For long-term distribution, copy the generated `shk.rb` into a Homebrew tap repository.
+
+Note: Intel macOS (`x86_64-apple-darwin`) release artifacts are not published. Apple Silicon macOS, Linux x86_64/aarch64, and Windows x86_64 are supported.
 
 ### Build from source
 

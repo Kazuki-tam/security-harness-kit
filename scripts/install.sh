@@ -51,7 +51,13 @@ detect_target() {
   esac
 
   case "$arch" in
-    x86_64 | amd64) arch_part="x86_64" ;;
+    x86_64 | amd64)
+      if [ "$os" = "Darwin" ]; then
+        echo "shk install: Intel macOS is not supported; use Apple Silicon macOS or build from source" >&2
+        exit 1
+      fi
+      arch_part="x86_64"
+      ;;
     arm64 | aarch64) arch_part="aarch64" ;;
     *)
       echo "shk install: unsupported architecture: $arch" >&2
