@@ -179,6 +179,26 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             validator: None,
         },
         CompiledRule {
+            id: "pii.en.passport",
+            severity: Severity::Low,
+            kind: Kind::Pii,
+            re: Regex::new(r"(?i)\bpassport(?:\s+(?:no|number))?\s*[:#]?\s*[A-Z0-9]{9}\b")
+                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "US passport number pattern detected",
+            confidence: 0.65,
+            validator: None,
+        },
+        CompiledRule {
+            id: "pii.en.name",
+            severity: Severity::Info,
+            kind: Kind::Pii,
+            re: Regex::new(r"(?i)\b(?:name|full name|author|by)\s*[:#]\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b")
+                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "English personal name label detected",
+            confidence: 0.45,
+            validator: None,
+        },
+        CompiledRule {
             id: "pii.en.ssn",
             severity: Severity::Medium,
             kind: Kind::Pii,

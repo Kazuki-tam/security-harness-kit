@@ -64,6 +64,8 @@ fn pii_detection_fixtures_cover_expected_rules() {
         "pii.en.phone",
         "pii.en.ein",
         "pii.en.postal_code",
+        "pii.en.passport",
+        "pii.en.name",
         "pii.en.ssn",
     ] {
         assert!(
