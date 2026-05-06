@@ -18,6 +18,7 @@ _llm-docs/
 *.crt
 *.cer
 secrets/
+!fixtures/secrets/
 credentials/
 api_keys.txt
 
