@@ -274,10 +274,10 @@ fn has_managed_ai_hooks(root: &Path) -> bool {
         root.join(".codex/config.toml"),
     ];
     for p in paths {
-        if let Ok(s) = fs::read_to_string(&p) {
-            if s.contains(MANAGED_MARKER_JSON) || s.contains(MANAGED_MARKER_SH) {
-                return true;
-            }
+        if let Ok(s) = fs::read_to_string(&p)
+            && (s.contains(MANAGED_MARKER_JSON) || s.contains(MANAGED_MARKER_SH))
+        {
+            return true;
         }
     }
     false
