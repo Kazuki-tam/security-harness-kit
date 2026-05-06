@@ -62,10 +62,14 @@ pub enum ColorMode {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ScanSection {
-    #[serde(default = "default_include")]
-    pub include: Vec<String>,
-    #[serde(default)]
-    pub exclude: Vec<String>,
+    /// `None` = absent from shk.toml → `effective_include()` returns `["**/*"]`.
+    /// `Some([])` = explicit empty in shk.toml → scan no files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include: Option<Vec<String>>,
+    /// `None` = absent from shk.toml → `effective_exclude()` returns built-in defaults.
+    /// `Some([])` = explicit empty in shk.toml → no exclude patterns (scan everything).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<Vec<String>>,
     #[serde(default = "default_max_file")]
     pub max_file_size_bytes: u64,
     #[serde(default = "default_binary_detection")]
@@ -79,8 +83,46 @@ pub struct ScanSection {
     pub fancy_regex_timeout_ms_per_file: u64,
 }
 
+impl ScanSection {
+    pub fn effective_include(&self) -> &[String] {
+        match &self.include {
+            Some(v) => v,
+            None => static_default_include(),
+        }
+    }
+
+    pub fn effective_exclude(&self) -> &[String] {
+        match &self.exclude {
+            Some(v) => v,
+            None => static_default_excludes(),
+        }
+    }
+}
+
+fn static_default_include() -> &'static [String] {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<Vec<String>> = OnceLock::new();
+    CELL.get_or_init(default_include)
+}
+
+fn static_default_excludes() -> &'static [String] {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<Vec<String>> = OnceLock::new();
+    CELL.get_or_init(default_excludes)
+}
+
 fn default_include() -> Vec<String> {
     vec!["**/*".into()]
+}
+
+fn default_excludes() -> Vec<String> {
+    vec![
+        ".git/**".into(),
+        "node_modules/**".into(),
+        "dist/**".into(),
+        "build/**".into(),
+        "coverage/**".into(),
+    ]
 }
 
 fn default_max_file() -> u64 {
@@ -98,8 +140,8 @@ fn default_fancy_timeout() -> u64 {
 impl Default for ScanSection {
     fn default() -> Self {
         Self {
-            include: default_include(),
-            exclude: default_excludes(),
+            include: None,
+            exclude: None,
             max_file_size_bytes: default_max_file(),
             binary_detection_bytes: default_binary_detection(),
             follow_symlinks: false,
@@ -107,16 +149,6 @@ impl Default for ScanSection {
             fancy_regex_timeout_ms_per_file: default_fancy_timeout(),
         }
     }
-}
-
-fn default_excludes() -> Vec<String> {
-    vec![
-        ".git/**".into(),
-        "node_modules/**".into(),
-        "dist/**".into(),
-        "build/**".into(),
-        "coverage/**".into(),
-    ]
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -260,18 +292,27 @@ impl Default for MaskSection {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct DoctorIgnoreSection {
-    #[serde(default = "default_required_patterns")]
-    pub required_patterns: Vec<String>,
+    /// `None` = absent from shk.toml → `effective_required_patterns()` returns built-in defaults.
+    /// `Some([])` = explicit empty in shk.toml → no required patterns checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_patterns: Option<Vec<String>>,
 }
 
-impl Default for DoctorIgnoreSection {
-    fn default() -> Self {
-        Self {
-            required_patterns: default_required_patterns(),
+impl DoctorIgnoreSection {
+    pub fn effective_required_patterns(&self) -> &[String] {
+        match &self.required_patterns {
+            Some(v) => v,
+            None => static_default_required_patterns(),
         }
     }
+}
+
+fn static_default_required_patterns() -> &'static [String] {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<Vec<String>> = OnceLock::new();
+    CELL.get_or_init(default_required_patterns)
 }
 
 fn default_required_patterns() -> Vec<String> {
@@ -320,8 +361,8 @@ impl Policy {
         let p = root.join("shk.toml");
         if p.is_file() {
             let s = std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
-            let base: Policy = toml::from_str(&s).with_context(|| "parse shk.toml")?;
-            Ok((merge_defaults(base), Some(p)))
+            let policy: Policy = toml::from_str(&s).with_context(|| "parse shk.toml")?;
+            Ok((policy, Some(p)))
         } else {
             Ok((Self::default(), None))
         }
@@ -348,19 +389,6 @@ impl Policy {
             internal_terms: self.rules.internal_terms,
         }
     }
-}
-
-fn merge_defaults(mut p: Policy) -> Policy {
-    if p.scan.include.is_empty() {
-        p.scan.include = default_include();
-    }
-    if p.scan.exclude.is_empty() {
-        p.scan.exclude = default_excludes();
-    }
-    if p.doctor.ignore.required_patterns.is_empty() {
-        p.doctor.ignore.required_patterns = default_required_patterns();
-    }
-    p
 }
 
 pub fn default_policy_toml(strict: bool) -> String {
@@ -497,6 +525,53 @@ required_patterns = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_patterns_distinguish_missing_from_explicit_empty() {
+        let missing: Policy = toml::from_str("[scan]\n").unwrap();
+        assert_eq!(missing.scan.include, None);
+        assert_eq!(missing.scan.exclude, None);
+        assert_eq!(missing.scan.effective_include(), ["**/*"]);
+        assert!(
+            missing
+                .scan
+                .effective_exclude()
+                .iter()
+                .any(|pattern| pattern == ".git/**")
+        );
+
+        let explicit_empty: Policy =
+            toml::from_str("[scan]\ninclude = []\nexclude = []\n").unwrap();
+        assert_eq!(explicit_empty.scan.include, Some(vec![]));
+        assert_eq!(explicit_empty.scan.exclude, Some(vec![]));
+        assert!(explicit_empty.scan.effective_include().is_empty());
+        assert!(explicit_empty.scan.effective_exclude().is_empty());
+    }
+
+    #[test]
+    fn doctor_ignore_patterns_distinguish_missing_from_explicit_empty() {
+        let missing: Policy = toml::from_str("[doctor.ignore]\n").unwrap();
+        assert_eq!(missing.doctor.ignore.required_patterns, None);
+        assert!(
+            missing
+                .doctor
+                .ignore
+                .effective_required_patterns()
+                .iter()
+                .any(|pattern| pattern == ".env")
+        );
+
+        let explicit_empty: Policy =
+            toml::from_str("[doctor.ignore]\nrequired_patterns = []\n").unwrap();
+        assert_eq!(explicit_empty.doctor.ignore.required_patterns, Some(vec![]));
+        assert!(
+            explicit_empty
+                .doctor
+                .ignore
+                .effective_required_patterns()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn rule_engine_config_includes_policy_rule_switches() {

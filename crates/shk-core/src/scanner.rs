@@ -88,7 +88,7 @@ fn build_exclude_set(patterns: &[String]) -> Result<GlobSet> {
 
 /// `None` = no extra restriction (same as explicit `**/*`).
 fn build_include_set(includes: &[String]) -> Result<Option<GlobSet>> {
-    if includes.is_empty() || includes.iter().any(|g| g == "**/*") {
+    if includes.iter().any(|g| g == "**/*") {
         return Ok(None);
     }
     let mut b = GlobSetBuilder::new();
@@ -107,8 +107,8 @@ struct PathFilters {
 impl PathFilters {
     fn from_policy(policy: &Policy) -> Result<Self> {
         Ok(Self {
-            exclude: build_exclude_set(&policy.scan.exclude)?,
-            include: build_include_set(&policy.scan.include)?,
+            exclude: build_exclude_set(policy.scan.effective_exclude())?,
+            include: build_include_set(policy.scan.effective_include())?,
         })
     }
 
@@ -420,11 +420,17 @@ pub fn scan_staged(cwd: &Path, opts: ScanOptions) -> Result<ScanResult> {
     let include_context = opts.include_context || opts.json;
     let mut findings = suppression::expired_allowlist_warnings(&policy.allowlist);
     let prepared = PreparedScan::new(&policy)?;
-    let mut scanned = Vec::new();
+    let scanned: Vec<String> = paths
+        .iter()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
+    let chunk_results: Vec<Result<(Vec<Finding>, u64)>> = paths
+        .par_iter()
+        .map(|rel| scan_staged_blob(&repo, rel, &prepared, include_context))
+        .collect();
     let mut suppressed_total = 0u64;
-    for rel in paths {
-        scanned.push(rel.to_string_lossy().replace('\\', "/"));
-        let (f, sup) = scan_staged_blob(&repo, &rel, &prepared, include_context)?;
+    for chunk in chunk_results {
+        let (f, sup) = chunk?;
         findings.extend(f);
         suppressed_total += sup;
     }
@@ -574,8 +580,8 @@ mod tests {
     #[test]
     fn path_filters_include_glob() {
         let mut p = Policy::default();
-        p.scan.include = vec!["**/only-me.txt".into()];
-        p.scan.exclude = vec![];
+        p.scan.include = Some(vec!["**/only-me.txt".into()]);
+        p.scan.exclude = Some(vec![]);
         let f = PathFilters::from_policy(&p).unwrap();
         assert!(f.allows("foo/only-me.txt"));
         assert!(!f.allows("foo/other.txt"));
@@ -586,6 +592,15 @@ mod tests {
         let p = Policy::default();
         let f = PathFilters::from_policy(&p).unwrap();
         assert!(f.allows("anything.rs"));
+    }
+
+    #[test]
+    fn path_filters_explicit_empty_include_scans_nothing() {
+        let mut p = Policy::default();
+        p.scan.include = Some(vec![]);
+        p.scan.exclude = Some(vec![]);
+        let f = PathFilters::from_policy(&p).unwrap();
+        assert!(!f.allows("anything.rs"));
     }
 
     #[test]

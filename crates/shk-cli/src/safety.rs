@@ -4,15 +4,23 @@ use std::path::{Path, PathBuf};
 const POLICY_FILE: &str = "shk.toml";
 
 const PROTECTED_HOME_PATHS: &[&str] = &[
+    ".aws/credentials",
+    ".aws/config",
     ".bash_profile",
     ".bashrc",
     ".cargo/credentials",
     ".cargo/credentials.toml",
     ".config/fish/config.fish",
+    ".config/gcloud/credentials.db",
+    ".config/gcloud/application_default_credentials.json",
     ".config/git/config",
     ".curlrc",
+    ".docker/config.json",
     ".gitconfig",
     ".gitignore",
+    ".gnupg/secring.gpg",
+    ".gnupg/trustdb.gpg",
+    ".kube/config",
     ".netrc",
     ".npmrc",
     ".profile",

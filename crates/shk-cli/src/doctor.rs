@@ -33,7 +33,7 @@ pub fn run_ignore(root: &Path, fix: bool) -> Result<()> {
         safety::ensure_writable_path_allowed(&root.join(".gitignore"))?;
     }
     let (policy, _) = Policy::load_from_dir(root)?;
-    let required = policy.doctor.ignore.required_patterns.clone();
+    let required = policy.doctor.ignore.effective_required_patterns().to_vec();
     let gi_path = root.join(".gitignore");
     let mut combined = String::new();
     if gi_path.is_file() {
