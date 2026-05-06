@@ -80,6 +80,9 @@ shk scan                        # scan current directory
 shk scan ./src                  # scan a specific path
 shk scan . --json               # structured JSON output
 shk scan . --fail-on medium     # fail on medium severity or above
+shk scan . --include-binary     # opt into scanning binary-looking files
+shk scan . --follow-symlinks    # opt into symlink traversal
+shk scan . --no-color           # disable colored human output
 shk scan --staged               # scan only Git-staged files (pre-commit)
 shk scan . --hook-mode cursor --audit < payload.json
 ```

@@ -9,6 +9,9 @@ use std::path::PathBuf;
     propagate_version = true
 )]
 pub struct Cli {
+    /// Disable colored human output.
+    #[arg(long, global = true)]
+    pub no_color: bool,
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -25,6 +28,12 @@ pub enum Commands {
         json: bool,
         #[arg(long, value_name = "SEVERITY")]
         fail_on: Option<String>,
+        /// Include binary files instead of emitting scan.binary_skipped info findings.
+        #[arg(long)]
+        include_binary: bool,
+        /// Follow symlinks during repository traversal.
+        #[arg(long)]
+        follow_symlinks: bool,
         /// Interpret stdin as AI tool hook JSON (see `_llm-docs/cli-implementation-spec.md` §7.9).
         #[arg(long, value_enum)]
         hook_mode: Option<AiTool>,

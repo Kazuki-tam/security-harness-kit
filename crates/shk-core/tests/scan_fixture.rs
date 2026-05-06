@@ -1,5 +1,5 @@
 use shk_core::policy::{Policy, Severity};
-use shk_core::scanner::{scan_path, ScanOptions};
+use shk_core::scanner::{ScanOptions, scan_path};
 use std::path::PathBuf;
 
 #[test]
@@ -12,6 +12,8 @@ fn scan_basic_fixture_dir() {
         fail_on_override: Some(Severity::Critical),
         use_pre_commit_threshold: false,
         include_context: true,
+        include_binary: false,
+        follow_symlinks: false,
     };
     let res = scan_path(&root, opts).expect("scan");
     assert!(

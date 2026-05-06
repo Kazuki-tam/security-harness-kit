@@ -1,6 +1,7 @@
 use anyhow::Result;
 use shk_core::git;
 use shk_core::policy::Policy;
+use shk_core::scanner::{ScanOptions, scan_string};
 use shk_integrations::{MANAGED_MARKER_JSON, MANAGED_MARKER_SH};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,6 +18,8 @@ const IGNORE_CANDIDATES: &[&str] = &[
     ".ignore",
     ".aiignore",
 ];
+
+const DOTENVX_HINT_FILES: &[&str] = &[".env.keys", ".env.vault"];
 
 pub fn run_ignore(root: &Path, fix: bool) -> Result<()> {
     let (policy, _) = Policy::load_from_dir(root)?;
@@ -75,26 +78,67 @@ fn pattern_present(hay: &str, pat: &str) -> bool {
     })
 }
 
-pub fn run_env(root: &Path, _dotenvx: bool) -> Result<()> {
-    let mut hits = Vec::new();
+pub fn run_env(root: &Path, dotenvx: bool) -> Result<()> {
+    let (_policy, _) = Policy::load_from_dir(root)?;
+    let mut env_files = Vec::new();
     for e in fs::read_dir(root)? {
         let e = e?;
         let name = e.file_name().to_string_lossy().to_string();
         if (name == ".env" || (name.starts_with(".env.") && name != ".env.example"))
             && e.path().is_file()
         {
-            hits.push(name);
+            env_files.push((name, e.path()));
         }
     }
-    if hits.is_empty() {
+    if env_files.is_empty() {
         println!("env: no plaintext .env / .env.* (except .env.example) at repo root");
     } else {
         println!("env: plaintext env files detected (review + prefer dotenvx / secret manager):");
-        for h in hits {
-            println!("  - {h}");
+        for (name, path) in env_files {
+            let content = fs::read_to_string(&path).unwrap_or_default();
+            let findings = scan_string(root, &name, &content, env_scan_options())?
+                .findings
+                .into_iter()
+                .filter(|f| f.kind != "ignore")
+                .count();
+            if findings == 0 {
+                println!("  - {name} (no rule hits; still unsafe by default)");
+            } else {
+                println!("  - {name} ({findings} finding(s))");
+            }
+        }
+        println!("  recommendation: encrypt env files or migrate secrets to a secret manager");
+        println!("  recommendation: deny direct AI reads of .env files via tool-specific controls");
+    }
+
+    if dotenvx {
+        let present: Vec<&str> = DOTENVX_HINT_FILES
+            .iter()
+            .copied()
+            .filter(|p| root.join(p).is_file())
+            .collect();
+        if present.is_empty() {
+            println!("dotenvx: no known dotenvx artifact files detected");
+        } else {
+            println!("dotenvx: artifact files detected (verify private keys are not committed):");
+            for p in present {
+                println!("  - {p}");
+            }
         }
     }
     Ok(())
+}
+
+fn env_scan_options() -> ScanOptions {
+    ScanOptions {
+        staged: false,
+        json: false,
+        fail_on_override: None,
+        use_pre_commit_threshold: false,
+        include_context: false,
+        include_binary: false,
+        follow_symlinks: false,
+    }
 }
 
 fn has_managed_ai_hooks(root: &Path) -> bool {

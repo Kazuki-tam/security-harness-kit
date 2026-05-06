@@ -1,7 +1,7 @@
 use crate::policy::Policy;
 use anyhow::Result;
 use serde::Serialize;
-use shk_rules::{scan_content, RuleEngineConfig};
+use shk_rules::{RuleEngineConfig, scan_content};
 
 #[derive(Debug, Serialize)]
 pub struct MaskJsonOutput {

@@ -59,6 +59,25 @@ fn mask_stdin_fixture() {
 }
 
 #[test]
+fn mask_binary_stdin_passes_through() {
+    use std::io::Write;
+
+    let data = b"abc\0def".to_vec();
+    let out = Command::new(shk_bin())
+        .args(["mask"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(&data)?;
+            c.wait_with_output()
+        })
+        .expect("mask binary");
+    assert!(out.status.success());
+    assert_eq!(out.stdout, data);
+}
+
+#[test]
 fn scan_json_reports_suppressed_field() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -167,4 +186,42 @@ fn hook_mode_audit_creates_audit_log_in_isolated_tmp() {
         "missing audit log {:?}",
         repo.join(".shk")
     );
+}
+
+#[test]
+fn doctor_env_reports_findings_without_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret = "abcdefghijklmnop";
+    std::fs::write(dir.path().join(".env"), format!("api_key={secret}\n")).unwrap();
+    let out = Command::new(shk_bin())
+        .args(["doctor", "env", dir.path().to_str().unwrap()])
+        .output()
+        .expect("doctor env");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(".env (1 finding(s))"), "{stdout}");
+    assert!(!stdout.contains(secret), "{stdout}");
+}
+
+#[test]
+fn doctor_ignore_fix_adds_extended_recommended_patterns() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".gitignore"), "node_modules/\n").unwrap();
+    let out = Command::new(shk_bin())
+        .args(["doctor", "ignore", dir.path().to_str().unwrap(), "--fix"])
+        .output()
+        .expect("doctor ignore fix");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let body = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+    assert!(body.contains("*.p12"), "{body}");
+    assert!(body.contains("*.mobileprovision"), "{body}");
+    assert!(body.contains("*.log"), "{body}");
 }

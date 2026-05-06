@@ -1,9 +1,9 @@
 use crate::audit_log;
 use crate::hook_output;
 use crate::output;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use shk_core::policy::{ColorMode, Severity};
-use shk_core::scanner::{scan_path, scan_string, ScanOptions};
+use shk_core::scanner::{ScanOptions, scan_path, scan_string};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -16,6 +16,8 @@ pub struct ScanInvocation {
     pub staged: bool,
     pub json: bool,
     pub fail_on: Option<String>,
+    pub include_binary: bool,
+    pub follow_symlinks: bool,
     pub hook_mode: Option<AiTool>,
     pub post: bool,
     pub audit: bool,
@@ -38,8 +40,10 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
         staged: inv.staged,
         json: inv.json,
         fail_on_override,
-        use_pre_commit_threshold: false,
+        use_pre_commit_threshold: inv.staged,
         include_context: false,
+        include_binary: inv.include_binary,
+        follow_symlinks: inv.follow_symlinks,
     };
     let res = scan_path(&inv.path, opts).context("scan failed")?;
     if inv.json {
@@ -110,6 +114,8 @@ fn run_hook_mode(
         fail_on_override,
         use_pre_commit_threshold: matches!(tool, AiTool::Cursor) && !post,
         include_context: false,
+        include_binary: false,
+        follow_symlinks: false,
     };
 
     let res = scan_string(&repo_root, &disp, &body, opts).context("hook scan failed")?;

@@ -59,6 +59,7 @@ struct CompiledRule {
     re: Regex,
     message: &'static str,
     confidence: f32,
+    validator: Option<fn(&str) -> bool>,
 }
 
 static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
@@ -71,6 +72,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible OpenAI API key detected",
             confidence: 0.9,
+            validator: None,
         },
         CompiledRule {
             id: "secret.aws_access_key",
@@ -80,6 +82,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible AWS access key id",
             confidence: 0.88,
+            validator: None,
         },
         CompiledRule {
             id: "secret.generic_api_key",
@@ -91,6 +94,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible API key assignment",
             confidence: 0.55,
+            validator: None,
         },
         CompiledRule {
             id: "secret.private_key_block",
@@ -100,6 +104,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Private key PEM block detected",
             confidence: 0.99,
+            validator: None,
         },
         CompiledRule {
             id: "pii.email",
@@ -109,6 +114,69 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Email address detected",
             confidence: 0.85,
+            validator: None,
+        },
+        CompiledRule {
+            id: "pii.credit_card",
+            severity: Severity::Medium,
+            kind: Kind::Pii,
+            re: Regex::new(r"\b(?:\d[ -]?){13,19}\b")
+                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Credit card number pattern detected",
+            confidence: 0.9,
+            validator: Some(luhn_valid),
+        },
+        CompiledRule {
+            id: "pii.ipv4",
+            severity: Severity::Low,
+            kind: Kind::Pii,
+            re: Regex::new(
+                r"\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b",
+            )
+            .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "IPv4 address detected",
+            confidence: 0.65,
+            validator: None,
+        },
+        CompiledRule {
+            id: "pii.ipv6",
+            severity: Severity::Low,
+            kind: Kind::Pii,
+            re: Regex::new(r"\b(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b")
+                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "IPv6 address detected",
+            confidence: 0.6,
+            validator: None,
+        },
+        CompiledRule {
+            id: "pii.en.phone",
+            severity: Severity::Medium,
+            kind: Kind::Pii,
+            re: Regex::new(r"(?:\+1[-.\s]?)?(?:\(\d{3}\)|\d{3})[-.\s]\d{3}[-.\s]\d{4}\b")
+                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "US/international phone number pattern detected",
+            confidence: 0.75,
+            validator: None,
+        },
+        CompiledRule {
+            id: "pii.en.ein",
+            severity: Severity::Low,
+            kind: Kind::Pii,
+            re: Regex::new(r"(?i)\b(?:ein|employer identification number)\s*[:#]?\s*\d{2}-\d{7}\b")
+                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "US EIN pattern detected",
+            confidence: 0.7,
+            validator: None,
+        },
+        CompiledRule {
+            id: "pii.en.postal_code",
+            severity: Severity::Low,
+            kind: Kind::Pii,
+            re: Regex::new(r"(?i)\b(?:zip|postal(?: code)?)\s*[:#]?\s*\d{5}(?:-\d{4})?\b")
+                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "US ZIP/postal code pattern detected",
+            confidence: 0.6,
+            validator: None,
         },
         CompiledRule {
             id: "pii.en.ssn",
@@ -118,6 +186,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "US SSN pattern detected",
             confidence: 0.7,
+            validator: None,
         },
         CompiledRule {
             id: "pii.ja.phone",
@@ -127,6 +196,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Japanese phone number pattern detected",
             confidence: 0.75,
+            validator: None,
         },
         CompiledRule {
             id: "pii.ja.postal_code",
@@ -136,9 +206,81 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Japanese postal code pattern detected",
             confidence: 0.8,
+            validator: None,
+        },
+        CompiledRule {
+            id: "pii.ja.passport",
+            severity: Severity::Medium,
+            kind: Kind::Pii,
+            re: Regex::new(r"\b[A-Z]{2}\d{7}\b").unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Japanese passport number pattern detected",
+            confidence: 0.75,
+            validator: None,
+        },
+        CompiledRule {
+            id: "pii.ja.my_number",
+            severity: Severity::Medium,
+            kind: Kind::Pii,
+            re: Regex::new(r"(?:マイナンバー|個人番号)\s*[:：]?\s*\d{12}")
+                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Japanese My Number pattern detected",
+            confidence: 0.8,
+            validator: None,
+        },
+        CompiledRule {
+            id: "pii.ja.corporate_number",
+            severity: Severity::Medium,
+            kind: Kind::Pii,
+            re: Regex::new(r"(?:法人番号)\s*[:：]?\s*\d{13}")
+                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Japanese corporate number pattern detected",
+            confidence: 0.8,
+            validator: None,
+        },
+        CompiledRule {
+            id: "pii.ja.drivers_license",
+            severity: Severity::Medium,
+            kind: Kind::Pii,
+            re: Regex::new(r"(?:運転免許証番号|免許証番号|運転免許番号)\s*[:：]?\s*\d{12}")
+                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Japanese driver license number pattern detected",
+            confidence: 0.75,
+            validator: None,
+        },
+        CompiledRule {
+            id: "pii.ja.name",
+            severity: Severity::Info,
+            kind: Kind::Pii,
+            re: Regex::new(r"(?:氏名|名前)\s*[:：]?\s*[\p{Han}\p{Hiragana}\p{Katakana}ー]{2,12}")
+                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Japanese personal name label detected",
+            confidence: 0.45,
+            validator: None,
         },
     ]
 });
+
+fn luhn_valid(candidate: &str) -> bool {
+    let digits: Vec<u32> = candidate.chars().filter_map(|c| c.to_digit(10)).collect();
+    if !(13..=19).contains(&digits.len()) {
+        return false;
+    }
+
+    let mut sum = 0;
+    let mut double = false;
+    for d in digits.iter().rev() {
+        let mut n = *d;
+        if double {
+            n *= 2;
+            if n > 9 {
+                n -= 9;
+            }
+        }
+        sum += n;
+        double = !double;
+    }
+    sum % 10 == 0
+}
 
 fn line_col(content: &str, byte_idx: usize) -> (usize, usize) {
     let prefix = &content[..byte_idx.min(content.len())];
@@ -202,6 +344,11 @@ pub fn scan_content(content: &str, rel_path: &str, cfg: &RuleEngineConfig) -> Ve
             continue;
         }
         for m in r.re.find_iter(content) {
+            if let Some(validate) = r.validator {
+                if !validate(m.as_str()) {
+                    continue;
+                }
+            }
             let (line, column) = line_col(content, m.start());
             out.push(RuleMatch {
                 rule_id: r.id,
@@ -239,5 +386,56 @@ mod tests {
         let out = redact_line_for_display("user: admin@example.com ok", &cfg);
         assert!(!out.contains("example.com"));
         assert!(out.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn detects_luhn_valid_credit_card() {
+        let cfg = RuleEngineConfig::default();
+        let m = scan_content("card: 4111 1111 1111 1111", "demo.txt", &cfg);
+        assert!(m.iter().any(|x| x.rule_id == "pii.credit_card"), "{m:?}");
+    }
+
+    #[test]
+    fn ignores_luhn_invalid_credit_card_like_number() {
+        let cfg = RuleEngineConfig::default();
+        let m = scan_content("card: 4111 1111 1111 1112", "demo.txt", &cfg);
+        assert!(!m.iter().any(|x| x.rule_id == "pii.credit_card"), "{m:?}");
+    }
+
+    #[test]
+    fn applies_language_specific_pii_rules() {
+        let cfg = RuleEngineConfig {
+            pii_languages: vec!["en".into()],
+            ..RuleEngineConfig::default()
+        };
+        let m = scan_content(
+            "phone: (555) 555-5555\npassport AB1234567",
+            "demo.txt",
+            &cfg,
+        );
+        assert!(m.iter().any(|x| x.rule_id == "pii.en.phone"), "{m:?}");
+        assert!(!m.iter().any(|x| x.rule_id == "pii.ja.passport"), "{m:?}");
+    }
+
+    #[test]
+    fn detects_label_anchored_japanese_pii_rules() {
+        let cfg = RuleEngineConfig::default();
+        let text = "個人番号: 123456789012\n法人番号：1234567890123\n免許証番号 123456789012\n氏名: 山田太郎";
+        let m = scan_content(text, "demo.txt", &cfg);
+        for id in [
+            "pii.ja.my_number",
+            "pii.ja.corporate_number",
+            "pii.ja.drivers_license",
+            "pii.ja.name",
+        ] {
+            assert!(m.iter().any(|x| x.rule_id == id), "missing {id}: {m:?}");
+        }
+    }
+
+    #[test]
+    fn japanese_name_requires_label() {
+        let cfg = RuleEngineConfig::default();
+        let m = scan_content("山田太郎", "demo.txt", &cfg);
+        assert!(!m.iter().any(|x| x.rule_id == "pii.ja.name"), "{m:?}");
     }
 }

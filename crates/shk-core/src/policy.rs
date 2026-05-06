@@ -242,6 +242,9 @@ fn default_required_patterns() -> Vec<String> {
         "credentials/**".into(),
         "*.pem".into(),
         "*.key".into(),
+        "*.p12".into(),
+        "*.mobileprovision".into(),
+        "*.log".into(),
     ]
 }
 
@@ -355,7 +358,10 @@ required_patterns = [
   "secrets/**",
   "credentials/**",
   "*.pem",
-  "*.key"
+  "*.key",
+  "*.p12",
+  "*.mobileprovision",
+  "*.log"
 ]
 
 # Allowlist / inline suppressions (spec §5.3). Prefer path-scoped rows; use value_hash for value-specific cases.
@@ -406,7 +412,10 @@ required_patterns = [
   "secrets/**",
   "credentials/**",
   "*.pem",
-  "*.key"
+  "*.key",
+  "*.p12",
+  "*.mobileprovision",
+  "*.log"
 ]
 
 # Allowlist / inline suppressions (spec §5.3). Prefer path-scoped rows; use value_hash for value-specific cases.

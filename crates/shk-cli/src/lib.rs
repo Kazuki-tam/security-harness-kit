@@ -16,7 +16,11 @@ use clap::Parser;
 use shk_core::policy::ColorMode;
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
-    let color = color::resolve_color(ColorMode::Auto);
+    let color = color::resolve_color(if cli.no_color {
+        ColorMode::Never
+    } else {
+        ColorMode::Auto
+    });
     let cwd = std::env::current_dir().context("current directory")?;
 
     match cli.command {
@@ -25,6 +29,8 @@ pub fn run() -> Result<()> {
             staged,
             json,
             fail_on,
+            include_binary,
+            follow_symlinks,
             hook_mode,
             post,
             audit,
@@ -33,6 +39,8 @@ pub fn run() -> Result<()> {
             staged,
             json,
             fail_on,
+            include_binary,
+            follow_symlinks,
             hook_mode,
             post,
             audit,

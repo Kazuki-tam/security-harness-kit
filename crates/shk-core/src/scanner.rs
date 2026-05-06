@@ -2,7 +2,7 @@ use crate::finding::{Finding, ScanJsonReport, ScanSummary};
 use crate::git;
 use crate::policy::{ColorMode, Policy, Severity};
 use crate::suppression;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
 use rayon::prelude::*;
@@ -16,6 +16,8 @@ pub struct ScanOptions {
     pub fail_on_override: Option<Severity>,
     pub use_pre_commit_threshold: bool,
     pub include_context: bool,
+    pub include_binary: bool,
+    pub follow_symlinks: bool,
 }
 
 pub struct ScanResult {
@@ -132,6 +134,15 @@ fn prepend_policy_warnings(head: Vec<Finding>, tail: Vec<Finding>) -> Vec<Findin
     v
 }
 
+fn apply_scan_flag_overrides(policy: &mut Policy, opts: &ScanOptions) {
+    if opts.include_binary {
+        policy.scan.include_binary = true;
+    }
+    if opts.follow_symlinks {
+        policy.scan.follow_symlinks = true;
+    }
+}
+
 pub(crate) fn scan_text_content(
     rel: &str,
     content: &str,
@@ -234,7 +245,8 @@ pub fn scan_string(
     opts: ScanOptions,
 ) -> Result<ScanResult> {
     let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let (policy, policy_path) = Policy::load_from_dir(&root)?;
+    let (mut policy, policy_path) = Policy::load_from_dir(&root)?;
+    apply_scan_flag_overrides(&mut policy, &opts);
     let include_context = opts.include_context || opts.json;
     let exit_threshold = if opts.use_pre_commit_threshold {
         opts.fail_on_override
@@ -267,7 +279,8 @@ pub fn scan_staged(cwd: &Path, opts: ScanOptions) -> Result<ScanResult> {
     if !git::is_inside_git_work_tree(&repo) {
         bail!("shk scan --staged requires a Git repository");
     }
-    let (policy, policy_path) = Policy::load_from_dir(&repo)?;
+    let (mut policy, policy_path) = Policy::load_from_dir(&repo)?;
+    apply_scan_flag_overrides(&mut policy, &opts);
     let paths = git::staged_files(&repo)?;
     let include_context = opts.include_context || opts.json;
     let mut findings = suppression::expired_allowlist_warnings(&policy.allowlist);
@@ -310,7 +323,8 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
             .unwrap_or_else(|| PathBuf::from("."))
     };
     let root = fs::canonicalize(&root).unwrap_or(root);
-    let (policy, policy_path) = Policy::load_from_dir(&root)?;
+    let (mut policy, policy_path) = Policy::load_from_dir(&root)?;
+    apply_scan_flag_overrides(&mut policy, &opts);
     let filters = PathFilters::from_policy(&policy)?;
     let include_context = opts.include_context || opts.json;
     let exit_threshold = if opts.use_pre_commit_threshold {

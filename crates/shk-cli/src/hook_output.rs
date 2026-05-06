@@ -7,11 +7,7 @@ const REASON_DENY_DEFAULT: &str =
     "shk: secrets detected above threshold — run `shk scan` for details";
 
 fn hook_event_json_name(is_post: bool) -> &'static str {
-    if is_post {
-        "PostToolUse"
-    } else {
-        "PreToolUse"
-    }
+    if is_post { "PostToolUse" } else { "PreToolUse" }
 }
 
 /// Pre-hook deny payload (blocking `shk scan --hook-mode`; exit code 2 at CLI).

@@ -5,4 +5,4 @@ pub const MANAGED_MARKER_SH: &str = "# shk-managed-start";
 
 pub mod ai_hooks;
 
-pub use ai_hooks::{stdin_to_hook_body, AiHookTool};
+pub use ai_hooks::{AiHookTool, stdin_to_hook_body};

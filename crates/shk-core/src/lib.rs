@@ -7,4 +7,4 @@ pub mod suppression;
 
 pub use finding::{Finding, ScanJsonReport};
 pub use policy::{ColorMode, Policy, Severity};
-pub use scanner::{scan_path, scan_string, ScanOptions, ScanResult};
+pub use scanner::{ScanOptions, ScanResult, scan_path, scan_string};

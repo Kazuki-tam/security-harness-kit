@@ -1,6 +1,6 @@
 use crate::policy::Severity;
 use serde::Serialize;
-use shk_rules::{redact_line_for_display, Kind, RuleEngineConfig};
+use shk_rules::{Kind, RuleEngineConfig, redact_line_for_display};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
