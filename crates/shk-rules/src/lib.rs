@@ -196,17 +196,17 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Japanese phone number pattern detected",
             confidence: 0.75,
-            validator: None,
+            validator: Some(japanese_phone_valid),
         },
         CompiledRule {
             id: "pii.ja.postal_code",
             severity: Severity::Medium,
             kind: Kind::Pii,
-            re: Regex::new(r"(?:〒)?\d{3}-\d{4}\b")
+            re: Regex::new(r"(?i)(?:〒\d{3}-\d{4}\b|(?:郵便番号|郵便|postal(?: code)?)\s*[:：]?\s*\d{3}-\d{4}\b)")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Japanese postal code pattern detected",
             confidence: 0.8,
-            validator: None,
+            validator: Some(japanese_postal_code_valid),
         },
         CompiledRule {
             id: "pii.ja.passport",
@@ -280,6 +280,20 @@ fn luhn_valid(candidate: &str) -> bool {
         double = !double;
     }
     sum % 10 == 0
+}
+
+fn japanese_phone_valid(candidate: &str) -> bool {
+    let groups: Vec<&str> = candidate.split('-').collect();
+    if groups.len() < 3 {
+        return true;
+    }
+    !groups[1..]
+        .iter()
+        .all(|group| group.chars().all(|c| c == '0'))
+}
+
+fn japanese_postal_code_valid(candidate: &str) -> bool {
+    candidate.chars().any(|c| c.is_ascii_digit() && c != '0')
 }
 
 fn line_col(content: &str, byte_idx: usize) -> (usize, usize) {

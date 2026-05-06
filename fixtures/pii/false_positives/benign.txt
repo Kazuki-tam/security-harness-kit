@@ -1,0 +1,4 @@
+Invalid test card: 4111 1111 1111 1112
+Japanese test phone placeholder: 090-0000-0000
+Standalone Japanese name-like text: 山田太郎
+Unlabeled number group: 123456789012

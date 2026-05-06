@@ -322,18 +322,18 @@ Raw secret values must never appear in `shk.toml`. Use `value_hash` for value-sp
 | Category | Description |
 |----------|-------------|
 | `secret` | OpenAI-style keys, AWS access key IDs, generic API key assignments, private key blocks |
-| `pii` | Email, US SSN, Japanese phone number, Japanese postal code |
+| `pii` | Email, credit card, IP addresses, English/Japanese personal information patterns |
 | `ignore` | Scanner skip notices and policy warnings |
 
 ### PII coverage
 
 Currently implemented PII rules:
 
-- Universal when `pii = true`: email
-- English (`pii_languages = ["en"]`): US SSN
-- Japanese (`pii_languages = ["ja"]`): phone number, postal code
+- Universal when `pii = true`: email, Luhn-validated credit card numbers, IPv4, IPv6
+- English (`pii_languages = ["en"]`): phone number, US SSN, label-anchored ZIP/postal code, label-anchored EIN
+- Japanese (`pii_languages = ["ja"]`): phone number, label-anchored/`〒` postal code, passport number, label-anchored My Number, corporate number, driver license number, and personal name
 
-Additional PII rules in the implementation spec are planned but not present yet.
+Japanese personal names are label-anchored only; free-standing kanji name detection is intentionally disabled to avoid high false positive rates.
 
 ### JSON output
 

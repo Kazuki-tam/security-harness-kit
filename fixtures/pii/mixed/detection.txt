@@ -1,0 +1,4 @@
+Contact: grace.hopper@example.test
+US phone: 212-555-0199
+Japanese phone: 090-1234-5678
+氏名: 佐藤花子
