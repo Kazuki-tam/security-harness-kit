@@ -768,6 +768,7 @@ dependencies = [
  "shk-core",
  "shk-integrations",
  "tempfile",
+ "toml",
 ]
 
 [[package]]

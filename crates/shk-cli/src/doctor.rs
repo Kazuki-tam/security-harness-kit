@@ -24,6 +24,8 @@ const DOTENVX_PRIVATE_KEY_FILE: &str = ".env.keys";
 const DOTENVX_VAULT_FILE: &str = ".env.vault";
 const DOTENVX_HINT_FILES: &[&str] = &[DOTENVX_PRIVATE_KEY_FILE, DOTENVX_VAULT_FILE];
 const CLAUDE_REQUIRED_DENY_PATTERNS: &[&str] = &[".env", ".env.*", "secrets/**", "credentials/**"];
+const CODEX_RISKY_SANDBOX_MODE: &str = "danger-full-access";
+const CODEX_RISKY_APPROVAL_POLICY: &str = "never";
 
 pub fn run_ignore(root: &Path, fix: bool) -> Result<()> {
     let (policy, _) = Policy::load_from_dir(root)?;
@@ -73,6 +75,7 @@ pub fn run_ignore(root: &Path, fix: bool) -> Result<()> {
         println!("Wrote updates to {}", path.display());
     }
     run_claude_permissions_check(root);
+    run_codex_config_check(root);
     Ok(())
 }
 
@@ -127,6 +130,48 @@ fn claude_deny_covers(denies: &[&str], pattern: &str) -> bool {
             .trim_start_matches("./");
         normalized == pattern || normalized.trim_end_matches('/') == pattern.trim_end_matches('/')
     })
+}
+
+fn run_codex_config_check(root: &Path) {
+    let path = root.join(".codex/config.toml");
+    if !path.is_file() {
+        return;
+    }
+
+    let Ok(text) = fs::read_to_string(&path) else {
+        println!("codex config: unable to read .codex/config.toml");
+        return;
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&text) else {
+        println!("codex config: unable to parse .codex/config.toml");
+        return;
+    };
+
+    let hooks_enabled = value
+        .get("features")
+        .and_then(|features| features.get("codex_hooks"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
+    if hooks_enabled {
+        println!("codex config: hooks feature enabled");
+    } else {
+        println!("codex config: hooks feature not enabled (`features.codex_hooks = true`)");
+    }
+
+    print_codex_string_setting(&value, "sandbox_mode", Some(CODEX_RISKY_SANDBOX_MODE));
+    print_codex_string_setting(&value, "approval_policy", Some(CODEX_RISKY_APPROVAL_POLICY));
+}
+
+fn print_codex_string_setting(value: &toml::Value, key: &str, risky_value: Option<&str>) {
+    match value.get(key).and_then(toml::Value::as_str) {
+        Some(current) if risky_value == Some(current) => {
+            println!("codex config: warning {key}={current}");
+        }
+        Some(current) => println!("codex config: {key}={current}"),
+        None => {
+            println!("codex config: {key} not set");
+        }
+    }
 }
 
 fn pattern_present(hay: &str, pat: &str) -> bool {

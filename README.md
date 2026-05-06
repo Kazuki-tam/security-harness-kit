@@ -177,7 +177,7 @@ shk doctor env                      # check .env file safety
 shk doctor env --dotenvx            # also inspect dotenvx artifact files
 ```
 
-`doctor ignore` checks ignore-style files such as `.gitignore`, `.cursorignore`, `.clineignore`, `.aiderignore`, `.continueignore`, `.codeiumignore`, `.tabnineignore`, `.ignore`, and `.aiignore`. It also inspects Claude Code `permissions.deny` entries in `.claude/settings.json` for recommended `Read(...)` denies. `--fix` appends missing patterns conservatively to `.gitignore` without removing existing entries.
+`doctor ignore` checks ignore-style files such as `.gitignore`, `.cursorignore`, `.clineignore`, `.aiderignore`, `.continueignore`, `.codeiumignore`, `.tabnineignore`, `.ignore`, and `.aiignore`. It also inspects Claude Code `permissions.deny` entries in `.claude/settings.json` and Codex `.codex/config.toml` sandbox/hook settings. `--fix` appends missing patterns conservatively to `.gitignore` without removing existing entries.
 
 `doctor env --dotenvx` reports known dotenvx artifacts such as `.env.vault` and warns when `.env.keys` is present in the project because it may contain private key material.
 

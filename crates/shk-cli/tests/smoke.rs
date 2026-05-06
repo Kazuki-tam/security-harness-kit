@@ -391,3 +391,78 @@ fn doctor_ignore_accepts_claude_read_denies() {
         "{stdout}"
     );
 }
+
+#[test]
+fn doctor_ignore_reports_codex_risky_config() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".codex")).unwrap();
+    std::fs::write(
+        dir.path().join(".codex/config.toml"),
+        r#"
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
+"#,
+    )
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["doctor", "ignore", dir.path().to_str().unwrap()])
+        .output()
+        .expect("doctor ignore");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("codex config: hooks feature not enabled"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("codex config: warning sandbox_mode=danger-full-access"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("codex config: warning approval_policy=never"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn doctor_ignore_reports_codex_conservative_config() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".codex")).unwrap();
+    std::fs::write(
+        dir.path().join(".codex/config.toml"),
+        r#"
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+
+[features]
+codex_hooks = true
+"#,
+    )
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["doctor", "ignore", dir.path().to_str().unwrap()])
+        .output()
+        .expect("doctor ignore");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("codex config: hooks feature enabled"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("codex config: sandbox_mode=workspace-write"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("codex config: approval_policy=on-request"),
+        "{stdout}"
+    );
+}
