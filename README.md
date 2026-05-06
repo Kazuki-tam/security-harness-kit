@@ -70,6 +70,7 @@ shk-x86_64-pc-windows-msvc.zip
 shk-x86_64-unknown-linux-gnu.tar.gz
 shk-sbom.cdx.json
 shk.json
+shk.rb
 SHA256SUMS
 *.bundle
 ```
@@ -103,6 +104,16 @@ scoop install https://github.com/Kazuki-tam/security-harness-kit/releases/downlo
 ```
 
 For long-term distribution, copy the generated `shk.json` into a Scoop bucket repository.
+
+### Homebrew
+
+macOS/Linux releases include a generated Homebrew formula (`shk.rb`) as a release asset. To test a release formula locally:
+
+```bash
+brew install --formula https://github.com/Kazuki-tam/security-harness-kit/releases/download/v0.1.0/shk.rb
+```
+
+For long-term distribution, copy the generated `shk.rb` into a Homebrew tap repository.
 
 ### Build from source
 
