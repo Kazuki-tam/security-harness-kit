@@ -1,5 +1,6 @@
+use crate::custom_rules;
 use crate::policy::Policy;
-use anyhow::Result;
+use anyhow::{Result, bail};
 use serde::Serialize;
 use shk_rules::{RuleEngineConfig, scan_content};
 use zeroize::Zeroize;
@@ -26,6 +27,16 @@ pub fn mask_text(
     rel_path: &str,
     redaction: MaskRedaction,
 ) -> (String, Vec<crate::finding::Finding>) {
+    mask_text_with_custom(content, cfg, &[], rel_path, redaction)
+}
+
+fn mask_text_with_custom(
+    content: &str,
+    cfg: &RuleEngineConfig,
+    custom: &[custom_rules::CompiledCustomRule],
+    rel_path: &str,
+    redaction: MaskRedaction,
+) -> (String, Vec<crate::finding::Finding>) {
     let mut findings = Vec::new();
     let ends_with_newline = content.ends_with('\n');
     let mut out = String::with_capacity(content.len());
@@ -34,14 +45,27 @@ pub fn mask_text(
             out.push('\n');
         }
         let mut ms = scan_content(line, rel_path, cfg);
-        if ms.is_empty() {
+        let mut custom_ms = custom_rules::scan_content(line, custom);
+        if ms.is_empty() && custom_ms.is_empty() {
             out.push_str(line);
         } else {
             for m in &ms {
-                findings.push(crate::finding::Finding::from_rule_match(
-                    rel_path, m, false, line, cfg,
+                findings.push(
+                    crate::finding::Finding::from_rule_match_with_custom_context(
+                        rel_path, m, false, line, cfg, custom,
+                    ),
+                );
+            }
+            for m in &custom_ms {
+                findings.push(crate::finding::Finding::from_custom_match(
+                    rel_path, m, false, line, cfg, custom,
                 ));
             }
+            let values = ms
+                .iter()
+                .map(|m| m.matched_text.clone())
+                .chain(custom_ms.iter().map(|m| m.matched_text.clone()))
+                .collect();
             match redaction {
                 MaskRedaction::FullLine => out.push_str("[REDACTED_LINE]"),
                 MaskRedaction::Partial {
@@ -49,12 +73,15 @@ pub fn mask_text(
                     preserve_suffix,
                 } => out.push_str(&mask_line_partial(
                     line,
-                    &ms,
+                    values,
                     preserve_prefix,
                     preserve_suffix,
                 )),
             }
             for m in &mut ms {
+                m.matched_text.zeroize();
+            }
+            for m in &mut custom_ms {
                 m.matched_text.zeroize();
             }
         }
@@ -67,12 +94,12 @@ pub fn mask_text(
 
 fn mask_line_partial(
     line: &str,
-    matches: &[shk_rules::RuleMatch],
+    matches: Vec<String>,
     preserve_prefix: usize,
     preserve_suffix: usize,
 ) -> String {
     let mut masked = line.to_string();
-    let mut values: Vec<String> = matches.iter().map(|m| m.matched_text.clone()).collect();
+    let mut values = matches;
     values.sort_by_key(|v| std::cmp::Reverse(v.len()));
     values.dedup();
 
@@ -102,7 +129,24 @@ pub fn mask_from_policy(
     policy: &Policy,
     rel_path: &str,
 ) -> Result<(String, Vec<crate::finding::Finding>)> {
+    if !policy.mask.mode.eq_ignore_ascii_case("strict") {
+        bail!(
+            "unsupported mask.mode `{}` (supported: strict)",
+            policy.mask.mode
+        );
+    }
     let cfg = policy.rule_engine_config();
+    let filtered: Vec<_> = if cfg.internal_terms {
+        policy.custom_rules.clone()
+    } else {
+        policy
+            .custom_rules
+            .iter()
+            .filter(|r| r.kind.trim().to_ascii_lowercase() != "internal")
+            .cloned()
+            .collect()
+    };
+    let custom = custom_rules::compile(&filtered)?;
     let redaction = if policy.mask.redaction.eq_ignore_ascii_case("partial") {
         MaskRedaction::Partial {
             preserve_prefix: policy.mask.preserve_prefix,
@@ -111,7 +155,9 @@ pub fn mask_from_policy(
     } else {
         MaskRedaction::FullLine
     };
-    Ok(mask_text(content, &cfg, rel_path, redaction))
+    Ok(mask_text_with_custom(
+        content, &cfg, &custom, rel_path, redaction,
+    ))
 }
 
 #[cfg(test)]
@@ -149,5 +195,40 @@ mod tests {
         assert!(!hits.is_empty());
         assert!(out.contains("sk-p[REDACTED]6789"), "{out}");
         assert!(!out.contains("abcdefghijklmnopqrstuvwxyz012345"), "{out}");
+    }
+
+    #[test]
+    fn mask_from_policy_rejects_unsupported_mode() {
+        let mut policy = Policy::default();
+        policy.mask.mode = "passthrough".into();
+        let err = mask_from_policy("hello@example.com\n", &policy, "<stdin>").unwrap_err();
+        assert!(err.to_string().contains("unsupported mask.mode"), "{err:#}");
+    }
+
+    #[test]
+    fn mask_from_policy_applies_custom_rules() {
+        let mut policy = Policy::default();
+        policy.rules.internal_terms = true;
+        policy.custom_rules.push(crate::policy::CustomRule {
+            id: "internal.project_codename".into(),
+            pattern: "ProjectNebula".into(),
+            severity: "high".into(),
+            kind: "internal".into(),
+            message: Some("Internal confidential term detected".into()),
+            confidence: None,
+            case_insensitive: false,
+            enabled: true,
+        });
+
+        let (out, findings) =
+            mask_from_policy("codename ProjectNebula\n", &policy, "<stdin>").unwrap();
+
+        assert_eq!(out, "[REDACTED_LINE]\n");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "internal.project_codename"),
+            "{findings:?}"
+        );
     }
 }

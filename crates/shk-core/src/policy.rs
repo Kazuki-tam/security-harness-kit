@@ -74,6 +74,7 @@ pub struct ScanSection {
     pub follow_symlinks: bool,
     #[serde(default)]
     pub include_binary: bool,
+    /// Config-reserved until a fancy-regex based rule is added.
     #[serde(default = "default_fancy_timeout")]
     pub fancy_regex_timeout_ms_per_file: u64,
 }
@@ -150,6 +151,36 @@ fn default_true() -> bool {
 
 fn default_pii_langs() -> Vec<String> {
     vec!["en".into(), "ja".into()]
+}
+
+fn default_custom_kind() -> String {
+    "internal".into()
+}
+
+fn default_custom_severity() -> String {
+    "medium".into()
+}
+
+fn default_custom_confidence() -> Option<f32> {
+    Some(1.0)
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CustomRule {
+    pub id: String,
+    pub pattern: String,
+    #[serde(default = "default_custom_severity")]
+    pub severity: String,
+    #[serde(default = "default_custom_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default = "default_custom_confidence")]
+    pub confidence: Option<f32>,
+    #[serde(default)]
+    pub case_insensitive: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 fn allowlist_all_paths() -> String {
@@ -273,6 +304,9 @@ pub struct Policy {
     /// Path-based / hash-based suppression (also see inline `# shk-ignore` in scanner).
     #[serde(default)]
     pub allowlist: Vec<AllowlistEntry>,
+    /// Project-specific sensitive words or regexes.
+    #[serde(default)]
+    pub custom_rules: Vec<CustomRule>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -310,6 +344,8 @@ impl Policy {
             secrets: self.rules.secrets,
             pii: self.rules.pii,
             pii_languages: self.rules.pii_languages.clone(),
+            env: self.rules.env,
+            internal_terms: self.rules.internal_terms,
         }
     }
 }
@@ -361,6 +397,14 @@ mode = "strict"
 redaction = "full"
 # preserve_prefix = 4 # only when redaction = "partial"
 # preserve_suffix = 4
+
+# Project-specific sensitive terms. Patterns use Rust regex syntax.
+# [[custom_rules]]
+# id = "internal.codename"
+# pattern = "ProjectNebula|社外秘|CONFIDENTIAL_CLIENT_X"
+# severity = "high"
+# kind = "internal"
+# message = "Internal confidential term detected"
 
 [doctor.ignore]
 required_patterns = [
@@ -418,6 +462,14 @@ redaction = "full"
 # preserve_prefix = 4 # only when redaction = "partial"
 # preserve_suffix = 4
 
+# Project-specific sensitive terms. Patterns use Rust regex syntax.
+# [[custom_rules]]
+# id = "internal.codename"
+# pattern = "ProjectNebula|社外秘|CONFIDENTIAL_CLIENT_X"
+# severity = "high"
+# kind = "internal"
+# message = "Internal confidential term detected"
+
 [doctor.ignore]
 required_patterns = [
   ".env",
@@ -440,4 +492,26 @@ required_patterns = [
 # reason = "demo fixture"
 "#
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rule_engine_config_includes_policy_rule_switches() {
+        let mut policy = Policy::default();
+        policy.rules.secrets = false;
+        policy.rules.pii = false;
+        policy.rules.pii_languages = vec!["ja".into()];
+        policy.rules.env = false;
+        policy.rules.internal_terms = true;
+
+        let cfg = policy.rule_engine_config();
+        assert!(!cfg.secrets);
+        assert!(!cfg.pii);
+        assert_eq!(cfg.pii_languages, vec!["ja"]);
+        assert!(!cfg.env);
+        assert!(cfg.internal_terms);
+    }
 }

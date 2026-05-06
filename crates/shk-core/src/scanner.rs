@@ -1,3 +1,4 @@
+use crate::custom_rules;
 use crate::finding::{Finding, ScanJsonReport, ScanSummary};
 use crate::git;
 use crate::policy::{ColorMode, Policy, Severity};
@@ -144,19 +145,62 @@ fn apply_scan_flag_overrides(policy: &mut Policy, opts: &ScanOptions) {
     }
 }
 
-pub(crate) fn scan_text_content(
+struct PreparedScan<'a> {
+    policy: &'a Policy,
+    allowlist: Vec<suppression::CompiledAllowlist>,
+    custom: Vec<custom_rules::CompiledCustomRule>,
+    cfg: shk_rules::RuleEngineConfig,
+}
+
+impl<'a> PreparedScan<'a> {
+    fn new(policy: &'a Policy) -> Result<Self> {
+        let cfg = policy.rule_engine_config();
+        let custom = custom_rules::compile(&filter_custom_rules(&policy.custom_rules, &cfg))?;
+        Ok(Self {
+            policy,
+            allowlist: suppression::compile_allowlist(&policy.allowlist)?,
+            custom,
+            cfg,
+        })
+    }
+}
+
+fn filter_custom_rules(
+    rules: &[crate::policy::CustomRule],
+    cfg: &shk_rules::RuleEngineConfig,
+) -> Vec<crate::policy::CustomRule> {
+    if cfg.internal_terms {
+        return rules.to_vec();
+    }
+    rules
+        .iter()
+        .filter(|r| r.kind.trim().to_ascii_lowercase() != "internal")
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+fn scan_text_content(
     rel: &str,
     content: &str,
     policy: &Policy,
     include_context: bool,
 ) -> Result<(Vec<Finding>, u64)> {
-    let compiled = suppression::compile_allowlist(&policy.allowlist)?;
+    let prepared = PreparedScan::new(policy)?;
+    scan_text_prepared(rel, content, &prepared, include_context)
+}
+
+fn scan_text_prepared(
+    rel: &str,
+    content: &str,
+    prepared: &PreparedScan<'_>,
+    include_context: bool,
+) -> Result<(Vec<Finding>, u64)> {
     let inline = suppression::parse_inline_suppressions(content);
-    let cfg = policy.rule_engine_config();
     let mut suppressed = 0u64;
     let mut findings = Vec::new();
 
-    for mut m in shk_rules::scan_content(content, rel, &cfg) {
+    for mut m in shk_rules::scan_content(content, rel, &prepared.cfg) {
         if inline.is_suppressed(m.line, m.rule_id) {
             m.matched_text.zeroize();
             suppressed += 1;
@@ -166,19 +210,47 @@ pub(crate) fn scan_text_content(
             rel,
             m.rule_id,
             &m.matched_text,
-            &policy.allowlist,
-            &compiled,
+            &prepared.policy.allowlist,
+            &prepared.allowlist,
         ) {
             m.matched_text.zeroize();
             suppressed += 1;
             continue;
         }
-        findings.push(Finding::from_rule_match(
+        findings.push(Finding::from_rule_match_with_custom_context(
             rel,
             &m,
             include_context,
             content,
-            &cfg,
+            &prepared.cfg,
+            &prepared.custom,
+        ));
+        m.matched_text.zeroize();
+    }
+    for mut m in custom_rules::scan_content(content, &prepared.custom) {
+        if inline.is_suppressed(m.line, &m.rule_id) {
+            m.matched_text.zeroize();
+            suppressed += 1;
+            continue;
+        }
+        if suppression::suppressed_by_allowlist(
+            rel,
+            &m.rule_id,
+            &m.matched_text,
+            &prepared.policy.allowlist,
+            &prepared.allowlist,
+        ) {
+            m.matched_text.zeroize();
+            suppressed += 1;
+            continue;
+        }
+        findings.push(Finding::from_custom_match(
+            rel,
+            &m,
+            include_context,
+            content,
+            &prepared.cfg,
+            &prepared.custom,
         ));
         m.matched_text.zeroize();
     }
@@ -188,7 +260,7 @@ pub(crate) fn scan_text_content(
 fn scan_one_path(
     root: &Path,
     rel_path: &Path,
-    policy: &Policy,
+    prepared: &PreparedScan<'_>,
     include_context: bool,
 ) -> Result<(Vec<Finding>, u64)> {
     let full = root.join(rel_path);
@@ -200,7 +272,7 @@ fn scan_one_path(
         return Ok((vec![], 0));
     }
     let rel = rel_normalized(&full, root);
-    if meta.len() > policy.scan.max_file_size_bytes {
+    if meta.len() > prepared.policy.scan.max_file_size_bytes {
         let f = vec![Finding {
             rule_id: "scan.file_too_large".into(),
             severity: "info".into(),
@@ -210,7 +282,7 @@ fn scan_one_path(
             column: 1,
             message: format!(
                 "Skipped: file exceeds max_file_size_bytes ({})",
-                policy.scan.max_file_size_bytes
+                prepared.policy.scan.max_file_size_bytes
             ),
             redacted_value: "[REDACTED]".into(),
             confidence: 1.0,
@@ -220,8 +292,8 @@ fn scan_one_path(
         return Ok((f, 0));
     }
     let mut bytes = fs::read(&full).with_context(|| format!("read {}", full.display()))?;
-    let take = policy.scan.binary_detection_bytes.min(bytes.len());
-    if !policy.scan.include_binary && is_probably_binary(&bytes[..take]) {
+    let take = prepared.policy.scan.binary_detection_bytes.min(bytes.len());
+    if !prepared.policy.scan.include_binary && is_probably_binary(&bytes[..take]) {
         let f = vec![Finding {
             rule_id: "scan.binary_skipped".into(),
             severity: "info".into(),
@@ -239,7 +311,7 @@ fn scan_one_path(
         return Ok((f, 0));
     }
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
-    let result = scan_text_content(&rel, &text, policy, include_context);
+    let result = scan_text_prepared(&rel, &text, prepared, include_context);
     text.zeroize();
     bytes.zeroize();
     result
@@ -266,10 +338,12 @@ pub fn scan_string(
 
     let mut suppressed_total = 0u64;
     let expired = suppression::expired_allowlist_warnings(&policy.allowlist);
+    let prepared = PreparedScan::new(&policy)?;
     let (scan_findings, suppressed) =
-        scan_text_content(rel_display_path, content, &policy, include_context)?;
+        scan_text_prepared(rel_display_path, content, &prepared, include_context)?;
     suppressed_total += suppressed;
     let findings = prepend_policy_warnings(expired, scan_findings);
+    drop(prepared);
 
     Ok(ScanResult {
         findings,
@@ -292,11 +366,12 @@ pub fn scan_staged(cwd: &Path, opts: ScanOptions) -> Result<ScanResult> {
     let paths = git::staged_files(&repo)?;
     let include_context = opts.include_context || opts.json;
     let mut findings = suppression::expired_allowlist_warnings(&policy.allowlist);
+    let prepared = PreparedScan::new(&policy)?;
     let mut scanned = Vec::new();
     let mut suppressed_total = 0u64;
     for rel in paths {
         scanned.push(rel.to_string_lossy().replace('\\', "/"));
-        let (f, sup) = scan_one_path(&repo, &rel, &policy, include_context)?;
+        let (f, sup) = scan_one_path(&repo, &rel, &prepared, include_context)?;
         findings.extend(f);
         suppressed_total += sup;
     }
@@ -307,6 +382,7 @@ pub fn scan_staged(cwd: &Path, opts: ScanOptions) -> Result<ScanResult> {
         opts.fail_on_override
             .unwrap_or_else(|| policy.scan_fail_on())
     };
+    drop(prepared);
     Ok(ScanResult {
         findings,
         scanned_paths: scanned,
@@ -345,6 +421,7 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
 
     let mut suppressed_total = 0u64;
     let expired = suppression::expired_allowlist_warnings(&policy.allowlist);
+    let prepared = PreparedScan::new(&policy)?;
 
     if target.is_file() {
         let abs_target = fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
@@ -359,6 +436,7 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
             });
         let rel_s = rel.to_string_lossy().replace('\\', "/");
         if !filters.allows(&rel_s) {
+            drop(prepared);
             return Ok(ScanResult {
                 findings: expired,
                 scanned_paths: vec![rel_s],
@@ -368,9 +446,10 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
                 suppressed: 0,
             });
         }
-        let (scan_findings, sup) = scan_one_path(&root, &rel, &policy, include_context)?;
+        let (scan_findings, sup) = scan_one_path(&root, &rel, &prepared, include_context)?;
         suppressed_total += sup;
         let findings = prepend_policy_warnings(expired, scan_findings);
+        drop(prepared);
         return Ok(ScanResult {
             findings,
             scanned_paths: vec![rel_s],
@@ -406,7 +485,7 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
         .par_iter()
         .map(|full| {
             let rel = full.strip_prefix(&root).unwrap_or(full).to_path_buf();
-            scan_one_path(&root, &rel, &policy, include_context)
+            scan_one_path(&root, &rel, &prepared, include_context)
         })
         .collect();
 
@@ -421,6 +500,7 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
         .iter()
         .map(|p| rel_normalized(p, &root))
         .collect();
+    drop(prepared);
 
     Ok(ScanResult {
         findings,
@@ -435,7 +515,7 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::{AllowlistEntry, Policy};
+    use crate::policy::{AllowlistEntry, CustomRule, Policy};
 
     #[test]
     fn path_filters_include_glob() {
@@ -491,5 +571,62 @@ mod tests {
             !f.iter().any(|x| x.rule_id == "secret.openai_api_key"),
             "{f:?}"
         );
+    }
+
+    #[test]
+    fn custom_rules_detect_project_terms() {
+        let mut p = Policy::default();
+        p.rules.internal_terms = true;
+        p.custom_rules.push(CustomRule {
+            id: "internal.project_codename".into(),
+            pattern: "ProjectNebula|社外秘".into(),
+            severity: "high".into(),
+            kind: "internal".into(),
+            message: Some("Internal confidential term detected".into()),
+            confidence: Some(0.95),
+            case_insensitive: false,
+            enabled: true,
+        });
+
+        let (findings, suppressed) =
+            scan_text_content("notes.txt", "launch ProjectNebula\n", &p, true).unwrap();
+
+        assert_eq!(suppressed, 0);
+        let f = findings
+            .iter()
+            .find(|f| f.rule_id == "internal.project_codename")
+            .expect("custom finding");
+        assert_eq!(f.severity, "high");
+        assert_eq!(f.kind, "internal");
+        assert_eq!(f.redacted_value, "[REDACTED]");
+    }
+
+    #[test]
+    fn custom_rules_respect_allowlist() {
+        let mut p = Policy::default();
+        p.rules.internal_terms = true;
+        p.custom_rules.push(CustomRule {
+            id: "internal.project_codename".into(),
+            pattern: "ProjectNebula".into(),
+            severity: "high".into(),
+            kind: "internal".into(),
+            message: None,
+            confidence: None,
+            case_insensitive: false,
+            enabled: true,
+        });
+        p.allowlist.push(AllowlistEntry {
+            rule_id: Some("internal.project_codename".into()),
+            path: "docs/**".into(),
+            value_hash: None,
+            reason: Some("public roadmap".into()),
+            expires: None,
+        });
+
+        let (findings, suppressed) =
+            scan_text_content("docs/roadmap.md", "ProjectNebula\n", &p, false).unwrap();
+
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(suppressed, 1);
     }
 }

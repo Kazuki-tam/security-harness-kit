@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Core scanning, masking, and policy for security-harness-kit"
+publish = false
 
 [dependencies]
 shk-rules = { version = "0.1.0", path = "../shk-rules" }

@@ -5,6 +5,7 @@ mod audit_log;
 mod color;
 mod commands;
 mod doctor;
+mod exit;
 mod hook_output;
 mod hooks;
 mod output;
@@ -16,6 +17,17 @@ use anyhow::{Context, Result};
 use args::{Cli, Commands, DoctorCmd, HooksCmd, PolicyCmd};
 use clap::Parser;
 use shk_core::policy::ColorMode;
+
+pub fn run_main() {
+    if let Err(err) = run() {
+        let code = exit::code_for(&err);
+        if !exit::is_silent(&err) {
+            eprintln!("Error: {err:#}");
+        }
+        std::process::exit(code);
+    }
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let color = color::resolve_color(if cli.no_color {
@@ -70,7 +82,7 @@ pub fn run() -> Result<()> {
             }
         },
         Commands::Hooks { cmd } => match cmd {
-            HooksCmd::Install { .. } => {
+            HooksCmd::Install { pre_commit: _ } => {
                 let root =
                     shk_core::git::discover_repo_root(&cwd).context("not a git repository")?;
                 safety::require_project_policy(&root, "hooks install")?;
@@ -81,14 +93,13 @@ pub fn run() -> Result<()> {
                 audit,
                 dry_run,
                 global,
-                all,
                 tool,
                 fail_closed,
             } => {
                 if !dry_run {
                     safety::require_project_policy(&cwd, "hooks install-ai")?;
                 }
-                hooks::install_ai(&cwd, tool, all, audit, dry_run, global, fail_closed)?
+                hooks::install_ai(&cwd, tool, audit, dry_run, global, fail_closed)?
             }
         },
         Commands::Policy { cmd } => match cmd {

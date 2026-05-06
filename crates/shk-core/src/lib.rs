@@ -1,3 +1,4 @@
+pub(crate) mod custom_rules;
 pub mod finding;
 pub mod git;
 pub mod masker;

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Optional diagnostics for external tools (dotenvx, AI hooks, etc.)"
+publish = false
 
 [dependencies]
 anyhow.workspace = true

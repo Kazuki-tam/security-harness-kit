@@ -87,14 +87,16 @@ fn read_files_from_candidates(
 ) -> Result<Option<(String, String)>> {
     let mut texts: Vec<String> = Vec::new();
     let mut first_rel: Option<String> = None;
+    let repo_root = fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
 
     for cand in candidate_path_strings(v) {
         let p = resolve_path(&cand, cwd);
         let p = fs::canonicalize(&p).ok();
         if let Some(abs) = p
             && abs.is_file()
+            && abs.starts_with(&repo_root)
         {
-            let rel = rel_from_repo(repo_root, &abs);
+            let rel = rel_from_repo(&repo_root, &abs);
             if first_rel.is_none() {
                 first_rel = Some(rel.clone());
             }

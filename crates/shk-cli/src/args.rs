@@ -136,7 +136,7 @@ pub enum DoctorCmd {
 pub enum HooksCmd {
     /// Install Git pre-commit hook (runs `shk scan --staged`)
     Install {
-        #[arg(long)]
+        #[arg(long, help = "Explicit alias for the default pre-commit hook.")]
         pre_commit: bool,
     },
     /// Configure AI-editor hooks (Cursor / Claude Code / Codex)
@@ -153,8 +153,6 @@ pub enum HooksCmd {
             help = "Write user-level configs (~/.cursor, ~/.codex, ~/.claude)."
         )]
         global: bool,
-        #[arg(long)]
-        all: bool,
         #[arg(long, value_enum)]
         tool: Option<AiTool>,
         /// Cursor hooks only: sets `failClosed` in injected entries.

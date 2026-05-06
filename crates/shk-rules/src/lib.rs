@@ -40,6 +40,8 @@ pub struct RuleEngineConfig {
     pub secrets: bool,
     pub pii: bool,
     pub pii_languages: Vec<String>,
+    pub env: bool,
+    pub internal_terms: bool,
 }
 
 impl Default for RuleEngineConfig {
@@ -48,6 +50,8 @@ impl Default for RuleEngineConfig {
             secrets: true,
             pii: true,
             pii_languages: vec!["en".into(), "ja".into()],
+            env: true,
+            internal_terms: false,
         }
     }
 }
@@ -452,7 +456,14 @@ fn line_col(content: &str, byte_idx: usize) -> (usize, usize) {
     (line, col)
 }
 
-fn rule_applies(rule_id: &str, cfg: &RuleEngineConfig) -> bool {
+fn rule_applies(rule: &CompiledRule, cfg: &RuleEngineConfig) -> bool {
+    let rule_id = rule.id;
+    if rule.kind == Kind::Env && !cfg.env {
+        return false;
+    }
+    if rule.kind == Kind::AiContext && !cfg.internal_terms {
+        return false;
+    }
     if rule_id.starts_with("secret.") && !cfg.secrets {
         return false;
     }
@@ -465,10 +476,6 @@ fn rule_applies(rule_id: &str, cfg: &RuleEngineConfig) -> bool {
     if rule_id.starts_with("pii.ja.") && !cfg.pii_languages.iter().any(|l| l == "ja") {
         return false;
     }
-    if (rule_id == "pii.email" || rule_id == "pii.credit_card" || rule_id == "pii.ipv4") && !cfg.pii
-    {
-        return false;
-    }
     true
 }
 
@@ -477,7 +484,7 @@ fn rule_applies(rule_id: &str, cfg: &RuleEngineConfig) -> bool {
 pub fn redact_line_for_display(line: &str, cfg: &RuleEngineConfig) -> String {
     let mut s = line.to_string();
     for r in RULES.iter() {
-        if !rule_applies(r.id, cfg) {
+        if !rule_applies(r, cfg) {
             continue;
         }
         s = r.re.replace_all(&s, "[REDACTED]").to_string();
@@ -496,7 +503,7 @@ pub fn scan_content(content: &str, rel_path: &str, cfg: &RuleEngineConfig) -> Ve
     let mut out = Vec::new();
     let skip_env_heavy = rel_path.ends_with(".env.example") || rel_path.contains(".env.sample");
     for r in RULES.iter() {
-        if !rule_applies(r.id, cfg) {
+        if !rule_applies(r, cfg) {
             continue;
         }
         if r.kind == Kind::Env && skip_env_heavy {

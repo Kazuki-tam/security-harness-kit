@@ -306,7 +306,7 @@ secrets = true
 pii = true
 pii_languages = ["en", "ja"]   # universal rules + English and Japanese PII
 env = true
-internal_terms = false
+internal_terms = false   # set true to enable [[custom_rules]] with kind = "internal"
 
 [thresholds]
 default_fail_on = "high"
@@ -317,9 +317,34 @@ pre_commit_fail_on = "high"
 mode = "strict"
 redaction = "full"
 
+# Project-specific sensitive terms. Patterns use Rust regex syntax.
+# [[custom_rules]]
+# id = "internal.codename"
+# pattern = "ProjectNebula|社外秘|CONFIDENTIAL_CLIENT_X"
+# severity = "high"
+# kind = "internal"
+# message = "Internal confidential term detected"
+
 [doctor.ignore]
 required_patterns = [".env", ".env.*", "!.env.example", "secrets/**", "*.pem", "*.key"]
 ```
+
+### Custom rules
+
+Add `[[custom_rules]]` entries to `shk.toml` for project-specific confidential words, codenames, or regex patterns:
+
+```toml
+[[custom_rules]]
+id = "internal.codename"
+pattern = "ProjectNebula|社外秘|CONFIDENTIAL_CLIENT_X"
+severity = "high"
+kind = "internal"
+message = "Internal confidential term detected"
+case_insensitive = false
+enabled = true
+```
+
+Custom rules participate in scan, mask, hook mode, inline suppression, and `[[allowlist]]` just like built-in rules. Keep raw secret values out of `shk.toml`; use custom rules for terms/classes of data, and `value_hash` allowlists for value-specific suppression.
 
 ### Suppression
 

@@ -1,3 +1,3 @@
-fn main() -> anyhow::Result<()> {
-    shk_cli::run()
+fn main() {
+    shk_cli::run_main()
 }

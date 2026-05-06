@@ -1,4 +1,5 @@
 use crate::audit_log;
+use crate::exit::CliExit;
 use crate::hook_output;
 use crate::output;
 use crate::safety;
@@ -46,6 +47,10 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
         include_binary: inv.include_binary,
         follow_symlinks: inv.follow_symlinks,
     };
+    if inv.staged && shk_core::git::discover_repo_root(&inv.path).is_none() {
+        return Err(CliExit::message(2, "shk scan --staged requires a Git repository").into());
+    }
+
     let res = scan_path(&inv.path, opts).context("scan failed")?;
     if inv.json {
         println!(
@@ -63,7 +68,7 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
         );
     }
     if res.should_fail() {
-        std::process::exit(1);
+        return Err(CliExit::silent(1).into());
     }
     Ok(())
 }
@@ -154,7 +159,7 @@ fn run_hook_mode(
 
     if res.should_fail() {
         println!("{}", hook_output::deny_stdout(tool));
-        std::process::exit(2);
+        return Err(CliExit::silent(2).into());
     }
 
     println!("{}", hook_output::allow_stdout(tool, false, None));

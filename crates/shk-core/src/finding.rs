@@ -1,3 +1,4 @@
+use crate::custom_rules::{CompiledCustomRule, CustomMatch};
 use crate::policy::Severity;
 use serde::Serialize;
 use shk_rules::{Kind, RuleEngineConfig, redact_line_for_display};
@@ -27,6 +28,17 @@ impl Finding {
         content: &str,
         rule_cfg: &RuleEngineConfig,
     ) -> Self {
+        Self::from_rule_match_with_custom_context(file, m, include_context, content, rule_cfg, &[])
+    }
+
+    pub(crate) fn from_rule_match_with_custom_context(
+        file: &str,
+        m: &shk_rules::RuleMatch,
+        include_context: bool,
+        content: &str,
+        rule_cfg: &RuleEngineConfig,
+        custom_rules: &[CompiledCustomRule],
+    ) -> Self {
         let (ctx_before, ctx_after) = if include_context {
             context_lines(content, m.line, 1)
         } else {
@@ -42,8 +54,36 @@ impl Finding {
             message: m.message.to_string(),
             redacted_value: "[REDACTED]".into(),
             confidence: m.confidence,
-            context_before: sanitize_context(ctx_before, rule_cfg),
-            context_after: sanitize_context(ctx_after, rule_cfg),
+            context_before: sanitize_context(ctx_before, rule_cfg, custom_rules),
+            context_after: sanitize_context(ctx_after, rule_cfg, custom_rules),
+        }
+    }
+
+    pub(crate) fn from_custom_match(
+        file: &str,
+        m: &CustomMatch,
+        include_context: bool,
+        content: &str,
+        rule_cfg: &RuleEngineConfig,
+        custom_rules: &[CompiledCustomRule],
+    ) -> Self {
+        let (ctx_before, ctx_after) = if include_context {
+            context_lines(content, m.line, 1)
+        } else {
+            (vec![], vec![])
+        };
+        Self {
+            rule_id: m.rule_id.clone(),
+            severity: m.severity.as_str().to_string(),
+            kind: m.kind.clone(),
+            file: file.to_string(),
+            line: m.line,
+            column: m.column,
+            message: m.message.clone(),
+            redacted_value: "[REDACTED]".into(),
+            confidence: m.confidence,
+            context_before: sanitize_context(ctx_before, rule_cfg, custom_rules),
+            context_after: sanitize_context(ctx_after, rule_cfg, custom_rules),
         }
     }
 }
@@ -81,10 +121,17 @@ fn context_lines(content: &str, line_1based: usize, n: usize) -> (Vec<String>, V
     (before, after)
 }
 
-fn sanitize_context(lines: Vec<String>, cfg: &RuleEngineConfig) -> Vec<String> {
+fn sanitize_context(
+    lines: Vec<String>,
+    cfg: &RuleEngineConfig,
+    custom_rules: &[CompiledCustomRule],
+) -> Vec<String> {
     lines
         .into_iter()
-        .map(|l| redact_line_for_display(&l, cfg))
+        .map(|l| {
+            let redacted = redact_line_for_display(&l, cfg);
+            crate::custom_rules::redact_line_for_display(&redacted, custom_rules)
+        })
         .collect()
 }
 

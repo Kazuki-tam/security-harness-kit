@@ -44,7 +44,6 @@ fn hook_scan_cli_command(tool: AiTool, audit: bool, post: bool) -> String {
 pub fn install_ai(
     cwd: &Path,
     maybe_tool: Option<AiTool>,
-    #[allow(unused_variables)] all: bool,
     audit: bool,
     dry_run: bool,
     global: bool,

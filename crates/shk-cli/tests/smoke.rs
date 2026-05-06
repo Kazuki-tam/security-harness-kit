@@ -200,6 +200,67 @@ fn scan_json_reports_suppressed_field() {
 }
 
 #[test]
+fn scan_detects_custom_rule_from_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("shk.toml"),
+        r#"
+[[custom_rules]]
+id = "internal.project_codename"
+pattern = "ProjectNebula|社外秘"
+severity = "high"
+kind = "internal"
+message = "Internal confidential term detected"
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "launch ProjectNebula\n").unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--json", "--fail-on", "critical"])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan custom");
+
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let findings = v["findings"].as_array().unwrap();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f["rule_id"] == "internal.project_codename"),
+        "{v}"
+    );
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("ProjectNebula"));
+}
+
+#[test]
+fn scan_staged_outside_git_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", "--staged"])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan staged outside git");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("shk scan --staged requires a Git repository"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn hooks_install_ai_dry_run_cursor() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let out = Command::new(shk_bin())
@@ -248,6 +309,43 @@ fn hook_mode_cursor_blocks_with_exit_2() {
 }
 
 #[test]
+fn hook_mode_ignores_file_paths_outside_repo_root() {
+    use std::io::Write;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let outside = tempfile::NamedTempFile::new().unwrap();
+    // not real credential: synthetic detector fixture value only
+    std::fs::write(
+        outside.path(),
+        "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
+    )
+    .unwrap();
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "file_path": outside.path().to_str().unwrap(),
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "cursor"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("hook scan");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(stdout["permission"], "allow");
+}
+
+#[test]
 fn hook_mode_audit_creates_audit_log_in_isolated_tmp() {
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
@@ -286,6 +384,52 @@ fn hook_mode_audit_creates_audit_log_in_isolated_tmp() {
         "missing audit log {:?}",
         repo.join(".shk")
     );
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(stdout["permission"], "allow");
+    assert!(
+        stdout["user_message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("shk audit: non-blocking"),
+        "{stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("shk audit: findings=1"), "{stderr}");
+}
+
+#[test]
+fn hook_mode_post_warns_but_exits_0() {
+    use std::io::Write;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "content": format!("tool returned token {secret}"),
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "cursor", "--post"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("post hook");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(stdout["permission"], "allow");
+    let msg = stdout["user_message"].as_str().unwrap_or_default();
+    assert!(msg.contains("finding(s) in tool output"), "{msg}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("finding(s) in tool output"), "{stderr}");
 }
 
 #[test]
