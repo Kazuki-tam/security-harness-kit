@@ -155,6 +155,7 @@ max_file_size_bytes = 8
 "#,
     );
     let file = dir.path().join("large.txt");
+    // not real credential: synthetic detector fixture value only
     fs::write(&file, "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789").unwrap();
 
     let res = scan_path(&file, default_scan_options()).expect("scan large file");
@@ -185,6 +186,7 @@ fn scan_handles_crlf_line_numbers() {
     let file = dir.path().join("crlf.txt");
     fs::write(
         &file,
+        // not real credential: synthetic detector fixture value only
         "first line\r\nsk-proj-abcdefghijklmnopqrstuvwxyz0123456789\r\n",
     )
     .unwrap();
@@ -202,6 +204,7 @@ fn scan_handles_crlf_line_numbers() {
 fn scan_handles_unicode_paths() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("秘密.txt");
+    // not real credential: synthetic detector fixture value only
     fs::write(&file, "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789").unwrap();
 
     let res = scan_path(&file, default_scan_options()).expect("scan unicode file");
@@ -219,6 +222,7 @@ fn scan_respects_gitignore_files() {
     fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
     fs::write(
         dir.path().join("ignored.txt"),
+        // not real credential: synthetic detector fixture value only
         "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
     )
     .unwrap();

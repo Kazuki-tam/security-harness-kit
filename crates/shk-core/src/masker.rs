@@ -122,6 +122,7 @@ mod tests {
     fn mask_leaves_clean_lines() {
         let cfg = RuleEngineConfig::default();
         let (out, hits) = mask_text(
+            // not real credential: synthetic detector fixture value only
             "ok line\nsk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
             &cfg,
             "x.txt",
@@ -136,6 +137,7 @@ mod tests {
     fn partial_mask_preserves_edges() {
         let cfg = RuleEngineConfig::default();
         let (out, hits) = mask_text(
+            // not real credential: synthetic detector fixture value only
             "token sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
             &cfg,
             "x.txt",

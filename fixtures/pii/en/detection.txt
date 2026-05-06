@@ -1,3 +1,4 @@
+# not real credential or personal data: synthetic detector fixture values only
 email: ada.lovelace@example.test
 card: 4111 1111 1111 1111
 public ip: 203.0.113.10

@@ -456,6 +456,7 @@ mod tests {
 
     #[test]
     fn allowlist_suppresses_match() {
+        // not real credential: synthetic detector fixture value only
         let secret = r#"sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"#;
         let hash = suppression::compute_value_hmac("secret.openai_api_key", secret);
         let mut p = Policy::default();
@@ -481,6 +482,7 @@ mod tests {
 
     #[test]
     fn inline_suppression_reduces_emitted_findings() {
+        // not real credential: synthetic detector fixture value only
         let text = "# shk-ignore-next-line secret.openai_api_key\nsk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n";
         let p = Policy::default();
         let (f, suppressed) = scan_text_content("w.txt", text, &p, false).unwrap();

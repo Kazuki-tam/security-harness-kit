@@ -1,3 +1,4 @@
+# not real credential or personal data: synthetic detector fixture values only
 電話: 03-1234-5678
 郵便番号: 〒100-0001
 旅券番号: AB1234567

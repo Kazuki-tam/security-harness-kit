@@ -530,6 +530,7 @@ mod tests {
 
     #[test]
     fn detects_openai_style_key() {
+        // not real credential: synthetic detector fixture value only
         let s = r#"const demo = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";"#;
         let cfg = RuleEngineConfig::default();
         let m = scan_content(s, "demo.ts", &cfg);
@@ -542,6 +543,7 @@ mod tests {
     #[test]
     fn redact_line_strips_email() {
         let cfg = RuleEngineConfig::default();
+        // not real credential or personal data: synthetic detector fixture value only
         let out = redact_line_for_display("user: admin@example.com ok", &cfg);
         assert!(!out.contains("example.com"));
         assert!(out.contains("[REDACTED]"));
@@ -550,6 +552,7 @@ mod tests {
     #[test]
     fn detects_luhn_valid_credit_card() {
         let cfg = RuleEngineConfig::default();
+        // not real credential or personal data: synthetic detector fixture value only
         let m = scan_content("card: 4111 1111 1111 1111", "demo.txt", &cfg);
         assert!(m.iter().any(|x| x.rule_id == "pii.credit_card"), "{m:?}");
     }
@@ -557,6 +560,7 @@ mod tests {
     #[test]
     fn ignores_luhn_invalid_credit_card_like_number() {
         let cfg = RuleEngineConfig::default();
+        // not real credential or personal data: synthetic detector fixture value only
         let m = scan_content("card: 4111 1111 1111 1112", "demo.txt", &cfg);
         assert!(!m.iter().any(|x| x.rule_id == "pii.credit_card"), "{m:?}");
     }
@@ -567,6 +571,7 @@ mod tests {
             pii_languages: vec!["en".into()],
             ..RuleEngineConfig::default()
         };
+        // not real credential or personal data: synthetic detector fixture value only
         let m = scan_content(
             "phone: (555) 555-5555\npassport AB1234567",
             "demo.txt",
@@ -579,6 +584,7 @@ mod tests {
     #[test]
     fn detects_label_anchored_japanese_pii_rules() {
         let cfg = RuleEngineConfig::default();
+        // not real credential or personal data: synthetic detector fixture value only
         let text = "個人番号: 123456789012\n法人番号：1234567890123\n免許証番号 123456789012\n氏名: 山田太郎";
         let m = scan_content(text, "demo.txt", &cfg);
         for id in [

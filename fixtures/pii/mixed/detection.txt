@@ -1,3 +1,4 @@
+# not real credential or personal data: synthetic detector fixture values only
 Contact: grace.hopper@example.test
 US phone: 212-555-0199
 Japanese phone: 090-1234-5678

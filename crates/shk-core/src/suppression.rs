@@ -242,6 +242,7 @@ mod tests {
 
     #[test]
     fn inline_next_line_all_rules() {
+        // not real credential: synthetic detector fixture value only
         let s = "# shk-ignore\nsk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n";
         let ig = parse_inline_suppressions(s);
         assert!(ig.is_suppressed(2, "secret.openai_api_key"));
@@ -249,6 +250,7 @@ mod tests {
 
     #[test]
     fn inline_next_line_rule_id() {
+        // not real credential or personal data: synthetic detector fixture value only
         let s = "# shk-ignore-next-line pii.email\nuser@example.com\n";
         let ig = parse_inline_suppressions(s);
         assert!(ig.is_suppressed(2, "pii.email"));

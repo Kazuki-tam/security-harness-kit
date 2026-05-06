@@ -115,6 +115,7 @@ mod tests {
     #[test]
     fn context_never_leaks_raw_email() {
         let cfg = RuleEngineConfig::default();
+        // not real credential or personal data: synthetic detector fixture value only
         let content = "line0 ok\nline1 user@secret.com\nline2 tail\n";
         let m = shk_rules::scan_content(content, "x.txt", &cfg)
             .into_iter()

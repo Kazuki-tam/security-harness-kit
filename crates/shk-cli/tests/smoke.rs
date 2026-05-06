@@ -62,6 +62,7 @@ fn mask_stdin_fixture() {
 fn mask_partial_redaction_json_preserves_edges() {
     use std::io::Write;
 
+    // not real credential: synthetic detector fixture value only
     let secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
     let out = Command::new(shk_bin())
         .args(["mask", "--json", "--redaction", "partial"])
@@ -110,6 +111,7 @@ fn mask_binary_stdin_passes_through() {
 fn mask_hook_mode_cursor_returns_masked_content() {
     use std::io::Write;
 
+    // not real credential: synthetic detector fixture value only
     let secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
     let stdin = serde_json::to_string(&serde_json::json!({
         "prompt": format!("please inspect this token: {secret}")
@@ -251,9 +253,10 @@ fn hook_mode_audit_creates_audit_log_in_isolated_tmp() {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();
     let fpath = repo.join("x.txt");
+    // not real credential: synthetic detector fixture value only
     std::fs::write(
         &fpath,
-        r#"const demo = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";"#,
+        "// not real credential: synthetic detector fixture value only\nconst demo = \"sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\";",
     )
     .unwrap();
     let stdin = serde_json::to_string(&serde_json::json!({

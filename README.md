@@ -317,6 +317,7 @@ required_patterns = [".env", ".env.*", "!.env.example", "secrets/**", "*.pem", "
 **Inline** (in files that support comments):
 
 ```
+# not real credential: synthetic example value only
 API_KEY=sk-abc123  # shk-ignore secret.openai_api_key
 # shk-ignore-next-line secret.generic_api_key
 SECRET=value
