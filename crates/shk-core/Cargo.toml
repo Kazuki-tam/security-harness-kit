@@ -3,10 +3,11 @@ name = "shk-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Core scanning, masking, and policy for security-harness-kit"
 
 [dependencies]
-shk-rules = { path = "../shk-rules" }
+shk-rules = { version = "0.1.0", path = "../shk-rules" }
 anyhow.workspace = true
 ignore.workspace = true
 rayon.workspace = true
