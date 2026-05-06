@@ -14,7 +14,13 @@ pub fn is_inside_git_work_tree(cwd: &Path) -> bool {
 /// Staged file paths relative to repo root, normalized with `/`.
 pub fn staged_files(repo_root: &Path) -> Result<Vec<PathBuf>> {
     let out = Command::new("git")
-        .args(["diff", "--cached", "--name-only", "-z"])
+        .args([
+            "diff",
+            "--cached",
+            "--name-only",
+            "--diff-filter=ACMR",
+            "-z",
+        ])
         .current_dir(repo_root)
         .output()
         .context("failed to run git")?;
@@ -32,8 +38,26 @@ pub fn staged_files(repo_root: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+pub fn staged_file_bytes(repo_root: &Path, rel_path: &Path) -> Result<Vec<u8>> {
+    let spec = format!(":{}", rel_path.to_string_lossy().replace('\\', "/"));
+    let out = Command::new("git")
+        .args(["show", &spec])
+        .current_dir(repo_root)
+        .output()
+        .with_context(|| format!("failed to read staged blob {}", rel_path.display()))?;
+    if !out.status.success() {
+        bail!("git show failed for staged blob {}", rel_path.display());
+    }
+    Ok(out.stdout)
+}
+
 pub fn discover_repo_root(start: &Path) -> Option<PathBuf> {
-    let mut cur = start.to_path_buf();
+    let start = if start.is_absolute() {
+        start.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(start)
+    };
+    let mut cur = std::fs::canonicalize(&start).unwrap_or(start);
     loop {
         if cur.join(".git").exists() {
             return Some(cur);

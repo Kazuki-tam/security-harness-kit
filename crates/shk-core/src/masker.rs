@@ -46,6 +46,12 @@ fn mask_text_with_custom(
         }
         let mut ms = scan_content(line, rel_path, cfg);
         let mut custom_ms = custom_rules::scan_content(line, custom);
+        for m in &mut ms {
+            m.line = i + 1;
+        }
+        for m in &mut custom_ms {
+            m.line = i + 1;
+        }
         if ms.is_empty() && custom_ms.is_empty() {
             out.push_str(line);
         } else {
@@ -185,6 +191,23 @@ mod tests {
         assert!(!hits.is_empty());
         assert!(out.contains("sk-p[REDACTED]6789"), "{out}");
         assert!(!out.contains("abcdefghijklmnopqrstuvwxyz012345"), "{out}");
+    }
+
+    #[test]
+    fn mask_findings_keep_original_line_numbers() {
+        let cfg = RuleEngineConfig::default();
+        let (_out, hits) = mask_text(
+            // not real credential: synthetic detector fixture value only
+            "clean\nsk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
+            &cfg,
+            "x.txt",
+            MaskRedaction::FullLine,
+        );
+        let hit = hits
+            .iter()
+            .find(|f| f.rule_id == "secret.openai_api_key")
+            .expect("openai finding");
+        assert_eq!(hit.line, 2, "{hits:?}");
     }
 
     #[test]

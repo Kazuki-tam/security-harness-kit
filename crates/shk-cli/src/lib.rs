@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use args::{Cli, Commands, DoctorCmd, HooksCmd, PolicyCmd};
 use clap::Parser;
 use shk_core::policy::ColorMode;
+use std::io::Write;
 
 pub fn run_main() {
     if let Err(err) = run() {
@@ -24,6 +25,8 @@ pub fn run_main() {
         if !exit::is_silent(&err) {
             eprintln!("Error: {err:#}");
         }
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
         std::process::exit(code);
     }
 }

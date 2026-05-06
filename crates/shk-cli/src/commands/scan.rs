@@ -37,7 +37,7 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
         return run_hook_mode(tool, inv.post, inv.audit, inv.fail_on, &cwd, inv.path);
     }
 
-    let fail_on_override = inv.fail_on.as_deref().and_then(Severity::parse);
+    let fail_on_override = parse_fail_on(inv.fail_on.as_deref())?;
     let opts = ScanOptions {
         staged: inv.staged,
         json: inv.json,
@@ -115,7 +115,7 @@ fn run_hook_mode(
         cwd,
         &repo_root,
     )?;
-    let fail_on_override = fail_on.as_deref().and_then(Severity::parse);
+    let fail_on_override = parse_fail_on(fail_on.as_deref())?;
 
     let opts = ScanOptions {
         staged: false,
@@ -194,4 +194,15 @@ fn emit_audit_hook(
 
 fn fs_canonical_or_same(p: PathBuf) -> PathBuf {
     std::fs::canonicalize(&p).unwrap_or(p)
+}
+
+fn parse_fail_on(raw: Option<&str>) -> Result<Option<Severity>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    Severity::parse(raw).map(Some).ok_or_else(|| {
+        anyhow::anyhow!(
+            "invalid --fail-on severity `{raw}` (expected: info, low, medium, high, critical)"
+        )
+    })
 }

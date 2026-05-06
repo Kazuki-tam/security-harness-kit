@@ -130,6 +130,32 @@ fn rel_normalized(full: &Path, root: &Path) -> String {
         .replace('\\', "/")
 }
 
+fn canonical_or_same(p: &Path) -> PathBuf {
+    fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+fn scan_root_for_target(target: &Path) -> PathBuf {
+    if target.is_dir() {
+        target.to_path_buf()
+    } else {
+        target
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+}
+
+fn policy_root_for_scan(target_root: &Path) -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = canonical_or_same(&cwd);
+    let target_root = canonical_or_same(target_root);
+    if target_root.starts_with(&cwd) {
+        cwd
+    } else {
+        target_root
+    }
+}
+
 fn prepend_policy_warnings(head: Vec<Finding>, tail: Vec<Finding>) -> Vec<Finding> {
     let mut v = head;
     v.extend(tail);
@@ -246,6 +272,7 @@ fn scan_text_prepared(
 fn scan_one_path(
     root: &Path,
     rel_path: &Path,
+    label_root: &Path,
     prepared: &PreparedScan<'_>,
     include_context: bool,
 ) -> Result<(Vec<Finding>, u64)> {
@@ -257,7 +284,7 @@ fn scan_one_path(
     if meta.is_dir() {
         return Ok((vec![], 0));
     }
-    let rel = rel_normalized(&full, root);
+    let rel = rel_normalized(&full, label_root);
     if meta.len() > prepared.policy.scan.max_file_size_bytes {
         let f = vec![Finding {
             rule_id: "scan.file_too_large".into(),
@@ -277,14 +304,54 @@ fn scan_one_path(
         }];
         return Ok((f, 0));
     }
-    let mut bytes = fs::read(&full).with_context(|| format!("read {}", full.display()))?;
+    let bytes = fs::read(&full).with_context(|| format!("read {}", full.display()))?;
+    scan_bytes(&rel, bytes, prepared, include_context)
+}
+
+fn scan_staged_blob(
+    repo: &Path,
+    rel_path: &Path,
+    prepared: &PreparedScan<'_>,
+    include_context: bool,
+) -> Result<(Vec<Finding>, u64)> {
+    let rel = rel_path.to_string_lossy().replace('\\', "/");
+    let bytes = git::staged_file_bytes(repo, rel_path)?;
+    scan_bytes(&rel, bytes, prepared, include_context)
+}
+
+fn scan_bytes(
+    rel: &str,
+    mut bytes: Vec<u8>,
+    prepared: &PreparedScan<'_>,
+    include_context: bool,
+) -> Result<(Vec<Finding>, u64)> {
+    if bytes.len() as u64 > prepared.policy.scan.max_file_size_bytes {
+        let f = vec![Finding {
+            rule_id: "scan.file_too_large".into(),
+            severity: "info".into(),
+            kind: "ignore".into(),
+            file: rel.to_string(),
+            line: 1,
+            column: 1,
+            message: format!(
+                "Skipped: file exceeds max_file_size_bytes ({})",
+                prepared.policy.scan.max_file_size_bytes
+            ),
+            redacted_value: "[REDACTED]".into(),
+            confidence: 1.0,
+            context_before: vec![],
+            context_after: vec![],
+        }];
+        bytes.zeroize();
+        return Ok((f, 0));
+    }
     let take = prepared.policy.scan.binary_detection_bytes.min(bytes.len());
     if !prepared.policy.scan.include_binary && is_probably_binary(&bytes[..take]) {
         let f = vec![Finding {
             rule_id: "scan.binary_skipped".into(),
             severity: "info".into(),
             kind: "ignore".into(),
-            file: rel,
+            file: rel.to_string(),
             line: 1,
             column: 1,
             message: "Skipped: binary file (null byte in head)".into(),
@@ -297,7 +364,7 @@ fn scan_one_path(
         return Ok((f, 0));
     }
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
-    let result = scan_text_prepared(&rel, &text, prepared, include_context);
+    let result = scan_text_prepared(rel, &text, prepared, include_context);
     text.zeroize();
     bytes.zeroize();
     result
@@ -357,7 +424,7 @@ pub fn scan_staged(cwd: &Path, opts: ScanOptions) -> Result<ScanResult> {
     let mut suppressed_total = 0u64;
     for rel in paths {
         scanned.push(rel.to_string_lossy().replace('\\', "/"));
-        let (f, sup) = scan_one_path(&repo, &rel, &prepared, include_context)?;
+        let (f, sup) = scan_staged_blob(&repo, &rel, &prepared, include_context)?;
         findings.extend(f);
         suppressed_total += sup;
     }
@@ -384,16 +451,9 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
         return scan_staged(target, opts);
     }
 
-    let root = if target.is_dir() {
-        target.to_path_buf()
-    } else {
-        target
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."))
-    };
-    let root = fs::canonicalize(&root).unwrap_or(root);
-    let (mut policy, policy_path) = Policy::load_from_dir(&root)?;
+    let scan_root = canonical_or_same(&scan_root_for_target(target));
+    let policy_root = policy_root_for_scan(&scan_root);
+    let (mut policy, policy_path) = Policy::load_from_dir(&policy_root)?;
     apply_scan_flag_overrides(&mut policy, &opts);
     let filters = PathFilters::from_policy(&policy)?;
     let include_context = opts.include_context || opts.json;
@@ -412,7 +472,7 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
     if target.is_file() {
         let abs_target = fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
         let rel = abs_target
-            .strip_prefix(&root)
+            .strip_prefix(&policy_root)
             .map(Path::to_path_buf)
             .unwrap_or_else(|_| {
                 target
@@ -432,7 +492,15 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
                 suppressed: 0,
             });
         }
-        let (scan_findings, sup) = scan_one_path(&root, &rel, &prepared, include_context)?;
+        let (scan_findings, sup) = scan_one_path(
+            &scan_root,
+            abs_target
+                .strip_prefix(&scan_root)
+                .unwrap_or(abs_target.as_path()),
+            &policy_root,
+            &prepared,
+            include_context,
+        )?;
         suppressed_total += sup;
         let findings = prepend_policy_warnings(expired, scan_findings);
         drop(prepared);
@@ -446,7 +514,7 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
         });
     }
 
-    let mut walk = WalkBuilder::new(&root);
+    let mut walk = WalkBuilder::new(&scan_root);
     walk.hidden(false);
     walk.git_ignore(true);
     walk.git_exclude(true);
@@ -462,7 +530,7 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
         .filter(|e| e.path().is_file())
         .map(|e| e.into_path())
         .filter(|full| {
-            let rel = rel_normalized(full, &root);
+            let rel = rel_normalized(full, &policy_root);
             filters.allows(&rel)
         })
         .collect();
@@ -470,8 +538,8 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
     let chunk_results: Vec<Result<(Vec<Finding>, u64)>> = scanned_files
         .par_iter()
         .map(|full| {
-            let rel = full.strip_prefix(&root).unwrap_or(full).to_path_buf();
-            scan_one_path(&root, &rel, &prepared, include_context)
+            let rel = full.strip_prefix(&scan_root).unwrap_or(full).to_path_buf();
+            scan_one_path(&scan_root, &rel, &policy_root, &prepared, include_context)
         })
         .collect();
 
@@ -484,7 +552,7 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
 
     let scanned_paths: Vec<String> = scanned_files
         .iter()
-        .map(|p| rel_normalized(p, &root))
+        .map(|p| rel_normalized(p, &policy_root))
         .collect();
     drop(prepared);
 

@@ -242,6 +242,59 @@ message = "Internal confidential term detected"
 }
 
 #[test]
+fn scan_target_uses_current_dir_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("shk.toml"),
+        r#"
+[rules]
+internal_terms = true
+
+[[custom_rules]]
+id = "internal.project_codename"
+pattern = "ProjectNebula"
+severity = "high"
+kind = "internal"
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("src/notes.txt"), "launch ProjectNebula\n").unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["scan", "src", "--json", "--fail-on", "critical"])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan target");
+
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["rule_id"] == "internal.project_codename"),
+        "{v}"
+    );
+}
+
+#[test]
+fn scan_rejects_invalid_fail_on() {
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--fail-on", "critcal"])
+        .output()
+        .expect("scan invalid fail-on");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("invalid --fail-on severity"), "{stderr}");
+}
+
+#[test]
 fn scan_staged_outside_git_exits_2() {
     let dir = tempfile::tempdir().unwrap();
     let out = Command::new(shk_bin())
@@ -260,6 +313,100 @@ fn scan_staged_outside_git_exits_2() {
     assert!(
         stderr.contains("shk scan --staged requires a Git repository"),
         "{stderr}"
+    );
+}
+
+#[test]
+fn scan_staged_reads_index_not_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let init = Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git init");
+    assert!(
+        init.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&init.stdout),
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let path = dir.path().join("secret.txt");
+    std::fs::write(
+        &path,
+        // not real credential: synthetic detector fixture value only
+        "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
+    )
+    .unwrap();
+    Command::new("git")
+        .args(["add", "secret.txt"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git add");
+    std::fs::write(&path, "clean worktree\n").unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["scan", "--staged", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan staged");
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["rule_id"] == "secret.openai_api_key"),
+        "{v}"
+    );
+}
+
+#[test]
+fn scan_staged_works_from_repo_subdirectory() {
+    let dir = tempfile::tempdir().unwrap();
+    let init = Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git init");
+    assert!(
+        init.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&init.stdout),
+        String::from_utf8_lossy(&init.stderr)
+    );
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("src/secret.txt"),
+        // not real credential: synthetic detector fixture value only
+        "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
+    )
+    .unwrap();
+    Command::new("git")
+        .args(["add", "src/secret.txt"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git add");
+
+    let out = Command::new(shk_bin())
+        .args(["scan", "--staged", "--json"])
+        .current_dir(dir.path().join("src"))
+        .output()
+        .expect("scan staged from subdir");
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -567,6 +714,47 @@ fn hooks_install_requires_project_policy() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("requires a project shk.toml"), "{stderr}");
     assert!(!dir.path().join(".git/hooks/pre-commit").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn hooks_install_makes_existing_pre_commit_executable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let init = Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git init");
+    assert!(
+        init.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&init.stdout),
+        String::from_utf8_lossy(&init.stderr)
+    );
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::create_dir_all(dir.path().join(".git/hooks")).unwrap();
+    let hook = dir.path().join(".git/hooks/pre-commit");
+    std::fs::write(&hook, "#!/bin/sh\necho existing\n").unwrap();
+    let mut perms = std::fs::metadata(&hook).unwrap().permissions();
+    perms.set_mode(0o600);
+    std::fs::set_permissions(&hook, perms).unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["hooks", "install"])
+        .current_dir(dir.path())
+        .output()
+        .expect("hooks install");
+
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mode = std::fs::metadata(&hook).unwrap().permissions().mode();
+    assert_ne!(mode & 0o111, 0, "mode={mode:o}");
+    assert_eq!(mode & 0o077, 0, "mode={mode:o}");
 }
 
 #[test]
