@@ -46,6 +46,18 @@ SHK_VERSION=v0.1.0 SHK_INSTALL_DIR="$HOME/.local/bin" sh scripts/install.sh
 
 The installer downloads the matching release archive, verifies it against `SHA256SUMS`, and installs both `shk` and `security-harness-kit`.
 
+Uninstall installed binaries:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Kazuki-tam/security-harness-kit/main/scripts/uninstall.sh | sh
+```
+
+For custom install locations, pass the same directory used during install:
+
+```bash
+SHK_INSTALL_DIR="$HOME/.local/bin" sh scripts/uninstall.sh
+```
+
 ### Download a release archive
 
 Tagged releases publish platform archives and a `SHA256SUMS` manifest:
