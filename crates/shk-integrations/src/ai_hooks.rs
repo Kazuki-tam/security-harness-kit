@@ -91,16 +91,16 @@ fn read_files_from_candidates(
     for cand in candidate_path_strings(v) {
         let p = resolve_path(&cand, cwd);
         let p = fs::canonicalize(&p).ok();
-        if let Some(abs) = p {
-            if abs.is_file() {
-                let rel = rel_from_repo(repo_root, &abs);
-                if first_rel.is_none() {
-                    first_rel = Some(rel.clone());
-                }
-                let t = fs::read_to_string(&abs)
-                    .with_context(|| format!("read scanned file {}", abs.display()))?;
-                texts.push(format!("// ---- {rel}\n{t}"));
+        if let Some(abs) = p
+            && abs.is_file()
+        {
+            let rel = rel_from_repo(repo_root, &abs);
+            if first_rel.is_none() {
+                first_rel = Some(rel.clone());
             }
+            let t = fs::read_to_string(&abs)
+                .with_context(|| format!("read scanned file {}", abs.display()))?;
+            texts.push(format!("// ---- {rel}\n{t}"));
         }
     }
 
@@ -135,10 +135,10 @@ fn scan_path_keys(v: &Value, out: &mut Vec<String>) {
     match v {
         Value::Object(map) => {
             for (k, val) in map {
-                if PATH_KEYS.iter().any(|pk| pk == k) || k.to_ascii_lowercase().ends_with("path") {
-                    if let Some(s) = val.as_str() {
-                        out.push(s.to_string());
-                    }
+                if (PATH_KEYS.iter().any(|pk| pk == k) || k.to_ascii_lowercase().ends_with("path"))
+                    && let Some(s) = val.as_str()
+                {
+                    out.push(s.to_string());
                 }
                 scan_path_keys(val, out);
             }
@@ -205,10 +205,8 @@ fn push_string_leaf(v: &Value, acc: &mut Vec<String>) {
 
 fn collect_large_strings(v: &Value, acc: &mut Vec<String>, min_len: usize, max_total_bytes: usize) {
     match v {
-        Value::String(s) if s.len() >= min_len => {
-            if acc_chars_len(acc) < max_total_bytes {
-                acc.push(s.clone());
-            }
+        Value::String(s) if s.len() >= min_len && acc_chars_len(acc) < max_total_bytes => {
+            acc.push(s.clone());
         }
         Value::Object(map) => {
             for (_k, val) in map {
