@@ -84,6 +84,7 @@ fn pii_detection_fixtures_cover_expected_rules() {
         "pii.ja.my_number",
         "pii.ja.corporate_number",
         "pii.ja.drivers_license",
+        "pii.ja.bank_account",
         "pii.ja.name",
     ] {
         assert!(

@@ -268,6 +268,18 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             validator: None,
         },
         CompiledRule {
+            id: "pii.ja.bank_account",
+            severity: Severity::Low,
+            kind: Kind::Pii,
+            re: Regex::new(
+                r"(?:銀行|金融機関|支店|口座番号|口座)\s*[:：]?\s*[^\n]{0,40}\d{7}\b",
+            )
+            .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Japanese bank account pattern detected",
+            confidence: 0.65,
+            validator: None,
+        },
+        CompiledRule {
             id: "pii.ja.name",
             severity: Severity::Info,
             kind: Kind::Pii,

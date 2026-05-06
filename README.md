@@ -331,7 +331,7 @@ Currently implemented PII rules:
 
 - Universal when `pii = true`: email, Luhn-validated credit card numbers, IPv4, IPv6
 - English (`pii_languages = ["en"]`): phone number, US SSN, and label-anchored ZIP/postal code, EIN, passport number, and personal name
-- Japanese (`pii_languages = ["ja"]`): phone number, label-anchored/`〒` postal code, passport number, label-anchored My Number, corporate number, driver license number, and personal name
+- Japanese (`pii_languages = ["ja"]`): phone number, label-anchored/`〒` postal code, passport number, label-anchored My Number, corporate number, driver license number, bank account, and personal name
 
 Personal names are label-anchored only; free-standing English or Japanese name detection is intentionally disabled to avoid high false positive rates.
 
