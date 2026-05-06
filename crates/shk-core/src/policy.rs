@@ -200,6 +200,10 @@ pub struct MaskSection {
     pub mode: String,
     #[serde(default = "default_redaction")]
     pub redaction: String,
+    #[serde(default = "default_preserve")]
+    pub preserve_prefix: usize,
+    #[serde(default = "default_preserve")]
+    pub preserve_suffix: usize,
 }
 
 fn default_mask_mode() -> String {
@@ -210,11 +214,17 @@ fn default_redaction() -> String {
     "full".into()
 }
 
+fn default_preserve() -> usize {
+    4
+}
+
 impl Default for MaskSection {
     fn default() -> Self {
         Self {
             mode: default_mask_mode(),
             redaction: default_redaction(),
+            preserve_prefix: default_preserve(),
+            preserve_suffix: default_preserve(),
         }
     }
 }
@@ -349,6 +359,8 @@ pre_commit_fail_on = "medium"
 [mask]
 mode = "strict"
 redaction = "full"
+# preserve_prefix = 4 # only when redaction = "partial"
+# preserve_suffix = 4
 
 [doctor.ignore]
 required_patterns = [
@@ -403,6 +415,8 @@ pre_commit_fail_on = "high"
 [mask]
 mode = "strict"
 redaction = "full"
+# preserve_prefix = 4 # only when redaction = "partial"
+# preserve_suffix = 4
 
 [doctor.ignore]
 required_patterns = [

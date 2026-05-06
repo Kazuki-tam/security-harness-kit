@@ -59,6 +59,35 @@ fn mask_stdin_fixture() {
 }
 
 #[test]
+fn mask_partial_redaction_json_preserves_edges() {
+    use std::io::Write;
+
+    let secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+    let out = Command::new(shk_bin())
+        .args(["mask", "--json", "--redaction", "partial"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin
+                .as_mut()
+                .unwrap()
+                .write_all(format!("token={secret}\n").as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("partial mask");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let masked = v["masked_content"].as_str().unwrap_or_default();
+    assert!(masked.contains("sk-p[REDACTED]6789"), "{masked}");
+    assert!(!masked.contains(secret), "{masked}");
+}
+
+#[test]
 fn mask_binary_stdin_passes_through() {
     use std::io::Write;
 

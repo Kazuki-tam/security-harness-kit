@@ -169,10 +169,11 @@ shk mask < prompt.txt               # mask stdin
 shk mask prompt.txt                 # mask a file
 shk mask prompt.txt --output out.txt
 shk mask --json < prompt.txt        # JSON output with findings + masked content
+shk mask --redaction partial < prompt.txt
 shk mask --hook-mode cursor < payload.json
 ```
 
-Masking is line-oriented today: any line with a match becomes `[REDACTED_LINE]`. `--redaction partial` is accepted but currently falls back to full-line redaction with a warning.
+Masking is line-oriented by default: any line with a match becomes `[REDACTED_LINE]`. `--redaction partial` masks only matched values and preserves the configured prefix/suffix (`preserve_prefix` / `preserve_suffix`, default `4` each).
 
 ### `shk doctor`
 

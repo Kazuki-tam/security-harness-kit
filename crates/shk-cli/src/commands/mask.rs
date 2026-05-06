@@ -18,10 +18,6 @@ pub fn run(
     hook_mode: Option<AiTool>,
     post: bool,
 ) -> Result<()> {
-    if matches!(redaction, Some(RedactionMode::Partial)) {
-        eprintln!("Note: partial redaction is not yet implemented; using full line redaction.");
-    }
-
     if let Some(tool) = hook_mode {
         if file.is_some() || output.is_some() || json {
             bail!("`mask --hook-mode` cannot be combined with FILE, `--output`, or `--json`");
@@ -33,7 +29,8 @@ pub fn run(
     }
 
     let (rel_label, mut bytes) = read_mask_input(file.as_ref())?;
-    let (policy, _) = Policy::load_from_dir(project_root)?;
+    let (mut policy, _) = Policy::load_from_dir(project_root)?;
+    apply_redaction_override(&mut policy, redaction);
 
     if is_binary_or_non_utf8(&bytes, policy.scan.binary_detection_bytes) {
         let findings = vec![binary_passthrough_finding(&rel_label)];
@@ -86,6 +83,16 @@ pub fn run(
         fs::write(&outp, masked)?;
     }
     Ok(())
+}
+
+fn apply_redaction_override(policy: &mut Policy, redaction: Option<RedactionMode>) {
+    if let Some(mode) = redaction {
+        policy.mask.redaction = match mode {
+            RedactionMode::Full => "full",
+            RedactionMode::Partial => "partial",
+        }
+        .into();
+    }
 }
 
 fn read_mask_input(file: Option<&PathBuf>) -> Result<(String, Vec<u8>)> {
