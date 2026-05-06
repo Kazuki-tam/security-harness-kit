@@ -30,9 +30,60 @@ AI coding agents (Claude Code, Cursor, Codex, and others) read your project file
 
 ## Installation
 
+### Install with script
+
+macOS and Linux releases can be installed with the bundled installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Kazuki-tam/security-harness-kit/main/scripts/install.sh | sh
+```
+
+Optional environment variables:
+
+```bash
+SHK_VERSION=v0.1.0 SHK_INSTALL_DIR="$HOME/.local/bin" sh scripts/install.sh
+```
+
+The installer downloads the matching release archive, verifies it against `SHA256SUMS`, and installs both `shk` and `security-harness-kit`.
+
+### Download a release archive
+
+Tagged releases publish platform archives and a `SHA256SUMS` manifest:
+
+```text
+shk-aarch64-unknown-linux-gnu.tar.gz
+shk-aarch64-apple-darwin.tar.gz
+shk-x86_64-apple-darwin.tar.gz
+shk-x86_64-pc-windows-msvc.zip
+shk-x86_64-unknown-linux-gnu.tar.gz
+shk-sbom.cdx.json
+SHA256SUMS
+*.bundle
+```
+
+Verify the archive before unpacking:
+
+```bash
+shasum -a 256 -c SHA256SUMS
+```
+
+Each archive contains both `shk` and `security-harness-kit`.
+
+Release assets are signed with `cosign` keyless signing. Verify a downloaded asset with its matching bundle:
+
+```bash
+cosign verify-blob \
+  --bundle shk-x86_64-unknown-linux-gnu.tar.gz.bundle \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp 'https://github.com/Kazuki-tam/security-harness-kit/.github/workflows/release.yml@refs/tags/v.*' \
+  shk-x86_64-unknown-linux-gnu.tar.gz
+```
+
+Releases also publish a CycloneDX SBOM (`shk-sbom.cdx.json`). Tagged releases generate GitHub artifact attestations for the release assets so provenance can be verified through GitHub's attestation tooling.
+
 ### Build from source
 
-Requires Rust 1.74+.
+Requires Rust 1.85+.
 
 ```bash
 cd security-harness-kit
@@ -42,7 +93,7 @@ cargo build --release
 
 Both `shk` and `security-harness-kit` resolve to the same CLI.
 
-Packaged installs (install script, Homebrew, signed release artifacts) are planned but not wired in this repository yet.
+Homebrew, npm wrappers, macOS notarization, and Windows Authenticode signing are planned next.
 
 ## Quick start
 
