@@ -69,7 +69,7 @@ fn is_sensitive_env_file(path: &Path) -> bool {
 }
 
 fn path_relative_to_home(path: &Path) -> Result<Option<PathBuf>> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = home_dir() else {
         return Ok(None);
     };
     let home = canonicalize_existing_or_parent(&home)?;
@@ -83,6 +83,13 @@ fn path_relative_to_home(path: &Path) -> Result<Option<PathBuf>> {
     };
     let abs = canonicalize_existing_or_parent(&abs)?;
     Ok(abs.strip_prefix(&home).ok().map(Path::to_path_buf))
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
 }
 
 fn expand_home(path: &Path, home: &Path) -> PathBuf {
