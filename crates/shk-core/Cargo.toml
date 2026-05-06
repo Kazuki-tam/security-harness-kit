@@ -20,3 +20,6 @@ globset = "0.4"
 hmac.workspace = true
 sha2.workspace = true
 chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

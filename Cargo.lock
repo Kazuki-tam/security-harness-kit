@@ -785,6 +785,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "shk-rules",
+ "tempfile",
  "thiserror",
  "toml",
  "walkdir",
