@@ -1,0 +1,57 @@
+# ===== Rust =====
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# ===== LLM / AI docs (private) =====
+_llm-docs/
+.claude/settings.local.json
+
+# ===== Secrets & credentials =====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+secrets/
+credentials/
+api_keys.txt
+
+# ===== IDE / Editor =====
+.DS_Store
+.vscode/settings.json
+.vscode/launch.json
+.idea/
+*.iml
+*.suo
+*.user
+*.swp
+*~
+
+# ===== OS =====
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ===== Test / scan outputs =====
+reports/
+scan-results/
+*.sarif
+*.report.json
+test-output/
+coverage/
+lcov.info
+
+# ===== Temporary / build artifacts =====
+*.tmp
+*.bak
+*.log
+dist/
+out/
+
+# ===== Claude Code =====
+.claude/memory/

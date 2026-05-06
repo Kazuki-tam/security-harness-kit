@@ -1,0 +1,220 @@
+# AGENTS.md — security-harness-kit / `shk`
+
+This repository is a **local-first security harness CLI for AI coding agents** (`shk` / `security-harness-kit`). This file is agent-oriented guidance (build, test, conventions), not a human-focused README. For the open format, see the [AGENTS.md project site](https://agents.md/).
+
+## Source of truth
+
+Implementation priorities, terminology, exit codes, and distribution expectations are defined in **`_llm-docs/cli-implementation-spec.md`**. If code and spec disagree, reconcile against the spec first, then change code or propose a spec update.
+
+## Stack
+
+- **Language**: Rust (single-binary distribution; end users should not need Rust installed).
+- **Workspace** (`Cargo.toml` `members`):
+  - `crates/shk-core` — policy, scanning, masking, JSON reports, suppression helpers.
+  - `crates/shk-rules` — built-in rules (secrets, PII, etc.).
+  - `crates/shk-cli` — `clap`-based CLI (binaries `shk` and `security-harness-kit`).
+    - **`src/lib.rs`** (crate `shk_cli`) — `run()` entry (tests and external callers).
+    - **`src/main.rs`** — thin wrapper calling `shk_cli::run()` (shared by both binaries).
+    - **`src/args.rs`** — `clap` CLI definitions.
+    - **`src/commands/`** — `scan`, `mask`, etc. (move `doctor` / others here if this layer grows).
+    - Other modules: `color`, `doctor`, `hooks`, `hook_payload`, `hook_output`, `audit_log`, `output`, `policy_cmd`.
+  - `crates/shk-integrations` — markers/constants for managed AI hooks; parsers may move here over time.
+
+## Setup
+
+```bash
+# From repository root
+cargo build
+cargo test --all
+cargo fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+Release build:
+
+```bash
+cargo build --release
+# Binaries: target/release/shk , target/release/security-harness-kit
+```
+
+## Exit codes
+
+| Code | Meaning | Commands |
+|------|---------|----------|
+| `0` | No findings above threshold / success | `shk scan`, `shk scan --staged`, `shk mask`, `shk doctor`, `shk scan --audit` |
+| `1` | Findings at or above the fail threshold | `shk scan`, `shk scan --staged` |
+| `2` | Blocking AI pre-hook triggered / runtime or config error | `shk scan --hook-mode <tool>` (block), `shk scan --staged` outside a Git repo |
+
+- `--audit` mode **always exits 0** (log-only; never blocks).
+- Post-execution hooks (`--post`) **always exit 0** — data is already in the AI's context.
+- Exit code 2 from a blocking pre-hook causes the AI tool to abort the pending operation.
+
+Do not change exit code semantics without updating `crates/shk-cli/src/lib.rs` **and** this table.
+
+## Quality gates (before merge / when editing this repo)
+
+Keep **green** on all supported platforms when possible:
+
+- `cargo fmt --all -- --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test --all`
+
+**Security / context hygiene**
+
+- Never commit or print **raw secret material** in logs, tests, or fixtures beyond what already exists in `fixtures/` demos.
+- JSON reports use `redacted_value: "[REDACTED]"` (spec §6).
+- `.shk/audit.log` entries must stay **metadata-only** (counts, tool name, relative path label) — implementation is in `audit_log::append_line`.
+
+## Common dev commands
+
+```bash
+# Scan repo/path (default fail-on high → exit 1 when exceeded)
+cargo run -p shk-cli --bin shk -- scan .
+
+# JSON only, relax threshold (similar to CI smoke)
+cargo run -p shk-cli --bin shk -- scan fixtures/basic --json --fail-on critical
+
+# Mask (stdin)
+cargo run -p shk-cli --bin shk -- mask --json < fixtures/pii.txt
+
+# Doctor
+cargo run -p shk-cli --bin shk -- doctor
+cargo run -p shk-cli --bin shk -- doctor ignore fixtures/project
+cargo run -p shk-cli --bin shk -- doctor env
+
+# Policy template
+cargo run -p shk-cli --bin shk -- policy init --strict
+
+# Git pre-commit (requires a `.git` directory)
+cargo run -p shk-cli --bin shk -- hooks install
+
+# AI tool hooks (writes project or `~/.cursor` / etc. with `--global`; use `--dry-run` first)
+cargo run -p shk-cli --bin shk -- hooks install-ai --dry-run
+cargo run -p shk-cli --bin shk -- hooks install-ai --tool cursor --audit
+cargo run -p shk-cli --bin shk -- hooks install-ai --tool claude-code --global --dry-run
+
+# Hook-mode scan (stdin = tool JSON payload; blocking pre hooks → exit 2, stdout = tool-specific JSON)
+cargo run -p shk-cli --bin shk -- scan . --hook-mode cursor < /path/to/payload.json
+```
+
+## Adding a new rule
+
+All built-in rules live in `crates/shk-rules/src/lib.rs` inside the `RULES` static vec.
+
+**Steps:**
+
+1. Add a `CompiledRule` entry to `RULES`:
+
+```rust
+CompiledRule {
+    id: "secret.my_service_key",   // stable, never rename once shipped
+    severity: Severity::High,
+    kind: Kind::Secret,            // Secret | Pii | Env | AiContext | Ignore | Git
+    re: Regex::new(r"(?i)\bmsk-[a-zA-Z0-9]{32}\b")
+        .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+    message: "Possible MyService key detected",
+    confidence: 0.88,
+},
+```
+
+2. Add a false-positive guard fixture under `fixtures/` if the pattern is broad.
+
+3. Add a unit test in the `#[cfg(test)]` block of `shk-rules/src/lib.rs`:
+
+```rust
+#[test]
+fn detects_my_service_key() {
+    let s = r#"key = "msk-abcdefghijklmnopqrstuvwxyz012345""#;
+    let cfg = RuleEngineConfig::default();
+    let m = scan_content(s, "demo.env", &cfg);
+    assert!(m.iter().any(|x| x.rule_id == "secret.my_service_key"), "{m:?}");
+}
+```
+
+**Constraints:**
+- Prefer `regex` crate over `fancy-regex`; use `fancy-regex` only when lookaround is unavoidable.
+- `fancy-regex` rules need a ReDoS fixture under `fixtures/redos/`.
+- PII rules namespaced `pii.en.*` / `pii.ja.*` are gated by `pii_languages` in `rule_applies()` — no extra wiring needed.
+- `rule_id` must be stable; changing it after release breaks existing `[[allowlist]]` entries in users' `shk.toml`.
+
+## Tests and fixtures
+
+- **Integration**: `crates/shk-cli/tests/smoke.rs`
+- **Core**: `crates/shk-core/tests/scan_fixture.rs`, plus `#[cfg(test)]` in `scanner`, `finding`, `masker`, `suppression`
+- **Rules**: `crates/shk-rules` `#[cfg(test)]` (detection, `redact_line_for_display`)
+- **Fixtures**: `fixtures/basic/`, `fixtures/pii.txt`, `fixtures/project/`
+
+## shk.toml reference
+
+Default file: `shk.toml` in the project root. Created by `shk policy init`.
+
+```toml
+[scan]
+include = ["**/*"]
+exclude = [".git/**", "node_modules/**", "dist/**"]
+max_file_size_bytes = 1048576          # files larger than this are skipped
+binary_detection_bytes = 8192
+follow_symlinks = false
+include_binary = false
+fancy_regex_timeout_ms_per_file = 100  # config-only today; not yet wired
+
+[rules]
+secrets = true
+pii = true
+pii_languages = ["en", "ja"]
+env = true
+internal_terms = false
+
+[thresholds]
+default_fail_on = "high"
+scan_fail_on = "high"
+pre_commit_fail_on = "high"
+
+[mask]
+mode = "strict"
+redaction = "full"
+# preserve_prefix = 4   # only when redaction = "partial"
+# preserve_suffix = 4
+
+[doctor.ignore]
+required_patterns = [".env", ".env.*", "!.env.example", "secrets/**", "*.pem", "*.key"]
+
+# Suppress a specific finding by path + rule
+[[allowlist]]
+rule_id = "secret.generic_api_key"
+path = "fixtures/**"
+reason = "Intentional test fixture"
+
+# Suppress by value hash: HMAC-SHA256(raw_value, rule_id), lowercase hex, prefixed "sha256-hmac:"
+[[allowlist]]
+rule_id = "pii.email"
+value_hash = "sha256-hmac:a3f1..."
+reason = "Public support address"
+expires = "2026-12-31"    # expired entries produce warning findings
+```
+
+Key facts:
+- Raw secret values must **never** appear in `shk.toml`; use `value_hash` for value-specific suppression.
+- Inline suppression: `# shk-ignore [rule_id]` or `# shk-ignore-next-line [rule_id]` (comment-capable formats only).
+- Policy is resolved relative to `std::env::current_dir()` — run from the project root.
+
+## Commit conventions
+
+Use [Conventional Commits](https://www.conventionalcommits.org/) style: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`. Keep the subject under 72 characters. Reference issue numbers in the body when applicable.
+
+## Coding notes
+
+- **Never log or emit raw secrets in JSON** (`redacted_value` is `[REDACTED]` per spec §6).
+- **`context_before` / `context_after`**: do not ship raw neighbor lines; run `shk_rules::redact_line_for_display` so patterns align with detection rules (toward “redacted lines only” in spec §6).
+- **Policy resolution**: `mask`, `doctor`, `policy init`, and `hooks install` resolve policy relative to **`std::env::current_dir()`**. From a subdirectory, `cd` to the project root or consider a future `--project-root` flag.
+- **`Policy::default()` vs `serde::Default`**: beware `#[derive(Default)]` on structs with `bool` fields that should default to `true` (e.g. `RulesSection` needs an explicit `Default` impl).
+- **Paths**: scanning `canonicalize`s the root and matches `ignore` walker paths with `strip_prefix`.
+- **Windows**: respect path separators and `pre-commit` shebang limitations.
+
+## CI
+
+`.github/workflows/ci.yml` runs `fmt`, `clippy`, `tests`, `release` build, and smoke checks on **ubuntu**, **macOS**, and **Windows**.
+
+## License
+
+MIT — see `LICENSE`.

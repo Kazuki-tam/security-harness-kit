@@ -1,0 +1,2 @@
+Contact: test.user@example.com
+Phone JP: 090-1234-5678

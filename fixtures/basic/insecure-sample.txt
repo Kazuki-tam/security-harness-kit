@@ -1,0 +1,2 @@
+// Demo fixture — not a real credential
+const demo = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";

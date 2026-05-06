@@ -1,0 +1,12 @@
+[package]
+name = "shk-integrations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Optional diagnostics for external tools (dotenvx, AI hooks, etc.)"
+
+[dependencies]
+anyhow.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true

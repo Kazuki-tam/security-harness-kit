@@ -1,0 +1,32 @@
+[package]
+name = "shk-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "security-harness-kit CLI (shk)"
+
+[lib]
+name = "shk_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "shk"
+path = "src/main.rs"
+
+[[bin]]
+name = "security-harness-kit"
+path = "src/main.rs"
+
+[dependencies]
+shk-core = { path = "../shk-core" }
+shk-integrations = { path = "../shk-integrations" }
+anyhow.workspace = true
+clap.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
