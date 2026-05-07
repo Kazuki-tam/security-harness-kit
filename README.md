@@ -1,5 +1,7 @@
 # security-harness-kit (`shk`)
 
+![Overview illustration of shk scanning code, masking secrets, enforcing hooks, and producing safe reports](docs/assets/shk-overview.jpg)
+
 `shk` is a local-first security harness for AI-assisted development. It scans for secrets, PII, and unsafe project surfaces before they reach AI tools, Git commits, or generated output.
 
 ```bash
