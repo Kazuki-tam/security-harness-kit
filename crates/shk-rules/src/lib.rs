@@ -171,6 +171,16 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             validator: None,
         },
         CompiledRule {
+            id: "secret.dotenvx_private_key",
+            severity: Severity::High,
+            kind: Kind::Secret,
+            re: Regex::new(r##"(?m)\bDOTENV_PRIVATE_KEY(?:_[A-Z0-9_]+)?\s*=\s*['"]?[^\s'"#]+"##)
+                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "dotenvx private key detected",
+            confidence: 0.95,
+            validator: None,
+        },
+        CompiledRule {
             id: "secret.generic_api_key",
             severity: Severity::Medium,
             kind: Kind::Secret,
@@ -586,6 +596,20 @@ mod tests {
         );
         assert!(m.iter().any(|x| x.rule_id == "pii.en.phone"), "{m:?}");
         assert!(!m.iter().any(|x| x.rule_id == "pii.ja.passport"), "{m:?}");
+    }
+
+    #[test]
+    fn detects_dotenvx_private_key_assignment() {
+        let cfg = RuleEngineConfig::default();
+        let m = scan_content(
+            "DOTENV_PRIVATE_KEY_PRODUCTION=dotenvx-secret-demo-value",
+            ".env.keys",
+            &cfg,
+        );
+        assert!(
+            m.iter().any(|x| x.rule_id == "secret.dotenvx_private_key"),
+            "{m:?}"
+        );
     }
 
     #[test]

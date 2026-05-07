@@ -1289,6 +1289,73 @@ fn doctor_env_dotenvx_accepts_vault_without_keys() {
 }
 
 #[test]
+fn env_dotenvx_help_is_registered() {
+    let out = Command::new(shk_bin())
+        .args(["env", "dotenvx", "--help"])
+        .output()
+        .expect("env dotenvx help");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("import-keys"), "{stdout}");
+    assert!(stdout.contains("run"), "{stdout}");
+    assert!(!stdout.contains("export"), "{stdout}");
+}
+
+#[test]
+fn env_dotenvx_delete_requires_explicit_target() {
+    let out = Command::new(shk_bin())
+        .args(["env", "dotenvx", "delete"])
+        .output()
+        .expect("env dotenvx delete");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--all"), "{stderr}");
+    assert!(stderr.contains("--key"), "{stderr}");
+    assert!(stderr.contains("--env"), "{stderr}");
+}
+
+#[test]
+fn scan_detects_dotenvx_private_key_without_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret = "dotenvx-secret-demo-value";
+    std::fs::write(dir.path().join("shk.toml"), "[scan]\nexclude = []\n").unwrap();
+    std::fs::write(
+        dir.path().join(".env.keys"),
+        format!("DOTENV_PRIVATE_KEY_PRODUCTION={secret}\n"),
+    )
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args([
+            "scan",
+            dir.path().join(".env.keys").to_str().unwrap(),
+            "--json",
+            "--fail-on",
+            "critical",
+        ])
+        .output()
+        .expect("scan dotenvx key");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains(secret), "{stdout}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let findings = v["findings"].as_array().unwrap();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f["rule_id"] == "secret.dotenvx_private_key"),
+        "{v}"
+    );
+}
+
+#[test]
 fn doctor_ignore_fix_adds_extended_recommended_patterns() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
