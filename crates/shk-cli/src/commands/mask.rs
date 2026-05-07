@@ -6,7 +6,7 @@ use shk_core::finding::Finding;
 use shk_core::masker::MaskJsonOutput;
 use shk_core::policy::Policy;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroize;
 
@@ -107,7 +107,13 @@ fn read_mask_input(file: Option<&PathBuf>) -> Result<(String, Vec<u8>)> {
         r.read_to_end(&mut bytes)?;
         f.to_string_lossy().to_string()
     } else {
-        io::stdin().read_to_end(&mut bytes)?;
+        let mut stdin = io::stdin();
+        if stdin.is_terminal() {
+            bail!(
+                "`shk mask` requires FILE or stdin input; try `shk mask prompt.txt` or `shk mask < prompt.txt`"
+            );
+        }
+        stdin.read_to_end(&mut bytes)?;
         "<stdin>".into()
     };
     Ok((rel_label, bytes))
@@ -115,7 +121,11 @@ fn read_mask_input(file: Option<&PathBuf>) -> Result<(String, Vec<u8>)> {
 
 fn run_hook_mode(cwd: &Path, tool: AiTool, post: bool) -> Result<()> {
     let mut stdin_raw = Vec::new();
-    io::stdin().read_to_end(&mut stdin_raw)?;
+    let mut stdin = io::stdin();
+    if stdin.is_terminal() {
+        bail!("`mask --hook-mode` requires hook JSON payload on stdin");
+    }
+    stdin.read_to_end(&mut stdin_raw)?;
     let mut stdin_str = String::from_utf8_lossy(&stdin_raw).to_string();
     stdin_raw.zeroize();
     let stdin_trim = stdin_str.trim();

@@ -103,6 +103,10 @@ Options:
 | `--hook-mode <tool>` | Read a hook payload from stdin and print tool-specific masked hook output. |
 | `--post` | Post-tool hook mode. Requires `--hook-mode <tool>`. |
 
+When no `FILE` is provided, `shk mask` reads stdin until EOF. In an interactive
+terminal, run it with input redirection (`shk mask < prompt.txt`) or provide a
+file path (`shk mask prompt.txt`).
+
 `mask --output` refuses sensitive env files and protected home configuration files. Binary or non-UTF-8 input is passed through unchanged in human output and reported as `mask.binary_passthrough` in JSON output.
 
 ## `shk doctor`
