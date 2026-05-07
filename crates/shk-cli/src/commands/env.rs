@@ -103,8 +103,27 @@ fn dotenvx_delete_with_store(
 pub fn dotenvx_run(cwd: &Path, args: DotenvxRunArgs) -> Result<()> {
     let project_root = project_root(cwd)?;
     let store = KeyringSecretStore;
-    let index = read_index(&store, &project_root)?;
-    let selected = run_targets(&args, &index)?;
+    let mut cmd = build_dotenvx_run_command(&store, &project_root, cwd, &args)?;
+    let status = cmd.status().with_context(|| {
+        format!(
+            "run `{}`; install dotenvx or pass --dotenvx-bin",
+            args.dotenvx_bin
+        )
+    })?;
+    if !status.success() {
+        return Err(CliExit::silent(status.code().unwrap_or(2)).into());
+    }
+    Ok(())
+}
+
+fn build_dotenvx_run_command(
+    store: &impl SecretStore,
+    project_root: &Path,
+    cwd: &Path,
+    args: &DotenvxRunArgs,
+) -> Result<Command> {
+    let index = read_index(store, project_root)?;
+    let selected = run_targets(args, &index)?;
     if selected.is_empty() {
         bail!(
             "no stored dotenvx private keys for {}; run `shk env dotenvx import-keys .env.keys` first",
@@ -123,7 +142,7 @@ pub fn dotenvx_run(cwd: &Path, args: DotenvxRunArgs) -> Result<()> {
 
     for key in selected {
         let mut value = store
-            .get(&account(&project_root, &key))
+            .get(&account(project_root, &key))
             .with_context(|| format!("read {key} from OS credential store"))?
             .ok_or_else(|| {
                 anyhow!("stored index references {key}, but the credential is missing")
@@ -131,17 +150,7 @@ pub fn dotenvx_run(cwd: &Path, args: DotenvxRunArgs) -> Result<()> {
         cmd.env(&key, &value);
         value.zeroize();
     }
-
-    let status = cmd.status().with_context(|| {
-        format!(
-            "run `{}`; install dotenvx or pass --dotenvx-bin",
-            args.dotenvx_bin
-        )
-    })?;
-    if !status.success() {
-        return Err(CliExit::silent(status.code().unwrap_or(2)).into());
-    }
-    Ok(())
+    Ok(cmd)
 }
 
 trait SecretStore {
@@ -379,6 +388,16 @@ mod tests {
         }
     }
 
+    fn run_args() -> DotenvxRunArgs {
+        DotenvxRunArgs {
+            dotenvx_bin: "dotenvx-test-bin".to_string(),
+            files: vec![PathBuf::from(".env"), PathBuf::from(".env.production")],
+            keys: Vec::new(),
+            envs: Vec::new(),
+            command: vec!["npm".to_string(), "test".to_string()],
+        }
+    }
+
     #[test]
     fn parses_dotenvx_keys_without_values_in_output() {
         let parsed = parse_dotenvx_keys(
@@ -496,6 +515,51 @@ mod tests {
     }
 
     #[test]
+    fn delete_all_removes_keys_and_index() {
+        let store = MockSecretStore::default();
+        let root = Path::new("/repo/app");
+        dotenvx_import_keys_with_store(
+            &store,
+            root,
+            vec![
+                (
+                    "DOTENV_PRIVATE_KEY".to_string(),
+                    "dotenvx-default-value".to_string(),
+                ),
+                (
+                    "DOTENV_PRIVATE_KEY_STAGING".to_string(),
+                    "dotenvx-staging-value".to_string(),
+                ),
+            ],
+        )
+        .unwrap();
+
+        dotenvx_delete_with_store(
+            &store,
+            root,
+            DotenvxDeleteArgs {
+                all: true,
+                key: None,
+                env: None,
+            },
+        )
+        .unwrap();
+
+        assert!(read_index(&store, root).unwrap().is_empty());
+        assert_eq!(store.get(&index_account(root)).unwrap(), None);
+        assert_eq!(
+            store.get(&account(root, "DOTENV_PRIVATE_KEY")).unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .get(&account(root, "DOTENV_PRIVATE_KEY_STAGING"))
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn delete_targets_require_explicit_target() {
         let err = delete_targets(
             DotenvxDeleteArgs {
@@ -510,6 +574,161 @@ mod tests {
             err.to_string().contains("pass --all, --key, or --env"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn delete_targets_validate_explicit_key_names() {
+        let err = delete_targets(
+            DotenvxDeleteArgs {
+                all: false,
+                key: Some("DOTENV_PUBLIC_KEY".to_string()),
+                env: None,
+            },
+            &BTreeSet::new(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("expected DOTENV_PRIVATE_KEY"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn run_targets_default_to_all_index_keys() {
+        let args = run_args();
+        let index = BTreeSet::from([
+            "DOTENV_PRIVATE_KEY".to_string(),
+            "DOTENV_PRIVATE_KEY_PRODUCTION".to_string(),
+        ]);
+
+        assert_eq!(
+            run_targets(&args, &index).unwrap(),
+            vec![
+                "DOTENV_PRIVATE_KEY".to_string(),
+                "DOTENV_PRIVATE_KEY_PRODUCTION".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn run_targets_validate_and_report_missing_keys() {
+        let mut args = run_args();
+        args.keys = vec!["DOTENV_PRIVATE_KEY_PRODUCTION".to_string()];
+        args.envs = vec!["staging".to_string()];
+
+        let err = run_targets(
+            &args,
+            &BTreeSet::from(["DOTENV_PRIVATE_KEY_PRODUCTION".to_string()]),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("dotenvx private key(s) not imported: DOTENV_PRIVATE_KEY_STAGING"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn build_run_command_injects_selected_keys_and_args() {
+        let store = MockSecretStore::default();
+        let root = Path::new("/repo/app");
+        dotenvx_import_keys_with_store(
+            &store,
+            root,
+            vec![
+                (
+                    "DOTENV_PRIVATE_KEY".to_string(),
+                    "dotenvx-default-value".to_string(),
+                ),
+                (
+                    "DOTENV_PRIVATE_KEY_PRODUCTION".to_string(),
+                    "dotenvx-production-value".to_string(),
+                ),
+            ],
+        )
+        .unwrap();
+        let mut args = run_args();
+        args.envs = vec!["production".to_string()];
+
+        let cmd =
+            build_dotenvx_run_command(&store, root, Path::new("/repo/app/subdir"), &args).unwrap();
+        assert_eq!(cmd.get_program(), "dotenvx-test-bin");
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("/repo/app/subdir")));
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            vec![
+                "run",
+                "-f",
+                ".env",
+                "-f",
+                ".env.production",
+                "--",
+                "npm",
+                "test"
+            ]
+        );
+
+        let envs = cmd.get_envs().collect::<Vec<_>>();
+        assert!(envs.iter().any(|(key, value)| {
+            *key == "DOTENV_PRIVATE_KEY_PRODUCTION"
+                && value.as_deref() == Some(std::ffi::OsStr::new("dotenvx-production-value"))
+        }));
+        assert!(!envs.iter().any(|(key, _)| *key == "DOTENV_PRIVATE_KEY"));
+    }
+
+    #[test]
+    fn build_run_command_reports_empty_index_and_missing_credential() {
+        let store = MockSecretStore::default();
+        let root = Path::new("/repo/app");
+        let empty_err = build_dotenvx_run_command(&store, root, root, &run_args()).unwrap_err();
+        assert!(
+            empty_err
+                .to_string()
+                .contains("no stored dotenvx private keys"),
+            "{empty_err}"
+        );
+
+        write_index(
+            &store,
+            root,
+            &BTreeSet::from(["DOTENV_PRIVATE_KEY".to_string()]),
+        )
+        .unwrap();
+        let missing_err = build_dotenvx_run_command(&store, root, root, &run_args()).unwrap_err();
+        assert!(
+            missing_err
+                .to_string()
+                .contains("stored index references DOTENV_PRIVATE_KEY"),
+            "{missing_err}"
+        );
+    }
+
+    #[test]
+    fn index_round_trips_sorted_and_deduplicated() {
+        let store = MockSecretStore::default();
+        let root = Path::new("/repo/app");
+        store
+            .put(
+                &index_account(root),
+                r#"{"keys":["DOTENV_PRIVATE_KEY_PRODUCTION","DOTENV_PRIVATE_KEY"]}"#,
+            )
+            .unwrap();
+
+        let mut index = read_index(&store, root).unwrap();
+        index.insert("DOTENV_PRIVATE_KEY".to_string());
+        write_index(&store, root, &index).unwrap();
+
+        assert_eq!(
+            store.get(&index_account(root)).unwrap(),
+            Some(r#"{"keys":["DOTENV_PRIVATE_KEY","DOTENV_PRIVATE_KEY_PRODUCTION"]}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn parse_env_value_rejects_malformed_quotes() {
+        assert!(parse_env_value(r#""unterminated"#).is_err());
+        assert!(parse_env_value(r#""value" trailing"#).is_err());
+        assert!(parse_env_value(r#""dangling\"#).is_err());
     }
 
     #[test]
