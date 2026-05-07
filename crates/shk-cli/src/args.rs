@@ -78,7 +78,7 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Git hook installation
+    /// Hook installation (Git pre-commit and AI editor hooks)
     Hooks {
         #[command(subcommand)]
         cmd: HooksCmd,

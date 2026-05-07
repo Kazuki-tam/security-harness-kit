@@ -990,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "shk-cli"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1009,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "shk-core"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1031,7 +1031,7 @@ dependencies = [
 
 [[package]]
 name = "shk-integrations"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "serde",
@@ -1041,7 +1041,7 @@ dependencies = [
 
 [[package]]
 name = "shk-rules"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "once_cell",
  "regex",

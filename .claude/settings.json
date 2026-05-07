@@ -1,26 +1,15 @@
 {
   "hooks": {
-    "UserPromptSubmit": [
-      {
-        "_shk_managed": true,
-        "hooks": [
-          {
-            "command": "shk scan --hook-mode claude-code --fail-on medium",
-            "type": "command"
-          }
-        ]
-      }
-    ],
     "PostToolUse": [
       {
         "_shk_managed": true,
         "hooks": [
           {
-            "command": "shk mask --hook-mode claude-code --post",
+            "command": "shk scan --hook-mode claude-code --post",
             "type": "command"
           }
         ],
-        "matcher": "WebFetch|WebSearch|Bash"
+        "matcher": "WebFetch|WebSearch|Bash|mcp__.*|Skill|Agent"
       }
     ],
     "PreToolUse": [
@@ -32,7 +21,18 @@
             "type": "command"
           }
         ],
-        "matcher": "Read|Write|Bash|WebFetch"
+        "matcher": "Read|Write|Bash|WebFetch|mcp__.*"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "_shk_managed": true,
+        "hooks": [
+          {
+            "command": "shk scan --hook-mode claude-code --fail-on medium",
+            "type": "command"
+          }
+        ]
       }
     ]
   }
