@@ -608,7 +608,7 @@ impl SecretPusher for GcpCliPusher {
     fn exists(&self, cfg: &PushConfig, target: &str) -> Result<bool> {
         let mut cmd = Command::new("gcloud");
         cmd.args(["secrets", "describe", target]);
-        add_gcp_flags(&mut cmd, cfg);
+        add_gcp_read_flags(&mut cmd, cfg);
         run_provider_status(&mut cmd)
     }
 
@@ -628,7 +628,7 @@ impl SecretPusher for GcpCliPusher {
                 "--replication-policy",
                 "automatic",
             ]);
-            add_gcp_flags(&mut create_cmd, cfg);
+            add_gcp_write_flags(&mut create_cmd, cfg);
             run_provider_command(&mut create_cmd)?;
         }
         let mut tmp = write_temp_payload(payload)?;
@@ -636,7 +636,7 @@ impl SecretPusher for GcpCliPusher {
         let mut cmd = Command::new("gcloud");
         cmd.args(["secrets", "versions", "add", target]);
         cmd.arg(data_file);
-        add_gcp_flags(&mut cmd, cfg);
+        add_gcp_write_flags(&mut cmd, cfg);
         let result = run_provider_command(&mut cmd);
         zero_temp_file(&mut tmp, payload.len())?;
         result?;
@@ -652,12 +652,23 @@ impl SecretPusher for GcpCliPusher {
     }
 }
 
-fn add_gcp_flags(cmd: &mut Command, cfg: &PushConfig) {
+fn add_gcp_read_flags(cmd: &mut Command, cfg: &PushConfig) {
+    add_gcp_project_flag(cmd, cfg);
+    if let Some(location) = &cfg.location {
+        cmd.arg("--location").arg(location);
+    }
+}
+
+fn add_gcp_write_flags(cmd: &mut Command, cfg: &PushConfig) {
+    add_gcp_project_flag(cmd, cfg);
+    cmd.arg("--location")
+        .arg(cfg.location.as_deref().unwrap_or("global"));
+}
+
+fn add_gcp_project_flag(cmd: &mut Command, cfg: &PushConfig) {
     if let Some(project) = &cfg.project {
         cmd.arg("--project").arg(project);
     }
-    cmd.arg("--location")
-        .arg(cfg.location.as_deref().unwrap_or("global"));
 }
 
 fn ensure_command_available(bin: &str) -> Result<()> {
@@ -921,6 +932,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn gcp_describe_does_not_default_location() {
+        let cfg = PushConfig {
+            provider: Provider::Gcp,
+            project: Some("demo-project".into()),
+            ..base_cfg(PushMode::Blob)
+        };
+        let mut cmd = Command::new("gcloud");
+
+        add_gcp_read_flags(&mut cmd, &cfg);
+
+        assert_eq!(command_args(&cmd), ["--project", "demo-project"]);
+    }
+
+    #[test]
+    fn gcp_writes_default_location_to_global() {
+        let cfg = PushConfig {
+            provider: Provider::Gcp,
+            project: Some("demo-project".into()),
+            ..base_cfg(PushMode::Blob)
+        };
+        let mut cmd = Command::new("gcloud");
+
+        add_gcp_write_flags(&mut cmd, &cfg);
+
+        assert_eq!(
+            command_args(&cmd),
+            ["--project", "demo-project", "--location", "global"]
+        );
+    }
+
     #[derive(Default)]
     struct MockPusher {
         calls: std::cell::RefCell<Vec<(String, Vec<u8>, bool)>>,
@@ -976,6 +1018,12 @@ mod tests {
             yes: true,
             expected_env: None,
         }
+    }
+
+    fn command_args(cmd: &Command) -> Vec<&str> {
+        cmd.get_args()
+            .map(|arg| arg.to_str().unwrap_or("<non-utf8>"))
+            .collect()
     }
 
     #[test]
