@@ -169,15 +169,28 @@ max_file_size_bytes = 8
 #[test]
 fn scan_reports_binary_skips() {
     let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("image.png");
+    let file = dir.path().join("image.dat");
     fs::write(&file, b"\x89PNG\0secret-ish").unwrap();
 
     let res = scan_path(&file, default_scan_options()).expect("scan binary file");
     assert!(
-        has_finding(&res, "scan.binary_skipped", "image.png"),
+        has_finding(&res, "scan.binary_skipped", "image.dat"),
         "{:?}",
         res.findings
     );
+}
+
+#[test]
+fn scan_default_policy_excludes_static_media_assets() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["favicon.svg", "photo.avif", "clip.mp4", "sound.mp3"] {
+        let file = dir.path().join(name);
+        // not real credential: synthetic detector fixture value only
+        fs::write(&file, "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789").unwrap();
+    }
+
+    let res = scan_path(dir.path(), default_scan_options()).expect("scan media files");
+    assert!(res.findings.is_empty(), "{:?}", res.findings);
 }
 
 #[test]

@@ -33,6 +33,9 @@ pub enum Commands {
         staged: bool,
         #[arg(long)]
         json: bool,
+        /// Show informational skip findings in human output.
+        #[arg(long)]
+        verbose: bool,
         #[arg(long, value_name = "SEVERITY")]
         fail_on: Option<String>,
         /// Include binary files instead of emitting scan.binary_skipped info findings.

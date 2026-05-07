@@ -318,7 +318,7 @@ pub fn run_all(root: &Path, json: bool) -> Result<()> {
         if ai_managed {
             "present"
         } else {
-            "not found — run `shk hooks install-ai` (see AGENTS.md)"
+            "not found — run `shk hooks install-ai`"
         }
     );
     println!();
