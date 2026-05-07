@@ -14,7 +14,7 @@ mod safety;
 mod version_check;
 
 use anyhow::{Context, Result};
-use args::{Cli, Commands, DoctorCmd, HooksCmd, PolicyCmd};
+use args::{Cli, Commands, DoctorCmd, HooksCmd, PolicyCmd, SkillToolArg, SkillsCmd};
 use clap::Parser;
 use shk_core::policy::ColorMode;
 use std::io::Write;
@@ -110,6 +110,26 @@ pub fn run() -> Result<()> {
         },
         Commands::Policy { cmd } => match cmd {
             PolicyCmd::Init { strict, force } => policy_cmd::init(&cwd, strict, force)?,
+        },
+        Commands::Skills { cmd } => match cmd {
+            SkillsCmd::List => commands::skills::list()?,
+            SkillsCmd::Status => commands::skills::status()?,
+            SkillsCmd::Install {
+                tool,
+                global,
+                dry_run,
+                force,
+            } => commands::skills::install(commands::skills::SkillsInstallArgs {
+                tool: tool.map(|t| match t {
+                    SkillToolArg::ClaudeCode => commands::skills::SkillTool::ClaudeCode,
+                    SkillToolArg::Codex => commands::skills::SkillTool::Codex,
+                    SkillToolArg::Cursor => commands::skills::SkillTool::Cursor,
+                    SkillToolArg::All => commands::skills::SkillTool::All,
+                }),
+                global,
+                dry_run,
+                force,
+            })?,
         },
     }
     Ok(())

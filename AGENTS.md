@@ -86,6 +86,12 @@ cargo run -p shk-cli --bin shk -- hooks install
 
 # AI tool hooks (writes project or `~/.cursor` / etc. with `--global`; use `--dry-run` first)
 cargo run -p shk-cli --bin shk -- hooks install-ai --dry-run
+
+# Skills (deploy embedded Claude Code / Codex / Cursor skill to project)
+cargo run -p shk-cli --bin shk -- skills install --dry-run
+cargo run -p shk-cli --bin shk -- skills install                   # .claude/skills/ + .agents/skills/
+cargo run -p shk-cli --bin shk -- skills install --tool claude-code
+cargo run -p shk-cli --bin shk -- skills install --tool codex
 cargo run -p shk-cli --bin shk -- hooks install-ai --tool cursor --audit
 cargo run -p shk-cli --bin shk -- hooks install-ai --tool claude-code --global --dry-run
 

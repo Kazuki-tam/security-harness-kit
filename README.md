@@ -27,6 +27,7 @@ AI coding agents can read project files and run commands. `shk` provides local c
 - Install Git pre-commit hooks.
 - Install managed hooks for Claude Code, Cursor, and Codex.
 - Diagnose ignore file and `.env` safety coverage.
+- Deploy AI agent skills to Claude Code, Codex, and Cursor project directories.
 
 ## Installation
 
@@ -84,6 +85,12 @@ Install AI tool hooks in audit mode:
 shk hooks install-ai --audit
 ```
 
+Install the shk agent skill for Claude Code and Codex/Cursor:
+
+```bash
+shk skills install
+```
+
 Check ignore coverage:
 
 ```bash
@@ -117,6 +124,10 @@ shk doctor env --dotenvx
 shk hooks install
 shk hooks install-ai --dry-run
 shk hooks install-ai --audit
+
+shk skills install
+shk skills install --tool claude-code --global
+shk skills status
 ```
 
 ## Configuration

@@ -1434,3 +1434,52 @@ codex_hooks = true
         "{stdout}"
     );
 }
+
+#[test]
+fn skills_install_all_writes_project_skill_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(shk_bin())
+        .args(["skills", "install"])
+        .current_dir(dir.path())
+        .output()
+        .expect("skills install");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let claude_skill = dir.path().join(".claude/skills/shk.md");
+    let agents_skill = dir.path().join(".agents/skills/shk/SKILL.md");
+    assert!(claude_skill.exists(), "missing {}", claude_skill.display());
+    assert!(agents_skill.exists(), "missing {}", agents_skill.display());
+
+    let body = std::fs::read_to_string(agents_skill).unwrap();
+    assert!(body.contains("name: shk"), "{body}");
+    assert!(body.contains("shk scan"), "{body}");
+}
+
+#[test]
+fn skills_install_all_preflights_existing_destinations() {
+    let dir = tempfile::tempdir().unwrap();
+    let agents_skill = dir.path().join(".agents/skills/shk/SKILL.md");
+    std::fs::create_dir_all(agents_skill.parent().unwrap()).unwrap();
+    std::fs::write(&agents_skill, "existing").unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["skills", "install"])
+        .current_dir(dir.path())
+        .output()
+        .expect("skills install");
+    assert!(
+        !out.status.success(),
+        "stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("already exists"), "{stderr}");
+    assert!(
+        !dir.path().join(".claude/skills/shk.md").exists(),
+        "claude skill should not be partially written"
+    );
+}

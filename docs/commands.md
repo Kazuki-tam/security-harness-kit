@@ -208,3 +208,49 @@ Installed entries:
 Managed entries are tagged with `"_shk_managed": true` or `# shk-managed-start` / `# shk-managed-end`. Re-running replaces managed entries and leaves non-managed entries in place.
 
 In pre-hook mode, `shk` also runs an action guard before content scanning. It blocks sensitive file access, destructive filesystem operations, direct database mutation commands, privilege or system changes, external transfer commands, and package manager operations when they are visible in the hook payload. Tune this with `[action_guard]` in `shk.toml`; `--audit` remains non-blocking.
+
+## `shk skills`
+
+Manage Claude Code / Codex / Cursor skills bundled with `shk`. Skills are embedded in the binary and deployed to project directories on demand.
+
+```bash
+shk skills list
+shk skills status
+shk skills install
+shk skills install --tool claude-code
+shk skills install --tool codex
+shk skills install --tool cursor
+shk skills install --tool all --global
+shk skills install --dry-run
+shk skills install --force
+```
+
+### `shk skills list`
+
+Print the built-in skills available for installation.
+
+### `shk skills status`
+
+Show the installation status for all supported tools (project and global paths).
+
+### `shk skills install`
+
+Install the `shk` skill to the current project's skill directories.
+
+Options:
+
+| Option | Behavior |
+|--------|----------|
+| `--tool <tool>` | Target: `claude-code`, `codex`, `cursor`, or `all` (default: `all`). |
+| `--global` | Write to user-level directories (`~/.claude/skills/` or `~/.agents/skills/`) instead of the project. |
+| `--dry-run` | Print planned paths without writing files. |
+| `--force` | Overwrite an existing skill file. |
+
+Install destinations:
+
+| Tool | Project path | Global path |
+|------|-------------|-------------|
+| `claude-code` | `.claude/skills/shk.md` | `~/.claude/skills/shk.md` |
+| `codex` / `cursor` | `.agents/skills/shk/SKILL.md` | `~/.agents/skills/shk/SKILL.md` |
+
+The Codex and Cursor paths follow the [open agent skills standard](https://agentskills.io). The skill file is embedded in the `shk` binary at build time and requires no network access.
