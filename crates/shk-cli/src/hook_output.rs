@@ -1,7 +1,7 @@
 //! Hook-mode stdout payloads (Cursor / Codex / Claude-compatible).
 
 use crate::args::AiTool;
-use serde_json::json;
+use serde_json::{Value, json};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HookEvent {
@@ -30,6 +30,23 @@ impl HookEvent {
     }
 }
 
+fn permission_output(event: HookEvent, decision: &str, reason: &str) -> Value {
+    json!({
+        "hookSpecificOutput":{
+            "hookEventName": event.json_name(),
+            "permissionDecision": decision,
+            "permissionDecisionReason": reason,
+        }
+    })
+}
+
+fn mask_replacement_message(finding_count: usize, content: &str) -> String {
+    format!(
+        "shk security: {finding_count} sensitive value(s) detected and sanitized. \
+        Use the following redacted version in place of the original tool output:\n\n{content}"
+    )
+}
+
 pub fn deny_stdout_for_event(tool: AiTool, event: HookEvent, reason: &str) -> String {
     match tool {
         AiTool::Cursor => json!({
@@ -48,14 +65,7 @@ pub fn deny_stdout_for_event(tool: AiTool, event: HookEvent, reason: &str) -> St
             }
         })
         .to_string(),
-        AiTool::Codex | AiTool::ClaudeCode => json!({
-            "hookSpecificOutput":{
-                "hookEventName": event.json_name(),
-                "permissionDecision":"deny",
-                "permissionDecisionReason": reason
-            }
-        })
-        .to_string(),
+        AiTool::Codex | AiTool::ClaudeCode => permission_output(event, "deny", reason).to_string(),
     }
 }
 
@@ -73,14 +83,7 @@ pub fn allow_stdout_for_event(tool: AiTool, event: HookEvent, info: Option<&str>
         AiTool::Codex if event == HookEvent::PermissionRequest => json!({}).to_string(),
         AiTool::Codex | AiTool::ClaudeCode => {
             let reason = info.unwrap_or("shk: OK");
-            json!({
-                "hookSpecificOutput":{
-                    "hookEventName": event.json_name(),
-                    "permissionDecision": "allow",
-                    "permissionDecisionReason": reason
-                }
-            })
-            .to_string()
+            permission_output(event, "allow", reason).to_string()
         }
     }
 }
@@ -111,15 +114,10 @@ pub fn mask_stdout(
             out.to_string()
         }
         AiTool::Codex | AiTool::ClaudeCode => {
-            let mut out = json!({
-                "hookSpecificOutput": {
-                    "hookEventName": event.json_name(),
-                    "permissionDecision": "allow",
-                    "permissionDecisionReason": msg,
-                },
-            });
+            let mut out = permission_output(event, "allow", &msg);
             if let Some(content) = masked_content {
-                out["masked_content"] = json!(content);
+                out["hookSpecificOutput"]["output"] =
+                    json!(mask_replacement_message(finding_count, content));
             }
             out.to_string()
         }

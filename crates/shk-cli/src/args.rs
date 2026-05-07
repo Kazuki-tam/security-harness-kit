@@ -88,6 +88,11 @@ pub enum Commands {
         #[command(subcommand)]
         cmd: PolicyCmd,
     },
+    /// Manage AI tool skills bundled with shk
+    Skills {
+        #[command(subcommand)]
+        cmd: SkillsCmd,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
@@ -182,4 +187,36 @@ pub enum PolicyCmd {
 pub enum RedactionMode {
     Full,
     Partial,
+}
+
+#[derive(Subcommand)]
+pub enum SkillsCmd {
+    /// List built-in skills available for installation
+    List,
+    /// Show installation status for all supported tools
+    Status,
+    /// Install shk skill for Claude Code, Codex, and/or Cursor
+    Install {
+        /// Target tool: claude-code, codex, cursor, or all (default: all)
+        #[arg(long, value_enum)]
+        tool: Option<SkillToolArg>,
+        /// Write to user-level directory (~/.claude/skills/ or ~/.agents/skills/)
+        #[arg(long)]
+        global: bool,
+        /// Print planned changes without writing
+        #[arg(long)]
+        dry_run: bool,
+        /// Overwrite an existing skill file
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum SkillToolArg {
+    ClaudeCode,
+    Codex,
+    Cursor,
+    All,
 }

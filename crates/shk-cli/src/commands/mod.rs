@@ -2,3 +2,4 @@
 
 pub mod mask;
 pub mod scan;
+pub mod skills;

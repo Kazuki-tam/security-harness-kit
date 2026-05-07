@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -16,6 +17,18 @@ const PATH_KEYS: &[&str] = &[
     "uri",
     "fileName",
 ];
+const MAX_HOOK_TEXT_BYTES: usize = 4096 * 512;
+const PRE_TEXT_KEYS: &[&str] = &[
+    "prompt", "text", "content", "command", "stdin", "args", "url",
+];
+const CODEX_POST_TEXT_KEYS: &[&str] = &[
+    "stdout", "stderr", "output", "result", "content", "text", "body",
+];
+const CLAUDE_POST_TEXT_KEYS: &[&str] = &[
+    "stdout", "stderr", "content", "response", "text", "body", "data", "result", "message",
+    "messages", "items", "value",
+];
+const CURSOR_POST_TEXT_KEYS: &[&str] = &["content", "text", "command", "shell_command", "args"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AiHookTool {
@@ -76,8 +89,9 @@ pub fn stdin_to_hook_body(
     text_priority_chunks(&v, post, tool, &mut blobs);
 
     if blobs.is_empty() {
-        collect_large_strings(&v, &mut blobs, 96, 4096 * 512);
+        collect_large_strings(&v, &mut blobs, 96, MAX_HOOK_TEXT_BYTES);
     }
+    dedup_blobs(&mut blobs);
 
     let body = if blobs.is_empty() {
         "{}".into()
@@ -88,6 +102,11 @@ pub fn stdin_to_hook_body(
     let disp = display.unwrap_or_else(|| tool.virtual_path_label().to_string());
 
     Ok((disp, body))
+}
+
+fn dedup_blobs(blobs: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    blobs.retain(|s| seen.insert(s.clone()));
 }
 
 fn rel_from_repo(repo_root: &Path, abs: &Path) -> String {
@@ -171,21 +190,19 @@ fn scan_path_keys(v: &Value, out: &mut Vec<String>) {
 }
 
 fn text_priority_chunks(v: &Value, post: bool, tool: AiHookTool, blobs: &mut Vec<String>) {
-    let priority: &[&str] = if post {
-        match tool {
-            AiHookTool::Codex => &[
-                "stdout", "stderr", "output", "result", "content", "text", "body",
-            ],
-            AiHookTool::ClaudeCode => &["stdout", "stderr", "content", "response", "text", "body"],
-            AiHookTool::Cursor => &["content", "text", "command", "shell_command", "args"],
-        }
-    } else {
-        &[
-            "prompt", "text", "content", "command", "stdin", "args", "url",
-        ]
-    };
+    grab_strings_for_keys_deep(v, priority_text_keys(post, tool), blobs);
+}
 
-    grab_strings_for_keys_deep(v, priority, blobs);
+fn priority_text_keys(post: bool, tool: AiHookTool) -> &'static [&'static str] {
+    if !post {
+        return PRE_TEXT_KEYS;
+    }
+
+    match tool {
+        AiHookTool::Codex => CODEX_POST_TEXT_KEYS,
+        AiHookTool::ClaudeCode => CLAUDE_POST_TEXT_KEYS,
+        AiHookTool::Cursor => CURSOR_POST_TEXT_KEYS,
+    }
 }
 
 fn grab_strings_for_keys_deep(v: &Value, keys: &[&str], acc: &mut Vec<String>) {
@@ -193,7 +210,7 @@ fn grab_strings_for_keys_deep(v: &Value, keys: &[&str], acc: &mut Vec<String>) {
         Value::Object(map) => {
             for (k, val) in map {
                 if keys.iter().any(|x| x == &k.as_str()) {
-                    push_string_leaf(val, acc);
+                    push_strings_from_value(val, acc);
                 }
                 grab_strings_for_keys_deep(val, keys, acc);
             }
@@ -207,24 +224,33 @@ fn grab_strings_for_keys_deep(v: &Value, keys: &[&str], acc: &mut Vec<String>) {
     }
 }
 
-fn push_string_leaf(v: &Value, acc: &mut Vec<String>) {
+fn push_strings_from_value(v: &Value, acc: &mut Vec<String>) {
     match v {
-        Value::String(s) if s.len() > 48 => acc.push(s.clone()),
+        Value::String(s) => push_hook_text(s, acc, MAX_HOOK_TEXT_BYTES),
         Value::Array(items) => {
             for x in items {
-                if let Some(s) = x.as_str() {
-                    acc.push(s.to_string());
-                }
+                push_strings_from_value(x, acc);
+            }
+        }
+        Value::Object(map) => {
+            for val in map.values() {
+                push_strings_from_value(val, acc);
             }
         }
         _ => {}
     }
 }
 
+fn push_hook_text(s: &str, acc: &mut Vec<String>, max_total_bytes: usize) {
+    if !s.trim().is_empty() && acc_chars_len(acc) < max_total_bytes {
+        acc.push(s.to_string());
+    }
+}
+
 fn collect_large_strings(v: &Value, acc: &mut Vec<String>, min_len: usize, max_total_bytes: usize) {
     match v {
         Value::String(s) if s.len() >= min_len && acc_chars_len(acc) < max_total_bytes => {
-            acc.push(s.clone());
+            push_hook_text(s, acc, max_total_bytes);
         }
         Value::Object(map) => {
             for (_k, val) in map {
@@ -242,4 +268,83 @@ fn collect_large_strings(v: &Value, acc: &mut Vec<String>, min_len: usize, max_t
 
 fn acc_chars_len(acc: &[String]) -> usize {
     acc.iter().map(|s| s.len()).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_post_extracts_short_value_fields() {
+        let stdin = serde_json::json!({
+            "tool_name": "mcp__demo__read",
+            "tool_response": {
+                "data": {
+                    "value": "short-sensitive-token"
+                }
+            }
+        })
+        .to_string();
+
+        let (_display, body) = stdin_to_hook_body(
+            AiHookTool::ClaudeCode,
+            true,
+            &stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert!(body.contains("short-sensitive-token"), "{body}");
+    }
+
+    #[test]
+    fn claude_post_extracts_nested_message_items() {
+        let stdin = serde_json::json!({
+            "tool_response": {
+                "messages": [
+                    {
+                        "role": "tool",
+                        "content": [
+                            { "type": "text", "text": "nested tool result" }
+                        ]
+                    }
+                ]
+            }
+        })
+        .to_string();
+
+        let (_display, body) = stdin_to_hook_body(
+            AiHookTool::ClaudeCode,
+            true,
+            &stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert!(body.contains("nested tool result"), "{body}");
+    }
+
+    #[test]
+    fn priority_chunks_are_deduplicated() {
+        let stdin = serde_json::json!({
+            "data": {
+                "content": "same text",
+                "items": ["same text"]
+            }
+        })
+        .to_string();
+
+        let (_display, body) = stdin_to_hook_body(
+            AiHookTool::ClaudeCode,
+            true,
+            &stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert_eq!(body.matches("same text").count(), 1, "{body}");
+    }
 }
