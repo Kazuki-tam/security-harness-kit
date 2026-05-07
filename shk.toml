@@ -1,0 +1,136 @@
+[scan]
+include = ["**/*"]
+exclude = [
+  ".git/**",
+  "node_modules/**",
+  "dist/**",
+  "build/**",
+  "coverage/**",
+  "**/*.svg",
+  "**/*.png",
+  "**/*.jpg",
+  "**/*.jpeg",
+  "**/*.gif",
+  "**/*.webp",
+  "**/*.ico",
+  "**/*.avif",
+  "**/*.bmp",
+  "**/*.tif",
+  "**/*.tiff",
+  "**/*.mp4",
+  "**/*.m4v",
+  "**/*.mov",
+  "**/*.webm",
+  "**/*.mkv",
+  "**/*.avi",
+  "**/*.ogv",
+  "**/*.mp3",
+  "**/*.m4a",
+  "**/*.wav",
+  "**/*.flac",
+  "**/*.aac",
+  "**/*.ogg",
+  "**/*.opus",
+  "**/*.woff",
+  "**/*.woff2",
+  "**/*.ttf",
+  "**/*.otf",
+  "**/*.eot"
+]
+max_file_size_bytes = 1048576
+binary_detection_bytes = 8192
+follow_symlinks = false
+include_binary = false
+fancy_regex_timeout_ms_per_file = 100
+
+[rules]
+secrets = true
+pii = true
+pii_languages = ["en", "ja"]
+env = true
+internal_terms = false
+
+[thresholds]
+default_fail_on = "high"
+scan_fail_on = "high"
+pre_commit_fail_on = "high"
+
+[mask]
+mode = "strict"
+redaction = "full"
+# preserve_prefix = 4 # only when redaction = "partial"
+# preserve_suffix = 4
+
+[action_guard]
+enabled = true
+profile = "recommended" # minimal | recommended | strict
+allow = []
+deny = []
+
+# Project-specific sensitive terms. Patterns use Rust regex syntax.
+# [[custom_rules]]
+# id = "internal.codename"
+# pattern = "ProjectNebula|社外秘|CONFIDENTIAL_CLIENT_X"
+# severity = "high"
+# kind = "internal"
+# message = "Internal confidential term detected"
+
+[doctor.ignore]
+required_patterns = [
+  ".env",
+  ".env.*",
+  "!.env.example",
+  "secrets/**",
+  "credentials/**",
+  "*.pem",
+  "*.key",
+  "*.p12",
+  "*.mobileprovision",
+  "*.log"
+]
+
+# Allowlist / inline suppressions (spec §5.3). Prefer path-scoped rows; use value_hash for value-specific cases.
+# Inline: # shk-ignore-next-line <rule_id>
+
+[[allowlist]]
+path = "fixtures/pii/**"
+reason = "Intentional PII detection demo fixtures"
+
+[[allowlist]]
+path = "fixtures/pii.txt"
+reason = "Intentional PII detection demo fixture"
+
+[[allowlist]]
+path = "fixtures/secrets/**"
+reason = "Intentional secrets detection demo fixtures"
+
+[[allowlist]]
+path = "crates/shk-rules/src/lib.rs"
+reason = "Built-in rule test block contains synthetic values"
+
+[[allowlist]]
+path = "crates/shk-core/tests/**"
+reason = "Synthetic values in core test assertions"
+
+[[allowlist]]
+path = "crates/shk-cli/tests/**"
+reason = "Synthetic values in CLI test assertions"
+
+[[allowlist]]
+rule_id = "pii.email"
+path = "crates/shk-core/src/finding.rs"
+reason = "Example email in doc/test comment"
+
+[[allowlist]]
+rule_id = "pii.email"
+path = "crates/shk-core/src/suppression.rs"
+reason = "Example email in doc/test comment"
+
+[[allowlist]]
+path = "crates/shk-core/src/masker.rs"
+reason = "Synthetic values in masker test helper"
+
+[[allowlist]]
+rule_id = "secret.openai_api_key"
+path = "crates/shk-core/src/scanner.rs"
+reason = "Synthetic key in scanner test helper"

@@ -117,6 +117,10 @@ fn run_hook_mode(
         safety::require_project_policy(&repo_root, "scan --audit")?;
     }
 
+    if hook_event == hook_output::HookEvent::UserPromptSubmit {
+        return run_user_prompt_mode(tool, audit, fail_on, &repo_root, stdin_trim);
+    }
+
     let (policy, _) = Policy::load_from_dir(&repo_root)?;
     let action_guard_config = action_guard_config_from_policy(&policy);
 
@@ -134,22 +138,12 @@ fn run_hook_mode(
         cwd,
         &repo_root,
     )?;
-    let fail_on_override = parse_fail_on(fail_on.as_deref())?;
-
-    let opts = ScanOptions {
-        staged: false,
-        json: false,
-        fail_on_override,
-        use_pre_commit_threshold: matches!(tool, AiTool::Cursor) && !post,
-        include_context: false,
-        include_binary: false,
-        follow_symlinks: false,
-    };
+    let opts = hook_scan_options(fail_on.as_deref(), matches!(tool, AiTool::Cursor) && !post)?;
 
     let res = scan_string(&repo_root, &disp, &body, opts).context("hook scan failed")?;
 
     if audit {
-        emit_audit_hook(&repo_root, tool, post, &disp, &res)?;
+        emit_audit_hook(&repo_root, tool, hook_event, &disp, &res)?;
         println!(
             "{}",
             hook_output::allow_stdout_for_event(
@@ -206,6 +200,59 @@ fn should_run_action_guard(post: bool, audit: bool) -> bool {
     !post && !audit
 }
 
+fn run_user_prompt_mode(
+    tool: AiTool,
+    audit: bool,
+    fail_on: Option<String>,
+    repo_root: &Path,
+    stdin_trim: &str,
+) -> Result<()> {
+    let event = hook_output::HookEvent::UserPromptSubmit;
+    let prompt = shk_integrations::extract_user_prompt(stdin_trim).unwrap_or_default();
+
+    if prompt.is_empty() {
+        println!("{}", hook_output::allow_stdout_for_event(tool, event, None));
+        return Ok(());
+    }
+
+    let opts = hook_scan_options(fail_on.as_deref(), false)?;
+
+    let res = scan_string(repo_root, "<user-prompt>", prompt.as_ref(), opts)
+        .context("user-prompt scan failed")?;
+
+    if audit {
+        emit_audit_hook(repo_root, tool, event, "<user-prompt>", &res)?;
+        println!(
+            "{}",
+            hook_output::allow_stdout_for_event(
+                tool,
+                event,
+                Some("shk audit: non-blocking (see .shk/audit.log)"),
+            )
+        );
+        return Ok(());
+    }
+
+    if res.should_fail() {
+        return deny_hook(tool, event, HOOK_DENY_REASON_DEFAULT);
+    }
+
+    println!("{}", hook_output::allow_stdout_for_event(tool, event, None));
+    Ok(())
+}
+
+fn hook_scan_options(fail_on: Option<&str>, use_pre_commit_threshold: bool) -> Result<ScanOptions> {
+    Ok(ScanOptions {
+        staged: false,
+        json: false,
+        fail_on_override: parse_fail_on(fail_on)?,
+        use_pre_commit_threshold,
+        include_context: false,
+        include_binary: false,
+        follow_symlinks: false,
+    })
+}
+
 fn deny_hook(tool: AiTool, event: hook_output::HookEvent, reason: &str) -> Result<()> {
     println!(
         "{}",
@@ -227,6 +274,7 @@ fn hook_event_from_stdin(stdin: &str, post: bool) -> hook_output::HookEvent {
         .and_then(serde_json::Value::as_str)
     {
         Some("PermissionRequest") => hook_output::HookEvent::PermissionRequest,
+        Some("UserPromptSubmit") => hook_output::HookEvent::UserPromptSubmit,
         _ => hook_output::HookEvent::PreToolUse,
     }
 }
@@ -234,7 +282,7 @@ fn hook_event_from_stdin(stdin: &str, post: bool) -> hook_output::HookEvent {
 fn emit_audit_hook(
     repo_root: &Path,
     tool: AiTool,
-    post: bool,
+    event: hook_output::HookEvent,
     disp: &str,
     res: &shk_core::scanner::ScanResult,
 ) -> Result<()> {
@@ -243,7 +291,7 @@ fn emit_audit_hook(
         repo_root,
         serde_json::json!({
             "tool": tool.kebab_str(),
-            "hook": if post {"post"} else {"pre"},
+            "hook": audit_hook_name(event),
             "display_path": disp,
             "finding_count": res.findings.len(),
             "suppressed": res.suppressed,
@@ -255,6 +303,14 @@ fn emit_audit_hook(
         hook_output::audit_note(res.findings.len(), res.suppressed, max_sev),
     );
     Ok(())
+}
+
+fn audit_hook_name(event: hook_output::HookEvent) -> &'static str {
+    match event {
+        hook_output::HookEvent::PostToolUse => "post",
+        hook_output::HookEvent::UserPromptSubmit => "user-prompt",
+        hook_output::HookEvent::PreToolUse | hook_output::HookEvent::PermissionRequest => "pre",
+    }
 }
 
 fn fs_canonical_or_same(p: PathBuf) -> PathBuf {

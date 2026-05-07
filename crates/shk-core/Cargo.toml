@@ -8,7 +8,7 @@ description = "Core scanning, masking, and policy for security-harness-kit"
 publish = false
 
 [dependencies]
-shk-rules = { version = "0.1.2", path = "../shk-rules" }
+shk-rules = { version = "0.1.3", path = "../shk-rules" }
 anyhow.workspace = true
 ignore.workspace = true
 rayon.workspace = true

@@ -531,6 +531,20 @@ fn hooks_install_ai_claude_apply_deny_merges_without_duplicates() {
         deny.iter().any(|v| v == "Bash(psql:*)"),
         "database guard deny should be installed: {deny:?}"
     );
+    let prompt_hooks = settings["hooks"]["UserPromptSubmit"].as_array().unwrap();
+    assert_eq!(
+        prompt_hooks.len(),
+        1,
+        "managed prompt hook should be deduplicated: {prompt_hooks:?}"
+    );
+    assert_eq!(prompt_hooks[0]["_shk_managed"], true);
+    assert!(
+        prompt_hooks[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("--fail-on medium"),
+        "prompt hook should use medium threshold: {prompt_hooks:?}"
+    );
 }
 
 #[test]
@@ -731,6 +745,42 @@ fn hook_mode_claude_allows_db_select_action() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+#[test]
+fn hook_mode_claude_user_prompt_blocks_medium_pii() {
+    use std::io::Write;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Please use customer email admin@example.com in the demo"
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", "--hook-mode", "claude-code", "--fail-on", "medium"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("prompt hook scan");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        stdout["hookSpecificOutput"]["hookEventName"],
+        "UserPromptSubmit"
+    );
+    assert_eq!(stdout["hookSpecificOutput"]["permissionDecision"], "deny");
 }
 
 #[test]

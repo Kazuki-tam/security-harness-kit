@@ -31,13 +31,26 @@ fn resolve_ai_config_path(tool: AiTool, cwd: &Path, global: bool) -> Result<Path
 }
 
 fn hook_scan_cli_command(tool: AiTool, audit: bool, post: bool) -> String {
+    hook_scan_cli_command_with_fail_on(tool, audit, post, None)
+}
+
+fn hook_scan_cli_command_with_fail_on(
+    tool: AiTool,
+    audit: bool,
+    post: bool,
+    fail_on: Option<&str>,
+) -> String {
     let suf_audit = if audit { " --audit" } else { "" };
     let suf_post = if post { " --post" } else { "" };
+    let suf_fail_on = fail_on
+        .map(|severity| format!(" --fail-on {severity}"))
+        .unwrap_or_default();
     format!(
-        "shk scan --hook-mode {}{}{}",
+        "shk scan --hook-mode {}{}{}{}",
         tool.kebab_str(),
         suf_audit,
-        suf_post
+        suf_post,
+        suf_fail_on,
     )
 }
 
@@ -138,6 +151,8 @@ fn merge_claude_permissions_deny(root: &mut Value) -> Result<usize> {
 fn apply_claude(path: &Path, audit: bool, dry_run: bool, apply_deny: bool) -> Result<String> {
     let pre = hook_scan_cli_command(AiTool::ClaudeCode, audit, false);
     let post = hook_scan_cli_command(AiTool::ClaudeCode, audit, true);
+    let user_prompt =
+        hook_scan_cli_command_with_fail_on(AiTool::ClaudeCode, audit, false, Some("medium"));
 
     let mut root = if path.is_file() {
         load_json(path)?
@@ -155,7 +170,12 @@ fn apply_claude(path: &Path, audit: bool, dry_run: bool, apply_deny: bool) -> Re
         "matcher": "WebFetch|WebSearch|Bash",
         "hooks": [{ "type": "command", "command": post }]
     });
+    let user_prompt_block = json!({
+        "_shk_managed": true,
+        "hooks": [{ "type": "command", "command": user_prompt }]
+    });
 
+    push_managed_claude(&mut root, "UserPromptSubmit", user_prompt_block)?;
     push_managed_claude(&mut root, "PreToolUse", pre_block)?;
     push_managed_claude(&mut root, "PostToolUse", post_block)?;
     let deny_added = if apply_deny {
@@ -167,7 +187,7 @@ fn apply_claude(path: &Path, audit: bool, dry_run: bool, apply_deny: bool) -> Re
     save_json_formatted(path, &root, dry_run)?;
     Ok(if dry_run {
         format!(
-            "dry-run: would write managed PreToolUse/PostToolUse blocks (audit={audit}, applyDeny={apply_deny}, denyAdded={deny_added})"
+            "dry-run: would write managed UserPromptSubmit/PreToolUse/PostToolUse blocks (audit={audit}, applyDeny={apply_deny}, denyAdded={deny_added})"
         )
     } else {
         format!(
