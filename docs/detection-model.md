@@ -146,3 +146,5 @@ Binary or non-UTF-8 input is not scanned by `shk mask`. Human output passes it t
 ## Audit Log
 
 `shk scan --hook-mode <tool> --audit` writes JSON lines to `.shk/audit.log`. Audit entries contain metadata such as tool name, hook phase, display path, finding count, suppressed count, and maximum severity. They do not contain raw matched values.
+
+`shk secrets push --audit` also writes metadata-only JSON lines to `.shk/audit.log`. Secret push audit entries include fields such as provider, mode, source label, byte count, payload SHA-256 hash, target label, key counts, operation, and status. They do not contain raw dotenv values or per-key secret payloads.

@@ -15,7 +15,8 @@ mod version_check;
 
 use anyhow::{Context, Result};
 use args::{
-    Cli, Commands, DoctorCmd, DotenvxCmd, EnvCmd, HooksCmd, PolicyCmd, SkillToolArg, SkillsCmd,
+    Cli, Commands, DoctorCmd, DotenvxCmd, EnvCmd, HooksCmd, PolicyCmd, SecretsCmd, SkillToolArg,
+    SkillsCmd,
 };
 use clap::Parser;
 use shk_core::policy::ColorMode;
@@ -140,6 +141,9 @@ pub fn run() -> Result<()> {
                 DotenvxCmd::Delete(args) => commands::env::dotenvx_delete(&cwd, args)?,
                 DotenvxCmd::Run(args) => commands::env::dotenvx_run(&cwd, args)?,
             },
+        },
+        Commands::Secrets { cmd } => match cmd {
+            SecretsCmd::Push(args) => commands::secrets::push(&cwd, args)?,
         },
     }
     Ok(())

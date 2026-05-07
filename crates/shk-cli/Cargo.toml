@@ -19,8 +19,9 @@ name = "security-harness-kit"
 path = "src/bin/security-harness-kit.rs"
 
 [dependencies]
-shk-core = { version = "0.1.6", path = "../shk-core" }
-shk-integrations = { version = "0.1.6", path = "../shk-integrations" }
+shk-core = { version = "0.1.7", path = "../shk-core" }
+shk-rules = { version = "0.1.7", path = "../shk-rules" }
+shk-integrations = { version = "0.1.7", path = "../shk-integrations" }
 anyhow.workspace = true
 clap.workspace = true
 serde = { workspace = true, features = ["derive"] }
@@ -31,7 +32,8 @@ regex.workspace = true
 toml.workspace = true
 ureq.workspace = true
 zeroize.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"] }
 
 [dev-dependencies]
-tempfile.workspace = true

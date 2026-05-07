@@ -16,7 +16,7 @@ shk init --strict
 
 ## Policy Reference
 
-Default policy shape:
+Default policy shape, plus an optional `secrets push` profile example:
 
 ```toml
 [scan]
@@ -101,6 +101,15 @@ required_patterns = [
   "*.mobileprovision",
   "*.log"
 ]
+
+# Optional profiles for `shk secrets push`.
+[secrets.profiles.prod]
+provider = "aws"
+mode = "blob"
+target = "app/prod/dotenv"
+source = ".env.production"
+audit = true
+confirm = true
 ```
 
 `shk init --strict` uses the same structure but sets `default_fail_on`, `scan_fail_on`, and `pre_commit_fail_on` to `medium`.
@@ -162,6 +171,57 @@ The `--fail-on` CLI option overrides the configured threshold for that command i
 Action patterns use tool-like strings with `*` wildcards, such as `Bash(psql:*)`, `Bash(kubectl delete:*)`, `Read(.env)`, or `Write(tokens/*.json)`. `allow` is checked before built-in and custom deny rules.
 
 The `strict` profile also blocks opaque execution forms such as `bash -c`, `sh -c`, `python -c`, `node -e`, `ruby -e`, and `perl -e` instead of trying to fully interpret embedded scripts.
+
+## Secret Manager Profiles
+
+`[secrets.profiles.<name>]` stores reusable defaults for `shk secrets push`. CLI flags override profile values.
+
+Blob mode stores the whole dotenv file as one provider secret:
+
+```toml
+[secrets.profiles.prod]
+provider = "aws"
+mode = "blob"
+target = "app/prod/dotenv"
+source = ".env.production"
+region = "ap-northeast-1"
+audit = true
+confirm = true
+create_if_missing = false
+expected_env = "production"
+```
+
+Per-key mode stores each dotenv key under a target prefix:
+
+```toml
+[secrets.profiles.prod-keys]
+provider = "gcp"
+mode = "per-key"
+target_prefix = "app/prod/"
+source = ".env.keys"
+project = "my-gcp-project"
+location = "global"
+audit = true
+```
+
+Supported profile keys:
+
+| Key | Behavior |
+|-----|----------|
+| `provider` | `aws` or `gcp`. |
+| `mode` | `blob` or `per-key`. Defaults to `blob` when omitted. |
+| `target` | Blob mode target secret name. |
+| `target_prefix` | Per-key mode target prefix. |
+| `source` | Source dotenv file, resolved relative to the project root when relative. |
+| `region` | AWS region. Otherwise AWS CLI environment/config is used. |
+| `project` | GCP project. Otherwise gcloud environment/config is used. |
+| `location` | GCP location. Defaults to `global`. |
+| `audit` | Append metadata-only `.shk/audit.log` entries when `true`. |
+| `confirm` | Prompt before writing when `true`. |
+| `create_if_missing` | Create provider secrets when missing. |
+| `expected_env` | Lint hint used for environment-like values such as `NODE_ENV`. |
+
+Unknown profile fields are rejected. Raw secret values must not be placed in `shk.toml`; keep values in the source dotenv file or provider secret manager.
 
 ## Custom Rules
 
