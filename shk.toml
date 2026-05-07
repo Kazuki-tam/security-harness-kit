@@ -62,7 +62,7 @@ redaction = "full"
 # preserve_suffix = 4
 
 [action_guard]
-enabled = true
+enabled = false
 profile = "recommended" # minimal | recommended | strict
 allow = []
 deny = []

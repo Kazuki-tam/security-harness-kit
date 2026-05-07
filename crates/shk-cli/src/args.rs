@@ -98,6 +98,11 @@ pub enum Commands {
         #[command(subcommand)]
         cmd: EnvCmd,
     },
+    /// Push dotenv payloads into external secret managers
+    Secrets {
+        #[command(subcommand)]
+        cmd: SecretsCmd,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
@@ -277,6 +282,136 @@ pub struct DotenvxRunArgs {
     /// Command to run after `dotenvx run --`.
     #[arg(last = true, required = true)]
     pub command: Vec<String>,
+}
+
+#[derive(Subcommand)]
+pub enum SecretsCmd {
+    /// Push a dotenv file to AWS Secrets Manager or GCP Secret Manager
+    Push(SecretsPushArgs),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum SecretProviderArg {
+    Aws,
+    Gcp,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum SecretsPushModeArg {
+    Blob,
+    PerKey,
+}
+
+#[derive(Args)]
+pub struct SecretsPushArgs {
+    /// Read provider settings from [secrets.profiles.<name>] in shk.toml.
+    #[arg(long)]
+    pub profile: Option<String>,
+    /// Secret manager provider.
+    #[arg(long, value_enum)]
+    pub provider: Option<SecretProviderArg>,
+    /// Blob mode target secret name.
+    #[arg(long, conflicts_with = "target_prefix")]
+    pub target: Option<String>,
+    /// Per-key mode target prefix.
+    #[arg(long, conflicts_with = "target")]
+    pub target_prefix: Option<String>,
+    /// Source dotenv file.
+    #[arg(long = "from", value_name = "FILE")]
+    pub source: Option<PathBuf>,
+    /// Push mode: blob stores the whole file; per-key stores each dotenv key separately.
+    #[arg(long, value_enum)]
+    pub mode: Option<SecretsPushModeArg>,
+    /// Backward-compatible shorthand for --mode per-key.
+    #[arg(long, hide = true, conflicts_with = "mode")]
+    pub per_key: bool,
+    /// Print planned writes without invoking provider CLIs.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Append metadata-only audit entries.
+    #[arg(long)]
+    pub audit: bool,
+    /// Prompt before writing.
+    #[arg(long)]
+    pub confirm: bool,
+    /// Skip confirmation prompts.
+    #[arg(long)]
+    pub yes: bool,
+    /// Create provider secrets when they are missing.
+    #[arg(long)]
+    pub create_if_missing: bool,
+    /// Treat lint warnings as failures.
+    #[arg(long)]
+    pub strict: bool,
+    /// Skip the pre-push PII scan.
+    #[arg(long)]
+    pub no_scan: bool,
+    /// AWS region. Otherwise delegated to AWS CLI environment/config.
+    #[arg(long)]
+    pub region: Option<String>,
+    /// GCP project. Otherwise delegated to gcloud environment/config.
+    #[arg(long)]
+    pub project: Option<String>,
+    /// GCP location, defaulting to global.
+    #[arg(long)]
+    pub location: Option<String>,
+    /// Expected environment name used by dotenv lint checks.
+    #[arg(long)]
+    pub expected_env: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::{Parser, error::ErrorKind};
+
+    #[test]
+    fn secrets_push_accepts_per_key_shorthand() {
+        let cli = Cli::try_parse_from(["shk", "secrets", "push", "--per-key"])
+            .expect("--per-key should remain available as a compatibility shorthand");
+
+        let Commands::Secrets {
+            cmd: SecretsCmd::Push(args),
+        } = cli.command
+        else {
+            panic!("expected secrets push command");
+        };
+
+        assert!(args.per_key);
+        assert_eq!(args.mode, None);
+    }
+
+    #[test]
+    fn secrets_push_rejects_per_key_shorthand_with_mode() {
+        let err =
+            match Cli::try_parse_from(["shk", "secrets", "push", "--mode", "per-key", "--per-key"])
+            {
+                Ok(_) => panic!("--mode and --per-key should not both be accepted"),
+                Err(err) => err,
+            };
+
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn secrets_push_rejects_target_and_target_prefix_together() {
+        let err = match Cli::try_parse_from([
+            "shk",
+            "secrets",
+            "push",
+            "--target",
+            "app/prod",
+            "--target-prefix",
+            "app/prod/",
+        ]) {
+            Ok(_) => panic!("--target and --target-prefix should not both be accepted"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]

@@ -168,7 +168,10 @@ shk env dotenvx import-keys .env.keys
 shk env dotenvx list
 shk env dotenvx run -- npm test
 shk env dotenvx run -f .env.production -- npm start
+shk env dotenvx run --env production -- npm start
+shk env dotenvx run --key DOTENV_PRIVATE_KEY_PRODUCTION -- npm start
 shk env dotenvx delete --env production
+shk env dotenvx delete --key DOTENV_PRIVATE_KEY_PRODUCTION
 shk env dotenvx delete --all
 ```
 
@@ -177,6 +180,69 @@ This command group uses the platform credential store through the `keyring` crat
 `import-keys` reads only `DOTENV_PRIVATE_KEY` and `DOTENV_PRIVATE_KEY_<ENV>` entries from a `.env.keys`-style file. Raw key values are never printed. `run` reads the stored keys for the current project and invokes `dotenvx run -- <command>` with those values present only in the child process environment. `delete` requires an explicit target: `--all`, `--key <DOTENV_PRIVATE_KEY*>`, or `--env <name>`.
 
 There is intentionally no `export` command because printing or writing raw private keys defeats the purpose of moving `.env.keys` into the OS credential store.
+
+Run options:
+
+| Option | Behavior |
+|--------|----------|
+| `--dotenvx-bin <bin>` | dotenvx executable to invoke. Defaults to `dotenvx`. |
+| `-f, --file <file>` | Pass one or more dotenvx env files to `dotenvx run`. |
+| `--key <DOTENV_PRIVATE_KEY*>` | Inject only the named stored private key. Repeatable. |
+| `--env <name>` | Inject `DOTENV_PRIVATE_KEY_<NAME>`. Use `default` for `DOTENV_PRIVATE_KEY`. Repeatable. |
+| `-- <command>` | Command to run through `dotenvx run`. Required. |
+
+Delete options:
+
+| Option | Behavior |
+|--------|----------|
+| `--all` | Delete every stored dotenvx private key for the current project. |
+| `--key <DOTENV_PRIVATE_KEY*>` | Delete one exact stored private key. |
+| `--env <name>` | Delete `DOTENV_PRIVATE_KEY_<NAME>`. Use `default` for `DOTENV_PRIVATE_KEY`. |
+
+## `shk secrets push`
+
+Push a dotenv payload into AWS Secrets Manager or GCP Secret Manager without printing raw secret values.
+
+```bash
+# Store the whole dotenv file as one secret.
+shk secrets push --provider aws --target app/prod/dotenv --from .env.production
+
+# Store each dotenv key as a separate secret under a target prefix.
+shk secrets push --provider gcp --mode per-key --target-prefix app/prod/ --from .env.keys
+
+# Preview writes and target names without invoking provider CLIs.
+shk secrets push --profile prod --dry-run
+```
+
+Options:
+
+| Option | Behavior |
+|--------|----------|
+| `--profile <name>` | Read defaults from `[secrets.profiles.<name>]` in `shk.toml`. CLI flags override profile values. |
+| `--provider <aws|gcp>` | Secret manager provider. Required unless configured by profile. |
+| `--target <name>` | Blob mode target secret name. Cannot be combined with `--target-prefix`. |
+| `--target-prefix <prefix>` | Per-key mode target prefix. Cannot be combined with `--target`. |
+| `--from <file>` | Source dotenv file. Required unless configured by profile. |
+| `--mode <blob|per-key>` | `blob` stores the full file as one payload. `per-key` stores each dotenv key separately. Defaults to `blob`. |
+| `--dry-run` | Print planned writes, target names, and metadata without calling AWS or GCP. |
+| `--audit` | Append metadata-only entries to `.shk/audit.log`. Raw values are not logged. |
+| `--confirm` | Prompt before writing. In non-interactive environments, pass `--yes` or use `--dry-run`. |
+| `--yes` | Skip confirmation prompts. |
+| `--create-if-missing` | Create provider secrets when they do not already exist. |
+| `--strict` | Treat dotenv lint warnings as failures. |
+| `--no-scan` | Skip the pre-push PII scan. Use only for an explicit exception. |
+| `--region <region>` | AWS region. Otherwise AWS CLI environment/config is used. |
+| `--project <project>` | GCP project. Otherwise gcloud environment/config is used. |
+| `--location <location>` | GCP location. Defaults to `global`. |
+| `--expected-env <name>` | Lint hint for values such as `NODE_ENV`. |
+
+Behavior notes:
+
+- `shk secrets push` requires a project root and reads `shk.toml` from that root.
+- The source file is scanned for PII before push unless `--no-scan` is passed.
+- Blob mode requires `--target`; per-key mode requires `--target-prefix`.
+- Per-key mode accepts dotenv-style `KEY=value` lines, rejects duplicate keys, and validates keys as `[A-Z_][A-Z0-9_]*`.
+- AWS and GCP writes are performed through the official `aws` and `gcloud` CLIs. Arguments are passed directly, not through a shell.
 
 ## `shk hooks install`
 

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -401,6 +402,8 @@ pub struct Policy {
     pub action_guard: ActionGuardSection,
     #[serde(default)]
     pub doctor: DoctorSection,
+    #[serde(default)]
+    pub secrets: SecretsSection,
     /// Path-based / hash-based suppression (also see inline `# shk-ignore` in scanner).
     #[serde(default)]
     pub allowlist: Vec<AllowlistEntry>,
@@ -413,6 +416,41 @@ pub struct Policy {
 pub struct DoctorSection {
     #[serde(default)]
     pub ignore: DoctorIgnoreSection,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct SecretsSection {
+    #[serde(default)]
+    pub profiles: BTreeMap<String, SecretProfile>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SecretProfile {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub target_prefix: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub region: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+    #[serde(default)]
+    pub audit: Option<bool>,
+    #[serde(default)]
+    pub confirm: Option<bool>,
+    #[serde(default)]
+    pub create_if_missing: Option<bool>,
+    #[serde(default)]
+    pub expected_env: Option<String>,
 }
 
 impl Policy {
@@ -725,6 +763,19 @@ deny = ["Bash(kubectl delete:*)"]
         assert_eq!(overridden.action_guard.profile, "minimal");
         assert_eq!(overridden.action_guard.allow, ["Bash(psql:*)"]);
         assert_eq!(overridden.action_guard.deny, ["Bash(kubectl delete:*)"]);
+    }
+
+    #[test]
+    fn secret_profiles_reject_unknown_fields() {
+        let err = toml::from_str::<Policy>(
+            r#"[secrets.profiles.prod]
+provider = "aws"
+format = "dotenv"
+"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("unknown field `format`"), "{err}");
     }
 
     #[test]
