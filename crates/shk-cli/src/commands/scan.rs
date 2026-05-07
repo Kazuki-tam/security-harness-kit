@@ -17,6 +17,7 @@ pub struct ScanInvocation {
     pub path: PathBuf,
     pub staged: bool,
     pub json: bool,
+    pub verbose: bool,
     pub fail_on: Option<String>,
     pub include_binary: bool,
     pub follow_symlinks: bool,
@@ -60,11 +61,15 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
     } else {
         print!(
             "{}",
-            output::format_human_findings(&res.findings, inv.color_enabled)
+            output::format_human_findings(&res.findings, inv.color_enabled, inv.verbose)
         );
         println!(
             "{}",
-            output::format_scan_summary(res.max_severity(), res.exit_threshold, inv.color_enabled,)
+            output::format_scan_summary(
+                output::max_human_severity(&res.findings, inv.verbose),
+                res.exit_threshold,
+                inv.color_enabled,
+            )
         );
     }
     if res.should_fail() {

@@ -294,7 +294,7 @@ Default policy file: `shk.toml` in the project root. Read-only commands can use 
 ```toml
 [scan]
 include = ["**/*"]
-exclude = [".git/**", "node_modules/**", "dist/**"]
+exclude = [".git/**", "node_modules/**", "dist/**", "build/**", "coverage/**", "**/*.svg", "**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.gif", "**/*.webp", "**/*.ico", "**/*.avif", "**/*.bmp", "**/*.tif", "**/*.tiff", "**/*.mp4", "**/*.m4v", "**/*.mov", "**/*.webm", "**/*.mkv", "**/*.avi", "**/*.ogv", "**/*.mp3", "**/*.m4a", "**/*.wav", "**/*.flac", "**/*.aac", "**/*.ogg", "**/*.opus", "**/*.woff", "**/*.woff2", "**/*.ttf", "**/*.otf", "**/*.eot"]
 max_file_size_bytes = 1048576
 follow_symlinks = false
 include_binary = false

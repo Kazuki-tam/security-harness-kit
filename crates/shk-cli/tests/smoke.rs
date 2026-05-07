@@ -200,6 +200,61 @@ fn scan_json_reports_suppressed_field() {
 }
 
 #[test]
+fn scan_human_output_hides_skip_details_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("blob.dat"), b"abc\0def").unwrap();
+
+    let out = Command::new(shk_bin())
+        .args([
+            "scan",
+            &dir.path().display().to_string(),
+            "--fail-on",
+            "critical",
+        ])
+        .output()
+        .expect("run");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("0 findings"), "{stdout}");
+    assert!(
+        stdout.contains("Skipped 1 files; use --verbose to show details."),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("scan.binary_skipped"), "{stdout}");
+}
+
+#[test]
+fn scan_verbose_human_output_shows_skip_details() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("blob.dat"), b"abc\0def").unwrap();
+
+    let out = Command::new(shk_bin())
+        .args([
+            "scan",
+            &dir.path().display().to_string(),
+            "--fail-on",
+            "critical",
+            "--verbose",
+        ])
+        .output()
+        .expect("run");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("1 findings"), "{stdout}");
+    assert!(stdout.contains("scan.binary_skipped"), "{stdout}");
+}
+
+#[test]
 fn scan_detects_custom_rule_from_policy() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(

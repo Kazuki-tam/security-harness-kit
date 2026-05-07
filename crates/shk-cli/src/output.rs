@@ -1,10 +1,20 @@
 use shk_core::finding::Finding;
 use shk_core::policy::Severity;
 
-pub fn format_human_findings(findings: &[Finding], color: bool) -> String {
+pub fn format_human_findings(findings: &[Finding], color: bool, verbose: bool) -> String {
     let mut s = String::new();
-    s.push_str(&format!("{} findings\n\n", findings.len()));
+    let hidden_skips = if verbose {
+        0
+    } else {
+        findings.iter().filter(|f| is_skip_finding(f)).count()
+    };
+    let visible_count = findings.len() - hidden_skips;
+
+    s.push_str(&format!("{visible_count} findings\n\n"));
     for f in findings {
+        if !verbose && is_skip_finding(f) {
+            continue;
+        }
         let sev = abbrev_sev(&f.severity);
         let line = if color {
             format!(
@@ -20,7 +30,27 @@ pub fn format_human_findings(findings: &[Finding], color: bool) -> String {
         s.push_str(&line);
         s.push('\n');
     }
+    if hidden_skips > 0 {
+        s.push_str(&format!(
+            "\nSkipped {hidden_skips} files; use --verbose to show details.\n"
+        ));
+    }
     s
+}
+
+pub fn max_human_severity(findings: &[Finding], verbose: bool) -> Option<Severity> {
+    findings
+        .iter()
+        .filter(|f| verbose || !is_skip_finding(f))
+        .filter_map(|f| Severity::parse(&f.severity))
+        .max()
+}
+
+fn is_skip_finding(f: &Finding) -> bool {
+    matches!(
+        f.rule_id.as_str(),
+        "scan.binary_skipped" | "scan.file_too_large"
+    )
 }
 
 fn abbrev_sev(sev: &str) -> String {
