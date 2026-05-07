@@ -483,6 +483,81 @@ fn hooks_install_ai_dry_run_cursor() {
 }
 
 #[test]
+fn hooks_install_ai_claude_apply_deny_merges_without_duplicates() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::create_dir(dir.path().join(".claude")).unwrap();
+    std::fs::write(
+        dir.path().join(".claude/settings.json"),
+        r#"{"permissions":{"deny":["Read(.env)","Bash(custom:*)"]}}"#,
+    )
+    .unwrap();
+
+    for _ in 0..2 {
+        let out = Command::new(shk_bin())
+            .args([
+                "hooks",
+                "install-ai",
+                "--tool",
+                "claude-code",
+                "--apply-deny",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .expect("install-ai apply deny");
+        assert!(
+            out.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap(),
+    )
+    .unwrap();
+    let deny = settings["permissions"]["deny"].as_array().unwrap();
+    assert!(
+        deny.iter().any(|v| v == "Bash(custom:*)"),
+        "existing deny entry should be preserved: {deny:?}"
+    );
+    assert_eq!(
+        deny.iter().filter(|v| *v == "Read(.env)").count(),
+        1,
+        "managed deny entries should not duplicate: {deny:?}"
+    );
+    assert!(
+        deny.iter().any(|v| v == "Bash(psql:*)"),
+        "database guard deny should be installed: {deny:?}"
+    );
+}
+
+#[test]
+fn hooks_install_ai_codex_includes_permission_request() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["hooks", "install-ai", "--tool", "codex"])
+        .current_dir(dir.path())
+        .output()
+        .expect("install-ai codex");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let body = std::fs::read_to_string(dir.path().join(".codex/config.toml")).unwrap();
+    assert!(body.contains("codex_hooks = true"), "{body}");
+    assert!(body.contains("[[hooks.PreToolUse]]"), "{body}");
+    assert!(body.contains("[[hooks.PermissionRequest]]"), "{body}");
+    assert!(body.contains("[[hooks.PostToolUse]]"), "{body}");
+}
+
+#[test]
 fn hook_mode_cursor_blocks_with_exit_2() {
     use std::io::Write;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -511,6 +586,190 @@ fn hook_mode_cursor_blocks_with_exit_2() {
     );
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("deny"), "{s}");
+}
+
+#[test]
+fn hook_mode_codex_permission_request_uses_decision_shape() {
+    use std::io::Write;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "hook_event_name": "PermissionRequest",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "psql -c \"DROP TABLE users\""
+        }
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "codex"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("hook scan");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        stdout["hookSpecificOutput"]["hookEventName"],
+        "PermissionRequest"
+    );
+    assert_eq!(stdout["hookSpecificOutput"]["decision"]["behavior"], "deny");
+    assert!(
+        stdout["hookSpecificOutput"]["decision"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("direct_db_mutation"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn hook_mode_codex_permission_request_clean_does_not_auto_allow() {
+    use std::io::Write;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "hook_event_name": "PermissionRequest",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "echo ok"
+        }
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "codex"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("hook scan");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(stdout, serde_json::json!({}));
+}
+
+#[test]
+fn hook_mode_claude_blocks_db_mutation_action() {
+    use std::io::Write;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "psql -c \"DROP TABLE users\""
+        }
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "claude-code"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("hook scan");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("direct_db_mutation"), "{stdout}");
+}
+
+#[test]
+fn hook_mode_claude_allows_db_select_action() {
+    use std::io::Write;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "psql -c \"SELECT 1\""
+        }
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "claude-code"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("hook scan");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn hook_mode_action_guard_respects_project_policy() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("shk.toml"),
+        r#"[action_guard]
+enabled = true
+allow = ["Bash(psql:*)"]
+"#,
+    )
+    .unwrap();
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "psql -c \"DROP TABLE users\""
+        }
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "claude-code"])
+        .current_dir(dir.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("hook scan");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
@@ -970,19 +1229,20 @@ fn doctor_ignore_reports_missing_claude_read_denies() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("claude permissions: missing recommended Read deny entries"),
+        stdout.contains("claude permissions: missing recommended action deny entries"),
         "{stdout}"
     );
-    assert!(stdout.contains("Read(./secrets/**)"), "{stdout}");
+    assert!(stdout.contains("Write(.env)"), "{stdout}");
 }
 
 #[test]
 fn doctor_ignore_accepts_claude_read_denies() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join(".claude")).unwrap();
+    let deny = shk_integrations::claude_recommended_deny_entries();
     std::fs::write(
         dir.path().join(".claude/settings.json"),
-        r#"{"permissions":{"deny":["Read(./.env)","Read(./.env.*)","Read(./secrets/**)","Read(./credentials/**)"]}}"#,
+        serde_json::json!({"permissions":{"deny": deny}}).to_string(),
     )
     .unwrap();
     let out = Command::new(shk_bin())
@@ -996,7 +1256,7 @@ fn doctor_ignore_accepts_claude_read_denies() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("claude permissions: OK (sensitive reads denied)"),
+        stdout.contains("claude permissions: OK (recommended action deny entries present)"),
         "{stdout}"
     );
 }

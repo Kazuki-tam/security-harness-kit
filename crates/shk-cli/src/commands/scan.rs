@@ -4,12 +4,15 @@ use crate::hook_output;
 use crate::output;
 use crate::safety;
 use anyhow::{Context, Result, bail};
-use shk_core::policy::{ColorMode, Severity};
+use shk_core::policy::{ColorMode, Policy, Severity};
 use shk_core::scanner::{ScanOptions, scan_path, scan_string};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::args::AiTool;
+
+const HOOK_DENY_REASON_DEFAULT: &str =
+    "shk: secrets detected above threshold — run `shk scan` for details";
 
 /// Flat `clap` flags for [`run`], grouped for readability at the CLI boundary.
 #[derive(Clone, Debug)]
@@ -108,9 +111,20 @@ fn run_hook_mode(
         bail!("hook-mode requires hook JSON payload on stdin");
     }
 
+    let hook_event = hook_event_from_stdin(stdin_trim, post);
     let repo_root = resolve_repo_root(cwd, path_arg.as_path());
     if audit {
         safety::require_project_policy(&repo_root, "scan --audit")?;
+    }
+
+    let (policy, _) = Policy::load_from_dir(&repo_root)?;
+    let action_guard_config = action_guard_config_from_policy(&policy);
+
+    if should_run_action_guard(post, audit)
+        && let Some(guard_match) =
+            shk_integrations::detect_dangerous_action_with_config(stdin_trim, &action_guard_config)?
+    {
+        return deny_hook(tool, hook_event, &guard_match.reason);
     }
 
     let (disp, body) = shk_integrations::stdin_to_hook_body(
@@ -138,9 +152,9 @@ fn run_hook_mode(
         emit_audit_hook(&repo_root, tool, post, &disp, &res)?;
         println!(
             "{}",
-            hook_output::allow_stdout(
+            hook_output::allow_stdout_for_event(
                 tool,
-                post,
+                hook_event,
                 Some("shk audit: non-blocking (see .shk/audit.log)"),
             ),
         );
@@ -149,7 +163,10 @@ fn run_hook_mode(
 
     if post {
         if res.findings.is_empty() {
-            println!("{}", hook_output::allow_stdout(tool, post, None));
+            println!(
+                "{}",
+                hook_output::allow_stdout_for_event(tool, hook_event, None)
+            );
         } else {
             let hint = format!(
                 "shk: {} finding(s) in tool output — review before using ({} suppressed)",
@@ -157,18 +174,61 @@ fn run_hook_mode(
                 res.suppressed,
             );
             eprintln!("{hint}");
-            println!("{}", hook_output::allow_stdout(tool, post, Some(&hint)));
+            println!(
+                "{}",
+                hook_output::allow_stdout_for_event(tool, hook_event, Some(&hint))
+            );
         }
         return Ok(());
     }
 
     if res.should_fail() {
-        println!("{}", hook_output::deny_stdout(tool));
-        return Err(CliExit::silent(2).into());
+        return deny_hook(tool, hook_event, HOOK_DENY_REASON_DEFAULT);
     }
 
-    println!("{}", hook_output::allow_stdout(tool, false, None));
+    println!(
+        "{}",
+        hook_output::allow_stdout_for_event(tool, hook_event, None)
+    );
     Ok(())
+}
+
+fn action_guard_config_from_policy(policy: &Policy) -> shk_integrations::ActionGuardConfig {
+    shk_integrations::ActionGuardConfig {
+        enabled: policy.action_guard.enabled,
+        profile: policy.action_guard.profile.clone(),
+        allow: policy.action_guard.allow.clone(),
+        deny: policy.action_guard.deny.clone(),
+    }
+}
+
+fn should_run_action_guard(post: bool, audit: bool) -> bool {
+    !post && !audit
+}
+
+fn deny_hook(tool: AiTool, event: hook_output::HookEvent, reason: &str) -> Result<()> {
+    println!(
+        "{}",
+        hook_output::deny_stdout_for_event(tool, event, reason)
+    );
+    Err(CliExit::silent(2).into())
+}
+
+fn hook_event_from_stdin(stdin: &str, post: bool) -> hook_output::HookEvent {
+    if post {
+        return hook_output::HookEvent::PostToolUse;
+    }
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(stdin) else {
+        return hook_output::HookEvent::PreToolUse;
+    };
+    match value
+        .get("hook_event_name")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("PermissionRequest") => hook_output::HookEvent::PermissionRequest,
+        _ => hook_output::HookEvent::PreToolUse,
+    }
 }
 
 fn emit_audit_hook(

@@ -82,6 +82,12 @@ redaction = "full"
 # preserve_prefix = 4
 # preserve_suffix = 4
 
+[action_guard]
+enabled = true
+profile = "recommended"
+allow = []
+deny = []
+
 [doctor.ignore]
 required_patterns = [
   ".env",
@@ -141,6 +147,21 @@ The `--fail-on` CLI option overrides the configured threshold for that command i
 | `redaction` | `full` | `full` redacts entire lines; `partial` redacts matched values. |
 | `preserve_prefix` | `4` | Characters preserved at the start of a matched value when `redaction = "partial"`. |
 | `preserve_suffix` | `4` | Characters preserved at the end of a matched value when `redaction = "partial"`. |
+
+## Action Guard Settings
+
+`action_guard` applies only to pre-hook scans such as `shk scan --hook-mode claude-code`. It checks operation intent before content scanning.
+
+| Key | Default | Behavior |
+|-----|---------|----------|
+| `enabled` | `true` | Enables action guard blocking in pre-hook mode. |
+| `profile` | `recommended` | Built-in coverage level: `minimal`, `recommended`, or `strict`. |
+| `allow` | `[]` | Action patterns that bypass action guard, for project-approved operations. |
+| `deny` | `[]` | Extra project-specific action patterns to block. |
+
+Action patterns use tool-like strings with `*` wildcards, such as `Bash(psql:*)`, `Bash(kubectl delete:*)`, `Read(.env)`, or `Write(tokens/*.json)`. `allow` is checked before built-in and custom deny rules.
+
+The `strict` profile also blocks opaque execution forms such as `bash -c`, `sh -c`, `python -c`, `node -e`, `ruby -e`, and `perl -e` instead of trying to fully interpret embedded scripts.
 
 ## Custom Rules
 

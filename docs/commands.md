@@ -180,6 +180,7 @@ shk hooks install-ai --dry-run
 shk hooks install-ai --audit
 shk hooks install-ai --tool cursor
 shk hooks install-ai --tool claude-code --global
+shk hooks install-ai --tool claude-code --apply-deny
 shk hooks install-ai --tool cursor --fail-closed
 ```
 
@@ -192,6 +193,7 @@ Options:
 | `--global` | Write user-level config files under the user's home directory. |
 | `--tool <tool>` | Limit installation to one of `claude-code`, `codex`, or `cursor`. |
 | `--fail-closed` | Cursor hooks only. Sets `failClosed` on managed entries. |
+| `--apply-deny` | Claude Code only. Merges recommended `permissions.deny` entries for sensitive files and dangerous actions. |
 
 Without `--tool`, the command targets Claude Code, Codex, and Cursor. Non-dry-run installation requires a project `shk.toml`.
 
@@ -201,6 +203,8 @@ Installed entries:
 |------|-------------|-----------------|
 | Claude Code | `.claude/settings.json` | `PreToolUse` for `Read|Write|Bash|WebFetch`; `PostToolUse` for `WebFetch|WebSearch|Bash`. |
 | Cursor | `.cursor/hooks.json` | `beforeReadFile`, `beforeShellExecution`, `beforeMCPExecution`, `beforeSubmitPrompt`. |
-| Codex | `.codex/config.toml` | `PreToolUse` and `PostToolUse` blocks; also ensures `features.codex_hooks = true`. |
+| Codex | `.codex/config.toml` | `PreToolUse`, `PermissionRequest`, and `PostToolUse` blocks; also ensures `features.codex_hooks = true`. |
 
 Managed entries are tagged with `"_shk_managed": true` or `# shk-managed-start` / `# shk-managed-end`. Re-running replaces managed entries and leaves non-managed entries in place.
+
+In pre-hook mode, `shk` also runs an action guard before content scanning. It blocks sensitive file access, destructive filesystem operations, direct database mutation commands, privilege or system changes, external transfer commands, and package manager operations when they are visible in the hook payload. Tune this with `[action_guard]` in `shk.toml`; `--audit` remains non-blocking.

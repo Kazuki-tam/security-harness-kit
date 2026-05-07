@@ -4,7 +4,7 @@ use serde_json::Value;
 use shk_core::git;
 use shk_core::policy::Policy;
 use shk_core::scanner::{ScanOptions, scan_string};
-use shk_integrations::{MANAGED_MARKER_JSON, MANAGED_MARKER_SH};
+use shk_integrations::{MANAGED_MARKER_JSON, MANAGED_MARKER_SH, claude_recommended_deny_entries};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -24,7 +24,6 @@ const IGNORE_CANDIDATES: &[&str] = &[
 const DOTENVX_PRIVATE_KEY_FILE: &str = ".env.keys";
 const DOTENVX_VAULT_FILE: &str = ".env.vault";
 const DOTENVX_HINT_FILES: &[&str] = &[DOTENVX_PRIVATE_KEY_FILE, DOTENVX_VAULT_FILE];
-const CLAUDE_REQUIRED_DENY_PATTERNS: &[&str] = &[".env", ".env.*", "secrets/**", "credentials/**"];
 const CODEX_RISKY_SANDBOX_MODE: &str = "danger-full-access";
 const CODEX_RISKY_APPROVAL_POLICY: &str = "never";
 pub fn run_ignore(root: &Path, fix: bool) -> Result<()> {
@@ -109,31 +108,38 @@ fn run_claude_permissions_check(root: &Path) {
         })
         .unwrap_or_default();
 
-    let missing: Vec<&str> = CLAUDE_REQUIRED_DENY_PATTERNS
+    let required = claude_recommended_deny_entries();
+    let missing: Vec<&str> = required
         .iter()
         .copied()
-        .filter(|pattern| !claude_deny_covers(&denies, pattern))
+        .filter(|entry| !claude_deny_covers(&denies, entry))
         .collect();
 
     if missing.is_empty() {
-        println!("claude permissions: OK (sensitive reads denied)");
+        println!("claude permissions: OK (recommended action deny entries present)");
     } else {
-        println!("claude permissions: missing recommended Read deny entries:");
+        println!("claude permissions: missing recommended action deny entries:");
         for pat in missing {
-            println!("  - Read(./{pat})");
+            println!("  - {pat}");
         }
     }
 }
 
-fn claude_deny_covers(denies: &[&str], pattern: &str) -> bool {
-    denies.iter().any(|entry| {
-        let normalized = entry
-            .trim()
-            .trim_start_matches("Read(")
-            .trim_end_matches(')')
-            .trim_start_matches("./");
-        normalized == pattern || normalized.trim_end_matches('/') == pattern.trim_end_matches('/')
-    })
+fn claude_deny_covers(denies: &[&str], required: &str) -> bool {
+    let required_norm = normalize_claude_deny(required);
+    denies
+        .iter()
+        .any(|entry| normalize_claude_deny(entry) == required_norm)
+}
+
+fn normalize_claude_deny(entry: &str) -> String {
+    entry
+        .trim()
+        .replace("(./", "(")
+        .replace(" ./.env", " .env")
+        .replace(" ./tokens/", " tokens/")
+        .trim_end_matches('/')
+        .to_string()
 }
 
 fn run_codex_config_check(root: &Path) {
