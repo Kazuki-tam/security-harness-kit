@@ -134,3 +134,28 @@ reason = "Synthetic values in masker test helper"
 rule_id = "secret.openai_api_key"
 path = "crates/shk-core/src/scanner.rs"
 reason = "Synthetic key in scanner test helper"
+
+[[allowlist]]
+rule_id = "secret.dotenvx_private_key"
+path = "crates/shk-cli/src/commands/env.rs"
+reason = "Synthetic dotenvx private keys in env command tests"
+
+[[allowlist]]
+rule_id = "secret.dotenvx_private_key"
+path = "crates/shk-cli/src/commands/secrets.rs"
+reason = "Synthetic dotenvx private keys in secrets command tests"
+
+[[allowlist]]
+rule_id = "pii.email"
+path = "crates/shk-cli/src/commands/secrets.rs"
+reason = "Example email in secrets command test fixture"
+
+[[allowlist]]
+rule_id = "pii.en.name"
+path = "crates/shk-cli/src/skills/shk.md"
+reason = "Documentation text contains a name-like skill heading"
+
+[[allowlist]]
+rule_id = "secret.openai_api_key"
+path = "fixtures/basic/insecure-sample.txt"
+reason = "Intentional insecure sample fixture"
