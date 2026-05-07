@@ -14,7 +14,9 @@ mod safety;
 mod version_check;
 
 use anyhow::{Context, Result};
-use args::{Cli, Commands, DoctorCmd, HooksCmd, PolicyCmd, SkillToolArg, SkillsCmd};
+use args::{
+    Cli, Commands, DoctorCmd, DotenvxCmd, EnvCmd, HooksCmd, PolicyCmd, SkillToolArg, SkillsCmd,
+};
 use clap::Parser;
 use shk_core::policy::ColorMode;
 use std::io::Write;
@@ -130,6 +132,14 @@ pub fn run() -> Result<()> {
                 dry_run,
                 force,
             })?,
+        },
+        Commands::Env { cmd } => match cmd {
+            EnvCmd::Dotenvx { cmd } => match cmd {
+                DotenvxCmd::ImportKeys { file } => commands::env::dotenvx_import_keys(&cwd, &file)?,
+                DotenvxCmd::List => commands::env::dotenvx_list(&cwd)?,
+                DotenvxCmd::Delete(args) => commands::env::dotenvx_delete(&cwd, args)?,
+                DotenvxCmd::Run(args) => commands::env::dotenvx_run(&cwd, args)?,
+            },
         },
     }
     Ok(())

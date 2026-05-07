@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -92,6 +92,11 @@ pub enum Commands {
     Skills {
         #[command(subcommand)]
         cmd: SkillsCmd,
+    },
+    /// Secure local environment helpers
+    Env {
+        #[command(subcommand)]
+        cmd: EnvCmd,
     },
 }
 
@@ -210,6 +215,68 @@ pub enum SkillsCmd {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum EnvCmd {
+    /// Store and inject dotenvx private keys with the OS credential store
+    Dotenvx {
+        #[command(subcommand)]
+        cmd: DotenvxCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DotenvxCmd {
+    /// Import DOTENV_PRIVATE_KEY* entries from a .env.keys file
+    ImportKeys {
+        #[arg(value_name = "FILE", default_value = ".env.keys")]
+        file: PathBuf,
+    },
+    /// List stored dotenvx private key names for this project
+    List,
+    /// Delete stored dotenvx private keys for this project
+    Delete(DotenvxDeleteArgs),
+    /// Run a command through dotenvx with private keys injected from the OS store
+    Run(DotenvxRunArgs),
+}
+
+#[derive(Args)]
+#[command(group(
+    ArgGroup::new("target")
+        .required(true)
+        .multiple(false)
+        .args(["all", "key", "env"])
+))]
+pub struct DotenvxDeleteArgs {
+    /// Delete every stored dotenvx private key for this project.
+    #[arg(long)]
+    pub all: bool,
+    /// Delete this exact DOTENV_PRIVATE_KEY* variable.
+    #[arg(long)]
+    pub key: Option<String>,
+    /// Delete DOTENV_PRIVATE_KEY_<ENV>. Use `default` for DOTENV_PRIVATE_KEY.
+    #[arg(long)]
+    pub env: Option<String>,
+}
+
+#[derive(Args)]
+pub struct DotenvxRunArgs {
+    /// dotenvx executable to invoke.
+    #[arg(long, default_value = "dotenvx")]
+    pub dotenvx_bin: String,
+    /// Pass one or more dotenvx env files, e.g. `-f .env.production`.
+    #[arg(short = 'f', long = "file", value_name = "FILE")]
+    pub files: Vec<PathBuf>,
+    /// Only inject this exact DOTENV_PRIVATE_KEY* variable. Repeat as needed.
+    #[arg(long = "key")]
+    pub keys: Vec<String>,
+    /// Only inject DOTENV_PRIVATE_KEY_<ENV>. Use `default` for DOTENV_PRIVATE_KEY.
+    #[arg(long = "env")]
+    pub envs: Vec<String>,
+    /// Command to run after `dotenvx run --`.
+    #[arg(last = true, required = true)]
+    pub command: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]

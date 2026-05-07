@@ -159,6 +159,25 @@ shk doctor --json version
 
 This command reports whether an update is available. It does not modify the installed binary.
 
+## `shk env dotenvx`
+
+Store dotenvx private keys in the operating system credential store and inject them only when running a command through dotenvx.
+
+```bash
+shk env dotenvx import-keys .env.keys
+shk env dotenvx list
+shk env dotenvx run -- npm test
+shk env dotenvx run -f .env.production -- npm start
+shk env dotenvx delete --env production
+shk env dotenvx delete --all
+```
+
+This command group uses the platform credential store through the `keyring` crate: macOS Keychain, Windows Credential Manager, and Linux Secret Service / keyutils depending on platform support.
+
+`import-keys` reads only `DOTENV_PRIVATE_KEY` and `DOTENV_PRIVATE_KEY_<ENV>` entries from a `.env.keys`-style file. Raw key values are never printed. `run` reads the stored keys for the current project and invokes `dotenvx run -- <command>` with those values present only in the child process environment. `delete` requires an explicit target: `--all`, `--key <DOTENV_PRIVATE_KEY*>`, or `--env <name>`.
+
+There is intentionally no `export` command because printing or writing raw private keys defeats the purpose of moving `.env.keys` into the OS credential store.
+
 ## `shk hooks install`
 
 Install a Git pre-commit hook that runs `shk scan --staged`.
