@@ -162,12 +162,12 @@ fn apply_claude(path: &Path, audit: bool, dry_run: bool, apply_deny: bool) -> Re
 
     let pre_block = json!({
         "_shk_managed": true,
-        "matcher": "Read|Write|Bash|WebFetch",
+        "matcher": "Read|Write|Bash|WebFetch|mcp__.*",
         "hooks": [{ "type": "command", "command": pre }]
     });
     let post_block = json!({
         "_shk_managed": true,
-        "matcher": "WebFetch|WebSearch|Bash",
+        "matcher": "WebFetch|WebSearch|Bash|mcp__.*|Skill|Agent",
         "hooks": [{ "type": "command", "command": post }]
     });
     let user_prompt_block = json!({

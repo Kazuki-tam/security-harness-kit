@@ -176,6 +176,48 @@ fn mask_hook_mode_clean_payload_does_not_echo_content() {
 }
 
 #[test]
+fn mask_hook_mode_claude_post_returns_replacement_output() {
+    use std::io::Write;
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // not real credential: synthetic detector fixture value only
+    let secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "tool_name": "mcp__demo__read",
+        "tool_response": {
+            "data": {
+                "value": secret
+            }
+        }
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["mask", "--hook-mode", "claude-code", "--post"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("mask hook");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let hook_output = &v["hookSpecificOutput"];
+    assert_eq!(hook_output["hookEventName"], "PostToolUse");
+    assert_eq!(hook_output["permissionDecision"], "allow");
+    let replacement = hook_output["output"].as_str().unwrap_or_default();
+    assert!(replacement.contains("[REDACTED_LINE]"), "{replacement}");
+    assert!(!replacement.contains(secret), "{replacement}");
+}
+
+#[test]
 fn scan_json_reports_suppressed_field() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -544,6 +586,13 @@ fn hooks_install_ai_claude_apply_deny_merges_without_duplicates() {
             .unwrap_or_default()
             .contains("--fail-on medium"),
         "prompt hook should use medium threshold: {prompt_hooks:?}"
+    );
+    let pre_hooks = settings["hooks"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(pre_hooks[0]["matcher"], "Read|Write|Bash|WebFetch|mcp__.*");
+    let post_hooks = settings["hooks"]["PostToolUse"].as_array().unwrap();
+    assert_eq!(
+        post_hooks[0]["matcher"],
+        "WebFetch|WebSearch|Bash|mcp__.*|Skill|Agent"
     );
 }
 
