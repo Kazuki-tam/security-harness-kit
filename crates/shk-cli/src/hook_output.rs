@@ -8,6 +8,7 @@ pub enum HookEvent {
     PreToolUse,
     PermissionRequest,
     PostToolUse,
+    UserPromptSubmit,
 }
 
 impl HookEvent {
@@ -24,6 +25,7 @@ impl HookEvent {
             Self::PreToolUse => "PreToolUse",
             Self::PermissionRequest => "PermissionRequest",
             Self::PostToolUse => "PostToolUse",
+            Self::UserPromptSubmit => "UserPromptSubmit",
         }
     }
 }

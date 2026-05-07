@@ -10,4 +10,4 @@ pub use action_guard::{
     ActionGuardConfig, ActionGuardMatch, claude_recommended_deny_entries, detect_dangerous_action,
     detect_dangerous_action_with_config,
 };
-pub use ai_hooks::{AiHookTool, stdin_to_hook_body};
+pub use ai_hooks::{AiHookTool, extract_user_prompt, stdin_to_hook_body};

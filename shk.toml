@@ -93,8 +93,16 @@ required_patterns = [
 # Inline: # shk-ignore-next-line <rule_id>
 
 [[allowlist]]
-path = "fixtures/**"
-reason = "Intentional detection demo fixtures"
+path = "fixtures/pii/**"
+reason = "Intentional PII detection demo fixtures"
+
+[[allowlist]]
+path = "fixtures/pii.txt"
+reason = "Intentional PII detection demo fixture"
+
+[[allowlist]]
+path = "fixtures/secrets/**"
+reason = "Intentional secrets detection demo fixtures"
 
 [[allowlist]]
 path = "crates/shk-rules/src/lib.rs"

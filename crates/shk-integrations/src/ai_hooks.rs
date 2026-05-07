@@ -1,7 +1,9 @@
 //! Parse AI tool stdin JSON payloads (MVP heuristic; spec §7.9).
 
 use anyhow::{Context, Result};
+use serde::Deserialize;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -38,6 +40,20 @@ impl AiHookTool {
             Self::Cursor => "<cursor-hook>",
         }
     }
+}
+
+/// Extracts the `prompt` field from a `UserPromptSubmit` JSON payload.
+/// Returns `None` when the field is absent or the payload is not valid JSON.
+pub fn extract_user_prompt(stdin: &str) -> Option<Cow<'_, str>> {
+    #[derive(Deserialize)]
+    struct UserPromptPayload<'a> {
+        #[serde(borrow)]
+        prompt: Option<Cow<'a, str>>,
+    }
+
+    serde_json::from_str::<UserPromptPayload<'_>>(stdin)
+        .ok()?
+        .prompt
 }
 
 /// Returns display path (posix-ish relative to repo) + body content to scan.

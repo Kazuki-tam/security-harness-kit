@@ -1,11 +1,22 @@
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "_shk_managed": true,
+        "hooks": [
+          {
+            "command": "shk scan --hook-mode claude-code --fail-on medium",
+            "type": "command"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "_shk_managed": true,
         "hooks": [
           {
-            "command": "shk scan --hook-mode claude-code --post",
+            "command": "shk mask --hook-mode claude-code --post",
             "type": "command"
           }
         ],
