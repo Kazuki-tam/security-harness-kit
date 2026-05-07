@@ -39,12 +39,6 @@ macOS and Linux releases can be installed with the bundled installer:
 curl -fsSL https://raw.githubusercontent.com/Kazuki-tam/security-harness-kit/main/scripts/install.sh | sh
 ```
 
-Build from source:
-
-```bash
-cargo build --release
-```
-
 Both `shk` and `security-harness-kit` resolve to the same CLI.
 
 See [Installation](docs/installation.md) for release archives, checksums, Homebrew, Scoop, and source builds.
