@@ -4,6 +4,7 @@ description: >
   Security scanning, PII detection, secret masking, and AI hook installation using the shk CLI.
   Use when the user asks to: scan for secrets/credentials/sensitive data, detect or mask PII,
   set up security hooks for Claude Code/Cursor/Codex, run security diagnostics (shk doctor),
+  manage dotenvx private keys, push dotenv payloads to AWS/GCP secret managers,
   or guard content flowing through MCP tools or external data connections.
 ---
 
@@ -25,6 +26,10 @@ shk hooks install-ai --tool claude-code --global
 shk hooks install-ai --dry-run       # preview changes
 shk doctor                           # full project diagnostics
 shk doctor ignore --fix              # fix missing .gitignore entries
+shk env dotenvx import-keys .env.keys # store dotenvx private keys in OS credential store
+shk env dotenvx run -- npm test       # inject stored keys only into child process
+shk secrets push --profile prod       # push dotenv payload to AWS/GCP secret manager
+shk secrets push --profile prod --dry-run
 shk skills install                   # install this skill (claude-code + codex)
 shk skills install --tool claude-code --global
 shk skills install --tool codex --global
@@ -56,6 +61,49 @@ shk mask prompt.txt | claude
 # Partial redaction (preserve 4-char prefix/suffix)
 shk mask --redaction partial < data.txt
 ```
+
+## Local dotenvx key storage
+
+Use `shk env dotenvx` when a project has `.env.keys` or `DOTENV_PRIVATE_KEY*` values that should not stay in plaintext files.
+
+```bash
+shk env dotenvx import-keys .env.keys
+shk env dotenvx list
+shk env dotenvx run -- npm test
+shk env dotenvx run -f .env.production -- npm start
+shk env dotenvx run --env production -- npm start
+shk env dotenvx delete --env production
+shk env dotenvx delete --all
+```
+
+Important behavior:
+- Keys are stored in the OS credential store through the platform keychain/credential backend.
+- `run` injects keys only into the child `dotenvx run -- <command>` environment.
+- There is no export command; do not print raw private keys.
+- `delete` requires an explicit target: `--all`, `--key <DOTENV_PRIVATE_KEY*>`, or `--env <name>`.
+
+## Secret manager push
+
+Use `shk secrets push` when the user wants to move a dotenv payload into AWS Secrets Manager or GCP Secret Manager.
+
+```bash
+# Store the entire dotenv file as one provider secret.
+shk secrets push --provider aws --target app/prod/dotenv --from .env.production
+
+# Store each dotenv key separately under a prefix.
+shk secrets push --provider gcp --mode per-key --target-prefix app/prod/ --from .env.keys
+
+# Prefer profiles for repeatable pushes.
+shk secrets push --profile prod --dry-run
+shk secrets push --profile prod --confirm
+```
+
+Safe operating rules:
+- Prefer `--dry-run` first; it prints target metadata but not raw values.
+- Use `--mode per-key` for per-key writes. Do not document or suggest the hidden compatibility `--per-key` flag.
+- The command runs a pre-push PII scan unless `--no-scan` is explicitly passed.
+- `--audit` writes metadata-only entries to `.shk/audit.log`, including a payload hash, not raw secrets.
+- Blob mode uses `--target`; per-key mode uses `--target-prefix`. Do not pass both.
 
 ## AI hook integration
 
@@ -179,6 +227,14 @@ pii_languages = ["en", "ja"]
 [thresholds]
 default_fail_on = "high"
 
+[secrets.profiles.prod]
+provider = "aws"
+mode = "blob"
+target = "app/prod/dotenv"
+source = ".env.production"
+audit = true
+confirm = true
+
 [[allowlist]]
 rule_id = "secret.generic_api_key"
 path = "fixtures/**"
@@ -186,6 +242,10 @@ reason = "Test fixture"
 ```
 
 Inline suppression: append `# shk-ignore` or `# shk-ignore-next-line <rule_id>` to a line.
+
+For `shk secrets push`, profile keys are limited to supported fields such as `provider`, `mode`,
+`target`, `target_prefix`, `source`, `region`, `project`, `location`, `audit`, `confirm`,
+`create_if_missing`, and `expected_env`. Unknown profile fields are rejected.
 
 ## Skills management
 
