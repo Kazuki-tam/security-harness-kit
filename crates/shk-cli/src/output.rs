@@ -15,18 +15,11 @@ pub fn format_human_findings(findings: &[Finding], color: bool, verbose: bool) -
         if !verbose && is_skip_finding(f) {
             continue;
         }
-        let sev = abbrev_sev(&f.severity);
-        let line = if color {
-            format!(
-                "\x1b[1m{sev}\x1b[0m  {}  {}:{}    {}",
-                f.rule_id, f.file, f.line, f.message
-            )
-        } else {
-            format!(
-                "{sev}  {}  {}:{}    {}",
-                f.rule_id, f.file, f.line, f.message
-            )
-        };
+        let sev = format_severity_label(&f.severity, color);
+        let line = format!(
+            "{sev}  {}  {}:{}    {}",
+            f.rule_id, f.file, f.line, f.message
+        );
         s.push_str(&line);
         s.push('\n');
     }
@@ -80,8 +73,111 @@ pub fn format_scan_summary(max: Option<Severity>, threshold: Severity, color: bo
         ),
     };
     if color {
-        format!("\x1b[36m{msg}\x1b[0m")
+        colorize_summary(&msg, max)
     } else {
         msg
+    }
+}
+
+fn format_severity_label(severity: &str, color: bool) -> String {
+    let label = abbrev_sev(severity);
+    if color {
+        colorize_severity_label(&label, severity)
+    } else {
+        label
+    }
+}
+
+fn colorize_summary(msg: &str, severity: Option<Severity>) -> String {
+    let code = match severity {
+        Some(sev) => severity_color_code(sev),
+        None => "32",
+    };
+    ansi(code, msg)
+}
+
+fn colorize_severity_label(label: &str, severity: &str) -> String {
+    match Severity::parse(severity) {
+        Some(sev) => ansi(severity_color_code(sev), label),
+        None => ansi("1", label),
+    }
+}
+
+fn ansi(code: &str, text: &str) -> String {
+    format!("\x1b[{code}m{text}\x1b[0m")
+}
+
+fn severity_color_code(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Critical => "1;31",
+        Severity::High => "31",
+        Severity::Medium => "33",
+        Severity::Low => "34",
+        Severity::Info => "36",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn finding(severity: &str) -> Finding {
+        Finding {
+            rule_id: "demo.rule".into(),
+            severity: severity.into(),
+            kind: "secret".into(),
+            file: "demo.txt".into(),
+            line: 7,
+            column: 1,
+            message: "demo finding".into(),
+            redacted_value: "[REDACTED]".into(),
+            confidence: 0.9,
+            context_before: vec![],
+            context_after: vec![],
+        }
+    }
+
+    #[test]
+    fn colorizes_human_finding_severity_labels_by_level() {
+        let findings = vec![
+            finding("critical"),
+            finding("high"),
+            finding("medium"),
+            finding("low"),
+            finding("info"),
+        ];
+
+        let out = format_human_findings(&findings, true, false);
+
+        assert!(out.contains("\x1b[1;31mCRIT\x1b[0m"));
+        assert!(out.contains("\x1b[31mHIGH\x1b[0m"));
+        assert!(out.contains("\x1b[33mMED \x1b[0m"));
+        assert!(out.contains("\x1b[34mLOW \x1b[0m"));
+        assert!(out.contains("\x1b[36mINFO\x1b[0m"));
+    }
+
+    #[test]
+    fn leaves_human_finding_severity_labels_plain_without_color() {
+        let out = format_human_findings(&[finding("high")], false, false);
+
+        assert!(out.contains("HIGH  demo.rule  demo.txt:7"));
+        assert!(!out.contains("\x1b["));
+    }
+
+    #[test]
+    fn colorizes_scan_summary_by_max_severity() {
+        let out = format_scan_summary(Some(Severity::High), Severity::High, true);
+
+        assert_eq!(
+            out,
+            "\x1b[31mFailed: findings at or above high (max high).\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn colorizes_empty_scan_summary_as_success() {
+        let out = format_scan_summary(None, Severity::High, true);
+
+        assert_eq!(out, "\x1b[32mNo findings.\x1b[0m");
     }
 }
