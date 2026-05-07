@@ -48,6 +48,7 @@ pub fn install_ai(
     dry_run: bool,
     global: bool,
     fail_closed: bool,
+    apply_deny: bool,
 ) -> Result<()> {
     let tools = if let Some(t) = maybe_tool {
         vec![t]
@@ -61,7 +62,7 @@ pub fn install_ai(
     for t in tools {
         let path = resolve_ai_config_path(t, &cwd, global)?;
         let summary = match t {
-            AiTool::ClaudeCode => apply_claude(&path, audit, dry_run)?,
+            AiTool::ClaudeCode => apply_claude(&path, audit, dry_run, apply_deny)?,
             AiTool::Cursor => apply_cursor(&path, audit, dry_run, fail_closed)?,
             AiTool::Codex => apply_codex(&path, audit, dry_run)?,
         };
@@ -108,7 +109,33 @@ fn push_managed_claude(root: &mut Value, key: &str, block: Value) -> Result<()> 
     Ok(())
 }
 
-fn apply_claude(path: &Path, audit: bool, dry_run: bool) -> Result<String> {
+fn merge_claude_permissions_deny(root: &mut Value) -> Result<usize> {
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("Claude settings root must be a JSON object"))?;
+    let permissions = obj.entry("permissions").or_insert_with(|| json!({}));
+    let permissions_obj = permissions
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("permissions must be an object"))?;
+    let deny = permissions_obj.entry("deny").or_insert_with(|| json!([]));
+    let deny_arr = deny
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("permissions.deny must be an array"))?;
+
+    let mut added = 0;
+    for entry in shk_integrations::claude_recommended_deny_entries() {
+        if !deny_arr
+            .iter()
+            .any(|existing| existing.as_str() == Some(entry))
+        {
+            deny_arr.push(json!(entry));
+            added += 1;
+        }
+    }
+    Ok(added)
+}
+
+fn apply_claude(path: &Path, audit: bool, dry_run: bool, apply_deny: bool) -> Result<String> {
     let pre = hook_scan_cli_command(AiTool::ClaudeCode, audit, false);
     let post = hook_scan_cli_command(AiTool::ClaudeCode, audit, true);
 
@@ -131,12 +158,21 @@ fn apply_claude(path: &Path, audit: bool, dry_run: bool) -> Result<String> {
 
     push_managed_claude(&mut root, "PreToolUse", pre_block)?;
     push_managed_claude(&mut root, "PostToolUse", post_block)?;
+    let deny_added = if apply_deny {
+        merge_claude_permissions_deny(&mut root)?
+    } else {
+        0
+    };
 
     save_json_formatted(path, &root, dry_run)?;
     Ok(if dry_run {
-        format!("dry-run: would write managed PreToolUse/PostToolUse blocks (audit={audit})")
+        format!(
+            "dry-run: would write managed PreToolUse/PostToolUse blocks (audit={audit}, applyDeny={apply_deny}, denyAdded={deny_added})"
+        )
     } else {
-        format!("wrote managed blocks (audit={audit})")
+        format!(
+            "wrote managed blocks (audit={audit}, applyDeny={apply_deny}, denyAdded={deny_added})"
+        )
     })
 }
 
@@ -211,6 +247,15 @@ timeout = {HOOK_CLI_TIMEOUT_SEC}
 type = \"command\"
 command = \"{pre}\"
 statusMessage = \"shk: scanning for secrets...\"
+
+[[hooks.PermissionRequest]]
+matcher = \".*\"
+timeout = {HOOK_CLI_TIMEOUT_SEC}
+
+[[hooks.PermissionRequest.hooks]]
+type = \"command\"
+command = \"{pre}\"
+statusMessage = \"shk: checking approval request...\"
 
 [[hooks.PostToolUse]]
 matcher = \".*\"

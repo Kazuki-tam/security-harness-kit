@@ -161,6 +161,9 @@ pub enum HooksCmd {
         /// Cursor hooks only: sets `failClosed` in injected entries.
         #[arg(long)]
         fail_closed: bool,
+        /// Claude Code only: merge recommended permissions.deny action guard entries.
+        #[arg(long)]
+        apply_deny: bool,
     },
 }
 

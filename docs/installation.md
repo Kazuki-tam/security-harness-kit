@@ -62,7 +62,7 @@ Windows releases include a generated Scoop manifest (`shk.json`) as a release as
 scoop install https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk.json
 ```
 
-To install a pinned release, replace `latest/download` with `download/v0.1.1`. For long-term distribution, copy the generated `shk.json` into a Scoop bucket repository. The generated manifest includes `checkver` and `autoupdate` metadata for bucket-based updates.
+To install a pinned release, replace `latest/download` with `download/v0.1.2`. For long-term distribution, copy the generated `shk.json` into a Scoop bucket repository. The generated manifest includes `checkver` and `autoupdate` metadata for bucket-based updates.
 
 ## Homebrew
 
@@ -72,7 +72,7 @@ macOS and Linux releases include a generated Homebrew formula (`shk.rb`) as a re
 brew install --formula https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk.rb
 ```
 
-To install a pinned release, replace `latest/download` with `download/v0.1.1`. For long-term distribution, copy the generated `shk.rb` into a Homebrew tap repository.
+To install a pinned release, replace `latest/download` with `download/v0.1.2`. For long-term distribution, copy the generated `shk.rb` into a Homebrew tap repository.
 
 Intel macOS (`x86_64-apple-darwin`) release artifacts are not published. Apple Silicon macOS, Linux x86_64/aarch64, and Windows x86_64 are supported.
 

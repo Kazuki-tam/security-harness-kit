@@ -100,11 +100,12 @@ pub fn run() -> Result<()> {
                 global,
                 tool,
                 fail_closed,
+                apply_deny,
             } => {
                 if !dry_run {
                     safety::require_project_policy(&cwd, "hooks install-ai")?;
                 }
-                hooks::install_ai(&cwd, tool, audit, dry_run, global, fail_closed)?
+                hooks::install_ai(&cwd, tool, audit, dry_run, global, fail_closed, apply_deny)?
             }
         },
         Commands::Policy { cmd } => match cmd {

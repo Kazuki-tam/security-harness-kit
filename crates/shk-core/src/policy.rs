@@ -322,6 +322,33 @@ impl Default for MaskSection {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ActionGuardSection {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_action_guard_profile")]
+    pub profile: String,
+    #[serde(default)]
+    pub allow: Vec<String>,
+    #[serde(default)]
+    pub deny: Vec<String>,
+}
+
+fn default_action_guard_profile() -> String {
+    "recommended".into()
+}
+
+impl Default for ActionGuardSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            profile: default_action_guard_profile(),
+            allow: Vec::new(),
+            deny: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct DoctorIgnoreSection {
     /// `None` = absent from shk.toml → `effective_required_patterns()` returns built-in defaults.
@@ -370,6 +397,8 @@ pub struct Policy {
     pub thresholds: ThresholdsSection,
     #[serde(default)]
     pub mask: MaskSection,
+    #[serde(default)]
+    pub action_guard: ActionGuardSection,
     #[serde(default)]
     pub doctor: DoctorSection,
     /// Path-based / hash-based suppression (also see inline `# shk-ignore` in scanner).
@@ -486,6 +515,12 @@ redaction = "full"
 # preserve_prefix = 4 # only when redaction = "partial"
 # preserve_suffix = 4
 
+[action_guard]
+enabled = true
+profile = "recommended" # minimal | recommended | strict
+allow = []
+deny = []
+
 # Project-specific sensitive terms. Patterns use Rust regex syntax.
 # [[custom_rules]]
 # id = "internal.codename"
@@ -580,6 +615,12 @@ redaction = "full"
 # preserve_prefix = 4 # only when redaction = "partial"
 # preserve_suffix = 4
 
+[action_guard]
+enabled = true
+profile = "recommended" # minimal | recommended | strict
+allow = []
+deny = []
+
 # Project-specific sensitive terms. Patterns use Rust regex syntax.
 # [[custom_rules]]
 # id = "internal.codename"
@@ -661,6 +702,29 @@ mod tests {
                 .effective_required_patterns()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn action_guard_defaults_and_overrides_parse() {
+        let defaulted: Policy = toml::from_str("").unwrap();
+        assert!(defaulted.action_guard.enabled);
+        assert_eq!(defaulted.action_guard.profile, "recommended");
+        assert!(defaulted.action_guard.allow.is_empty());
+        assert!(defaulted.action_guard.deny.is_empty());
+
+        let overridden: Policy = toml::from_str(
+            r#"[action_guard]
+enabled = false
+profile = "minimal"
+allow = ["Bash(psql:*)"]
+deny = ["Bash(kubectl delete:*)"]
+"#,
+        )
+        .unwrap();
+        assert!(!overridden.action_guard.enabled);
+        assert_eq!(overridden.action_guard.profile, "minimal");
+        assert_eq!(overridden.action_guard.allow, ["Bash(psql:*)"]);
+        assert_eq!(overridden.action_guard.deny, ["Bash(kubectl delete:*)"]);
     }
 
     #[test]
