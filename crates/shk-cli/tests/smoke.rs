@@ -833,9 +833,16 @@ fn doctor_env_reports_findings_without_values() {
 
 #[test]
 fn doctor_version_reports_update_available_from_env() {
+    let current = env!("CARGO_PKG_VERSION");
+    let mut parts = current
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap())
+        .collect::<Vec<_>>();
+    parts[2] += 1;
+    let next_patch = format!("v{}.{}.{}", parts[0], parts[1], parts[2]);
     let out = Command::new(shk_bin())
         .args(["doctor", "version"])
-        .env("SHK_UPDATE_CHECK_LATEST_TAG", "v0.1.1")
+        .env("SHK_UPDATE_CHECK_LATEST_TAG", &next_patch)
         .env_remove("SHK_UPDATE_CHECK_URL")
         .output()
         .expect("doctor version");
@@ -846,15 +853,20 @@ fn doctor_version_reports_update_available_from_env() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("version: update available"), "{stdout}");
-    assert!(stdout.contains("current: 0.1.0"), "{stdout}");
-    assert!(stdout.contains("latest:  v0.1.1"), "{stdout}");
+    assert!(stdout.contains(&format!("current: {current}")), "{stdout}");
+    assert!(
+        stdout.contains(&format!("latest:  {next_patch}")),
+        "{stdout}"
+    );
 }
 
 #[test]
 fn doctor_version_json_reports_current_status_from_env() {
+    let current = env!("CARGO_PKG_VERSION");
+    let latest = format!("v{current}");
     let out = Command::new(shk_bin())
         .args(["doctor", "--json", "version"])
-        .env("SHK_UPDATE_CHECK_LATEST_TAG", "v0.1.0")
+        .env("SHK_UPDATE_CHECK_LATEST_TAG", &latest)
         .env_remove("SHK_UPDATE_CHECK_URL")
         .output()
         .expect("doctor version json");
@@ -864,8 +876,8 @@ fn doctor_version_json_reports_current_status_from_env() {
         String::from_utf8_lossy(&out.stderr)
     );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["current"], "0.1.0");
-    assert_eq!(v["latest"], "v0.1.0");
+    assert_eq!(v["current"], current);
+    assert_eq!(v["latest"], latest);
     assert_eq!(v["status"], "current");
     assert_eq!(v["update_available"], false);
 }
