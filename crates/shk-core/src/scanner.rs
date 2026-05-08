@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
 use rayon::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroize;
@@ -29,6 +29,7 @@ pub struct ScanResult {
     pub policy_path: Option<PathBuf>,
     pub exit_threshold: Severity,
     pub suppressed: u64,
+    pub deduplicated: u64,
 }
 
 impl ScanResult {
@@ -64,6 +65,7 @@ impl ScanResult {
             exit_threshold: self.exit_threshold.as_str().to_string(),
             policy_path: self.policy_path.as_ref().map(|p| p.display().to_string()),
             suppressed: self.suppressed,
+            deduplicated: self.deduplicated,
             color_mode: match color_mode {
                 ColorMode::Auto => "auto".into(),
                 ColorMode::Always => "always".into(),
@@ -191,13 +193,54 @@ impl<'a> PreparedScan<'a> {
     }
 }
 
+struct FindingDeduper {
+    seen: HashSet<(String, String)>,
+}
+
+impl FindingDeduper {
+    fn new() -> Self {
+        Self {
+            seen: HashSet::new(),
+        }
+    }
+
+    fn insert(&mut self, rule_id: &str, matched_text: &str) -> bool {
+        self.seen
+            .insert((rule_id.to_string(), matched_text.to_string()))
+    }
+}
+
+struct ScanChunk {
+    findings: Vec<Finding>,
+    suppressed: u64,
+    deduplicated: u64,
+}
+
+impl ScanChunk {
+    fn empty() -> Self {
+        Self {
+            findings: vec![],
+            suppressed: 0,
+            deduplicated: 0,
+        }
+    }
+
+    fn skipped(findings: Vec<Finding>) -> Self {
+        Self {
+            findings,
+            suppressed: 0,
+            deduplicated: 0,
+        }
+    }
+}
+
 #[cfg(test)]
 fn scan_text_content(
     rel: &str,
     content: &str,
     policy: &Policy,
     include_context: bool,
-) -> Result<(Vec<Finding>, u64)> {
+) -> Result<ScanChunk> {
     let prepared = PreparedScan::new(policy)?;
     scan_text_prepared(rel, content, &prepared, include_context)
 }
@@ -207,10 +250,12 @@ fn scan_text_prepared(
     content: &str,
     prepared: &PreparedScan<'_>,
     include_context: bool,
-) -> Result<(Vec<Finding>, u64)> {
+) -> Result<ScanChunk> {
     let inline = suppression::parse_inline_suppressions(content);
     let mut suppressed = 0u64;
+    let mut deduplicated = 0u64;
     let mut findings = Vec::new();
+    let mut deduper = FindingDeduper::new();
 
     for mut m in shk_rules::scan_content(content, rel, &prepared.cfg) {
         if inline.is_suppressed(m.line, m.rule_id) {
@@ -227,6 +272,11 @@ fn scan_text_prepared(
         ) {
             m.matched_text.zeroize();
             suppressed += 1;
+            continue;
+        }
+        if !deduper.insert(m.rule_id, &m.matched_text) {
+            m.matched_text.zeroize();
+            deduplicated += 1;
             continue;
         }
         findings.push(Finding::from_rule_match_with_custom_context(
@@ -256,6 +306,11 @@ fn scan_text_prepared(
             suppressed += 1;
             continue;
         }
+        if !deduper.insert(&m.rule_id, &m.matched_text) {
+            m.matched_text.zeroize();
+            deduplicated += 1;
+            continue;
+        }
         findings.push(Finding::from_custom_match(
             rel,
             &m,
@@ -266,7 +321,11 @@ fn scan_text_prepared(
         ));
         m.matched_text.zeroize();
     }
-    Ok((findings, suppressed))
+    Ok(ScanChunk {
+        findings,
+        suppressed,
+        deduplicated,
+    })
 }
 
 fn scan_one_path(
@@ -275,14 +334,14 @@ fn scan_one_path(
     label_root: &Path,
     prepared: &PreparedScan<'_>,
     include_context: bool,
-) -> Result<(Vec<Finding>, u64)> {
+) -> Result<ScanChunk> {
     let full = root.join(rel_path);
     let meta = match fs::metadata(&full) {
         Ok(m) => m,
-        Err(_) => return Ok((vec![], 0)),
+        Err(_) => return Ok(ScanChunk::empty()),
     };
     if meta.is_dir() {
-        return Ok((vec![], 0));
+        return Ok(ScanChunk::empty());
     }
     let rel = rel_normalized(&full, label_root);
     if meta.len() > prepared.policy.scan.max_file_size_bytes {
@@ -302,7 +361,7 @@ fn scan_one_path(
             context_before: vec![],
             context_after: vec![],
         }];
-        return Ok((f, 0));
+        return Ok(ScanChunk::skipped(f));
     }
     let bytes = fs::read(&full).with_context(|| format!("read {}", full.display()))?;
     scan_bytes(&rel, bytes, prepared, include_context)
@@ -313,7 +372,7 @@ fn scan_staged_blob(
     rel_path: &Path,
     prepared: &PreparedScan<'_>,
     include_context: bool,
-) -> Result<(Vec<Finding>, u64)> {
+) -> Result<ScanChunk> {
     let rel = rel_path.to_string_lossy().replace('\\', "/");
     let bytes = git::staged_file_bytes(repo, rel_path)?;
     scan_bytes(&rel, bytes, prepared, include_context)
@@ -324,7 +383,7 @@ fn scan_bytes(
     mut bytes: Vec<u8>,
     prepared: &PreparedScan<'_>,
     include_context: bool,
-) -> Result<(Vec<Finding>, u64)> {
+) -> Result<ScanChunk> {
     if bytes.len() as u64 > prepared.policy.scan.max_file_size_bytes {
         let f = vec![Finding {
             rule_id: "scan.file_too_large".into(),
@@ -343,7 +402,7 @@ fn scan_bytes(
             context_after: vec![],
         }];
         bytes.zeroize();
-        return Ok((f, 0));
+        return Ok(ScanChunk::skipped(f));
     }
     let take = prepared.policy.scan.binary_detection_bytes.min(bytes.len());
     if !prepared.policy.scan.include_binary && is_probably_binary(&bytes[..take]) {
@@ -361,7 +420,7 @@ fn scan_bytes(
             context_after: vec![],
         }];
         bytes.zeroize();
-        return Ok((f, 0));
+        return Ok(ScanChunk::skipped(f));
     }
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
     let result = scan_text_prepared(rel, &text, prepared, include_context);
@@ -389,13 +448,10 @@ pub fn scan_string(
             .unwrap_or_else(|| policy.scan_fail_on())
     };
 
-    let mut suppressed_total = 0u64;
     let expired = suppression::expired_allowlist_warnings(&policy.allowlist);
     let prepared = PreparedScan::new(&policy)?;
-    let (scan_findings, suppressed) =
-        scan_text_prepared(rel_display_path, content, &prepared, include_context)?;
-    suppressed_total += suppressed;
-    let findings = prepend_policy_warnings(expired, scan_findings);
+    let chunk = scan_text_prepared(rel_display_path, content, &prepared, include_context)?;
+    let findings = prepend_policy_warnings(expired, chunk.findings);
     drop(prepared);
 
     Ok(ScanResult {
@@ -404,7 +460,8 @@ pub fn scan_string(
         policy,
         policy_path,
         exit_threshold,
-        suppressed: suppressed_total,
+        suppressed: chunk.suppressed,
+        deduplicated: chunk.deduplicated,
     })
 }
 
@@ -424,15 +481,17 @@ pub fn scan_staged(cwd: &Path, opts: ScanOptions) -> Result<ScanResult> {
         .iter()
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .collect();
-    let chunk_results: Vec<Result<(Vec<Finding>, u64)>> = paths
+    let chunk_results: Vec<Result<ScanChunk>> = paths
         .par_iter()
         .map(|rel| scan_staged_blob(&repo, rel, &prepared, include_context))
         .collect();
     let mut suppressed_total = 0u64;
+    let mut deduplicated_total = 0u64;
     for chunk in chunk_results {
-        let (f, sup) = chunk?;
-        findings.extend(f);
-        suppressed_total += sup;
+        let chunk = chunk?;
+        findings.extend(chunk.findings);
+        suppressed_total += chunk.suppressed;
+        deduplicated_total += chunk.deduplicated;
     }
     let exit_threshold = if opts.use_pre_commit_threshold {
         opts.fail_on_override
@@ -449,6 +508,7 @@ pub fn scan_staged(cwd: &Path, opts: ScanOptions) -> Result<ScanResult> {
         policy_path,
         exit_threshold,
         suppressed: suppressed_total,
+        deduplicated: deduplicated_total,
     })
 }
 
@@ -472,6 +532,7 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
     };
 
     let mut suppressed_total = 0u64;
+    let mut deduplicated_total = 0u64;
     let expired = suppression::expired_allowlist_warnings(&policy.allowlist);
     let prepared = PreparedScan::new(&policy)?;
 
@@ -496,9 +557,10 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
                 policy_path,
                 exit_threshold,
                 suppressed: 0,
+                deduplicated: 0,
             });
         }
-        let (scan_findings, sup) = scan_one_path(
+        let chunk = scan_one_path(
             &scan_root,
             abs_target
                 .strip_prefix(&scan_root)
@@ -507,8 +569,9 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
             &prepared,
             include_context,
         )?;
-        suppressed_total += sup;
-        let findings = prepend_policy_warnings(expired, scan_findings);
+        suppressed_total += chunk.suppressed;
+        deduplicated_total += chunk.deduplicated;
+        let findings = prepend_policy_warnings(expired, chunk.findings);
         drop(prepared);
         return Ok(ScanResult {
             findings,
@@ -517,6 +580,7 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
             policy_path,
             exit_threshold,
             suppressed: suppressed_total,
+            deduplicated: deduplicated_total,
         });
     }
 
@@ -541,7 +605,7 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
         })
         .collect();
 
-    let chunk_results: Vec<Result<(Vec<Finding>, u64)>> = scanned_files
+    let chunk_results: Vec<Result<ScanChunk>> = scanned_files
         .par_iter()
         .map(|full| {
             let rel = full.strip_prefix(&scan_root).unwrap_or(full).to_path_buf();
@@ -551,9 +615,10 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
 
     let mut findings = expired;
     for chunk in chunk_results {
-        let (f, s) = chunk?;
-        findings.extend(f);
-        suppressed_total += s;
+        let chunk = chunk?;
+        findings.extend(chunk.findings);
+        suppressed_total += chunk.suppressed;
+        deduplicated_total += chunk.deduplicated;
     }
 
     let scanned_paths: Vec<String> = scanned_files
@@ -569,6 +634,7 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
         policy_path,
         exit_threshold,
         suppressed: suppressed_total,
+        deduplicated: deduplicated_total,
     })
 }
 
@@ -634,12 +700,39 @@ mod tests {
         // not real credential: synthetic detector fixture value only
         let text = "# shk-ignore-next-line secret.openai_api_key\nsk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n";
         let p = Policy::default();
-        let (f, suppressed) = scan_text_content("w.txt", text, &p, false).unwrap();
-        assert!(suppressed >= 1, "expect suppression: findings={f:?}");
+        let chunk = scan_text_content("w.txt", text, &p, false).unwrap();
         assert!(
-            !f.iter().any(|x| x.rule_id == "secret.openai_api_key"),
-            "{f:?}"
+            chunk.suppressed >= 1,
+            "expect suppression: findings={:?}",
+            chunk.findings
         );
+        assert!(
+            !chunk
+                .findings
+                .iter()
+                .any(|x| x.rule_id == "secret.openai_api_key"),
+            "{:?}",
+            chunk.findings
+        );
+    }
+
+    #[test]
+    fn duplicate_builtin_matches_emit_once_per_file_rule_and_value() {
+        // not real credential: synthetic detector fixture value only
+        let secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+        let text = format!("{secret}\nlet copied = \"{secret}\";\n");
+        let p = Policy::default();
+        let chunk = scan_text_content("w.txt", &text, &p, false).unwrap();
+
+        assert_eq!(chunk.suppressed, 0);
+        assert_eq!(chunk.deduplicated, 1);
+        let matches: Vec<_> = chunk
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == "secret.openai_api_key")
+            .collect();
+        assert_eq!(matches.len(), 1, "{:?}", chunk.findings);
+        assert_eq!(matches[0].line, 1);
     }
 
     #[test]
@@ -657,11 +750,11 @@ mod tests {
             enabled: true,
         });
 
-        let (findings, suppressed) =
-            scan_text_content("notes.txt", "launch ProjectNebula\n", &p, true).unwrap();
+        let chunk = scan_text_content("notes.txt", "launch ProjectNebula\n", &p, true).unwrap();
 
-        assert_eq!(suppressed, 0);
-        let f = findings
+        assert_eq!(chunk.suppressed, 0);
+        let f = chunk
+            .findings
             .iter()
             .find(|f| f.rule_id == "internal.project_codename")
             .expect("custom finding");
@@ -684,11 +777,10 @@ mod tests {
             enabled: true,
         });
 
-        let (findings, suppressed) =
-            scan_text_content("notes.txt", "launch ProjectNebula\n", &p, false).unwrap();
+        let chunk = scan_text_content("notes.txt", "launch ProjectNebula\n", &p, false).unwrap();
 
-        assert!(findings.is_empty(), "{findings:?}");
-        assert_eq!(suppressed, 0);
+        assert!(chunk.findings.is_empty(), "{:?}", chunk.findings);
+        assert_eq!(chunk.suppressed, 0);
     }
 
     #[test]
@@ -713,10 +805,9 @@ mod tests {
             expires: None,
         });
 
-        let (findings, suppressed) =
-            scan_text_content("docs/roadmap.md", "ProjectNebula\n", &p, false).unwrap();
+        let chunk = scan_text_content("docs/roadmap.md", "ProjectNebula\n", &p, false).unwrap();
 
-        assert!(findings.is_empty(), "{findings:?}");
-        assert_eq!(suppressed, 1);
+        assert!(chunk.findings.is_empty(), "{:?}", chunk.findings);
+        assert_eq!(chunk.suppressed, 1);
     }
 }

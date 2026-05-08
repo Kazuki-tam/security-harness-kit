@@ -145,6 +145,7 @@ pub struct ScanJsonReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub policy_path: Option<String>,
     pub suppressed: u64,
+    pub deduplicated: u64,
     pub color_mode: String,
 }
 

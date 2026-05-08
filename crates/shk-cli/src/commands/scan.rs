@@ -64,7 +64,12 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
     } else {
         print!(
             "{}",
-            output::format_human_findings(&res.findings, inv.color_enabled, inv.verbose)
+            output::format_human_findings(
+                &res.findings,
+                inv.color_enabled,
+                inv.verbose,
+                res.deduplicated,
+            )
         );
         println!(
             "{}",
@@ -163,9 +168,10 @@ fn run_hook_mode(
             );
         } else {
             let hint = format!(
-                "shk: {} finding(s) in tool output — review before using ({} suppressed)",
+                "shk: {} finding(s) in tool output — review before using ({} suppressed, {} deduplicated)",
                 res.findings.len(),
                 res.suppressed,
+                res.deduplicated,
             );
             eprintln!("{hint}");
             println!(
@@ -295,6 +301,7 @@ fn emit_audit_hook(
             "display_path": disp,
             "finding_count": res.findings.len(),
             "suppressed": res.suppressed,
+            "deduplicated": res.deduplicated,
             "max_severity": max_sev,
         }),
     )?;

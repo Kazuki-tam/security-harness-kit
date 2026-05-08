@@ -5,6 +5,7 @@ members = [
     "crates/shk-rules",
     "crates/shk-cli",
     "crates/shk-integrations",
+    "xtask",
 ]
 
 [workspace.package]

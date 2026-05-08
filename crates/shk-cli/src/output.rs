@@ -1,7 +1,12 @@
 use shk_core::finding::Finding;
 use shk_core::policy::Severity;
 
-pub fn format_human_findings(findings: &[Finding], color: bool, verbose: bool) -> String {
+pub fn format_human_findings(
+    findings: &[Finding],
+    color: bool,
+    verbose: bool,
+    deduplicated: u64,
+) -> String {
     let mut s = String::new();
     let hidden_skips = if verbose {
         0
@@ -26,6 +31,11 @@ pub fn format_human_findings(findings: &[Finding], color: bool, verbose: bool) -
     if hidden_skips > 0 {
         s.push_str(&format!(
             "\nSkipped {hidden_skips} files; use --verbose to show details.\n"
+        ));
+    }
+    if deduplicated > 0 {
+        s.push_str(&format!(
+            "\nDeduplicated {deduplicated} repeated finding(s).\n"
         ));
     }
     s
@@ -147,7 +157,7 @@ mod tests {
             finding("info"),
         ];
 
-        let out = format_human_findings(&findings, true, false);
+        let out = format_human_findings(&findings, true, false, 0);
 
         assert!(out.contains("\x1b[1;31mCRIT\x1b[0m"));
         assert!(out.contains("\x1b[31mHIGH\x1b[0m"));
@@ -158,7 +168,7 @@ mod tests {
 
     #[test]
     fn leaves_human_finding_severity_labels_plain_without_color() {
-        let out = format_human_findings(&[finding("high")], false, false);
+        let out = format_human_findings(&[finding("high")], false, false, 0);
 
         assert!(out.contains("HIGH  demo.rule  demo.txt:7"));
         assert!(!out.contains("\x1b["));
@@ -179,5 +189,12 @@ mod tests {
         let out = format_scan_summary(None, Severity::High, true);
 
         assert_eq!(out, "\x1b[32mNo findings.\x1b[0m");
+    }
+
+    #[test]
+    fn human_findings_report_deduplicated_count() {
+        let out = format_human_findings(&[finding("high")], false, false, 2);
+
+        assert!(out.contains("Deduplicated 2 repeated finding(s)."));
     }
 }

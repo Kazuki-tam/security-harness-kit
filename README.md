@@ -2,7 +2,7 @@
 
 ![Overview illustration of shk scanning code, masking secrets, enforcing hooks, and producing safe reports](docs/assets/shk-overview.jpg)
 
-`shk` is a local-first security harness for AI-assisted development. It scans for secrets, PII, and unsafe project surfaces before they reach AI tools, Git commits, or generated output.
+`shk` is a local-first guardrail for AI-assisted development. It helps keep secrets, PII, and risky project surfaces out of AI tool context, Git commits, generated output, and everyday local workflows.
 
 ```bash
 shk scan .
@@ -20,11 +20,11 @@ MED   pii.en.ssn             docs/test.md:8   US Social Security Number detected
 
 ## Why
 
-AI coding agents can read project files and run commands. `shk` provides local checks that help catch sensitive data before it is sent to an AI tool, committed to Git, or written into derived files.
+AI coding agents can read project files, run commands, and transform sensitive input into new files. `shk` adds local checks around those workflows so teams can audit, mask, or block risky content before it leaves the intended boundary.
 
 `shk` can:
 
-- Scan project paths and Git-staged files for secrets and PII.
+- Scan project paths and Git-staged files for common secrets and PII.
 - Mask sensitive content from stdin or files.
 - Install Git pre-commit hooks.
 - Install managed hooks for Claude Code, Cursor, and Codex.
@@ -155,8 +155,10 @@ See [Configuration](docs/configuration.md) for the full `shk.toml` reference, cu
 ## Safety Notes
 
 - Scans and masking run locally.
+- Built-in detection is pattern-based and includes hand-tuned `shk` rules plus generated gitleaks-derived `secret.gitleaks.*` rules; use it as an AI/local workflow guardrail, not as a complete replacement for dedicated secret scanning platforms.
 - JSON reports use `redacted_value: "[REDACTED]"`.
 - Hook audit logs contain metadata such as counts, tool name, hook phase, and display path.
+- Allowlist `value_hash` entries are deterministic fingerprints for suppression, not cryptographic secret storage.
 - Post-tool hooks are non-blocking.
 - `doctor ignore --fix` appends missing patterns to `.gitignore`; it does not remove existing entries.
 - `mask --output` requires `shk.toml` and refuses sensitive env files and protected home configuration files.
