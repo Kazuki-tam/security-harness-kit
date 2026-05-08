@@ -319,7 +319,7 @@ fn rule_expr(rule: &GitleaksTomlRule, skipped: &mut Vec<String>) -> Option<Strin
     .ok()?;
     writeln!(
         out,
-        "            re: Regex::new({}).expect(\"valid generated gitleaks regex\"),",
+        "            re: Lazy::new(|| Regex::new({}).expect(\"valid generated gitleaks regex\")),",
         rust_str(&pattern)
     )
     .ok()?;
@@ -367,7 +367,7 @@ fn regex_vec_expr(patterns: &[String], skipped: &mut Vec<String>) -> String {
             continue;
         }
         parts.push(format!(
-            "Regex::new({}).expect(\"valid generated gitleaks allowlist regex\")",
+            "Lazy::new(|| Regex::new({}).expect(\"valid generated gitleaks allowlist regex\"))",
             rust_str(&pattern)
         ));
     }
@@ -388,7 +388,7 @@ fn option_regex(pattern: Option<&str>, skipped: &mut Vec<String>, label: &str) -
         return "None".to_string();
     }
     format!(
-        "Some(Regex::new({}).expect(\"valid generated gitleaks path regex\"))",
+        "Some(Lazy::new(|| Regex::new({}).expect(\"valid generated gitleaks path regex\")))",
         rust_str(&pattern)
     )
 }
