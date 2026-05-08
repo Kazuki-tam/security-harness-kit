@@ -624,7 +624,11 @@ fn hooks_install_ai_codex_includes_permission_request() {
 fn hook_mode_cursor_blocks_with_exit_2() {
     use std::io::Write;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let fixture = std::fs::canonicalize(root.join("fixtures/basic/insecure-sample.txt")).unwrap();
+    let dir = tempfile::tempdir_in(&root).unwrap();
+    let fixture = dir.path().join("hook-secret.txt");
+    // not real credential: synthetic detector fixture value only
+    std::fs::write(&fixture, "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n").unwrap();
+    let fixture = std::fs::canonicalize(fixture).unwrap();
     let stdin = serde_json::to_string(&serde_json::json!({
         "file_path": fixture.to_str().unwrap(),
     }))
