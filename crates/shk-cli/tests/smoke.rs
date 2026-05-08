@@ -218,14 +218,14 @@ fn mask_hook_mode_claude_post_returns_replacement_output() {
 }
 
 #[test]
-fn scan_json_reports_suppressed_field() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("fixtures/basic");
+fn scan_json_reports_suppressed_and_deduplicated_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+    std::fs::write(dir.path().join("dupe.txt"), format!("{secret}\n{secret}\n")).unwrap();
     let out = Command::new(shk_bin())
         .args([
             "scan",
-            &root.display().to_string(),
+            &dir.path().display().to_string(),
             "--json",
             "--fail-on",
             "critical",
@@ -239,6 +239,7 @@ fn scan_json_reports_suppressed_field() {
     );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(v.get("suppressed").is_some(), "{v}");
+    assert_eq!(v["deduplicated"], 1, "{v}");
 }
 
 #[test]
@@ -1177,7 +1178,7 @@ fn hooks_install_makes_existing_pre_commit_executable() {
 #[test]
 fn doctor_env_reports_findings_without_values() {
     let dir = tempfile::tempdir().unwrap();
-    let secret = "abcdefghijklmnop";
+    let secret = "aB3dE5gH7jK9mN2pQ4rS";
     std::fs::write(dir.path().join(".env"), format!("api_key={secret}\n")).unwrap();
     let out = Command::new(shk_bin())
         .args(["doctor", "env", dir.path().to_str().unwrap()])

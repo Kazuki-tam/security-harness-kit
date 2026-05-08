@@ -31,7 +31,12 @@ Not every kind is used by every command or built-in rule set.
 
 ## Built-In Secret Coverage
 
-The built-in secret rules include patterns for:
+The built-in secret rules combine two sources:
+
+- Hand-tuned `shk` rules in `crates/shk-rules/src/lib.rs`.
+- Generated `secret.gitleaks.*` rules adapted from the gitleaks default configuration in `crates/shk-rules/src/gitleaks_rules.rs`.
+
+The hand-tuned `shk` rules include patterns for:
 
 - OpenAI-style API keys.
 - AWS access key IDs.
@@ -40,11 +45,27 @@ The built-in secret rules include patterns for:
 - GitHub tokens.
 - Slack tokens.
 - Stripe API keys.
+- Hugging Face tokens.
+- Label-anchored Twilio auth tokens.
+- SendGrid API keys.
+- Shopify tokens.
+- Supabase service role keys.
+- Label-anchored Vercel tokens.
+- npm tokens.
+- GitLab personal access tokens.
+- Discord webhook URLs.
+- Label-anchored Cloudflare API tokens.
+- Label-anchored Notion integration tokens.
+- Linear API keys.
 - Database URLs with credentials.
 - JWTs.
 - Bearer tokens.
 - Generic API key or secret key assignments.
 - Private key PEM block headers.
+
+The generated gitleaks-derived rules add broader service coverage for provider-specific API keys, access tokens, client secrets, webhook URLs, cloud credentials, package registry tokens, and related secret formats. They preserve key gitleaks rule semantics where practical, including keyword prefilters, path-limited rules, `secretGroup` extraction for the reported secret value, entropy thresholds, and rule-level allowlists.
+
+Generated gitleaks rule ids use the `secret.gitleaks.<upstream-id>` namespace so they do not collide with existing `shk` rule ids. A small number of upstream rules are intentionally skipped when they are path-only, overlap with existing tuned `shk` rules, or exceed Rust `regex` compiled-size limits. See `THIRD_PARTY_LICENSES.md` for the gitleaks license and source commit.
 
 These are pattern-based detections. Review findings before treating them as confirmed credentials.
 
@@ -66,7 +87,7 @@ Universal PII rules run when `pii = true`:
 English PII rules run when `pii = true` and `pii_languages` includes `en`:
 
 - Phone numbers.
-- US Social Security Numbers.
+- Label-anchored US Social Security Numbers.
 - Label-anchored ZIP or postal codes.
 - EINs.
 - Passport numbers.
@@ -77,7 +98,7 @@ Japanese PII rules run when `pii = true` and `pii_languages` includes `ja`:
 
 - Phone numbers.
 - Label-anchored or postal-mark-prefixed postal codes.
-- Passport numbers.
+- Label-anchored passport numbers.
 - Label-anchored My Number values.
 - Corporate numbers.
 - Driver license numbers.
@@ -85,7 +106,7 @@ Japanese PII rules run when `pii = true` and `pii_languages` includes `ja`:
 - Health insurance card patterns.
 - Label-anchored personal names.
 
-Personal names and English street addresses are label-anchored to reduce false positives.
+Personal names, English street addresses, English SSNs, and Japanese passport numbers are label-anchored to reduce false positives.
 
 ## Binary And Large Files
 
@@ -128,11 +149,12 @@ Example report:
   },
   "exit_threshold": "high",
   "suppressed": 0,
+  "deduplicated": 0,
   "color_mode": "never"
 }
 ```
 
-JSON scans include redacted surrounding context when context lines are available. Empty context fields are omitted from the serialized report.
+JSON scans include redacted surrounding context when context lines are available. Empty context fields are omitted from the serialized report. Repeated findings with the same rule and value in a single scanned file are emitted once and counted in `deduplicated`.
 
 ## Masking Model
 
@@ -145,6 +167,6 @@ Binary or non-UTF-8 input is not scanned by `shk mask`. Human output passes it t
 
 ## Audit Log
 
-`shk scan --hook-mode <tool> --audit` writes JSON lines to `.shk/audit.log`. Audit entries contain metadata such as tool name, hook phase, display path, finding count, suppressed count, and maximum severity. They do not contain raw matched values.
+`shk scan --hook-mode <tool> --audit` writes JSON lines to `.shk/audit.log`. Audit entries contain metadata such as tool name, hook phase, display path, finding count, suppressed count, deduplicated count, and maximum severity. They do not contain raw matched values.
 
 `shk secrets push --audit` also writes metadata-only JSON lines to `.shk/audit.log`. Secret push audit entries include fields such as provider, mode, source label, byte count, payload SHA-256 hash, target label, key counts, operation, and status. They do not contain raw dotenv values or per-key secret payloads.

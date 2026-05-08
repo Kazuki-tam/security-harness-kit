@@ -79,9 +79,6 @@ pub struct ScanSection {
     pub follow_symlinks: bool,
     #[serde(default)]
     pub include_binary: bool,
-    /// Config-reserved until a fancy-regex based rule is added.
-    #[serde(default = "default_fancy_timeout")]
-    pub fancy_regex_timeout_ms_per_file: u64,
 }
 
 impl ScanSection {
@@ -164,10 +161,6 @@ fn default_binary_detection() -> usize {
     8192
 }
 
-fn default_fancy_timeout() -> u64 {
-    100
-}
-
 impl Default for ScanSection {
     fn default() -> Self {
         Self {
@@ -177,7 +170,6 @@ impl Default for ScanSection {
             binary_detection_bytes: default_binary_detection(),
             follow_symlinks: false,
             include_binary: false,
-            fancy_regex_timeout_ms_per_file: default_fancy_timeout(),
         }
     }
 }
@@ -533,7 +525,6 @@ max_file_size_bytes = 1048576
 binary_detection_bytes = 8192
 follow_symlinks = false
 include_binary = false
-fancy_regex_timeout_ms_per_file = 100
 
 [rules]
 secrets = true
@@ -581,7 +572,7 @@ required_patterns = [
   "*.log"
 ]
 
-# Allowlist / inline suppressions (spec §5.3). Prefer path-scoped rows; use value_hash for value-specific cases.
+# Allowlist / inline suppressions (spec §5.3). Prefer path-scoped rows; use value_hash only as an equality fingerprint.
 # Inline: # shk-ignore-next-line <rule_id>
 # [[allowlist]]
 # rule_id = "secret.openai_api_key"
@@ -633,7 +624,6 @@ max_file_size_bytes = 1048576
 binary_detection_bytes = 8192
 follow_symlinks = false
 include_binary = false
-fancy_regex_timeout_ms_per_file = 100
 
 [rules]
 secrets = true
@@ -681,7 +671,7 @@ required_patterns = [
   "*.log"
 ]
 
-# Allowlist / inline suppressions (spec §5.3). Prefer path-scoped rows; use value_hash for value-specific cases.
+# Allowlist / inline suppressions (spec §5.3). Prefer path-scoped rows; use value_hash only as an equality fingerprint.
 # Inline: # shk-ignore-next-line <rule_id>
 # [[allowlist]]
 # rule_id = "secret.openai_api_key"

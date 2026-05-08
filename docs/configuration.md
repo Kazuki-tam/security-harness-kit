@@ -62,7 +62,6 @@ max_file_size_bytes = 1048576
 binary_detection_bytes = 8192
 follow_symlinks = false
 include_binary = false
-fancy_regex_timeout_ms_per_file = 100
 
 [rules]
 secrets = true
@@ -124,7 +123,6 @@ confirm = true
 | `binary_detection_bytes` | `8192` | Number of leading bytes inspected for binary detection. |
 | `follow_symlinks` | `false` | Whether scanner traversal follows symlinks. |
 | `include_binary` | `false` | Whether binary-looking files are scanned instead of skipped. |
-| `fancy_regex_timeout_ms_per_file` | `100` | Reserved configuration value. It is not currently wired to a runtime timeout. |
 
 ## Rule Settings
 
@@ -282,7 +280,7 @@ value_hash = "sha256-hmac:a3f1..."
 reason = "Public support address"
 ```
 
-Do not place raw secret values in `shk.toml`. Use `value_hash` for value-specific suppression.
+Do not place raw secret values in `shk.toml`. Use `value_hash` for value-specific suppression. A `value_hash` is a deterministic fingerprint for equality checks, not cryptographic secret storage; anyone who knows the candidate value and rule id can compute the same hash.
 
 Expired allowlist entries produce low-severity warning findings.
 
