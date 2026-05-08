@@ -5,7 +5,15 @@ use std::path::Path;
 
 const MANAGED_START: &str = "# shk-managed-start\n";
 const MANAGED_END: &str = "# shk-managed-end\n";
-const HOOK_BODY: &str = "shk scan --staged\n";
+const HOOK_BODY: &str = r#"if command -v shk >/dev/null 2>&1; then
+  shk scan --staged
+elif command -v cargo >/dev/null 2>&1 && [ -f Cargo.toml ]; then
+  cargo run -q -p shk-cli --bin shk -- scan --staged
+else
+  echo "shk pre-commit hook requires 'shk' in PATH or Cargo in a source checkout." >&2
+  exit 127
+fi
+"#;
 
 pub fn install_pre_commit(repo_root: &Path) -> Result<()> {
     let repo_root = fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
@@ -26,7 +34,11 @@ pub fn install_pre_commit(repo_root: &Path) -> Result<()> {
         }
         let existing = fs::read_to_string(&hook_path)
             .with_context(|| format!("read {}", hook_path.display()))?;
-        if existing.contains("shk-managed-start") && existing.contains("shk scan --staged") {
+        if existing.contains(MANAGED_START) && existing.contains(MANAGED_END) {
+            let updated = replace_managed_block(&existing, &block);
+            if updated != existing {
+                fs::write(&hook_path, updated)?;
+            }
             ensure_executable(&hook_path)?;
             return Ok(());
         }
@@ -46,6 +58,21 @@ pub fn install_pre_commit(repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn replace_managed_block(existing: &str, block: &str) -> String {
+    let Some(start) = existing.find(MANAGED_START) else {
+        return existing.to_owned();
+    };
+    let Some(end_rel) = existing[start..].find(MANAGED_END) else {
+        return existing.to_owned();
+    };
+    let end = start + end_rel + MANAGED_END.len();
+    let mut updated = String::with_capacity(existing.len() + block.len());
+    updated.push_str(&existing[..start]);
+    updated.push_str(block);
+    updated.push_str(&existing[end..]);
+    updated
+}
+
 #[cfg(unix)]
 fn ensure_executable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -62,4 +89,26 @@ fn ensure_executable(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn ensure_executable(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_block_is_upgraded_in_place() {
+        let existing = "#!/bin/sh\n\
+# existing user hook\n\
+# shk-managed-start\n\
+shk scan --staged\n\
+# shk-managed-end\n";
+        let block = format!("{MANAGED_START}{HOOK_BODY}{MANAGED_END}");
+
+        let updated = replace_managed_block(existing, &block);
+
+        assert!(updated.contains("# existing user hook"));
+        assert!(updated.contains("command -v shk"));
+        assert!(updated.contains("cargo run -q -p shk-cli --bin shk -- scan --staged"));
+        assert!(!updated.contains("\nshk scan --staged\n# shk-managed-end"));
+    }
 }
