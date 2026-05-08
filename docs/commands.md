@@ -146,7 +146,7 @@ shk doctor env --dotenvx
 shk doctor env ./path
 ```
 
-`.env.example` is excluded from the plaintext env file warning. With `--dotenvx`, the diagnostic also reports known dotenvx artifact files such as `.env.keys` and `.env.vault`.
+`.env.example` and dotenvx-encrypted env files are excluded from the plaintext env file warning. With `--dotenvx`, the diagnostic also reports known dotenvx artifact files such as `.env.keys` and `.env.vault`.
 
 ### `shk doctor version`
 
@@ -266,6 +266,7 @@ shk hooks install-ai --audit
 shk hooks install-ai --tool cursor
 shk hooks install-ai --tool claude-code --global
 shk hooks install-ai --tool claude-code --apply-deny
+shk hooks install-ai --apply-sandbox
 shk hooks install-ai --tool cursor --fail-closed
 ```
 
@@ -279,6 +280,7 @@ Options:
 | `--tool <tool>` | Limit installation to one of `claude-code`, `codex`, or `cursor`. |
 | `--fail-closed` | Cursor hooks only. Sets `failClosed` on managed entries. |
 | `--apply-deny` | Claude Code only. Merges recommended `permissions.deny` entries for sensitive files and dangerous actions. |
+| `--apply-sandbox` | Applies supported sandbox hardening. Claude Code gets `sandbox.enabled`, hard-fail, and no unsandboxed escape hatch. Project installs also add a home-read deny with project read re-allow; global installs skip those project-relative read rules. Codex gets `sandbox_mode = "workspace-write"` and `approval_policy = "on-request"` when absent or risky. Cursor has no local sandbox setting in `hooks.json`, so managed hooks are set fail-closed. |
 
 Without `--tool`, the command targets Claude Code, Codex, and Cursor. Non-dry-run installation requires a project `shk.toml`.
 

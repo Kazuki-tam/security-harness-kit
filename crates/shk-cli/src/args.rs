@@ -179,6 +179,12 @@ pub enum HooksCmd {
         /// Claude Code only: merge recommended permissions.deny action guard entries.
         #[arg(long)]
         apply_deny: bool,
+        /// Apply supported sandbox hardening for Claude Code and Codex.
+        ///
+        /// Cursor does not expose a local sandbox setting in hooks.json; for Cursor this also
+        /// enables fail-closed managed hooks.
+        #[arg(long)]
+        apply_sandbox: bool,
     },
 }
 

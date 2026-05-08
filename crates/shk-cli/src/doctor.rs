@@ -4,7 +4,10 @@ use serde_json::Value;
 use shk_core::git;
 use shk_core::policy::Policy;
 use shk_core::scanner::{ScanOptions, scan_string};
-use shk_integrations::{MANAGED_MARKER_JSON, MANAGED_MARKER_SH, claude_recommended_deny_entries};
+use shk_integrations::{
+    MANAGED_MARKER_JSON, MANAGED_MARKER_SH, claude_deny_entry_covers,
+    claude_recommended_deny_entries,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -24,6 +27,9 @@ const IGNORE_CANDIDATES: &[&str] = &[
 const DOTENVX_PRIVATE_KEY_FILE: &str = ".env.keys";
 const DOTENVX_VAULT_FILE: &str = ".env.vault";
 const DOTENVX_HINT_FILES: &[&str] = &[DOTENVX_PRIVATE_KEY_FILE, DOTENVX_VAULT_FILE];
+const DOTENVX_ENCRYPTED_VALUE_PREFIX: &str = "encrypted:";
+const DOTENVX_PUBLIC_KEY_PREFIX: &str = "DOTENV_PUBLIC_KEY";
+const DOTENVX_PRIVATE_KEY_PREFIX: &str = "DOTENV_PRIVATE_KEY";
 const CODEX_RISKY_SANDBOX_MODE: &str = "danger-full-access";
 const CODEX_RISKY_APPROVAL_POLICY: &str = "never";
 pub fn run_ignore(root: &Path, fix: bool) -> Result<()> {
@@ -39,6 +45,9 @@ pub fn run_ignore(root: &Path, fix: bool) -> Result<()> {
         combined.push_str(&fs::read_to_string(&gi_path)?);
     }
     for p in IGNORE_CANDIDATES {
+        if *p == ".gitignore" {
+            continue;
+        }
         let fp = root.join(p);
         if fp.is_file() {
             combined.push('\n');
@@ -126,20 +135,9 @@ fn run_claude_permissions_check(root: &Path) {
 }
 
 fn claude_deny_covers(denies: &[&str], required: &str) -> bool {
-    let required_norm = normalize_claude_deny(required);
     denies
         .iter()
-        .any(|entry| normalize_claude_deny(entry) == required_norm)
-}
-
-fn normalize_claude_deny(entry: &str) -> String {
-    entry
-        .trim()
-        .replace("(./", "(")
-        .replace(" ./.env", " .env")
-        .replace(" ./tokens/", " tokens/")
-        .trim_end_matches('/')
-        .to_string()
+        .any(|entry| claude_deny_entry_covers(entry, required))
 }
 
 fn run_codex_config_check(root: &Path) {
@@ -186,9 +184,39 @@ fn print_codex_string_setting(value: &toml::Value, key: &str, risky_value: Optio
 
 fn pattern_present(hay: &str, pat: &str) -> bool {
     let needle = pat.trim();
-    hay.lines().any(|l| {
-        l.trim() == needle || l.trim_end_matches('/').trim() == needle.trim_end_matches('/')
-    })
+    hay.lines()
+        .filter_map(normalize_ignore_pattern)
+        .any(|line| ignore_pattern_covers(line, needle))
+}
+
+fn normalize_ignore_pattern(line: &str) -> Option<&str> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        None
+    } else {
+        Some(line)
+    }
+}
+
+fn ignore_pattern_covers(existing: &str, required: &str) -> bool {
+    if existing == required
+        || existing.trim_end_matches('/') == required.trim_end_matches('/')
+        || directory_pattern_covers(existing, required)
+    {
+        return true;
+    }
+
+    matches!(
+        (existing, required),
+        (".env*", ".env") | (".env*", ".env.*")
+    )
+}
+
+fn directory_pattern_covers(existing: &str, required: &str) -> bool {
+    let Some(required_dir) = required.strip_suffix("/**") else {
+        return false;
+    };
+    existing.trim_end_matches('/') == required_dir
 }
 
 pub fn run_env(root: &Path, dotenvx: bool) -> Result<()> {
@@ -200,15 +228,17 @@ pub fn run_env(root: &Path, dotenvx: bool) -> Result<()> {
         if (name == ".env" || (name.starts_with(".env.") && name != ".env.example"))
             && e.path().is_file()
         {
-            env_files.push((name, e.path()));
+            let content = fs::read_to_string(e.path()).unwrap_or_default();
+            if !is_dotenvx_encrypted_env(&content) {
+                env_files.push((name, e.path(), content));
+            }
         }
     }
     if env_files.is_empty() {
         println!("env: no plaintext .env / .env.* (except .env.example) at repo root");
     } else {
         println!("env: plaintext env files detected (review + prefer dotenvx / secret manager):");
-        for (name, path) in env_files {
-            let content = fs::read_to_string(&path).unwrap_or_default();
+        for (name, _path, content) in env_files {
             let findings = scan_string(root, &name, &content, env_scan_options())?
                 .findings
                 .into_iter()
@@ -228,6 +258,79 @@ pub fn run_env(root: &Path, dotenvx: bool) -> Result<()> {
         run_dotenvx(root);
     }
     Ok(())
+}
+
+fn is_dotenvx_encrypted_env(content: &str) -> bool {
+    let mut saw_encrypted_value = false;
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let Some((raw_key, raw_value)) = line.split_once('=') else {
+            return false;
+        };
+        let key = raw_key.trim();
+        if key.is_empty() || is_dotenvx_private_key_name(key) {
+            return false;
+        }
+        if is_dotenvx_public_key_name(key) {
+            continue;
+        }
+
+        let Some(value) = dotenv_value_without_wrapping_quotes(raw_value.trim()) else {
+            return false;
+        };
+        if value.starts_with(DOTENVX_ENCRYPTED_VALUE_PREFIX) {
+            saw_encrypted_value = true;
+            continue;
+        }
+
+        return false;
+    }
+
+    saw_encrypted_value
+}
+
+fn dotenv_value_without_wrapping_quotes(value: &str) -> Option<&str> {
+    match value.chars().next() {
+        Some(quote @ ('"' | '\'')) => {
+            let rest = &value[quote.len_utf8()..];
+            let end = rest.find(quote)?;
+            let trailing = rest[end + quote.len_utf8()..].trim();
+            if !trailing.is_empty() && !trailing.starts_with('#') {
+                return None;
+            }
+            Some(&rest[..end])
+        }
+        _ => Some(
+            value
+                .split_once(" #")
+                .map(|(before, _)| before.trim_end())
+                .unwrap_or(value),
+        ),
+    }
+}
+
+fn is_dotenvx_public_key_name(key: &str) -> bool {
+    key == DOTENVX_PUBLIC_KEY_PREFIX
+        || key
+            .strip_prefix(&format!("{DOTENVX_PUBLIC_KEY_PREFIX}_"))
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(is_env_key_char))
+}
+
+fn is_dotenvx_private_key_name(key: &str) -> bool {
+    key == DOTENVX_PRIVATE_KEY_PREFIX
+        || key
+            .strip_prefix(&format!("{DOTENVX_PRIVATE_KEY_PREFIX}_"))
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(is_env_key_char))
+}
+
+fn is_env_key_char(ch: char) -> bool {
+    ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_'
 }
 
 fn run_dotenvx(root: &Path) {

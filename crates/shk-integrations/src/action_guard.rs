@@ -182,6 +182,20 @@ pub fn claude_recommended_deny_entries() -> Vec<&'static str> {
         .collect()
 }
 
+pub fn normalize_claude_deny_entry(entry: &str) -> String {
+    entry
+        .trim()
+        .replace("(./", "(")
+        .replace(" ./.env", " .env")
+        .replace(" ./tokens/", " tokens/")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+pub fn claude_deny_entry_covers(existing: &str, required: &str) -> bool {
+    normalize_claude_deny_entry(existing) == normalize_claude_deny_entry(required)
+}
+
 pub fn detect_dangerous_action(stdin: &str) -> Result<Option<ActionGuardMatch>> {
     detect_dangerous_action_with_config(stdin, &ActionGuardConfig::default())
 }
@@ -778,5 +792,15 @@ mod tests {
         .to_string();
 
         assert!(detect_dangerous_action(&write_text).unwrap().is_none());
+    }
+
+    #[test]
+    fn claude_deny_entry_covers_normalized_relative_paths() {
+        assert!(claude_deny_entry_covers("Read(./.env)", "Read(.env)"));
+        assert!(claude_deny_entry_covers(
+            "Bash(cat ./.env:*)",
+            "Bash(cat .env:*)"
+        ));
+        assert!(!claude_deny_entry_covers("Write(.env)", "Read(.env)"));
     }
 }
