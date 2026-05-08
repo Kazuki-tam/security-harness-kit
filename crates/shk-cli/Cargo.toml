@@ -20,9 +20,9 @@ name = "security-harness-kit"
 path = "src/bin/security-harness-kit.rs"
 
 [dependencies]
-shk-core = { version = "0.2.1", path = "../shk-core" }
-shk-rules = { version = "0.2.1", path = "../shk-rules" }
-shk-integrations = { version = "0.2.1", path = "../shk-integrations" }
+shk-core = { version = "0.2.2", path = "../shk-core" }
+shk-rules = { version = "0.2.2", path = "../shk-rules" }
+shk-integrations = { version = "0.2.2", path = "../shk-integrations" }
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
