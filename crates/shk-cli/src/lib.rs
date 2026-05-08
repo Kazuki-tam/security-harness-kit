@@ -77,6 +77,8 @@ pub fn run() -> Result<()> {
             hook_mode,
             post,
         } => commands::mask::run(&cwd, file, json, output, redaction, hook_mode, post)?,
+        Commands::Completions { shell } => commands::completions::run(shell)?,
+        Commands::Status => commands::status::run(&cwd)?,
         Commands::Doctor { cmd, json } => match cmd {
             None => doctor::run_all(&cwd, json)?,
             Some(DoctorCmd::Version) => version_check::run(json)?,
@@ -104,11 +106,23 @@ pub fn run() -> Result<()> {
                 tool,
                 fail_closed,
                 apply_deny,
+                apply_sandbox,
             } => {
                 if !dry_run {
                     safety::require_project_policy(&cwd, "hooks install-ai")?;
                 }
-                hooks::install_ai(&cwd, tool, audit, dry_run, global, fail_closed, apply_deny)?
+                hooks::install_ai(
+                    &cwd,
+                    tool,
+                    hooks::InstallAiOptions {
+                        audit,
+                        dry_run,
+                        global,
+                        fail_closed,
+                        apply_deny,
+                        apply_sandbox,
+                    },
+                )?
             }
         },
         Commands::Policy { cmd } => match cmd {

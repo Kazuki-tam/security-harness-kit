@@ -362,6 +362,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap_complete"
+version = "4.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "660c0520455b1013b9bcb0393d5f643d7e4454fb69c915b8d6d2aa0e9a45acc3"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "clap_derive"
 version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1646,11 +1655,12 @@ dependencies = [
 
 [[package]]
 name = "shk-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "clap_complete",
  "dirs",
  "keyring",
  "regex",
@@ -1668,7 +1678,7 @@ dependencies = [
 
 [[package]]
 name = "shk-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1690,7 +1700,7 @@ dependencies = [
 
 [[package]]
 name = "shk-integrations"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -1700,7 +1710,7 @@ dependencies = [
 
 [[package]]
 name = "shk-rules"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "once_cell",
  "regex",
@@ -2572,7 +2582,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "regex",

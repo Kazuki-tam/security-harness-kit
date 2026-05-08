@@ -598,6 +598,123 @@ fn hooks_install_ai_claude_apply_deny_merges_without_duplicates() {
 }
 
 #[test]
+fn hooks_install_ai_claude_apply_deny_accepts_equivalent_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::create_dir(dir.path().join(".claude")).unwrap();
+    std::fs::write(
+        dir.path().join(".claude/settings.json"),
+        r#"{"permissions":{"deny":["Read(./.env)","Bash(cat ./.env:*)"]}}"#,
+    )
+    .unwrap();
+
+    let out = Command::new(shk_bin())
+        .args([
+            "hooks",
+            "install-ai",
+            "--tool",
+            "claude-code",
+            "--apply-deny",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("install-ai apply deny");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap(),
+    )
+    .unwrap();
+    let deny = settings["permissions"]["deny"].as_array().unwrap();
+    assert_eq!(
+        deny.iter().filter(|v| *v == "Read(./.env)").count(),
+        1,
+        "existing equivalent deny entry should be preserved: {deny:?}"
+    );
+    assert!(
+        !deny.iter().any(|v| v == "Read(.env)"),
+        "equivalent deny entries should not be duplicated: {deny:?}"
+    );
+    assert!(
+        !deny.iter().any(|v| v == "Bash(cat .env:*)"),
+        "equivalent bash deny entries should not be duplicated: {deny:?}"
+    );
+}
+
+#[test]
+fn hooks_install_ai_codex_is_idempotent() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir_in(&root).unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+
+    for _ in 0..2 {
+        let out = Command::new(shk_bin())
+            .args(["hooks", "install-ai", "--tool", "codex"])
+            .current_dir(dir.path())
+            .output()
+            .expect("install-ai");
+        assert!(
+            out.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let codex = std::fs::read_to_string(dir.path().join(".codex/config.toml")).unwrap();
+    assert_eq!(codex.matches("# shk-managed-start").count(), 1, "{codex}");
+    assert_eq!(codex.matches("[[hooks.PreToolUse]]").count(), 1, "{codex}");
+    assert_eq!(
+        codex.matches("[[hooks.PermissionRequest]]").count(),
+        1,
+        "{codex}"
+    );
+    assert_eq!(codex.matches("[[hooks.PostToolUse]]").count(), 1, "{codex}");
+}
+
+#[test]
+fn hooks_install_ai_apply_sandbox_hardens_codex() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir_in(&root).unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::create_dir(dir.path().join(".codex")).unwrap();
+    std::fs::write(
+        dir.path().join(".codex/config.toml"),
+        r#"sandbox_mode = "danger-full-access"
+approval_policy = "never"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["hooks", "install-ai", "--tool", "codex", "--apply-sandbox"])
+        .current_dir(dir.path())
+        .output()
+        .expect("install-ai apply sandbox");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let codex = std::fs::read_to_string(dir.path().join(".codex/config.toml")).unwrap();
+    assert!(
+        codex.contains(r#"sandbox_mode = "workspace-write""#),
+        "{codex}"
+    );
+    assert!(
+        codex.contains(r#"approval_policy = "on-request""#),
+        "{codex}"
+    );
+}
+
+#[test]
 fn hooks_install_ai_codex_includes_permission_request() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
@@ -1195,6 +1312,63 @@ fn doctor_env_reports_findings_without_values() {
 }
 
 #[test]
+fn doctor_env_skips_dotenvx_encrypted_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".env.local"),
+        r#"
+        DOTENV_PUBLIC_KEY_LOCAL="dotenvx-public-key"
+        DATABASE_URL="encrypted:BE9f1wzB2Rf6Sg=="
+        API_TOKEN='encrypted:BNwGvFpc2vRW4Q=='
+        "#,
+    )
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["doctor", "env", dir.path().to_str().unwrap()])
+        .output()
+        .expect("doctor env");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("env: no plaintext .env / .env.*"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("plaintext env files detected"), "{stdout}");
+    assert!(!stdout.contains(".env.local ("), "{stdout}");
+}
+
+#[test]
+fn doctor_env_reports_dotenvx_files_with_plaintext_values() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".env.local"),
+        r#"
+        DOTENV_PUBLIC_KEY_LOCAL="dotenvx-public-key"
+        DATABASE_URL="encrypted:BE9f1wzB2Rf6Sg=="
+        API_TOKEN=plaintext-token
+        "#,
+    )
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["doctor", "env", dir.path().to_str().unwrap()])
+        .output()
+        .expect("doctor env");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("plaintext env files detected"), "{stdout}");
+    assert!(stdout.contains(".env.local ("), "{stdout}");
+    assert!(!stdout.contains("plaintext-token"), "{stdout}");
+}
+
+#[test]
 fn doctor_version_reports_update_available_from_env() {
     let current = env!("CARGO_PKG_VERSION");
     let mut parts = current
@@ -1243,6 +1417,59 @@ fn doctor_version_json_reports_current_status_from_env() {
     assert_eq!(v["latest"], latest);
     assert_eq!(v["status"], "current");
     assert_eq!(v["update_available"], false);
+}
+
+#[test]
+fn completions_bash_generates_script() {
+    let out = Command::new(shk_bin())
+        .args(["completions", "bash"])
+        .output()
+        .expect("completions bash");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("_shk()"), "{stdout}");
+    assert!(stdout.contains("complete -F _shk"), "{stdout}");
+}
+
+#[test]
+fn status_reports_update_available_from_env() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("shk.toml"),
+        "[thresholds]\nscan_fail_on = \"high\"\n",
+    )
+    .unwrap();
+    let current = env!("CARGO_PKG_VERSION");
+    let mut parts = current
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap())
+        .collect::<Vec<_>>();
+    parts[2] += 1;
+    let next_patch = format!("v{}.{}.{}", parts[0], parts[1], parts[2]);
+    let out = Command::new(shk_bin())
+        .arg("status")
+        .current_dir(dir.path())
+        .env("SHK_UPDATE_CHECK_LATEST_TAG", &next_patch)
+        .env_remove("SHK_UPDATE_CHECK_URL")
+        .output()
+        .expect("status");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("status:"), "{stdout}");
+    assert!(stdout.contains("shk.toml"), "{stdout}");
+    assert!(stdout.contains("update available"), "{stdout}");
+    assert!(
+        stdout.contains(&format!("{current} -> {next_patch}")),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -1378,6 +1605,42 @@ fn doctor_ignore_fix_adds_extended_recommended_patterns() {
     assert!(body.contains("*.p12"), "{body}");
     assert!(body.contains("*.mobileprovision"), "{body}");
     assert!(body.contains("*.log"), "{body}");
+}
+
+#[test]
+fn doctor_ignore_fix_accepts_equivalent_existing_patterns() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let original = [
+        ".env*",
+        "!.env.example",
+        "secrets/",
+        "credentials/",
+        "*.pem",
+        "*.key",
+        "*.p12",
+        "*.mobileprovision",
+        "*.log",
+        "",
+    ]
+    .join("\n");
+    std::fs::write(dir.path().join(".gitignore"), &original).unwrap();
+    let out = Command::new(shk_bin())
+        .args(["doctor", "ignore", dir.path().to_str().unwrap(), "--fix"])
+        .output()
+        .expect("doctor ignore fix");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("ignore: OK (required patterns present in ignore files)"),
+        "{stdout}"
+    );
+    let body = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+    assert_eq!(body, original);
 }
 
 #[test]

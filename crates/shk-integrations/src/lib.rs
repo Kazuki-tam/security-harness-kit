@@ -7,7 +7,7 @@ pub mod action_guard;
 pub mod ai_hooks;
 
 pub use action_guard::{
-    ActionGuardConfig, ActionGuardMatch, claude_recommended_deny_entries, detect_dangerous_action,
-    detect_dangerous_action_with_config,
+    ActionGuardConfig, ActionGuardMatch, claude_deny_entry_covers, claude_recommended_deny_entries,
+    detect_dangerous_action, detect_dangerous_action_with_config, normalize_claude_deny_entry,
 };
 pub use ai_hooks::{AiHookTool, extract_user_prompt, stdin_to_hook_body};

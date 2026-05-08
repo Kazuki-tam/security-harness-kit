@@ -22,6 +22,30 @@ shk policy init --strict
 shk policy init --force
 ```
 
+## `shk status`
+
+Show a concise project health summary.
+
+```bash
+shk status
+```
+
+The status command reports whether `shk.toml` exists, whether the Git pre-commit hook and managed AI hooks are installed, whether bundled AI skills are installed, and whether a newer `shk` release is available.
+
+Update checks are limited to `shk status` and `shk doctor version`; scan and hook commands do not contact the network for version notices.
+
+## `shk completions`
+
+Generate shell completion scripts.
+
+```bash
+shk completions bash > /usr/local/etc/bash_completion.d/shk
+shk completions zsh > "${fpath[1]}/_shk"
+shk completions fish > ~/.config/fish/completions/shk.fish
+```
+
+Supported shells are `bash`, `zsh`, `fish`, `powershell`, and `elvish`.
+
 ## `shk scan`
 
 Scan a repository or path for secrets, PII, and configured custom rules.
@@ -146,7 +170,7 @@ shk doctor env --dotenvx
 shk doctor env ./path
 ```
 
-`.env.example` is excluded from the plaintext env file warning. With `--dotenvx`, the diagnostic also reports known dotenvx artifact files such as `.env.keys` and `.env.vault`.
+`.env.example` and dotenvx-encrypted env files are excluded from the plaintext env file warning. With `--dotenvx`, the diagnostic also reports known dotenvx artifact files such as `.env.keys` and `.env.vault`.
 
 ### `shk doctor version`
 
@@ -266,6 +290,7 @@ shk hooks install-ai --audit
 shk hooks install-ai --tool cursor
 shk hooks install-ai --tool claude-code --global
 shk hooks install-ai --tool claude-code --apply-deny
+shk hooks install-ai --apply-sandbox
 shk hooks install-ai --tool cursor --fail-closed
 ```
 
@@ -279,6 +304,7 @@ Options:
 | `--tool <tool>` | Limit installation to one of `claude-code`, `codex`, or `cursor`. |
 | `--fail-closed` | Cursor hooks only. Sets `failClosed` on managed entries. |
 | `--apply-deny` | Claude Code only. Merges recommended `permissions.deny` entries for sensitive files and dangerous actions. |
+| `--apply-sandbox` | Applies supported sandbox hardening. Claude Code gets `sandbox.enabled`, hard-fail, and no unsandboxed escape hatch. Project installs also add a home-read deny with project read re-allow; global installs skip those project-relative read rules. Codex gets `sandbox_mode = "workspace-write"` and `approval_policy = "on-request"` when absent or risky. Cursor has no local sandbox setting in `hooks.json`, so managed hooks are set fail-closed. |
 
 Without `--tool`, the command targets Claude Code, Codex, and Cursor. Non-dry-run installation requires a project `shk.toml`.
 

@@ -10,7 +10,7 @@ const LATEST_RELEASE_TAG_ENV: &str = "SHK_UPDATE_CHECK_LATEST_TAG";
 const LATEST_RELEASE_URL_ENV: &str = "SHK_UPDATE_CHECK_URL";
 
 #[derive(Clone, Copy)]
-enum VersionStatus {
+pub(crate) enum VersionStatus {
     Current,
     UpdateAvailable,
     LocalNewer,
@@ -18,7 +18,7 @@ enum VersionStatus {
 }
 
 impl VersionStatus {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Current => "current",
             Self::UpdateAvailable => "update_available",
@@ -27,7 +27,7 @@ impl VersionStatus {
         }
     }
 
-    fn update_available(self) -> Option<bool> {
+    pub(crate) fn update_available(self) -> Option<bool> {
         match self {
             Self::Current | Self::LocalNewer => Some(false),
             Self::UpdateAvailable => Some(true),
@@ -36,10 +36,28 @@ impl VersionStatus {
     }
 }
 
-struct VersionCheck {
+pub(crate) struct VersionCheck {
     current: &'static str,
     latest_tag: String,
     status: VersionStatus,
+}
+
+impl VersionCheck {
+    pub(crate) fn current(&self) -> &'static str {
+        self.current
+    }
+
+    pub(crate) fn latest_tag(&self) -> &str {
+        &self.latest_tag
+    }
+
+    pub(crate) fn status(&self) -> VersionStatus {
+        self.status
+    }
+
+    pub(crate) fn release_url(&self) -> String {
+        release_url(&self.latest_tag)
+    }
 }
 
 pub fn run(json: bool) -> Result<()> {
@@ -62,7 +80,7 @@ pub fn run(json: bool) -> Result<()> {
         Err(err) => {
             if json {
                 let v = serde_json::json!({
-                    "current": env!("CARGO_PKG_VERSION"),
+                    "current": current_version(),
                     "latest": null,
                     "status": "unknown",
                     "update_available": null,
@@ -104,8 +122,8 @@ fn print_human(check: &VersionCheck) {
     }
 }
 
-fn check_latest_version() -> Result<VersionCheck> {
-    let current = env!("CARGO_PKG_VERSION");
+pub(crate) fn check_latest_version() -> Result<VersionCheck> {
+    let current = current_version();
     let latest_tag = fetch_latest_release_tag()?;
     let status = compare_versions(current, &latest_tag)
         .map(|ordering| match ordering {
@@ -177,6 +195,10 @@ fn parse_version(input: &str) -> Option<Vec<u64>> {
         parts.push(0);
     }
     Some(parts)
+}
+
+fn current_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
 }
 
 fn release_url(tag: &str) -> String {
