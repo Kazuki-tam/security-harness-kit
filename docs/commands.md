@@ -22,6 +22,30 @@ shk policy init --strict
 shk policy init --force
 ```
 
+## `shk status`
+
+Show a concise project health summary.
+
+```bash
+shk status
+```
+
+The status command reports whether `shk.toml` exists, whether the Git pre-commit hook and managed AI hooks are installed, whether bundled AI skills are installed, and whether a newer `shk` release is available.
+
+Update checks are limited to `shk status` and `shk doctor version`; scan and hook commands do not contact the network for version notices.
+
+## `shk completions`
+
+Generate shell completion scripts.
+
+```bash
+shk completions bash > /usr/local/etc/bash_completion.d/shk
+shk completions zsh > "${fpath[1]}/_shk"
+shk completions fish > ~/.config/fish/completions/shk.fish
+```
+
+Supported shells are `bash`, `zsh`, `fish`, `powershell`, and `elvish`.
+
 ## `shk scan`
 
 Scan a repository or path for secrets, PII, and configured custom rules.

@@ -380,7 +380,7 @@ fn env_scan_options() -> ScanOptions {
     }
 }
 
-fn has_managed_ai_hooks(root: &Path) -> bool {
+pub(crate) fn has_managed_ai_hooks(root: &Path) -> bool {
     let paths = [
         root.join(".claude/settings.json"),
         root.join(".cursor/hooks.json"),
@@ -396,9 +396,8 @@ fn has_managed_ai_hooks(root: &Path) -> bool {
     false
 }
 
-pub fn run_all(root: &Path, json: bool) -> Result<()> {
-    let repo = git::discover_repo_root(root);
-    let hook_ok = repo
+pub(crate) fn has_shk_pre_commit(root: &Path) -> bool {
+    git::discover_repo_root(root)
         .as_ref()
         .map(|r| r.join(".git/hooks/pre-commit"))
         .map(|p| {
@@ -407,7 +406,11 @@ pub fn run_all(root: &Path, json: bool) -> Result<()> {
                     .unwrap_or_default()
                     .contains("shk scan --staged")
         })
-        .unwrap_or(false);
+        .unwrap_or(false)
+}
+
+pub fn run_all(root: &Path, json: bool) -> Result<()> {
+    let hook_ok = has_shk_pre_commit(root);
     let ai_managed = has_managed_ai_hooks(root);
     if json {
         let v = serde_json::json!({

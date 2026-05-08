@@ -1420,6 +1420,59 @@ fn doctor_version_json_reports_current_status_from_env() {
 }
 
 #[test]
+fn completions_bash_generates_script() {
+    let out = Command::new(shk_bin())
+        .args(["completions", "bash"])
+        .output()
+        .expect("completions bash");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("_shk()"), "{stdout}");
+    assert!(stdout.contains("complete -F _shk"), "{stdout}");
+}
+
+#[test]
+fn status_reports_update_available_from_env() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("shk.toml"),
+        "[thresholds]\nscan_fail_on = \"high\"\n",
+    )
+    .unwrap();
+    let current = env!("CARGO_PKG_VERSION");
+    let mut parts = current
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap())
+        .collect::<Vec<_>>();
+    parts[2] += 1;
+    let next_patch = format!("v{}.{}.{}", parts[0], parts[1], parts[2]);
+    let out = Command::new(shk_bin())
+        .arg("status")
+        .current_dir(dir.path())
+        .env("SHK_UPDATE_CHECK_LATEST_TAG", &next_patch)
+        .env_remove("SHK_UPDATE_CHECK_URL")
+        .output()
+        .expect("status");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("status:"), "{stdout}");
+    assert!(stdout.contains("shk.toml"), "{stdout}");
+    assert!(stdout.contains("update available"), "{stdout}");
+    assert!(
+        stdout.contains(&format!("{current} -> {next_patch}")),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn doctor_env_dotenvx_flags_private_key_artifacts() {
     let dir = tempfile::tempdir().unwrap();
     let private_key = "DOTENV_PRIVATE_KEY=dotenvx-secret-demo-value";

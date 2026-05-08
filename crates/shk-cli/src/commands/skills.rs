@@ -19,6 +19,12 @@ pub struct SkillsInstallArgs {
     pub force: bool,
 }
 
+pub struct SkillStatus {
+    pub label: &'static str,
+    pub path: Option<PathBuf>,
+    pub installed: bool,
+}
+
 struct InstallPlan {
     tool: SkillTool,
     dest: PathBuf,
@@ -97,7 +103,13 @@ pub fn list() -> Result<()> {
 
 pub fn status() -> Result<()> {
     println!("shk skill status:");
+    for entry in status_entries() {
+        print_status_line(entry.label, entry.path.as_deref());
+    }
+    Ok(())
+}
 
+pub fn status_entries() -> Vec<SkillStatus> {
     let tools = [
         ("claude-code (project)", SkillTool::ClaudeCode, false),
         ("claude-code (global)", SkillTool::ClaudeCode, true),
@@ -105,13 +117,21 @@ pub fn status() -> Result<()> {
         ("codex/cursor (global)", SkillTool::Codex, true),
     ];
 
-    for (label, tool, global) in &tools {
-        match dest_path(*tool, *global) {
-            Ok(p) => print_status_line(label, Some(&p)),
-            Err(_) => print_status_line(label, None),
-        }
-    }
-    Ok(())
+    tools
+        .into_iter()
+        .map(|(label, tool, global)| match dest_path(tool, global) {
+            Ok(path) => SkillStatus {
+                label,
+                installed: path.exists(),
+                path: Some(path),
+            },
+            Err(_) => SkillStatus {
+                label,
+                installed: false,
+                path: None,
+            },
+        })
+        .collect()
 }
 
 fn print_status_line(label: &str, path: Option<&Path>) {

@@ -25,6 +25,7 @@ shk-rules = { version = "0.2.1", path = "../shk-rules" }
 shk-integrations = { version = "0.2.1", path = "../shk-integrations" }
 anyhow.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 chrono.workspace = true

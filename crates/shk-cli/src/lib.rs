@@ -77,6 +77,8 @@ pub fn run() -> Result<()> {
             hook_mode,
             post,
         } => commands::mask::run(&cwd, file, json, output, redaction, hook_mode, post)?,
+        Commands::Completions { shell } => commands::completions::run(shell)?,
+        Commands::Status => commands::status::run(&cwd)?,
         Commands::Doctor { cmd, json } => match cmd {
             None => doctor::run_all(&cwd, json)?,
             Some(DoctorCmd::Version) => version_check::run(json)?,

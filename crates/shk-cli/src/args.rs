@@ -1,4 +1,5 @@
 use clap::{ArgGroup, Args, Parser, Subcommand};
+use clap_complete::Shell;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -71,6 +72,13 @@ pub enum Commands {
         #[arg(long)]
         post: bool,
     },
+    /// Generate shell completion scripts
+    Completions {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+    /// Show project health and CLI status
+    Status,
     /// Project diagnostics
     Doctor {
         #[command(subcommand)]
