@@ -136,6 +136,22 @@ fn canonical_or_same(p: &Path) -> PathBuf {
     fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
+fn skipped_finding(rule_id: &str, rel: String, message: String) -> Finding {
+    Finding {
+        rule_id: rule_id.into(),
+        severity: "info".into(),
+        kind: "ignore".into(),
+        file: rel,
+        line: 1,
+        column: 1,
+        message,
+        redacted_value: "[REDACTED]".into(),
+        confidence: 1.0,
+        context_before: vec![],
+        context_after: vec![],
+    }
+}
+
 fn scan_root_for_target(target: &Path) -> PathBuf {
     if target.is_dir() {
         target.to_path_buf()
@@ -345,25 +361,27 @@ fn scan_one_path(
     }
     let rel = rel_normalized(&full, label_root);
     if meta.len() > prepared.policy.scan.max_file_size_bytes {
-        let f = vec![Finding {
-            rule_id: "scan.file_too_large".into(),
-            severity: "info".into(),
-            kind: "ignore".into(),
-            file: rel,
-            line: 1,
-            column: 1,
-            message: format!(
+        let f = vec![skipped_finding(
+            "scan.file_too_large",
+            rel,
+            format!(
                 "Skipped: file exceeds max_file_size_bytes ({})",
                 prepared.policy.scan.max_file_size_bytes
             ),
-            redacted_value: "[REDACTED]".into(),
-            confidence: 1.0,
-            context_before: vec![],
-            context_after: vec![],
-        }];
+        )];
         return Ok(ScanChunk::skipped(f));
     }
-    let bytes = fs::read(&full).with_context(|| format!("read {}", full.display()))?;
+    let bytes = match fs::read(&full) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            let f = vec![skipped_finding(
+                "scan.file_read_error",
+                rel,
+                format!("Skipped: could not read file ({err})"),
+            )];
+            return Ok(ScanChunk::skipped(f));
+        }
+    };
     scan_bytes(&rel, bytes, prepared, include_context)
 }
 
@@ -385,40 +403,24 @@ fn scan_bytes(
     include_context: bool,
 ) -> Result<ScanChunk> {
     if bytes.len() as u64 > prepared.policy.scan.max_file_size_bytes {
-        let f = vec![Finding {
-            rule_id: "scan.file_too_large".into(),
-            severity: "info".into(),
-            kind: "ignore".into(),
-            file: rel.to_string(),
-            line: 1,
-            column: 1,
-            message: format!(
+        let f = vec![skipped_finding(
+            "scan.file_too_large",
+            rel.to_string(),
+            format!(
                 "Skipped: file exceeds max_file_size_bytes ({})",
                 prepared.policy.scan.max_file_size_bytes
             ),
-            redacted_value: "[REDACTED]".into(),
-            confidence: 1.0,
-            context_before: vec![],
-            context_after: vec![],
-        }];
+        )];
         bytes.zeroize();
         return Ok(ScanChunk::skipped(f));
     }
     let take = prepared.policy.scan.binary_detection_bytes.min(bytes.len());
     if !prepared.policy.scan.include_binary && is_probably_binary(&bytes[..take]) {
-        let f = vec![Finding {
-            rule_id: "scan.binary_skipped".into(),
-            severity: "info".into(),
-            kind: "ignore".into(),
-            file: rel.to_string(),
-            line: 1,
-            column: 1,
-            message: "Skipped: binary file (null byte in head)".into(),
-            redacted_value: "[REDACTED]".into(),
-            confidence: 1.0,
-            context_before: vec![],
-            context_after: vec![],
-        }];
+        let f = vec![skipped_finding(
+            "scan.binary_skipped",
+            rel.to_string(),
+            "Skipped: binary file (null byte in head)".into(),
+        )];
         bytes.zeroize();
         return Ok(ScanChunk::skipped(f));
     }
