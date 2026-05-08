@@ -180,6 +180,31 @@ fn scan_reports_binary_skips() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn scan_reports_unreadable_file_skips() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("unreadable.txt");
+    fs::write(&file, "nothing sensitive").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let res = scan_path(&file, default_scan_options()).expect("scan unreadable file");
+    assert!(
+        has_finding(&res, "scan.file_read_error", "unreadable.txt"),
+        "{:?}",
+        res.findings
+    );
+    assert!(
+        res.findings
+            .iter()
+            .any(|f| f.message.starts_with("Skipped: could not read file")),
+        "{:?}",
+        res.findings
+    );
+}
+
 #[test]
 fn scan_default_policy_excludes_static_media_assets() {
     let dir = tempfile::tempdir().unwrap();
