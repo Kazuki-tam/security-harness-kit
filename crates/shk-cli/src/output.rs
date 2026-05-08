@@ -52,7 +52,7 @@ pub fn max_human_severity(findings: &[Finding], verbose: bool) -> Option<Severit
 fn is_skip_finding(f: &Finding) -> bool {
     matches!(
         f.rule_id.as_str(),
-        "scan.binary_skipped" | "scan.file_too_large"
+        "scan.binary_skipped" | "scan.file_read_error" | "scan.file_too_large"
     )
 }
 
@@ -147,6 +147,22 @@ mod tests {
         }
     }
 
+    fn skip_finding(rule_id: &str) -> Finding {
+        Finding {
+            rule_id: rule_id.into(),
+            severity: "info".into(),
+            kind: "ignore".into(),
+            file: "demo.txt".into(),
+            line: 1,
+            column: 1,
+            message: "Skipped: demo".into(),
+            redacted_value: "[REDACTED]".into(),
+            confidence: 1.0,
+            context_before: vec![],
+            context_after: vec![],
+        }
+    }
+
     #[test]
     fn colorizes_human_finding_severity_labels_by_level() {
         let findings = vec![
@@ -196,5 +212,26 @@ mod tests {
         let out = format_human_findings(&[finding("high")], false, false, 2);
 
         assert!(out.contains("Deduplicated 2 repeated finding(s)."));
+    }
+
+    #[test]
+    fn human_findings_hide_file_read_error_skips_unless_verbose() {
+        let skipped = skip_finding("scan.file_read_error");
+        let quiet = format_human_findings(std::slice::from_ref(&skipped), false, false, 0);
+
+        assert!(quiet.contains("0 findings"));
+        assert!(quiet.contains("Skipped 1 files; use --verbose to show details."));
+        assert!(!quiet.contains("scan.file_read_error"));
+        assert_eq!(
+            max_human_severity(std::slice::from_ref(&skipped), false),
+            None
+        );
+
+        let verbose = format_human_findings(&[skipped], false, true, 0);
+        assert!(verbose.contains("scan.file_read_error"));
+        assert_eq!(
+            max_human_severity(&[skip_finding("scan.file_read_error")], true),
+            Some(Severity::Info)
+        );
     }
 }
