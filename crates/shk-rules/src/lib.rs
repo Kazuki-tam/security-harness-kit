@@ -69,11 +69,13 @@ struct CompiledRule {
     validator: Option<fn(&str) -> bool>,
 }
 
+type LazyRegex = Lazy<Regex>;
+
 struct GitleaksRule {
     id: &'static str,
     description: &'static str,
-    re: Regex,
-    path: Option<Regex>,
+    re: LazyRegex,
+    path: Option<LazyRegex>,
     secret_group: Option<usize>,
     entropy: Option<f32>,
     keywords: &'static [&'static str],
@@ -83,8 +85,8 @@ struct GitleaksRule {
 struct GitleaksAllowlist {
     condition: AllowlistCondition,
     target: AllowlistTarget,
-    regexes: Vec<Regex>,
-    paths: Vec<Regex>,
+    regexes: Vec<LazyRegex>,
+    paths: Vec<LazyRegex>,
     stopwords: &'static [&'static str],
 }
 
@@ -856,12 +858,12 @@ fn scan_gitleaks_content(content: &str, rel_path: &str, cfg: &RuleEngineConfig) 
     let mut out = Vec::new();
     let lowercase_content = content.to_ascii_lowercase();
     for r in gitleaks_rules::rules().iter() {
+        if !any_keyword_matches(&lowercase_content, r.keywords) {
+            continue;
+        }
         if let Some(path) = &r.path
             && !path.is_match(rel_path)
         {
-            continue;
-        }
-        if !any_keyword_matches(&lowercase_content, r.keywords) {
             continue;
         }
         for captures in r.re.captures_iter(content) {

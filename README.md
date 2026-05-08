@@ -36,12 +36,18 @@ AI coding agents can read project files, run commands, and transform sensitive i
 macOS and Linux releases can be installed with the bundled installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Kazuki-tam/security-harness-kit/main/scripts/install.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk-cli-installer.sh | sh
+```
+
+Windows releases can be installed from PowerShell:
+
+```powershell
+powershell -c "irm https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk-cli-installer.ps1 | iex"
 ```
 
 Both `shk` and `security-harness-kit` resolve to the same CLI.
 
-See [Installation](docs/installation.md) for release archives, checksums, Homebrew, Scoop, and source builds.
+See [Installation](docs/installation.md) for release archives, checksums, Homebrew, and source builds.
 
 ## Quick Start
 
