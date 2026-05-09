@@ -186,6 +186,8 @@ pub struct RulesSection {
     pub env: bool,
     #[serde(default)]
     pub internal_terms: bool,
+    #[serde(default = "default_true")]
+    pub ai_context: bool,
 }
 
 impl Default for RulesSection {
@@ -196,6 +198,7 @@ impl Default for RulesSection {
             pii_languages: default_pii_langs(),
             env: true,
             internal_terms: false,
+            ai_context: true,
         }
     }
 }
@@ -476,6 +479,7 @@ impl Policy {
             pii_languages: self.rules.pii_languages.clone(),
             env: self.rules.env,
             internal_terms: self.rules.internal_terms,
+            ai_context: self.rules.ai_context,
         }
     }
 }
@@ -532,6 +536,7 @@ pii = true
 pii_languages = ["en", "ja"]
 env = true
 internal_terms = false
+ai_context = true
 
 [thresholds]
 default_fail_on = "medium"
@@ -631,6 +636,7 @@ pii = true
 pii_languages = ["en", "ja"]
 env = true
 internal_terms = false
+ai_context = true
 
 [thresholds]
 default_fail_on = "high"
@@ -776,6 +782,7 @@ format = "dotenv"
         policy.rules.pii_languages = vec!["ja".into()];
         policy.rules.env = false;
         policy.rules.internal_terms = true;
+        policy.rules.ai_context = false;
 
         let cfg = policy.rule_engine_config();
         assert!(!cfg.secrets);
@@ -783,5 +790,6 @@ format = "dotenv"
         assert_eq!(cfg.pii_languages, vec!["ja"]);
         assert!(!cfg.env);
         assert!(cfg.internal_terms);
+        assert!(!cfg.ai_context);
     }
 }

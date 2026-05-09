@@ -69,6 +69,7 @@ pii = true
 pii_languages = ["en", "ja"]
 env = true
 internal_terms = false
+ai_context = true
 
 [thresholds]
 default_fail_on = "high"
@@ -133,6 +134,7 @@ confirm = true
 | `pii_languages` | `["en", "ja"]` | Enables language-gated PII rules. Universal PII rules run when `pii = true`. |
 | `env` | `true` | Enables env-related rules and hints. |
 | `internal_terms` | `false` | Enables custom rules with `kind = "internal"`. |
+| `ai_context` | `true` | Enables high-signal AI context safety rules for Unicode controls and unsafe URI schemes. |
 
 ## Thresholds
 
