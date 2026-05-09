@@ -28,6 +28,7 @@ AI coding agents can read project files, run commands, and transform sensitive i
 - Mask sensitive content from stdin or files.
 - Install Git pre-commit hooks.
 - Install managed hooks for Claude Code, Cursor, and Codex.
+- Generate a GitHub Actions workflow that runs `shk scan` on every pull request.
 - Diagnose ignore file and `.env` safety coverage.
 - Deploy AI agent skills to Claude Code, Codex, and Cursor project directories.
 
@@ -87,6 +88,12 @@ Install AI tool hooks in audit mode:
 shk hooks install-ai --audit
 ```
 
+Generate a GitHub Actions workflow that scans every pull request:
+
+```bash
+shk ci init github
+```
+
 Install the shk agent skill for Claude Code and Codex/Cursor:
 
 ```bash
@@ -105,6 +112,7 @@ shk doctor ignore
 - [Commands](docs/commands.md)
 - [Configuration](docs/configuration.md)
 - [Detection Model](docs/detection-model.md)
+- [GitHub Actions Integration](docs/ci.md)
 
 ## Common Commands
 
@@ -126,6 +134,11 @@ shk doctor env --dotenvx
 shk hooks install
 shk hooks install-ai --dry-run
 shk hooks install-ai --audit
+
+shk ci init github
+shk ci init github --dry-run
+shk ci init github --mode audit
+shk ci init github --shk-version v0.2.3
 
 shk skills install
 shk skills install --tool claude-code --global

@@ -320,6 +320,37 @@ Managed entries are tagged with `"_shk_managed": true` or `# shk-managed-start` 
 
 In pre-hook mode, `shk` also runs an action guard before content scanning. It blocks sensitive file access, destructive filesystem operations, direct database mutation commands, privilege or system changes, external transfer commands, and package manager operations when they are visible in the hook payload. Tune this with `[action_guard]` in `shk.toml`; `--audit` remains non-blocking.
 
+## `shk ci init github`
+
+Generate a GitHub Actions workflow that installs `shk` from the bundled cargo-dist installer and runs `shk scan` on every pull request and push to `main`.
+
+```bash
+shk ci init github
+shk ci init github --dry-run
+shk ci init github --mode audit
+shk ci init github --fail-on critical
+shk ci init github --shk-version v0.2.3
+shk ci init github --output .github/workflows/security.yml --force
+```
+
+Options:
+
+| Option | Behavior |
+|--------|----------|
+| `--mode <blocking|audit>` | `blocking` (default) fails the workflow when findings meet `--fail-on`. `audit` always exits `0` and is intended for non-blocking adoption. |
+| `--fail-on <severity>` | Severity threshold for blocking mode. Valid values: `info`, `low`, `medium`, `high` (default), `critical`. Ignored under `--mode audit` (a warning is printed). |
+| `--path <path>` | Path passed to `shk scan`. Defaults to `.`. |
+| `--repo <owner/name>` | GitHub repository hosting `shk` releases. Defaults to `Kazuki-tam/security-harness-kit`. |
+| `--shk-version <version>` | Release version to install. Accepts `latest` (default) or a SemVer-ish tag such as `v0.2.3`. |
+| `--installer-name <name>` | cargo-dist shell installer asset name. Defaults to `shk-cli-installer.sh`. |
+| `--output <path>` | Workflow destination path. Defaults to `.github/workflows/shk.yml`. |
+| `--dry-run` | Print the workflow YAML to stdout without writing it. |
+| `--force` | Overwrite an existing workflow file. |
+
+Generated workflows include `permissions: contents: read` and a `concurrency` block with `cancel-in-progress: true` so reruns on the same ref supersede in-flight jobs. The CLI rejects unsafe values for `--repo`, `--shk-version`, and `--installer-name` to keep the generated installer URL well-formed.
+
+See [GitHub Actions integration](ci.md) for a full guide covering the generated YAML, blocking vs audit rollout, pinning a release, and PR Required Check setup.
+
 ## `shk skills`
 
 Manage Claude Code / Codex / Cursor skills bundled with `shk`. Skills are embedded in the binary and deployed to project directories on demand.
