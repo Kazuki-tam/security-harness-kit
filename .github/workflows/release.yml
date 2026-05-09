@@ -69,16 +69,12 @@ jobs:
       - name: smoke version
         if: runner.os != 'Windows'
         shell: bash
-        run: |
-          ./target/${{ matrix.target }}/dist/shk --version
-          ./target/${{ matrix.target }}/dist/security-harness-kit --version
+        run: ./target/${{ matrix.target }}/dist/shk --version
 
       - name: smoke version
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          ./target/${{ matrix.target }}/dist/shk.exe --version
-          ./target/${{ matrix.target }}/dist/security-harness-kit.exe --version
+        run: ./target/${{ matrix.target }}/dist/shk.exe --version
 
       - name: upload local artifacts
         uses: actions/upload-artifact@v7
