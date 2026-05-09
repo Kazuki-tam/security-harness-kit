@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "beforeMCPExecution": [
+      {
+        "_shk_managed": true,
+        "command": "shk scan --hook-mode cursor",
+        "failClosed": false,
+        "timeout": 30
+      }
+    ],
+    "beforeReadFile": [
+      {
+        "_shk_managed": true,
+        "command": "shk scan --hook-mode cursor",
+        "failClosed": false,
+        "timeout": 30
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "_shk_managed": true,
+        "command": "shk scan --hook-mode cursor",
+        "failClosed": false,
+        "timeout": 30
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "_shk_managed": true,
+        "command": "shk scan --hook-mode cursor",
+        "failClosed": false,
+        "timeout": 30
+      }
+    ]
+  },
+  "version": 1
+}

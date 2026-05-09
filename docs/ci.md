@@ -45,7 +45,7 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install shk
         shell: bash
@@ -64,7 +64,7 @@ jobs:
 |-------|-----------------|
 | `permissions: contents: read` | The workflow only needs to read repository content. Explicitly minimising the `GITHUB_TOKEN` scopes prevents an accidental write at the workflow or organisation default level. |
 | `concurrency: cancel-in-progress: true` | Successive pushes to the same PR cancel the in-flight job. Cuts CI cost on busy branches without losing the result for the latest commit. |
-| `actions/checkout@v4` | Pinned to a major tag for stability with current GitHub Actions defaults. |
+| `actions/checkout@v6` | Pinned to a major tag that supports the current GitHub Actions Node.js runtime. |
 | Installer over `cargo install` | The cargo-dist installer downloads a prebuilt binary with checksums published next to the release. It avoids a long Rust toolchain build per CI run. |
 | `--json --fail-on high` | JSON output is greppable / archivable from the run log. `high` matches the default `[thresholds].scan_fail_on` shipped by `shk init`. |
 

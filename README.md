@@ -48,7 +48,7 @@ powershell -c "irm https://github.com/Kazuki-tam/security-harness-kit/releases/l
 
 Both `shk` and `security-harness-kit` resolve to the same CLI.
 
-See [Installation](docs/installation.md) for release archives, checksums, Homebrew, and source builds.
+See [Installation](docs/installation.md) for release archives, checksums, Homebrew, source builds, and [uninstall](docs/installation.md#uninstall) instructions.
 
 ## Quick Start
 

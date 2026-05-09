@@ -1,0 +1,32 @@
+[features]
+codex_hooks = true
+
+# shk-managed-start
+[[hooks.PreToolUse]]
+matcher = ".*"
+timeout = 30
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "shk scan --hook-mode codex"
+statusMessage = "shk: scanning for secrets..."
+
+[[hooks.PermissionRequest]]
+matcher = ".*"
+timeout = 30
+
+[[hooks.PermissionRequest.hooks]]
+type = "command"
+command = "shk scan --hook-mode codex"
+statusMessage = "shk: checking approval request..."
+
+[[hooks.PostToolUse]]
+matcher = ".*"
+timeout = 30
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "shk scan --hook-mode codex --post"
+statusMessage = "shk: scanning tool output..."
+# shk-managed-end
+

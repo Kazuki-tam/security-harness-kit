@@ -132,7 +132,7 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install shk
         shell: bash
@@ -191,7 +191,7 @@ mod tests {
 
         assert!(workflow.contains("releases/latest/download/shk-cli-installer.sh"));
         assert!(workflow.contains("shk scan . --json --fail-on high"));
-        assert!(workflow.contains("actions/checkout@v4"));
+        assert!(workflow.contains("actions/checkout@v6"));
     }
 
     #[test]

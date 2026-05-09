@@ -80,3 +80,78 @@ The release binaries are written to:
 target/release/shk
 target/release/security-harness-kit
 ```
+
+## Uninstall
+
+`shk` does not ship a dedicated `shk uninstall` command. Removal has two layers: the CLI binary, and any project or user-level files written by `shk` while it was in use.
+
+### 1. Remove The Binary
+
+Pick the method that matches how `shk` was installed.
+
+Script installer (default `~/.cargo/bin`):
+
+```bash
+rm -f "${CARGO_HOME:-$HOME/.cargo}/bin/shk"
+rm -f "${CARGO_HOME:-$HOME/.cargo}/bin/security-harness-kit"
+```
+
+Windows (PowerShell installer; default `%USERPROFILE%\.cargo\bin` when `CARGO_HOME` is unset):
+
+```powershell
+$BinDir = if ($env:CARGO_HOME) { Join-Path $env:CARGO_HOME "bin" } else { "$env:USERPROFILE\.cargo\bin" }
+Remove-Item (Join-Path $BinDir "shk.exe") -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $BinDir "security-harness-kit.exe") -ErrorAction SilentlyContinue
+```
+
+Homebrew formula:
+
+```bash
+brew uninstall shk-cli
+```
+
+Release archive: remove `shk` and `security-harness-kit` from the directory where you unpacked or copied them.
+
+Source build: run `cargo clean` in the cloned repository to remove build output, or remove `target/release/shk` and `target/release/security-harness-kit` directly. If you copied those binaries into a directory on `PATH`, remove the copied binaries there as well.
+
+### 2. Remove Project Artifacts
+
+`shk` does not modify project files unless you explicitly run a command that writes to disk. The artifacts created by those commands are listed below. Remove any that you no longer need from each project.
+
+| Source | Path | Notes |
+|--------|------|-------|
+| `shk init` / `shk policy init` | `shk.toml` | Project policy file. |
+| `shk scan --audit`, audit-mode hooks | `.shk/audit.log` and the `.shk/` directory | Metadata-only audit log. |
+| `shk hooks install` | `.git/hooks/pre-commit` | Managed block delimited by `# shk-managed-start` / `# shk-managed-end`. Delete the file if `shk` is the only owner, or remove just the managed block to keep other pre-commit logic. |
+| `shk hooks install-ai` (Claude Code) | `.claude/settings.json` | Remove entries tagged with `"_shk_managed": true`. Delete the file if it has no remaining entries. If you used `--apply-deny` or `--apply-sandbox`, also review the `permissions.deny` and `sandbox` settings that were merged into the same file. |
+| `shk hooks install-ai` (Cursor) | `.cursor/hooks.json` | Remove entries tagged with `"_shk_managed": true`. |
+| `shk hooks install-ai` (Codex) | `.codex/config.toml` | Remove the block delimited by `# shk-managed-start` / `# shk-managed-end`, and `features.codex_hooks = true` if no longer needed. If you used `--apply-sandbox`, also review the top-level `sandbox_mode` and `approval_policy` values. |
+| `shk skills install` (Claude Code) | `.claude/skills/shk.md` | Bundled skill file. |
+| `shk skills install` (Codex / Cursor) | `.agents/skills/shk/SKILL.md` | Bundled skill file. |
+| `shk ci init github` | `.github/workflows/shk.yml` by default | Generated GitHub Actions workflow. If you passed `--output`, remove that custom path instead. |
+
+For commands that support it, re-running with `--dry-run` is a safe way to confirm the exact paths used in your project before deleting them. This applies to `shk hooks install-ai`, `shk skills install`, and `shk ci init github`; `shk hooks install` and `shk init` do not have a dry-run mode.
+
+### 3. Remove User-Level Files
+
+`--global` installs write to the user's home directory instead of the project. Remove these only if you want to disable `shk` for every project on this machine.
+
+| Source | Path |
+|--------|------|
+| `shk hooks install-ai --global --tool claude-code` | `~/.claude/settings.json` (managed entries, plus any `permissions.deny` or `sandbox` settings you explicitly enabled) |
+| `shk hooks install-ai --global --tool codex` | `~/.codex/config.toml` (managed block, plus top-level sandbox settings if you used `--apply-sandbox`) |
+| `shk hooks install-ai --global --tool cursor` | `~/.cursor/hooks.json` (managed entries) |
+| `shk skills install --global --tool claude-code` | `~/.claude/skills/shk.md` |
+| `shk skills install --global --tool codex` / `--tool cursor` | `~/.agents/skills/shk/SKILL.md` |
+
+Managed entries use the same markers as project installs (`"_shk_managed": true` for JSON files, `# shk-managed-start` / `# shk-managed-end` for shell and TOML files), so they are safe to identify and remove by hand. Settings merged by `--apply-deny` and `--apply-sandbox` are not individually tagged; review them before removing so you do not discard unrelated user configuration.
+
+### 4. Remove Stored dotenvx Keys
+
+If you used `shk env dotenvx import-keys` to store dotenvx private keys in the operating system credential store (macOS Keychain, Windows Credential Manager, or Linux Secret Service / keyutils), delete them before removing the binary so they are not orphaned. Stored keys are scoped to the canonical project root, so run this from each project where you imported keys:
+
+```bash
+shk env dotenvx delete --all
+```
+
+The keys are stored under the service name `security-harness-kit/dotenvx`. If `shk` has already been removed, they can also be removed through the platform credential store UI by searching for that service name.
