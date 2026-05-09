@@ -1,6 +1,6 @@
-# AGENTS.md — security-harness-kit / `shk`
+# AGENTS.md — `shk`
 
-This repository is a **local-first security harness CLI for AI coding agents** (`shk` / `security-harness-kit`). This file is agent-oriented guidance (build, test, conventions), not a human-focused README. For the open format, see the [AGENTS.md project site](https://agents.md/).
+This repository is a **local-first security harness CLI for AI coding agents** (`shk`). This file is agent-oriented guidance (build, test, conventions), not a human-focused README. For the open format, see the [AGENTS.md project site](https://agents.md/).
 
 ## Stack
 
@@ -8,9 +8,9 @@ This repository is a **local-first security harness CLI for AI coding agents** (
 - **Workspace** (`Cargo.toml` `members`):
   - `crates/shk-core` — policy, scanning, masking, JSON reports, suppression helpers.
   - `crates/shk-rules` — built-in rules (secrets, PII, etc.).
-  - `crates/shk-cli` — `clap`-based CLI (binaries `shk` and `security-harness-kit`).
+  - `crates/shk-cli` — `clap`-based CLI (binary `shk`).
     - **`src/lib.rs`** (crate `shk_cli`) — `run()` entry (tests and external callers).
-    - **`src/main.rs`** / **`src/bin/security-harness-kit.rs`** — thin wrappers calling `shk_cli::run()`.
+    - **`src/main.rs`** — thin wrapper calling `shk_cli::run()`.
     - **`src/args.rs`** — `clap` CLI definitions.
     - **`src/commands/`** — `scan`, `mask`, etc. (move `doctor` / others here if this layer grows).
     - Other modules: `color`, `doctor`, `hooks`, `hook_payload`, `hook_output`, `audit_log`, `output`, `policy_cmd`.
@@ -31,7 +31,7 @@ Release build:
 
 ```bash
 cargo build --release
-# Binaries: target/release/shk , target/release/security-harness-kit
+# Binary: target/release/shk
 ```
 
 ## Exit codes

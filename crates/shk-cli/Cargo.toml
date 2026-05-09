@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "security-harness-kit CLI (shk)"
+description = "shk CLI"
 
 [lib]
 name = "shk_cli"
@@ -14,10 +14,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "shk"
 path = "src/main.rs"
-
-[[bin]]
-name = "security-harness-kit"
-path = "src/bin/security-harness-kit.rs"
 
 [dependencies]
 shk-core = { version = "0.2.3", path = "../shk-core" }

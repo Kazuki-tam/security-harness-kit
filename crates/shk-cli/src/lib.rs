@@ -1,4 +1,4 @@
-//! `shk` / `security-harness-kit` CLI library (callable from tests and tooling).
+//! `shk` CLI library (callable from tests and tooling).
 
 mod args;
 mod audit_log;

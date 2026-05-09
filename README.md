@@ -46,8 +46,6 @@ Windows releases can be installed from PowerShell:
 powershell -c "irm https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk-cli-installer.ps1 | iex"
 ```
 
-Both `shk` and `security-harness-kit` resolve to the same CLI.
-
 See [Installation](docs/installation.md) for release archives, checksums, Homebrew, source builds, and [uninstall](docs/installation.md#uninstall) instructions.
 
 ## Quick Start
