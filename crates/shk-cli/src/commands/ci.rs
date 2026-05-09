@@ -19,10 +19,14 @@ static INSTALLER_NAME_RE: LazyLock<Regex> =
 static REPO_SLUG_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z0-9._\-]+/[A-Za-z0-9._\-]+$").unwrap());
 
+/// Effective default when the user does not pass `--fail-on`. Documented in the CLI help
+/// text on `GithubCiArgs::fail_on`; keep them in sync.
+const DEFAULT_FAIL_ON: SeverityArg = SeverityArg::High;
+
 pub fn init_github(root: &Path, args: GithubCiArgs) -> Result<()> {
     validate(&args)?;
 
-    if matches!(args.mode, CiModeArg::Audit) && args.fail_on != SeverityArg::High {
+    if matches!(args.mode, CiModeArg::Audit) && args.fail_on.is_some() {
         eprintln!(
             "warning: --fail-on is ignored when --mode audit (audit hooks always exit 0). \
              Drop --fail-on or switch to --mode blocking to make it effective."
@@ -44,7 +48,12 @@ pub fn init_github(root: &Path, args: GithubCiArgs) -> Result<()> {
         );
     }
 
-    let parent = dest.parent().expect("workflow destination has parent");
+    let parent = dest.parent().with_context(|| {
+        format!(
+            "workflow destination has no parent directory: {}",
+            dest.display()
+        )
+    })?;
     std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     std::fs::write(&dest, workflow).with_context(|| format!("write {}", dest.display()))?;
 
@@ -52,8 +61,17 @@ pub fn init_github(root: &Path, args: GithubCiArgs) -> Result<()> {
     Ok(())
 }
 
+/// Reject `.` / `..` segments in any forward-slash separated path-like input.
+/// Shared by `--repo` and `--installer-name` so neither can synthesise a URL that
+/// escapes the intended GitHub release path.
+fn has_traversal_segment(value: &str) -> bool {
+    value
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+}
+
 fn validate(args: &GithubCiArgs) -> Result<()> {
-    if !REPO_SLUG_RE.is_match(&args.repo) {
+    if !REPO_SLUG_RE.is_match(&args.repo) || has_traversal_segment(&args.repo) {
         bail!(
             "invalid --repo `{}` (expected `owner/repository`)",
             args.repo
@@ -66,26 +84,30 @@ fn validate(args: &GithubCiArgs) -> Result<()> {
         );
     }
     if !INSTALLER_NAME_RE.is_match(&args.installer_name)
-        || args
-            .installer_name
-            .split('/')
-            .any(|segment| segment == "." || segment == "..")
+        || has_traversal_segment(&args.installer_name)
     {
         bail!(
             "invalid --installer-name `{}` (expected a relative path under the release assets)",
             args.installer_name
         );
     }
+    // `--path` is embedded into a YAML block scalar (`run: |`). A literal newline
+    // there breaks the scalar and produces an unparsable workflow file regardless
+    // of how the value is shell-quoted.
+    if args.path.contains('\n') || args.path.contains('\r') {
+        bail!("invalid --path: must not contain newline or carriage return characters");
+    }
     Ok(())
 }
 
 pub fn github_workflow(args: &GithubCiArgs) -> String {
     let installer_url = installer_url(&args.repo, &args.shk_version, &args.installer_name);
+    let fail_on = args.fail_on.unwrap_or(DEFAULT_FAIL_ON);
     let scan_command = match args.mode {
         CiModeArg::Blocking => format!(
             "shk scan {} --json --fail-on {}",
             shell_quote(&args.path),
-            args.fail_on.as_str()
+            fail_on.as_str()
         ),
         CiModeArg::Audit => format!("shk scan {} --json --audit", shell_quote(&args.path)),
     };
@@ -152,7 +174,7 @@ mod tests {
     fn args(mode: CiModeArg) -> GithubCiArgs {
         GithubCiArgs {
             mode,
-            fail_on: SeverityArg::High,
+            fail_on: None,
             path: ".".into(),
             repo: "Kazuki-tam/security-harness-kit".into(),
             shk_version: "latest".into(),
@@ -194,12 +216,12 @@ mod tests {
     fn installer_url_handles_pinned_version() {
         let url = installer_url(
             "Kazuki-tam/security-harness-kit",
-            "v0.2.2",
+            "v0.2.3",
             "shk-cli-installer.sh",
         );
         assert_eq!(
             url,
-            "https://github.com/Kazuki-tam/security-harness-kit/releases/download/v0.2.2/shk-cli-installer.sh"
+            "https://github.com/Kazuki-tam/security-harness-kit/releases/download/v0.2.3/shk-cli-installer.sh"
         );
     }
 
@@ -210,9 +232,49 @@ mod tests {
     }
 
     #[test]
+    fn shell_quote_wraps_newline_input_but_validate_rejects_it() {
+        // shell_quote on its own would happily produce a multi-line single-quoted string.
+        // That is fine for a shell, but it would corrupt the surrounding YAML block scalar,
+        // so `validate` must reject newline input before we ever quote it.
+        let quoted = shell_quote("src\nevil");
+        assert!(quoted.contains('\n'), "{quoted}");
+
+        let mut a = args(CiModeArg::Blocking);
+        a.path = "src\nevil".into();
+        let err = validate(&a).unwrap_err();
+        assert!(err.to_string().contains("must not contain newline"));
+
+        a.path = "src\rdir".into();
+        let err = validate(&a).unwrap_err();
+        assert!(err.to_string().contains("must not contain newline"));
+    }
+
+    #[test]
+    fn github_workflow_quotes_path_with_whitespace() {
+        let mut a = args(CiModeArg::Blocking);
+        a.path = "src dir".into();
+        let workflow = github_workflow(&a);
+        assert!(
+            workflow.contains("shk scan 'src dir' --json --fail-on high"),
+            "{workflow}"
+        );
+    }
+
+    #[test]
     fn validate_rejects_unsafe_inputs() {
         let mut a = args(CiModeArg::Blocking);
         a.repo = "not-a-slug".into();
+        assert!(validate(&a).is_err());
+
+        let mut a = args(CiModeArg::Blocking);
+        a.repo = "../foo".into();
+        assert!(
+            validate(&a).is_err(),
+            "`..` segments must be rejected even when REPO_SLUG_RE matches"
+        );
+
+        let mut a = args(CiModeArg::Blocking);
+        a.repo = "owner/..".into();
         assert!(validate(&a).is_err());
 
         let mut a = args(CiModeArg::Blocking);
@@ -227,7 +289,7 @@ mod tests {
     #[test]
     fn validate_accepts_canonical_inputs() {
         let mut a = args(CiModeArg::Blocking);
-        a.shk_version = "v0.2.2".into();
+        a.shk_version = "v0.2.3".into();
         a.installer_name = "nested/asset.sh".into();
         assert!(validate(&a).is_ok());
     }

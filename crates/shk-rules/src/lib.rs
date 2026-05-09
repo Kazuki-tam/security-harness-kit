@@ -724,14 +724,15 @@ fn japanese_postal_code_valid(candidate: &str) -> bool {
 /// Pre-computed newline offsets for a single `&str`, enabling O(log N) line/column lookup.
 ///
 /// Bound to the lifetime of the source content so the borrow checker prevents callers from
-/// accidentally querying a different buffer than the one used to build the index.
-struct LineIndex<'a> {
+/// accidentally querying a different buffer than the one used to build the index. Shared
+/// across `shk-core` and `shk-rules` so any scanner can reuse the same index per file.
+pub struct LineIndex<'a> {
     content: &'a str,
     newline_offsets: Vec<usize>,
 }
 
 impl<'a> LineIndex<'a> {
-    fn new(content: &'a str) -> Self {
+    pub fn new(content: &'a str) -> Self {
         Self {
             content,
             newline_offsets: content.match_indices('\n').map(|(idx, _)| idx).collect(),
@@ -740,7 +741,7 @@ impl<'a> LineIndex<'a> {
 
     /// Returns `(zero_based_line_idx, line_start_byte, line_end_byte_exclusive_of_newline)`
     /// for the line containing `byte_idx`.
-    fn bounds(&self, byte_idx: usize) -> (usize, usize, usize) {
+    pub fn bounds(&self, byte_idx: usize) -> (usize, usize, usize) {
         let byte_idx = byte_idx.min(self.content.len());
         let line_idx = self.newline_offsets.partition_point(|&idx| idx < byte_idx);
         let line_start = if line_idx == 0 {
@@ -756,14 +757,16 @@ impl<'a> LineIndex<'a> {
         (line_idx, line_start, line_end)
     }
 
-    fn line_col(&self, byte_idx: usize) -> (usize, usize) {
+    /// Returns 1-based `(line, column)` for `byte_idx`. Column is counted in `char`s.
+    pub fn line_col(&self, byte_idx: usize) -> (usize, usize) {
         let (line_idx, line_start, _) = self.bounds(byte_idx);
         let clamped = byte_idx.min(self.content.len());
         let col = self.content[line_start..clamped].chars().count() + 1;
         (line_idx + 1, col)
     }
 
-    fn line_at(&self, byte_idx: usize) -> &'a str {
+    /// Returns the source line containing `byte_idx`, excluding the trailing `\n`.
+    pub fn line_at(&self, byte_idx: usize) -> &'a str {
         let (_, start, end) = self.bounds(byte_idx);
         &self.content[start..end]
     }

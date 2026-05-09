@@ -515,7 +515,11 @@ fn scan_rejects_invalid_fail_on() {
         .expect("scan invalid fail-on");
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("invalid --fail-on severity"), "{stderr}");
+    assert!(stderr.contains("invalid value 'critcal'"), "{stderr}");
+    assert!(
+        stderr.contains("[possible values: info, low, medium, high, critical]"),
+        "{stderr}"
+    );
 }
 
 #[test]

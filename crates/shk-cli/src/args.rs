@@ -38,8 +38,8 @@ pub enum Commands {
         /// Show informational skip findings in human-readable output.
         #[arg(long)]
         verbose: bool,
-        #[arg(long, value_name = "SEVERITY")]
-        fail_on: Option<String>,
+        #[arg(long, value_enum, value_name = "SEVERITY")]
+        fail_on: Option<SeverityArg>,
         /// Include binary files instead of emitting scan.binary_skipped info findings.
         #[arg(long)]
         include_binary: bool,
@@ -234,15 +234,23 @@ pub struct GithubCiArgs {
     #[arg(long, value_enum, default_value_t = CiModeArg::Blocking)]
     pub mode: CiModeArg,
     /// Severity threshold for blocking mode (info | low | medium | high | critical).
-    #[arg(long, value_enum, default_value_t = SeverityArg::High)]
-    pub fail_on: SeverityArg,
+    /// Optional so the CLI can detect explicit overrides — useful for warning when
+    /// `--mode audit` is combined with an explicit `--fail-on`. Defaults to `high`
+    /// when unset; the help text below documents the effective default.
+    #[arg(
+        long,
+        value_enum,
+        value_name = "SEVERITY",
+        help = "Severity threshold for blocking mode [default: high]"
+    )]
+    pub fail_on: Option<SeverityArg>,
     /// Path passed to `shk scan`.
     #[arg(long, default_value = ".")]
     pub path: String,
     /// GitHub owner/repository that hosts shk releases.
     #[arg(long, default_value = "Kazuki-tam/security-harness-kit")]
     pub repo: String,
-    /// shk release version to install, or `latest` (e.g. `v0.2.2`).
+    /// shk release version to install, or `latest` (e.g. `v0.2.3`).
     #[arg(long = "shk-version", default_value = "latest")]
     pub shk_version: String,
     /// cargo-dist shell installer asset name.
@@ -266,11 +274,8 @@ pub enum CiModeArg {
     Audit,
 }
 
-/// clap-validated severity used by subcommands that synthesise scan invocations.
-///
-/// `Scan` itself still accepts `--fail-on` as a free-form string for backwards-compatible
-/// error messages; new commands should prefer `SeverityArg` so unknown values are rejected
-/// at the CLI parsing layer.
+/// clap-validated severity shared by every subcommand that synthesises a scan threshold.
+/// Unknown values are rejected at the CLI parsing layer with the standard clap error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
 #[clap(rename_all = "kebab-case")]
 pub enum SeverityArg {
