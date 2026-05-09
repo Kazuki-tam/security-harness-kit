@@ -261,6 +261,8 @@ Inline suppression is available in files that support comments:
 API_KEY=synthetic-example-value  # shk-ignore secret.generic_api_key
 # shk-ignore-next-line secret.generic_api_key
 SECRET=synthetic-example-value
+<!-- shk-ignore-next-line secret.generic_api_key -->
+SECRET=synthetic-example-value
 ```
 
 Policy allowlists can suppress by path and rule:

@@ -21,18 +21,23 @@ shk scan . --json                    # JSON report
 shk scan --staged                    # scan git-staged files (pre-commit)
 shk mask < file.txt                  # mask PII/secrets from stdin
 shk mask file.txt --json             # JSON output with findings + masked content
+shk init                             # create starter shk.toml
+shk status                           # concise project health summary
+shk hooks install                    # install Git pre-commit hook
 shk hooks install-ai                 # install hooks for Claude Code / Cursor / Codex
 shk hooks install-ai --tool claude-code --global
 shk hooks install-ai --dry-run       # preview changes
+shk ci init github --dry-run         # preview GitHub Actions workflow
 shk doctor                           # full project diagnostics
 shk doctor ignore --fix              # fix missing .gitignore entries
 shk env dotenvx import-keys .env.keys # store dotenvx private keys in OS credential store
 shk env dotenvx run -- npm test       # inject stored keys only into child process
 shk secrets push --profile prod       # push dotenv payload to AWS/GCP secret manager
 shk secrets push --profile prod --dry-run
-shk skills install                   # install this skill (claude-code + codex)
+shk skills install                   # install this skill (claude-code + codex/cursor)
 shk skills install --tool claude-code --global
 shk skills install --tool codex --global
+shk skills install --tool cursor --global
 ```
 
 ## Scanning
@@ -119,7 +124,15 @@ shk hooks install-ai --audit                     # non-blocking, writes .shk/aud
 shk hooks install-ai --tool claude-code
 shk hooks install-ai --tool claude-code --global
 shk hooks install-ai --tool claude-code --apply-deny
+shk hooks install-ai --apply-sandbox
+shk hooks install-ai --tool cursor --fail-closed
 ```
+
+Important hook behavior:
+- Without `--tool`, installs managed hooks for Claude Code, Codex, and Cursor.
+- `--audit` makes installed hooks non-blocking and writes metadata-only entries to `.shk/audit.log`.
+- `--apply-sandbox` hardens supported tool sandbox settings. Cursor has no local sandbox setting in `hooks.json`, so this sets managed hooks fail-closed.
+- Pre-hook mode runs action guard before content scanning. Tune with `[action_guard]` in `shk.toml`.
 
 ## External data sources and MCP integration
 
@@ -211,8 +224,16 @@ shk doctor                   # full suite: hooks, ignore, env, AI tool status
 shk doctor ignore            # check .gitignore / AI tool ignore coverage
 shk doctor ignore --fix      # append missing patterns to .gitignore
 shk doctor env               # detect plaintext .env secrets
+shk doctor env --dotenvx     # include dotenvx artifact checks
 shk doctor version           # check for shk updates
 ```
+
+`shk doctor ignore` checks `.gitignore` plus AI-oriented ignore files such as
+`.cursorignore`, `.cursorindexingignore`, `.codeiumignore`, `.clineignore`,
+`.aiderignore`, `.continueignore`, `.tabnineignore`, `.ignore`, and `.aiignore` when present.
+It also reports Claude Code read-deny coverage and risky Codex hook/sandbox settings when those
+config files exist. `--fix` appends missing required patterns to `.gitignore`; it does not remove
+existing entries.
 
 ## Configuration (shk.toml)
 
@@ -223,9 +244,23 @@ shk doctor version           # check for shk updates
 secrets = true
 pii = true
 pii_languages = ["en", "ja"]
+env = true
+ai_context = true
+internal_terms = false
+
+[action_guard]
+enabled = true
+profile = "recommended" # minimal | recommended | strict
+allow = []
+deny = []
 
 [thresholds]
 default_fail_on = "high"
+scan_fail_on = "high"
+pre_commit_fail_on = "high"
+
+[doctor.ignore]
+required_patterns = [".env", ".env.*", "!.env.example", "secrets/**", "credentials/**"]
 
 [secrets.profiles.prod]
 provider = "aws"
@@ -241,7 +276,13 @@ path = "fixtures/**"
 reason = "Test fixture"
 ```
 
-Inline suppression: append `# shk-ignore` or `# shk-ignore-next-line <rule_id>` to a line.
+Suppression and ignore methods agents should know:
+- Same-line suppression: `value # shk-ignore <rule_id>` or `value // shk-ignore <rule_id>`.
+- Next-line suppression: `# shk-ignore-next-line <rule_id>` or `// shk-ignore-next-line <rule_id>`.
+- Markdown-friendly suppression: `<!-- shk-ignore-next-line <rule_id> -->` before the line, or `value <!-- shk-ignore <rule_id> -->` on the same line.
+- Omit `<rule_id>` only when intentionally suppressing all rules on the target line.
+- Prefer `[[allowlist]]` for durable project policy. Use `path` + `rule_id` when possible; use `value_hash` for value-specific suppression. Never put raw secret values in `shk.toml`.
+- Scanner skip notices and policy warnings with kind `ignore` are not file-content findings, so they are not suppressed by inline comments. Use scan settings, `[[allowlist]]`, or `[doctor.ignore]` as appropriate.
 
 For `shk secrets push`, profile keys are limited to supported fields such as `provider`, `mode`,
 `target`, `target_prefix`, `source`, `region`, `project`, `location`, `audit`, `confirm`,
@@ -252,11 +293,13 @@ For `shk secrets push`, profile keys are limited to supported fields such as `pr
 ```bash
 shk skills list                              # show available built-in skills
 shk skills status                            # check installation status
-shk skills install                           # install for all tools (claude-code + codex)
+shk skills install                           # install for all tools (claude-code + codex/cursor)
 shk skills install --tool claude-code        # .claude/skills/shk.md
 shk skills install --tool codex             # .agents/skills/shk/SKILL.md
+shk skills install --tool cursor            # .agents/skills/shk/SKILL.md
 shk skills install --tool claude-code --global   # ~/.claude/skills/shk.md
 shk skills install --tool codex --global    # ~/.agents/skills/shk/SKILL.md
+shk skills install --tool cursor --global   # ~/.agents/skills/shk/SKILL.md
 shk skills install --force                  # overwrite existing
 shk skills install --dry-run                # preview without writing
 ```
