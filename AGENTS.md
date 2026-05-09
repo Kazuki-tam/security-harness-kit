@@ -192,7 +192,7 @@ pre_commit_fail_on = "high"
 
 [mask]
 mode = "strict"
-redaction = "full"
+redaction = "match"
 # preserve_prefix = 4   # only when redaction = "partial"
 # preserve_suffix = 4
 

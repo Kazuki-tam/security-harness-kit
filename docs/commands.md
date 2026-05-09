@@ -111,6 +111,7 @@ shk mask < prompt.txt
 shk mask prompt.txt
 shk mask prompt.txt --output out.txt
 shk mask --json < prompt.txt
+shk mask --redaction match < prompt.txt
 shk mask --redaction partial < prompt.txt
 shk mask --hook-mode cursor < payload.json
 ```
@@ -123,6 +124,7 @@ Options:
 | `--json` | Print masked content and findings as JSON. |
 | `--output <path>` | Write masked content to a file. Requires `shk.toml`. |
 | `--redaction full` | Replace any line containing a finding with `[REDACTED_LINE]`. |
+| `--redaction match` | Replace only matched values with `[REDACTED]` (default). |
 | `--redaction partial` | Replace matched values and preserve the configured prefix/suffix. |
 | `--hook-mode <tool>` | Read a hook payload from stdin and print tool-specific masked hook output. |
 | `--post` | Post-tool hook mode. Requires `--hook-mode <tool>`. |

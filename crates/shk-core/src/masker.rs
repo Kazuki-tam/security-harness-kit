@@ -14,13 +14,14 @@ pub struct MaskJsonOutput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaskRedaction {
     FullLine,
+    Match,
     Partial {
         preserve_prefix: usize,
         preserve_suffix: usize,
     },
 }
 
-/// Line-oriented masking: lines containing matches become `[REDACTED_LINE]` (MVP, streaming-friendly).
+/// Mask content line-by-line while preserving original line boundaries.
 pub fn mask_text(
     content: &str,
     cfg: &RuleEngineConfig,
@@ -74,6 +75,7 @@ fn mask_text_with_custom(
                 .collect();
             match redaction {
                 MaskRedaction::FullLine => out.push_str("[REDACTED_LINE]"),
+                MaskRedaction::Match => out.push_str(&mask_line_match(line, values)),
                 MaskRedaction::Partial {
                     preserve_prefix,
                     preserve_suffix,
@@ -104,15 +106,50 @@ fn mask_line_partial(
     preserve_prefix: usize,
     preserve_suffix: usize,
 ) -> String {
-    let mut masked = line.to_string();
+    mask_line_values(line, matches, |value| {
+        partial_value(value, preserve_prefix, preserve_suffix)
+    })
+}
+
+fn mask_line_match(line: &str, matches: Vec<String>) -> String {
+    mask_line_values(line, matches, |_| "[REDACTED]".into())
+}
+
+fn mask_line_values(
+    line: &str,
+    matches: Vec<String>,
+    mut replacement_for: impl FnMut(&str) -> String,
+) -> String {
     let mut values = matches;
-    values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    values.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     values.dedup();
 
-    for value in values {
-        let replacement = partial_value(&value, preserve_prefix, preserve_suffix);
-        masked = masked.replace(&value, &replacement);
+    let mut ranges: Vec<(usize, usize, String)> = Vec::new();
+    for value in &values {
+        if value.is_empty() {
+            continue;
+        }
+        for (start, _) in line.match_indices(value) {
+            let end = start + value.len();
+            if ranges.iter().any(|(s, e, _)| start < *e && *s < end) {
+                continue;
+            }
+            ranges.push((start, end, replacement_for(value)));
+        }
     }
+    for value in &mut values {
+        value.zeroize();
+    }
+    ranges.sort_by_key(|(start, _, _)| *start);
+
+    let mut masked = String::with_capacity(line.len());
+    let mut cursor = 0;
+    for (start, end, replacement) in ranges {
+        masked.push_str(&line[cursor..start]);
+        masked.push_str(&replacement);
+        cursor = end;
+    }
+    masked.push_str(&line[cursor..]);
     masked
 }
 
@@ -143,13 +180,14 @@ pub fn mask_from_policy(
     }
     let cfg = policy.rule_engine_config();
     let custom = custom_rules::compile_for_policy(&policy.custom_rules, cfg.internal_terms)?;
-    let redaction = if policy.mask.redaction.eq_ignore_ascii_case("partial") {
-        MaskRedaction::Partial {
+    let redaction = match policy.mask.redaction.to_ascii_lowercase().as_str() {
+        "full" => MaskRedaction::FullLine,
+        "match" => MaskRedaction::Match,
+        "partial" => MaskRedaction::Partial {
             preserve_prefix: policy.mask.preserve_prefix,
             preserve_suffix: policy.mask.preserve_suffix,
-        }
-    } else {
-        MaskRedaction::FullLine
+        },
+        other => bail!("unsupported mask.redaction `{other}` (supported: full, match, partial)"),
     };
     Ok(mask_text_with_custom(
         content, &cfg, &custom, rel_path, redaction,
@@ -194,6 +232,43 @@ mod tests {
     }
 
     #[test]
+    fn match_mask_replaces_only_detected_value() {
+        let cfg = RuleEngineConfig::default();
+        let (out, hits) = mask_text(
+            // not real credential: synthetic detector fixture value only
+            "token sk-proj-abcdefghijklmnopqrstuvwxyz0123456789 stays\n",
+            &cfg,
+            "x.txt",
+            MaskRedaction::Match,
+        );
+        assert!(!hits.is_empty());
+        assert_eq!(out, "token [REDACTED] stays\n");
+    }
+
+    #[test]
+    fn match_mask_does_not_remask_replacement_text() {
+        let out = mask_line_match(
+            "token secret REDACTED",
+            vec!["secret".into(), "REDACTED".into()],
+        );
+        assert_eq!(out, "token [REDACTED] [REDACTED]");
+    }
+
+    #[test]
+    fn partial_mask_prefers_longer_overlapping_matches() {
+        let out = mask_line_partial(
+            "token sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+            vec![
+                "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789".into(),
+                "sk-p".into(),
+            ],
+            4,
+            4,
+        );
+        assert_eq!(out, "token sk-p[REDACTED]6789");
+    }
+
+    #[test]
     fn mask_findings_keep_original_line_numbers() {
         let cfg = RuleEngineConfig::default();
         let (_out, hits) = mask_text(
@@ -219,6 +294,17 @@ mod tests {
     }
 
     #[test]
+    fn mask_from_policy_rejects_unsupported_redaction() {
+        let mut policy = Policy::default();
+        policy.mask.redaction = "line".into();
+        let err = mask_from_policy("hello@example.com\n", &policy, "<stdin>").unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported mask.redaction"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
     fn mask_from_policy_applies_custom_rules() {
         let mut policy = Policy::default();
         policy.rules.internal_terms = true;
@@ -236,7 +322,7 @@ mod tests {
         let (out, findings) =
             mask_from_policy("codename ProjectNebula\n", &policy, "<stdin>").unwrap();
 
-        assert_eq!(out, "[REDACTED_LINE]\n");
+        assert_eq!(out, "codename [REDACTED]\n");
         assert!(
             findings
                 .iter()

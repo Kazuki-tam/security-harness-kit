@@ -170,7 +170,8 @@ fn mask_hook_mode_cursor_returns_masked_content() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["permission"], "allow");
     let masked = v["masked_content"].as_str().unwrap_or_default();
-    assert!(masked.contains("[REDACTED_LINE]"), "{masked}");
+    assert!(masked.contains("[REDACTED]"), "{masked}");
+    assert!(masked.contains("please inspect this token:"), "{masked}");
     assert!(!masked.contains(secret), "{masked}");
 }
 
@@ -370,7 +371,8 @@ fn mask_hook_mode_claude_post_returns_replacement_output() {
     assert_eq!(hook_output["hookEventName"], "PostToolUse");
     assert_eq!(hook_output["permissionDecision"], "allow");
     let replacement = hook_output["output"].as_str().unwrap_or_default();
-    assert!(replacement.contains("[REDACTED_LINE]"), "{replacement}");
+    assert!(replacement.contains("[REDACTED]"), "{replacement}");
+    assert!(replacement.contains("tool output:"), "{replacement}");
     assert!(!replacement.contains(secret), "{replacement}");
 }
 

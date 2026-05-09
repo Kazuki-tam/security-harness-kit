@@ -175,6 +175,7 @@ JSON scans include redacted surrounding context when context lines are available
 
 `shk mask` scans input and redacts matching lines or values according to policy:
 
+- `redaction = "match"` replaces only matched values with `[REDACTED]`.
 - `redaction = "full"` replaces each line with at least one finding with `[REDACTED_LINE]`.
 - `redaction = "partial"` replaces matched values with a `[REDACTED]` marker while preserving `preserve_prefix` and `preserve_suffix` characters.
 

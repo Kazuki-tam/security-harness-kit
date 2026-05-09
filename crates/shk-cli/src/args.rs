@@ -313,6 +313,7 @@ impl From<SeverityArg> for Severity {
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 pub enum RedactionMode {
     Full,
+    Match,
     Partial,
 }
 
