@@ -60,7 +60,7 @@ macOS and Linux releases include a generated Homebrew formula (`shk-cli.rb`) as 
 brew install --formula https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk-cli.rb
 ```
 
-To install a pinned release, replace `latest/download` with `download/<tag>` (e.g. `download/v0.2.3`).
+To install a pinned release, replace `latest/download` with `download/<tag>` (e.g. `download/v0.2.4`).
 
 Intel macOS, Apple Silicon macOS, Linux x86_64/aarch64, and Windows x86_64 are supported. Scoop manifests are not published by the current `dist`-based release pipeline.
 
