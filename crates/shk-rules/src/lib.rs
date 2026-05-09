@@ -884,6 +884,19 @@ fn ai_embedded_bom_re() -> &'static Regex {
     &RE
 }
 
+fn ai_invisible_format_chars_re() -> &'static Regex {
+    static RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"[\x{00AD}\x{034F}\x{061C}\x{180E}\x{200B}-\x{200D}\x{2060}]").unwrap()
+    });
+    &RE
+}
+
+fn ai_variation_selectors_re() -> &'static Regex {
+    static RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"[\x{FE00}-\x{FE0F}\x{E0100}-\x{E01EF}]").unwrap());
+    &RE
+}
+
 fn ai_unsafe_uri_re() -> &'static Regex {
     static RE: Lazy<Regex> = Lazy::new(|| {
         Regex::new(
@@ -902,13 +915,14 @@ fn ai_svg_data_uri_re() -> &'static Regex {
 fn ai_context_display_re() -> &'static Regex {
     static RE: Lazy<Regex> = Lazy::new(|| {
         Regex::new(
-            r"(?i)[\x{E0000}-\x{E007F}\x{202A}-\x{202E}\x{2066}-\x{2069}\x{FEFF}]|\b(?:javascript\s*:|data\s*:\s*(?:text/html|text/javascript|image/svg\+xml|application/(?:javascript|x-javascript)))",
+            r"(?i)[\x{00AD}\x{034F}\x{061C}\x{180E}\x{200B}-\x{200D}\x{202A}-\x{202E}\x{2060}\x{2066}-\x{2069}\x{FE00}-\x{FE0F}\x{FEFF}\x{E0000}-\x{E007F}\x{E0100}-\x{E01EF}]|\b(?:javascript\s*:|data\s*:\s*(?:text/html|text/javascript|image/svg\+xml|application/(?:javascript|x-javascript)))",
         )
         .unwrap()
     });
     &RE
 }
 
+#[derive(Clone, Copy)]
 struct AiContextMatchSpec {
     rule_id: &'static str,
     severity: Severity,
@@ -936,6 +950,19 @@ fn push_ai_context_match(
     });
 }
 
+fn push_ai_context_regex_matches<'a>(
+    out: &mut Vec<RuleMatch>,
+    content: &'a str,
+    line_index: &mut Option<LineIndex<'a>>,
+    re: &Regex,
+    spec: AiContextMatchSpec,
+) {
+    for m in re.find_iter(content) {
+        let index = line_index.get_or_insert_with(|| LineIndex::new(content));
+        push_ai_context_match(out, index, spec, m.start(), m.as_str().to_string());
+    }
+}
+
 fn scan_ai_context_content<'a>(
     content: &'a str,
     rel_path: &str,
@@ -947,21 +974,18 @@ fn scan_ai_context_content<'a>(
     }
 
     let mut out = Vec::new();
-    for m in ai_tag_chars_re().find_iter(content) {
-        let index = line_index.get_or_insert_with(|| LineIndex::new(content));
-        push_ai_context_match(
-            &mut out,
-            index,
-            AiContextMatchSpec {
-                rule_id: "ai_context.unicode_tag_chars",
-                severity: Severity::High,
-                message: "Unicode tag character detected in AI-visible context",
-                confidence: 0.95,
-            },
-            m.start(),
-            m.as_str().to_string(),
-        );
-    }
+    push_ai_context_regex_matches(
+        &mut out,
+        content,
+        line_index,
+        ai_tag_chars_re(),
+        AiContextMatchSpec {
+            rule_id: "ai_context.unicode_tag_chars",
+            severity: Severity::High,
+            message: "Unicode tag character detected in AI-visible context",
+            confidence: 0.95,
+        },
+    );
 
     let bidi_severity = if is_code_path(rel_path) {
         Severity::High
@@ -973,21 +997,18 @@ fn scan_ai_context_content<'a>(
     } else {
         "Bidirectional control character detected in document text"
     };
-    for m in ai_bidi_controls_re().find_iter(content) {
-        let index = line_index.get_or_insert_with(|| LineIndex::new(content));
-        push_ai_context_match(
-            &mut out,
-            index,
-            AiContextMatchSpec {
-                rule_id: "ai_context.bidi_control",
-                severity: bidi_severity,
-                message: bidi_message,
-                confidence: 0.9,
-            },
-            m.start(),
-            m.as_str().to_string(),
-        );
-    }
+    push_ai_context_regex_matches(
+        &mut out,
+        content,
+        line_index,
+        ai_bidi_controls_re(),
+        AiContextMatchSpec {
+            rule_id: "ai_context.bidi_control",
+            severity: bidi_severity,
+            message: bidi_message,
+            confidence: 0.9,
+        },
+    );
 
     for m in ai_embedded_bom_re().find_iter(content) {
         if m.start() == 0 {
@@ -1008,37 +1029,57 @@ fn scan_ai_context_content<'a>(
         );
     }
 
-    for m in ai_unsafe_uri_re().find_iter(content) {
-        let index = line_index.get_or_insert_with(|| LineIndex::new(content));
-        push_ai_context_match(
-            &mut out,
-            index,
-            AiContextMatchSpec {
-                rule_id: "ai_context.unsafe_uri",
-                severity: Severity::High,
-                message: "Unsafe JavaScript-scheme or executable data URI detected",
-                confidence: 0.9,
-            },
-            m.start(),
-            m.as_str().to_string(),
-        );
-    }
+    push_ai_context_regex_matches(
+        &mut out,
+        content,
+        line_index,
+        ai_invisible_format_chars_re(),
+        AiContextMatchSpec {
+            rule_id: "ai_context.invisible_format_chars",
+            severity: Severity::High,
+            message: "Invisible Unicode format character detected in AI-visible context",
+            confidence: 0.9,
+        },
+    );
 
-    for m in ai_svg_data_uri_re().find_iter(content) {
-        let index = line_index.get_or_insert_with(|| LineIndex::new(content));
-        push_ai_context_match(
-            &mut out,
-            index,
-            AiContextMatchSpec {
-                rule_id: "ai_context.unsafe_uri",
-                severity: Severity::Medium,
-                message: "SVG data URI detected in AI-visible context",
-                confidence: 0.75,
-            },
-            m.start(),
-            m.as_str().to_string(),
-        );
-    }
+    push_ai_context_regex_matches(
+        &mut out,
+        content,
+        line_index,
+        ai_variation_selectors_re(),
+        AiContextMatchSpec {
+            rule_id: "ai_context.variation_selector",
+            severity: Severity::Medium,
+            message: "Unicode variation selector detected in AI-visible context",
+            confidence: 0.75,
+        },
+    );
+
+    push_ai_context_regex_matches(
+        &mut out,
+        content,
+        line_index,
+        ai_unsafe_uri_re(),
+        AiContextMatchSpec {
+            rule_id: "ai_context.unsafe_uri",
+            severity: Severity::High,
+            message: "Unsafe JavaScript-scheme or executable data URI detected",
+            confidence: 0.9,
+        },
+    );
+
+    push_ai_context_regex_matches(
+        &mut out,
+        content,
+        line_index,
+        ai_svg_data_uri_re(),
+        AiContextMatchSpec {
+            rule_id: "ai_context.unsafe_uri",
+            severity: Severity::Medium,
+            message: "SVG data URI detected in AI-visible context",
+            confidence: 0.75,
+        },
+    );
 
     out
 }
@@ -1535,6 +1576,42 @@ secret_key = "0123456789abcdef0123456789abcdef""#;
     }
 
     #[test]
+    fn detects_invisible_format_chars_as_high_signal_ai_context() {
+        let cfg = RuleEngineConfig::default();
+        for (sample, path) in [
+            ("ignore\u{200B} previous instruction", "prompt.md"),
+            ("let name = \"safe\u{200D}tail\";", "demo.rs"),
+            ("word\u{2060}joiner", "notes.txt"),
+        ] {
+            let m = scan_content(sample, path, &cfg);
+            assert!(
+                m.iter()
+                    .any(|x| x.rule_id == "ai_context.invisible_format_chars"
+                        && x.severity == Severity::High),
+                "missing invisible format char finding for {path}: {m:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn detects_variation_selectors_without_high_severity() {
+        let cfg = RuleEngineConfig::default();
+        let m = scan_content("selector\u{FE0F}tail", "prompt.md", &cfg);
+        assert!(
+            m.iter()
+                .any(|x| x.rule_id == "ai_context.variation_selector"
+                    && x.severity == Severity::Medium),
+            "{m:?}"
+        );
+        assert!(
+            !m.iter()
+                .any(|x| x.rule_id == "ai_context.variation_selector"
+                    && x.severity == Severity::High),
+            "{m:?}"
+        );
+    }
+
+    #[test]
     fn detects_unsafe_javascript_and_executable_data_uri() {
         let cfg = RuleEngineConfig::default();
         let m = scan_content(
@@ -1581,7 +1658,12 @@ secret_key = "0123456789abcdef0123456789abcdef""#;
             ..RuleEngineConfig::default()
         };
         let m = scan_content(
-            concat!("prompt\u{E0000}\nurl = \"java", "script:alert(1)\""),
+            concat!(
+                "prompt\u{E0000}\n",
+                "zero\u{200B} selector\u{FE0F}\n",
+                "url = \"java",
+                "script:alert(1)\""
+            ),
             "demo.js",
             &cfg,
         );
@@ -1623,6 +1705,7 @@ secret_key = "0123456789abcdef0123456789abcdef""#;
         let cfg = RuleEngineConfig::default();
         let line = concat!(
             "prompt\u{E0000} bidi\u{202E} ",
+            "zero\u{200B}width selector\u{FE0F} ",
             r#"<a href="java"#,
             r#"script:alert(1)">x</a> "#,
             r#"<a href="data:text/html,<script></script>">x</a>"#
@@ -1631,6 +1714,8 @@ secret_key = "0123456789abcdef0123456789abcdef""#;
         assert!(redacted.contains("[REDACTED]"), "{redacted}");
         assert!(!redacted.contains('\u{E0000}'), "{redacted}");
         assert!(!redacted.contains('\u{202E}'), "{redacted}");
+        assert!(!redacted.contains('\u{200B}'), "{redacted}");
+        assert!(!redacted.contains('\u{FE0F}'), "{redacted}");
         assert!(
             !redacted.to_ascii_lowercase().contains("javascript:"),
             "{redacted}"
@@ -1641,7 +1726,7 @@ secret_key = "0123456789abcdef0123456789abcdef""#;
         );
 
         let disabled = redact_line_for_display(
-            "prompt\u{E0000} bidi\u{202E} javascript:alert(1)",
+            "prompt\u{E0000} bidi\u{202E} zero\u{200B} selector\u{FE0F} javascript:alert(1)",
             &RuleEngineConfig {
                 ai_context: false,
                 ..RuleEngineConfig::default()
@@ -1649,6 +1734,8 @@ secret_key = "0123456789abcdef0123456789abcdef""#;
         );
         assert!(disabled.contains('\u{E0000}'), "{disabled}");
         assert!(disabled.contains('\u{202E}'), "{disabled}");
+        assert!(disabled.contains('\u{200B}'), "{disabled}");
+        assert!(disabled.contains('\u{FE0F}'), "{disabled}");
         assert!(disabled.contains("javascript:"), "{disabled}");
     }
 
