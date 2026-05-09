@@ -112,7 +112,7 @@ Personal names, English street addresses, English SSNs, and Japanese passport nu
 
 By default, scanner traversal skips files larger than `scan.max_file_size_bytes` and binary-looking files. Binary detection checks the first `scan.binary_detection_bytes` bytes for NUL bytes.
 
-In human output, informational skip findings are hidden unless `--verbose` is used. In JSON output, skip findings are included.
+In human-readable output, informational skip findings are hidden unless `--verbose` is used. In JSON output, skip findings are included.
 
 Use `--include-binary` or `scan.include_binary = true` to opt into scanning binary-looking files.
 

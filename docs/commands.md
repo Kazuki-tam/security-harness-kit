@@ -68,12 +68,12 @@ Options:
 |--------|----------|
 | `PATH` | Path to scan. Defaults to `.`. |
 | `--json` | Print a JSON report. |
-| `--verbose` | Include informational skip findings in human output. |
+| `--verbose` | Include informational skip findings in human-readable output. |
 | `--fail-on <severity>` | Override the configured failure threshold. Valid values: `info`, `low`, `medium`, `high`, `critical`. |
 | `--include-binary` | Scan binary-looking files instead of reporting `scan.binary_skipped` info findings. |
 | `--follow-symlinks` | Follow symlinks during traversal. |
 | `--staged` | Scan Git-staged files. Intended for pre-commit usage. |
-| `--no-color` | Disable colored human output. This is a global option. |
+| `--no-color` | Disable colored human-readable output. This is a global option. |
 
 Exit codes:
 
@@ -131,7 +131,7 @@ When no `FILE` is provided, `shk mask` reads stdin until EOF. In an interactive
 terminal, run it with input redirection (`shk mask < prompt.txt`) or provide a
 file path (`shk mask prompt.txt`).
 
-`mask --output` refuses sensitive env files and protected home configuration files. Binary or non-UTF-8 input is passed through unchanged in human output and reported as `mask.binary_passthrough` in JSON output.
+`mask --output` refuses sensitive env files and protected home configuration files. Binary or non-UTF-8 input is passed through unchanged in human-readable output and reported as `mask.binary_passthrough` in JSON output.
 
 ## `shk doctor`
 

@@ -8,7 +8,7 @@
 shk scan .
 ```
 
-Example human output:
+Example output:
 
 ```text
 3 findings

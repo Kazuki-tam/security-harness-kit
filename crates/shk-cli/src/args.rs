@@ -10,7 +10,7 @@ use std::path::PathBuf;
     propagate_version = true
 )]
 pub struct Cli {
-    /// Disable colored human output.
+    /// Disable colored human-readable output.
     #[arg(long, global = true)]
     pub no_color: bool,
     #[command(subcommand)]
@@ -34,7 +34,7 @@ pub enum Commands {
         staged: bool,
         #[arg(long)]
         json: bool,
-        /// Show informational skip findings in human output.
+        /// Show informational skip findings in human-readable output.
         #[arg(long)]
         verbose: bool,
         #[arg(long, value_name = "SEVERITY")]
