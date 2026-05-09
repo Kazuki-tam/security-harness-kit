@@ -721,15 +721,52 @@ fn japanese_postal_code_valid(candidate: &str) -> bool {
     candidate.chars().any(|c| c.is_ascii_digit() && c != '0')
 }
 
-fn line_col(content: &str, byte_idx: usize) -> (usize, usize) {
-    let prefix = &content[..byte_idx.min(content.len())];
-    let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
-    let last_nl = prefix.rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let col = content[last_nl..byte_idx.min(content.len())]
-        .chars()
-        .count()
-        + 1;
-    (line, col)
+/// Pre-computed newline offsets for a single `&str`, enabling O(log N) line/column lookup.
+///
+/// Bound to the lifetime of the source content so the borrow checker prevents callers from
+/// accidentally querying a different buffer than the one used to build the index.
+struct LineIndex<'a> {
+    content: &'a str,
+    newline_offsets: Vec<usize>,
+}
+
+impl<'a> LineIndex<'a> {
+    fn new(content: &'a str) -> Self {
+        Self {
+            content,
+            newline_offsets: content.match_indices('\n').map(|(idx, _)| idx).collect(),
+        }
+    }
+
+    /// Returns `(zero_based_line_idx, line_start_byte, line_end_byte_exclusive_of_newline)`
+    /// for the line containing `byte_idx`.
+    fn bounds(&self, byte_idx: usize) -> (usize, usize, usize) {
+        let byte_idx = byte_idx.min(self.content.len());
+        let line_idx = self.newline_offsets.partition_point(|&idx| idx < byte_idx);
+        let line_start = if line_idx == 0 {
+            0
+        } else {
+            self.newline_offsets[line_idx - 1] + 1
+        };
+        let line_end = self
+            .newline_offsets
+            .get(line_idx)
+            .copied()
+            .unwrap_or(self.content.len());
+        (line_idx, line_start, line_end)
+    }
+
+    fn line_col(&self, byte_idx: usize) -> (usize, usize) {
+        let (line_idx, line_start, _) = self.bounds(byte_idx);
+        let clamped = byte_idx.min(self.content.len());
+        let col = self.content[line_start..clamped].chars().count() + 1;
+        (line_idx + 1, col)
+    }
+
+    fn line_at(&self, byte_idx: usize) -> &'a str {
+        let (_, start, end) = self.bounds(byte_idx);
+        &self.content[start..end]
+    }
 }
 
 fn shannon_entropy(value: &str) -> f32 {
@@ -839,19 +876,12 @@ fn gitleaks_rule_allows(
         .any(|allowlist| allowlist_matches(allowlist, rel_path, secret, whole_match, line))
 }
 
-fn line_at(content: &str, byte_idx: usize) -> &str {
-    let start = content[..byte_idx.min(content.len())]
-        .rfind('\n')
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    let end = content[byte_idx.min(content.len())..]
-        .find('\n')
-        .map(|i| byte_idx.min(content.len()) + i)
-        .unwrap_or(content.len());
-    &content[start..end]
-}
-
-fn scan_gitleaks_content(content: &str, rel_path: &str, cfg: &RuleEngineConfig) -> Vec<RuleMatch> {
+fn scan_gitleaks_content<'a>(
+    content: &'a str,
+    rel_path: &str,
+    cfg: &RuleEngineConfig,
+    line_index: &mut Option<LineIndex<'a>>,
+) -> Vec<RuleMatch> {
     if !cfg.secrets {
         return Vec::new();
     }
@@ -880,11 +910,12 @@ fn scan_gitleaks_content(content: &str, rel_path: &str, cfg: &RuleEngineConfig) 
             {
                 continue;
             }
-            let line = line_at(content, whole.start());
+            let index = line_index.get_or_insert_with(|| LineIndex::new(content));
+            let line = index.line_at(whole.start());
             if gitleaks_rule_allows(r, rel_path, secret, whole.as_str(), line) {
                 continue;
             }
-            let (line, column) = line_col(content, secret_match.start());
+            let (line, column) = index.line_col(secret_match.start());
             out.push(RuleMatch {
                 rule_id: r.id,
                 severity: Severity::High,
@@ -931,6 +962,7 @@ pub fn redact_line_for_display(line: &str, cfg: &RuleEngineConfig) -> String {
 /// Scan full file content; `rel_path` used only for env heuristics (skip .env.example noise).
 pub fn scan_content(content: &str, rel_path: &str, cfg: &RuleEngineConfig) -> Vec<RuleMatch> {
     let mut out = Vec::new();
+    let mut line_index = None;
     let skip_env_heavy = rel_path.ends_with(".env.example") || rel_path.contains(".env.sample");
     for r in RULES.iter() {
         if !rule_applies(r, cfg) {
@@ -945,7 +977,8 @@ pub fn scan_content(content: &str, rel_path: &str, cfg: &RuleEngineConfig) -> Ve
             {
                 continue;
             }
-            let (line, column) = line_col(content, m.start());
+            let index = line_index.get_or_insert_with(|| LineIndex::new(content));
+            let (line, column) = index.line_col(m.start());
             out.push(RuleMatch {
                 rule_id: r.id,
                 severity: r.severity,
@@ -958,13 +991,83 @@ pub fn scan_content(content: &str, rel_path: &str, cfg: &RuleEngineConfig) -> Ve
             });
         }
     }
-    out.extend(scan_gitleaks_content(content, rel_path, cfg));
+    out.extend(scan_gitleaks_content(
+        content,
+        rel_path,
+        cfg,
+        &mut line_index,
+    ));
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_index_handles_empty_content() {
+        let idx = LineIndex::new("");
+        assert_eq!(idx.line_col(0), (1, 1));
+        assert_eq!(idx.line_at(0), "");
+        assert_eq!(idx.line_col(usize::MAX), (1, 1));
+    }
+
+    #[test]
+    fn line_index_matches_legacy_scan_for_ascii() {
+        let content = "abc\ndef\nghi";
+        let idx = LineIndex::new(content);
+        assert_eq!(idx.line_col(0), (1, 1));
+        assert_eq!(idx.line_col(2), (1, 3));
+        assert_eq!(idx.line_col(3), (1, 4));
+        assert_eq!(idx.line_col(4), (2, 1));
+        assert_eq!(idx.line_col(7), (2, 4));
+        assert_eq!(idx.line_col(8), (3, 1));
+        assert_eq!(idx.line_col(11), (3, 4));
+        assert_eq!(idx.line_col(usize::MAX), (3, 4));
+    }
+
+    #[test]
+    fn line_index_line_at_returns_full_line_without_newline() {
+        let content = "first\nsecond\nthird";
+        let idx = LineIndex::new(content);
+        assert_eq!(idx.line_at(0), "first");
+        assert_eq!(idx.line_at(5), "first");
+        assert_eq!(idx.line_at(6), "second");
+        assert_eq!(idx.line_at(13), "third");
+        assert_eq!(idx.line_at(usize::MAX), "third");
+    }
+
+    #[test]
+    fn line_index_handles_trailing_newline() {
+        let content = "alpha\nbeta\n";
+        let idx = LineIndex::new(content);
+        assert_eq!(idx.line_at(0), "alpha");
+        assert_eq!(idx.line_at(6), "beta");
+        assert_eq!(idx.line_at(11), "");
+        assert_eq!(idx.line_col(11), (3, 1));
+    }
+
+    #[test]
+    fn line_index_counts_columns_in_chars_for_multibyte() {
+        let content = "あいう\nえお";
+        let idx = LineIndex::new(content);
+        assert_eq!("あ".len(), 3);
+        assert_eq!(idx.line_col(0), (1, 1));
+        assert_eq!(idx.line_col(3), (1, 2));
+        assert_eq!(idx.line_col(6), (1, 3));
+        assert_eq!(idx.line_col(10), (2, 1));
+        assert_eq!(idx.line_col(13), (2, 2));
+        assert_eq!(idx.line_at(0), "あいう");
+        assert_eq!(idx.line_at(10), "えお");
+    }
+
+    #[test]
+    fn line_index_clamps_byte_idx_to_content_length() {
+        let content = "x";
+        let idx = LineIndex::new(content);
+        assert_eq!(idx.line_col(usize::MAX), (1, 2));
+        assert_eq!(idx.line_at(usize::MAX), "x");
+    }
 
     #[test]
     fn detects_openai_style_key() {

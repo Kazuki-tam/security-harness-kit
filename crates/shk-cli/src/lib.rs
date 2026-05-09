@@ -15,8 +15,8 @@ mod version_check;
 
 use anyhow::{Context, Result};
 use args::{
-    Cli, Commands, DoctorCmd, DotenvxCmd, EnvCmd, HooksCmd, PolicyCmd, SecretsCmd, SkillToolArg,
-    SkillsCmd,
+    CiCmd, CiInitProvider, Cli, Commands, DoctorCmd, DotenvxCmd, EnvCmd, HooksCmd, PolicyCmd,
+    SecretsCmd, SkillToolArg, SkillsCmd,
 };
 use clap::Parser;
 use shk_core::policy::ColorMode;
@@ -127,6 +127,11 @@ pub fn run() -> Result<()> {
         },
         Commands::Policy { cmd } => match cmd {
             PolicyCmd::Init { strict, force } => policy_cmd::init(&cwd, strict, force)?,
+        },
+        Commands::Ci { cmd } => match cmd {
+            CiCmd::Init { provider } => match provider {
+                CiInitProvider::Github(args) => commands::ci::init_github(&cwd, args)?,
+            },
         },
         Commands::Skills { cmd } => match cmd {
             SkillsCmd::List => commands::skills::list()?,

@@ -1,5 +1,6 @@
 use clap::{ArgGroup, Args, Parser, Subcommand};
 use clap_complete::Shell;
+use shk_core::policy::Severity;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -95,6 +96,11 @@ pub enum Commands {
     Policy {
         #[command(subcommand)]
         cmd: PolicyCmd,
+    },
+    /// Generate CI configuration
+    Ci {
+        #[command(subcommand)]
+        cmd: CiCmd,
     },
     /// Manage AI tool skills bundled with shk
     Skills {
@@ -205,6 +211,98 @@ pub enum PolicyCmd {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum CiCmd {
+    /// Create CI workflow files
+    Init {
+        #[command(subcommand)]
+        provider: CiInitProvider,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CiInitProvider {
+    /// Create a GitHub Actions workflow
+    Github(GithubCiArgs),
+}
+
+#[derive(Args)]
+pub struct GithubCiArgs {
+    /// Scan mode: blocking fails CI at or above --fail-on; audit always exits 0.
+    #[arg(long, value_enum, default_value_t = CiModeArg::Blocking)]
+    pub mode: CiModeArg,
+    /// Severity threshold for blocking mode (info | low | medium | high | critical).
+    #[arg(long, value_enum, default_value_t = SeverityArg::High)]
+    pub fail_on: SeverityArg,
+    /// Path passed to `shk scan`.
+    #[arg(long, default_value = ".")]
+    pub path: String,
+    /// GitHub owner/repository that hosts shk releases.
+    #[arg(long, default_value = "Kazuki-tam/security-harness-kit")]
+    pub repo: String,
+    /// shk release version to install, or `latest` (e.g. `v0.2.2`).
+    #[arg(long = "shk-version", default_value = "latest")]
+    pub shk_version: String,
+    /// cargo-dist shell installer asset name.
+    #[arg(long, default_value = "shk-cli-installer.sh")]
+    pub installer_name: String,
+    /// Workflow destination path.
+    #[arg(long, default_value = ".github/workflows/shk.yml")]
+    pub output: PathBuf,
+    /// Print the workflow without writing it.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Overwrite an existing workflow file.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum CiModeArg {
+    Blocking,
+    Audit,
+}
+
+/// clap-validated severity used by subcommands that synthesise scan invocations.
+///
+/// `Scan` itself still accepts `--fail-on` as a free-form string for backwards-compatible
+/// error messages; new commands should prefer `SeverityArg` so unknown values are rejected
+/// at the CLI parsing layer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum SeverityArg {
+    Info,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl SeverityArg {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
+}
+
+impl From<SeverityArg> for Severity {
+    fn from(value: SeverityArg) -> Self {
+        match value {
+            SeverityArg::Info => Severity::Info,
+            SeverityArg::Low => Severity::Low,
+            SeverityArg::Medium => Severity::Medium,
+            SeverityArg::High => Severity::High,
+            SeverityArg::Critical => Severity::Critical,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
