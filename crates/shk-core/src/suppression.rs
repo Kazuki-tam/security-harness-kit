@@ -98,10 +98,8 @@ fn parse_standalone_ignore_line(trimmed_full_line: &str) -> Option<&str> {
         rest.trim_start()
     } else if let Some(rest) = tl.strip_prefix("//") {
         rest.trim_start()
-    } else if let Some(rest) = html_comment_inner(tl) {
-        rest
     } else {
-        return None;
+        html_comment_inner(tl)?
     };
     rest_after_ignore_keywords(inner)
 }
