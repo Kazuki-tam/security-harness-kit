@@ -1,6 +1,7 @@
 use crate::policy::{CustomRule, Severity};
 use anyhow::{Context, Result, bail};
 use regex::{Regex, RegexBuilder};
+use shk_rules::LineIndex;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledCustomRule {
@@ -86,22 +87,13 @@ fn compile_one(rule: &CustomRule) -> Result<CompiledCustomRule> {
     })
 }
 
-fn line_col(content: &str, byte_idx: usize) -> (usize, usize) {
-    let prefix = &content[..byte_idx.min(content.len())];
-    let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
-    let last_nl = prefix.rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let col = content[last_nl..byte_idx.min(content.len())]
-        .chars()
-        .count()
-        + 1;
-    (line, col)
-}
-
 pub(crate) fn scan_content(content: &str, rules: &[CompiledCustomRule]) -> Vec<CustomMatch> {
     let mut out = Vec::new();
+    let mut line_index: Option<LineIndex<'_>> = None;
     for rule in rules {
         for m in rule.re.find_iter(content) {
-            let (line, column) = line_col(content, m.start());
+            let index = line_index.get_or_insert_with(|| LineIndex::new(content));
+            let (line, column) = index.line_col(m.start());
             out.push(CustomMatch {
                 rule_id: rule.id.clone(),
                 severity: rule.severity,

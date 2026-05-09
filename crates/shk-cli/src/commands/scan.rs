@@ -9,7 +9,7 @@ use shk_core::scanner::{ScanOptions, scan_path, scan_string};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::args::AiTool;
+use crate::args::{AiTool, SeverityArg};
 
 const HOOK_DENY_REASON_DEFAULT: &str =
     "shk: secrets detected above threshold — run `shk scan` for details";
@@ -21,7 +21,7 @@ pub struct ScanInvocation {
     pub staged: bool,
     pub json: bool,
     pub verbose: bool,
-    pub fail_on: Option<String>,
+    pub fail_on: Option<SeverityArg>,
     pub include_binary: bool,
     pub follow_symlinks: bool,
     pub hook_mode: Option<AiTool>,
@@ -41,7 +41,7 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
         return run_hook_mode(tool, inv.post, inv.audit, inv.fail_on, &cwd, inv.path);
     }
 
-    let fail_on_override = parse_fail_on(inv.fail_on.as_deref())?;
+    let fail_on_override = inv.fail_on.map(Severity::from);
     let opts = ScanOptions {
         staged: inv.staged,
         json: inv.json,
@@ -104,7 +104,7 @@ fn run_hook_mode(
     tool: AiTool,
     post: bool,
     audit: bool,
-    fail_on: Option<String>,
+    fail_on: Option<SeverityArg>,
     cwd: &Path,
     path_arg: PathBuf,
 ) -> Result<()> {
@@ -143,7 +143,7 @@ fn run_hook_mode(
         cwd,
         &repo_root,
     )?;
-    let opts = hook_scan_options(fail_on.as_deref(), matches!(tool, AiTool::Cursor) && !post)?;
+    let opts = hook_scan_options(fail_on, matches!(tool, AiTool::Cursor) && !post);
 
     let res = scan_string(&repo_root, &disp, &body, opts).context("hook scan failed")?;
 
@@ -209,7 +209,7 @@ fn should_run_action_guard(post: bool, audit: bool) -> bool {
 fn run_user_prompt_mode(
     tool: AiTool,
     audit: bool,
-    fail_on: Option<String>,
+    fail_on: Option<SeverityArg>,
     repo_root: &Path,
     stdin_trim: &str,
 ) -> Result<()> {
@@ -221,7 +221,7 @@ fn run_user_prompt_mode(
         return Ok(());
     }
 
-    let opts = hook_scan_options(fail_on.as_deref(), false)?;
+    let opts = hook_scan_options(fail_on, false);
 
     let res = scan_string(repo_root, "<user-prompt>", prompt.as_ref(), opts)
         .context("user-prompt scan failed")?;
@@ -247,16 +247,16 @@ fn run_user_prompt_mode(
     Ok(())
 }
 
-fn hook_scan_options(fail_on: Option<&str>, use_pre_commit_threshold: bool) -> Result<ScanOptions> {
-    Ok(ScanOptions {
+fn hook_scan_options(fail_on: Option<SeverityArg>, use_pre_commit_threshold: bool) -> ScanOptions {
+    ScanOptions {
         staged: false,
         json: false,
-        fail_on_override: parse_fail_on(fail_on)?,
+        fail_on_override: fail_on.map(Severity::from),
         use_pre_commit_threshold,
         include_context: false,
         include_binary: false,
         follow_symlinks: false,
-    })
+    }
 }
 
 fn deny_hook(tool: AiTool, event: hook_output::HookEvent, reason: &str) -> Result<()> {
@@ -322,15 +322,4 @@ fn audit_hook_name(event: hook_output::HookEvent) -> &'static str {
 
 fn fs_canonical_or_same(p: PathBuf) -> PathBuf {
     std::fs::canonicalize(&p).unwrap_or(p)
-}
-
-fn parse_fail_on(raw: Option<&str>) -> Result<Option<Severity>> {
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    Severity::parse(raw).map(Some).ok_or_else(|| {
-        anyhow::anyhow!(
-            "invalid --fail-on severity `{raw}` (expected: info, low, medium, high, critical)"
-        )
-    })
 }

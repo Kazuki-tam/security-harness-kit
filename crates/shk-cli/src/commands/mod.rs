@@ -1,5 +1,6 @@
 //! Subcommand implementations invoked from `lib` / `main`.
 
+pub mod ci;
 pub mod completions;
 pub mod env;
 pub mod mask;
