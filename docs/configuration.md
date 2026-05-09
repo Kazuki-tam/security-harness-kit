@@ -78,7 +78,7 @@ pre_commit_fail_on = "high"
 
 [mask]
 mode = "strict"
-redaction = "full"
+redaction = "match"
 # preserve_prefix = 4
 # preserve_suffix = 4
 
@@ -153,7 +153,7 @@ The `--fail-on` CLI option overrides the configured threshold for that command i
 | Key | Default | Behavior |
 |-----|---------|----------|
 | `mode` | `strict` | Only `strict` is supported. Other values are rejected. |
-| `redaction` | `full` | `full` redacts entire lines; `partial` redacts matched values. |
+| `redaction` | `match` | `match` redacts only matched values; `full` redacts entire lines; `partial` preserves configured matched-value edges. |
 | `preserve_prefix` | `4` | Characters preserved at the start of a matched value when `redaction = "partial"`. |
 | `preserve_suffix` | `4` | Characters preserved at the end of a matched value when `redaction = "partial"`. |
 

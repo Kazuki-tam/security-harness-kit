@@ -300,7 +300,7 @@ fn default_mask_mode() -> String {
 }
 
 fn default_redaction() -> String {
-    "full".into()
+    "match".into()
 }
 
 fn default_preserve() -> usize {
@@ -545,7 +545,7 @@ pre_commit_fail_on = "medium"
 
 [mask]
 mode = "strict"
-redaction = "full"
+redaction = "match"
 # preserve_prefix = 4 # only when redaction = "partial"
 # preserve_suffix = 4
 
@@ -646,7 +646,7 @@ pre_commit_fail_on = "high"
 
 [mask]
 mode = "strict"
-redaction = "full"
+redaction = "match"
 # preserve_prefix = 4 # only when redaction = "partial"
 # preserve_suffix = 4
 

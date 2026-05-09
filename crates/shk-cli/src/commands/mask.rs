@@ -94,6 +94,7 @@ fn apply_redaction_override(policy: &mut Policy, redaction: Option<RedactionMode
     if let Some(mode) = redaction {
         policy.mask.redaction = match mode {
             RedactionMode::Full => "full",
+            RedactionMode::Match => "match",
             RedactionMode::Partial => "partial",
         }
         .into();

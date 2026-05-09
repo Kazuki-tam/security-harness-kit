@@ -63,6 +63,9 @@ Useful flags:
 # Mask a prompt before passing to an LLM
 shk mask prompt.txt | claude
 
+# Match-only redaction (default)
+shk mask --redaction match < data.txt
+
 # Partial redaction (preserve 4-char prefix/suffix)
 shk mask --redaction partial < data.txt
 ```
