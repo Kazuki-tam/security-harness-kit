@@ -48,17 +48,48 @@ impl InlineSuppressions {
             .map(|rs| rs.iter().any(|r| r == rule_id))
             .unwrap_or(false)
     }
+
+    fn suppress_line(&mut self, line: usize, rest_after_kw: &str) {
+        match first_rule_token(rest_after_kw) {
+            Some(id) => {
+                self.line_rules.entry(line).or_default().insert(id);
+            }
+            None => {
+                self.line_all_rules.insert(line);
+            }
+        }
+    }
+}
+
+fn strip_ignore_keyword<'a>(inner: &'a str, keyword: &str) -> Option<&'a str> {
+    let rest = inner.strip_prefix(keyword)?;
+    if rest
+        .chars()
+        .next()
+        .map(|c| c.is_whitespace())
+        .unwrap_or(true)
+    {
+        Some(rest.trim_start())
+    } else {
+        None
+    }
 }
 
 fn rest_after_ignore_keywords(inner: &str) -> Option<&str> {
     let inner = inner.trim_start();
-    if let Some(r) = inner.strip_prefix("shk-ignore-next-line") {
-        Some(r.trim_start())
-    } else if let Some(r) = inner.strip_prefix("shk-ignore") {
-        Some(r.trim_start())
+    if let Some(rest) = strip_ignore_keyword(inner, "shk-ignore-next-line") {
+        Some(rest)
+    } else if let Some(rest) = strip_ignore_keyword(inner, "shk-ignore") {
+        Some(rest)
     } else {
         None
     }
+}
+
+fn html_comment_inner(text: &str) -> Option<&str> {
+    text.strip_prefix("<!--")
+        .and_then(|rest| rest.trim_end().strip_suffix("-->"))
+        .map(str::trim_start)
 }
 
 fn parse_standalone_ignore_line(trimmed_full_line: &str) -> Option<&str> {
@@ -68,7 +99,7 @@ fn parse_standalone_ignore_line(trimmed_full_line: &str) -> Option<&str> {
     } else if let Some(rest) = tl.strip_prefix("//") {
         rest.trim_start()
     } else {
-        return None;
+        html_comment_inner(tl)?
     };
     rest_after_ignore_keywords(inner)
 }
@@ -82,7 +113,33 @@ fn first_rule_token(rest_after_kw: &str) -> Option<String> {
     }
 }
 
-/// Parse `#` / `//` standalone and trailing `shk-ignore` comments.
+fn trailing_hash_ignore(trimmed_end: &str) -> Option<&str> {
+    let (body, cmt) = trimmed_end.rsplit_once('#')?;
+    if body.trim().is_empty() {
+        return None;
+    }
+    rest_after_ignore_keywords(cmt.trim())
+}
+
+fn trailing_slash_ignore(trimmed_end: &str) -> Option<&str> {
+    let idx = trimmed_end.rfind("//")?;
+    let body = &trimmed_end[..idx];
+    if body.trim().is_empty() {
+        return None;
+    }
+    rest_after_ignore_keywords(trimmed_end[idx + 2..].trim_start())
+}
+
+fn trailing_html_ignore(trimmed_end: &str) -> Option<&str> {
+    let idx = trimmed_end.rfind("<!--")?;
+    let body = &trimmed_end[..idx];
+    if body.trim().is_empty() {
+        return None;
+    }
+    rest_after_ignore_keywords(html_comment_inner(&trimmed_end[idx..])?)
+}
+
+/// Parse `#`, `//`, and HTML standalone/trailing `shk-ignore` comments.
 pub fn parse_inline_suppressions(content: &str) -> InlineSuppressions {
     let mut out = InlineSuppressions::default();
 
@@ -91,61 +148,22 @@ pub fn parse_inline_suppressions(content: &str) -> InlineSuppressions {
         let trimmed_end = raw_line.trim_end();
 
         if let Some(rest_kw) = parse_standalone_ignore_line(trimmed_end) {
-            let target_line = line_no.saturating_add(1);
-            match first_rule_token(rest_kw) {
-                Some(id) => {
-                    out.line_rules.entry(target_line).or_default().insert(id);
-                }
-                None => {
-                    out.line_all_rules.insert(target_line);
-                }
-            }
+            out.suppress_line(line_no.saturating_add(1), rest_kw);
             continue;
         }
 
-        let trailing_hash = trimmed_end.rsplit_once('#').and_then(|(body, cmt)| {
-            let body_trim = body.trim();
-            if body_trim.is_empty() {
-                return None;
-            }
-            let cmt = cmt.trim();
-            let rest = rest_after_ignore_keywords(cmt)?;
-            Some((body, rest))
-        });
-
-        if let Some((body, tail)) = trailing_hash
-            && !body.trim().is_empty()
-        {
-            let rid = first_rule_token(tail);
-            match rid {
-                Some(id) => {
-                    out.line_rules.entry(line_no).or_default().insert(id);
-                }
-                None => {
-                    out.line_all_rules.insert(line_no);
-                }
-            }
+        if let Some(rest_kw) = trailing_hash_ignore(trimmed_end) {
+            out.suppress_line(line_no, rest_kw);
             continue;
         }
 
-        let trailing_slash = trimmed_end.rfind("//").and_then(|idx| {
-            let body = &trimmed_end[..idx];
-            let after = trimmed_end[idx + 2..].trim_start();
-            let rest_after_kw = rest_after_ignore_keywords(after)?;
-            Some((body, rest_after_kw))
-        });
+        if let Some(rest_kw) = trailing_slash_ignore(trimmed_end) {
+            out.suppress_line(line_no, rest_kw);
+            continue;
+        }
 
-        if let Some((body, tail)) = trailing_slash
-            && !body.trim().is_empty()
-        {
-            match first_rule_token(tail) {
-                Some(id) => {
-                    out.line_rules.entry(line_no).or_default().insert(id);
-                }
-                None => {
-                    out.line_all_rules.insert(line_no);
-                }
-            }
+        if let Some(rest_kw) = trailing_html_ignore(trimmed_end) {
+            out.suppress_line(line_no, rest_kw);
         }
     }
 
@@ -255,5 +273,29 @@ mod tests {
         let ig = parse_inline_suppressions(s);
         assert!(ig.is_suppressed(2, "pii.email"));
         assert!(!ig.is_suppressed(2, "secret.openai_api_key"));
+    }
+
+    #[test]
+    fn inline_html_comment_next_line_rule_id() {
+        let s = "<!-- shk-ignore-next-line pii.email -->\nuser@example.com\n";
+        let ig = parse_inline_suppressions(s);
+        assert!(ig.is_suppressed(2, "pii.email"));
+        assert!(!ig.is_suppressed(2, "secret.openai_api_key"));
+    }
+
+    #[test]
+    fn inline_html_comment_same_line_all_rules() {
+        let s = "placeholder <!-- shk-ignore -->\n";
+        let ig = parse_inline_suppressions(s);
+        assert!(ig.is_suppressed(1, "secret.openai_api_key"));
+    }
+
+    #[test]
+    fn inline_ignore_keyword_requires_boundary() {
+        let s =
+            "# shk-ignorement pii.email\nuser@example.com\nplaceholder <!-- shk-ignorement -->\n";
+        let ig = parse_inline_suppressions(s);
+        assert!(!ig.is_suppressed(2, "pii.email"));
+        assert!(!ig.is_suppressed(3, "secret.openai_api_key"));
     }
 }

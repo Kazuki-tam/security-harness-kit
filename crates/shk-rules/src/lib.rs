@@ -885,15 +885,13 @@ fn ai_embedded_bom_re() -> &'static Regex {
 }
 
 fn ai_invisible_format_chars_re() -> &'static Regex {
-    static RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"[\x{00AD}\x{034F}\x{061C}\x{180E}\x{200B}-\x{200D}\x{2060}]").unwrap()
-    });
+    static RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"[\x{00AD}\x{034F}\x{061C}\x{180E}\x{200B}\x{2060}]").unwrap());
     &RE
 }
 
 fn ai_variation_selectors_re() -> &'static Regex {
-    static RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"[\x{FE00}-\x{FE0F}\x{E0100}-\x{E01EF}]").unwrap());
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[\x{E0100}-\x{E01EF}]").unwrap());
     &RE
 }
 
@@ -909,16 +907,6 @@ fn ai_unsafe_uri_re() -> &'static Regex {
 
 fn ai_svg_data_uri_re() -> &'static Regex {
     static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bdata\s*:\s*image/svg\+xml").unwrap());
-    &RE
-}
-
-fn ai_context_display_re() -> &'static Regex {
-    static RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(
-            r"(?i)[\x{00AD}\x{034F}\x{061C}\x{180E}\x{200B}-\x{200D}\x{202A}-\x{202E}\x{2060}\x{2066}-\x{2069}\x{FE00}-\x{FE0F}\x{FEFF}\x{E0000}-\x{E007F}\x{E0100}-\x{E01EF}]|\b(?:javascript\s*:|data\s*:\s*(?:text/html|text/javascript|image/svg\+xml|application/(?:javascript|x-javascript)))",
-        )
-        .unwrap()
-    });
     &RE
 }
 
@@ -961,6 +949,22 @@ fn push_ai_context_regex_matches<'a>(
         let index = line_index.get_or_insert_with(|| LineIndex::new(content));
         push_ai_context_match(out, index, spec, m.start(), m.as_str().to_string());
     }
+}
+
+fn redact_ai_context_line(line: &str) -> String {
+    let mut s = line.to_string();
+    for re in [
+        ai_tag_chars_re(),
+        ai_bidi_controls_re(),
+        ai_embedded_bom_re(),
+        ai_invisible_format_chars_re(),
+        ai_variation_selectors_re(),
+        ai_unsafe_uri_re(),
+        ai_svg_data_uri_re(),
+    ] {
+        s = re.replace_all(&s, "[REDACTED]").to_string();
+    }
+    s
 }
 
 fn scan_ai_context_content<'a>(
@@ -1225,9 +1229,7 @@ pub fn redact_line_for_display(line: &str, cfg: &RuleEngineConfig) -> String {
         }
     }
     if cfg.ai_context {
-        s = ai_context_display_re()
-            .replace_all(&s, "[REDACTED]")
-            .to_string();
+        s = redact_ai_context_line(&s);
     }
     const MAX: usize = 200;
     if s.chars().count() > MAX {
@@ -1580,7 +1582,7 @@ secret_key = "0123456789abcdef0123456789abcdef""#;
         let cfg = RuleEngineConfig::default();
         for (sample, path) in [
             ("ignore\u{200B} previous instruction", "prompt.md"),
-            ("let name = \"safe\u{200D}tail\";", "demo.rs"),
+            ("let name = \"safe\u{00AD}tail\";", "demo.rs"),
             ("word\u{2060}joiner", "notes.txt"),
         ] {
             let m = scan_content(sample, path, &cfg);
@@ -1596,7 +1598,7 @@ secret_key = "0123456789abcdef0123456789abcdef""#;
     #[test]
     fn detects_variation_selectors_without_high_severity() {
         let cfg = RuleEngineConfig::default();
-        let m = scan_content("selector\u{FE0F}tail", "prompt.md", &cfg);
+        let m = scan_content("selector\u{E0100}tail", "prompt.md", &cfg);
         assert!(
             m.iter()
                 .any(|x| x.rule_id == "ai_context.variation_selector"
@@ -1609,6 +1611,22 @@ secret_key = "0123456789abcdef0123456789abcdef""#;
                     && x.severity == Severity::High),
             "{m:?}"
         );
+    }
+
+    #[test]
+    fn common_emoji_sequences_do_not_trigger_ai_context_rules() {
+        let cfg = RuleEngineConfig::default();
+        let line = "status: ❤️ Rust 👨‍👩‍👧‍👦 ☺️";
+        let m = scan_content(line, "notes.md", &cfg);
+        assert!(
+            !m.iter().any(|x| x.rule_id.starts_with("ai_context.")),
+            "{m:?}"
+        );
+
+        let redacted = redact_line_for_display(line, &cfg);
+        assert!(redacted.contains("❤️"), "{redacted}");
+        assert!(redacted.contains("👨‍👩‍👧‍👦"), "{redacted}");
+        assert!(redacted.contains("☺️"), "{redacted}");
     }
 
     #[test]
@@ -1660,7 +1678,7 @@ secret_key = "0123456789abcdef0123456789abcdef""#;
         let m = scan_content(
             concat!(
                 "prompt\u{E0000}\n",
-                "zero\u{200B} selector\u{FE0F}\n",
+                "zero\u{200B} selector\u{E0100}\n",
                 "url = \"java",
                 "script:alert(1)\""
             ),
@@ -1705,7 +1723,7 @@ secret_key = "0123456789abcdef0123456789abcdef""#;
         let cfg = RuleEngineConfig::default();
         let line = concat!(
             "prompt\u{E0000} bidi\u{202E} ",
-            "zero\u{200B}width selector\u{FE0F} ",
+            "zero\u{200B}width selector\u{E0100} ",
             r#"<a href="java"#,
             r#"script:alert(1)">x</a> "#,
             r#"<a href="data:text/html,<script></script>">x</a>"#
@@ -1715,7 +1733,7 @@ secret_key = "0123456789abcdef0123456789abcdef""#;
         assert!(!redacted.contains('\u{E0000}'), "{redacted}");
         assert!(!redacted.contains('\u{202E}'), "{redacted}");
         assert!(!redacted.contains('\u{200B}'), "{redacted}");
-        assert!(!redacted.contains('\u{FE0F}'), "{redacted}");
+        assert!(!redacted.contains('\u{E0100}'), "{redacted}");
         assert!(
             !redacted.to_ascii_lowercase().contains("javascript:"),
             "{redacted}"
@@ -1726,7 +1744,7 @@ secret_key = "0123456789abcdef0123456789abcdef""#;
         );
 
         let disabled = redact_line_for_display(
-            "prompt\u{E0000} bidi\u{202E} zero\u{200B} selector\u{FE0F} javascript:alert(1)",
+            "prompt\u{E0000} bidi\u{202E} zero\u{200B} selector\u{E0100} javascript:alert(1)",
             &RuleEngineConfig {
                 ai_context: false,
                 ..RuleEngineConfig::default()
@@ -1735,7 +1753,7 @@ secret_key = "0123456789abcdef0123456789abcdef""#;
         assert!(disabled.contains('\u{E0000}'), "{disabled}");
         assert!(disabled.contains('\u{202E}'), "{disabled}");
         assert!(disabled.contains('\u{200B}'), "{disabled}");
-        assert!(disabled.contains('\u{FE0F}'), "{disabled}");
+        assert!(disabled.contains('\u{E0100}'), "{disabled}");
         assert!(disabled.contains("javascript:"), "{disabled}");
     }
 

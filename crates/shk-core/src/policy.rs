@@ -579,6 +579,7 @@ required_patterns = [
 
 # Allowlist / inline suppressions (spec §5.3). Prefer path-scoped rows; use value_hash only as an equality fingerprint.
 # Inline: # shk-ignore-next-line <rule_id>
+# Markdown: <!-- shk-ignore-next-line <rule_id> -->
 # [[allowlist]]
 # rule_id = "secret.openai_api_key"
 # path = "fixtures/**"
@@ -679,6 +680,7 @@ required_patterns = [
 
 # Allowlist / inline suppressions (spec §5.3). Prefer path-scoped rows; use value_hash only as an equality fingerprint.
 # Inline: # shk-ignore-next-line <rule_id>
+# Markdown: <!-- shk-ignore-next-line <rule_id> -->
 # [[allowlist]]
 # rule_id = "secret.openai_api_key"
 # path = "fixtures/**"
