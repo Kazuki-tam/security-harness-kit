@@ -37,6 +37,40 @@ fn scan_basic_fixture() {
 }
 
 #[test]
+fn scan_json_reports_ai_context_findings() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("prompt.md"),
+        "safe prefix \u{E0000} hidden tag\n",
+    )
+    .expect("write prompt");
+
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--json", "--fail-on", "critical"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("run shk");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let findings = v["findings"].as_array().expect("findings array");
+    assert!(
+        findings.iter().any(|f| {
+            f["rule_id"] == "ai_context.unicode_tag_chars"
+                && f["kind"] == "ai-context"
+                && f["severity"] == "high"
+                && f["redacted_value"] == "[REDACTED]"
+        }),
+        "expected ai-context rule hit: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
 fn mask_stdin_fixture() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

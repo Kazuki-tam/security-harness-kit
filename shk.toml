@@ -48,6 +48,7 @@ pii = true
 pii_languages = ["en", "ja"]
 env = true
 internal_terms = false
+ai_context = true
 
 [thresholds]
 default_fail_on = "high"

@@ -14,6 +14,21 @@ Raw matched values are not emitted in JSON reports. `redacted_value` is `[REDACT
 | `low` | IP addresses and policy warnings such as expired allowlist entries. |
 | `info` | Skip notices and informational findings. |
 
+## AI Context Safety Coverage
+
+AI-context rules run when `ai_context = true` in `[rules]` and report findings with kind `ai-context`.
+
+The default rule set focuses on high-signal syntax that can alter or obscure AI-visible context:
+
+- `ai_context.unicode_tag_chars` (`high`): Unicode tag characters (`U+E0000..U+E007F`).
+- `ai_context.bidi_control` (`high` in source-code files, `low` in other text): bidirectional control characters associated with Trojan Source-style visual reordering.
+- `ai_context.embedded_bom` (`medium`): byte order marks after the start of a file.
+- `ai_context.invisible_format_chars` (`high`): invisible Unicode format characters such as soft hyphen, combining grapheme joiner, Arabic letter mark, Mongolian vowel separator, zero-width space/joiner/non-joiner, and word joiner.
+- `ai_context.variation_selector` (`medium`): Unicode variation selectors (`U+FE00..U+FE0F`, `U+E0100..U+E01EF`) that can alter visual presentation.
+- `ai_context.unsafe_uri` (`high`, or `medium` for SVG data URIs): JavaScript-scheme links and executable `data` URI media types such as `text/html`, `text/javascript`, `image/svg+xml`, and JavaScript application types.
+
+Lower-confidence detectors such as Markdown image exfiltration and natural-language prompt-injection phrases are not part of the default rule set.
+
 ## Finding Kinds
 
 The rule engine supports these kinds:

@@ -450,6 +450,7 @@ fn run_pii_scan(source_label: &str, payload: &SecretPayload) -> Result<()> {
         pii_languages: vec!["en".into(), "ja".into()],
         env: false,
         internal_terms: false,
+        ai_context: false,
     };
     let findings: Vec<_> = shk_rules::scan_content(&text, source_label, &cfg)
         .into_iter()

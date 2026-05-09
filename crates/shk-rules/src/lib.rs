@@ -45,6 +45,7 @@ pub struct RuleEngineConfig {
     pub pii_languages: Vec<String>,
     pub env: bool,
     pub internal_terms: bool,
+    pub ai_context: bool,
 }
 
 impl Default for RuleEngineConfig {
@@ -55,6 +56,7 @@ impl Default for RuleEngineConfig {
             pii_languages: vec!["en".into(), "ja".into()],
             env: true,
             internal_terms: false,
+            ai_context: true,
         }
     }
 }
@@ -795,7 +797,7 @@ fn rule_applies(rule: &CompiledRule, cfg: &RuleEngineConfig) -> bool {
     if rule.kind == Kind::Env && !cfg.env {
         return false;
     }
-    if rule.kind == Kind::AiContext && !cfg.internal_terms {
+    if rule.kind == Kind::AiContext && !cfg.ai_context {
         return false;
     }
     if rule_id.starts_with("secret.") && !cfg.secrets {
@@ -811,6 +813,275 @@ fn rule_applies(rule: &CompiledRule, cfg: &RuleEngineConfig) -> bool {
         return false;
     }
     true
+}
+
+fn is_code_path(rel_path: &str) -> bool {
+    let file_name = rel_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(rel_path)
+        .rsplit('\\')
+        .next()
+        .unwrap_or(rel_path);
+    let lowercase_file_name = file_name.to_ascii_lowercase();
+    if matches!(
+        lowercase_file_name.as_str(),
+        "dockerfile"
+            | "gnumakefile"
+            | "justfile"
+            | "makefile"
+            | "rakefile"
+            | "gemfile"
+            | "vagrantfile"
+            | "procfile"
+    ) || lowercase_file_name.starts_with("dockerfile.")
+        || lowercase_file_name.starts_with("makefile.")
+    {
+        return true;
+    }
+
+    let Some(ext) = rel_path.rsplit('.').next() else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "c" | "cc"
+            | "cpp"
+            | "cs"
+            | "css"
+            | "go"
+            | "h"
+            | "hpp"
+            | "java"
+            | "js"
+            | "jsx"
+            | "kt"
+            | "mjs"
+            | "py"
+            | "rb"
+            | "rs"
+            | "sh"
+            | "swift"
+            | "ts"
+            | "tsx"
+            | "vue"
+    )
+}
+
+fn ai_tag_chars_re() -> &'static Regex {
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[\x{E0000}-\x{E007F}]").unwrap());
+    &RE
+}
+
+fn ai_bidi_controls_re() -> &'static Regex {
+    static RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"[\x{202A}-\x{202E}\x{2066}-\x{2069}]").unwrap());
+    &RE
+}
+
+fn ai_embedded_bom_re() -> &'static Regex {
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\x{FEFF}").unwrap());
+    &RE
+}
+
+fn ai_invisible_format_chars_re() -> &'static Regex {
+    static RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"[\x{00AD}\x{034F}\x{061C}\x{180E}\x{200B}-\x{200D}\x{2060}]").unwrap()
+    });
+    &RE
+}
+
+fn ai_variation_selectors_re() -> &'static Regex {
+    static RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"[\x{FE00}-\x{FE0F}\x{E0100}-\x{E01EF}]").unwrap());
+    &RE
+}
+
+fn ai_unsafe_uri_re() -> &'static Regex {
+    static RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r"(?i)\b(?:javascript\s*:|data\s*:\s*(?:text/html|text/javascript|application/(?:javascript|x-javascript)))",
+        )
+        .unwrap()
+    });
+    &RE
+}
+
+fn ai_svg_data_uri_re() -> &'static Regex {
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bdata\s*:\s*image/svg\+xml").unwrap());
+    &RE
+}
+
+fn ai_context_display_re() -> &'static Regex {
+    static RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r"(?i)[\x{00AD}\x{034F}\x{061C}\x{180E}\x{200B}-\x{200D}\x{202A}-\x{202E}\x{2060}\x{2066}-\x{2069}\x{FE00}-\x{FE0F}\x{FEFF}\x{E0000}-\x{E007F}\x{E0100}-\x{E01EF}]|\b(?:javascript\s*:|data\s*:\s*(?:text/html|text/javascript|image/svg\+xml|application/(?:javascript|x-javascript)))",
+        )
+        .unwrap()
+    });
+    &RE
+}
+
+#[derive(Clone, Copy)]
+struct AiContextMatchSpec {
+    rule_id: &'static str,
+    severity: Severity,
+    message: &'static str,
+    confidence: f32,
+}
+
+fn push_ai_context_match(
+    out: &mut Vec<RuleMatch>,
+    index: &LineIndex<'_>,
+    spec: AiContextMatchSpec,
+    byte_idx: usize,
+    matched_text: String,
+) {
+    let (line, column) = index.line_col(byte_idx);
+    out.push(RuleMatch {
+        rule_id: spec.rule_id,
+        severity: spec.severity,
+        kind: Kind::AiContext,
+        line,
+        column,
+        message: spec.message,
+        confidence: spec.confidence,
+        matched_text,
+    });
+}
+
+fn push_ai_context_regex_matches<'a>(
+    out: &mut Vec<RuleMatch>,
+    content: &'a str,
+    line_index: &mut Option<LineIndex<'a>>,
+    re: &Regex,
+    spec: AiContextMatchSpec,
+) {
+    for m in re.find_iter(content) {
+        let index = line_index.get_or_insert_with(|| LineIndex::new(content));
+        push_ai_context_match(out, index, spec, m.start(), m.as_str().to_string());
+    }
+}
+
+fn scan_ai_context_content<'a>(
+    content: &'a str,
+    rel_path: &str,
+    cfg: &RuleEngineConfig,
+    line_index: &mut Option<LineIndex<'a>>,
+) -> Vec<RuleMatch> {
+    if !cfg.ai_context {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    push_ai_context_regex_matches(
+        &mut out,
+        content,
+        line_index,
+        ai_tag_chars_re(),
+        AiContextMatchSpec {
+            rule_id: "ai_context.unicode_tag_chars",
+            severity: Severity::High,
+            message: "Unicode tag character detected in AI-visible context",
+            confidence: 0.95,
+        },
+    );
+
+    let bidi_severity = if is_code_path(rel_path) {
+        Severity::High
+    } else {
+        Severity::Low
+    };
+    let bidi_message = if bidi_severity == Severity::High {
+        "Bidirectional control character detected in source code"
+    } else {
+        "Bidirectional control character detected in document text"
+    };
+    push_ai_context_regex_matches(
+        &mut out,
+        content,
+        line_index,
+        ai_bidi_controls_re(),
+        AiContextMatchSpec {
+            rule_id: "ai_context.bidi_control",
+            severity: bidi_severity,
+            message: bidi_message,
+            confidence: 0.9,
+        },
+    );
+
+    for m in ai_embedded_bom_re().find_iter(content) {
+        if m.start() == 0 {
+            continue;
+        }
+        let index = line_index.get_or_insert_with(|| LineIndex::new(content));
+        push_ai_context_match(
+            &mut out,
+            index,
+            AiContextMatchSpec {
+                rule_id: "ai_context.embedded_bom",
+                severity: Severity::Medium,
+                message: "Byte order mark found after the start of the file",
+                confidence: 0.9,
+            },
+            m.start(),
+            m.as_str().to_string(),
+        );
+    }
+
+    push_ai_context_regex_matches(
+        &mut out,
+        content,
+        line_index,
+        ai_invisible_format_chars_re(),
+        AiContextMatchSpec {
+            rule_id: "ai_context.invisible_format_chars",
+            severity: Severity::High,
+            message: "Invisible Unicode format character detected in AI-visible context",
+            confidence: 0.9,
+        },
+    );
+
+    push_ai_context_regex_matches(
+        &mut out,
+        content,
+        line_index,
+        ai_variation_selectors_re(),
+        AiContextMatchSpec {
+            rule_id: "ai_context.variation_selector",
+            severity: Severity::Medium,
+            message: "Unicode variation selector detected in AI-visible context",
+            confidence: 0.75,
+        },
+    );
+
+    push_ai_context_regex_matches(
+        &mut out,
+        content,
+        line_index,
+        ai_unsafe_uri_re(),
+        AiContextMatchSpec {
+            rule_id: "ai_context.unsafe_uri",
+            severity: Severity::High,
+            message: "Unsafe JavaScript-scheme or executable data URI detected",
+            confidence: 0.9,
+        },
+    );
+
+    push_ai_context_regex_matches(
+        &mut out,
+        content,
+        line_index,
+        ai_svg_data_uri_re(),
+        AiContextMatchSpec {
+            rule_id: "ai_context.unsafe_uri",
+            severity: Severity::Medium,
+            message: "SVG data URI detected in AI-visible context",
+            confidence: 0.75,
+        },
+    );
+
+    out
 }
 
 fn any_keyword_matches(lowercase_content: &str, keywords: &[&str]) -> bool {
@@ -953,6 +1224,11 @@ pub fn redact_line_for_display(line: &str, cfg: &RuleEngineConfig) -> String {
             s = r.re.replace_all(&s, "[REDACTED]").to_string();
         }
     }
+    if cfg.ai_context {
+        s = ai_context_display_re()
+            .replace_all(&s, "[REDACTED]")
+            .to_string();
+    }
     const MAX: usize = 200;
     if s.chars().count() > MAX {
         let t: String = s.chars().take(MAX).collect();
@@ -995,6 +1271,12 @@ pub fn scan_content(content: &str, rel_path: &str, cfg: &RuleEngineConfig) -> Ve
         }
     }
     out.extend(scan_gitleaks_content(
+        content,
+        rel_path,
+        cfg,
+        &mut line_index,
+    ));
+    out.extend(scan_ai_context_content(
         content,
         rel_path,
         cfg,
@@ -1227,6 +1509,234 @@ secret_key = "0123456789abcdef0123456789abcdef""#;
             .filter(|x| x.rule_id == "secret.generic_api_key")
             .count();
         assert_eq!(hits, 2, "{m:?}");
+    }
+
+    #[test]
+    fn detects_ai_context_unicode_tag_chars() {
+        let cfg = RuleEngineConfig::default();
+        let m = scan_content("prompt\u{E0000}tail", "demo.md", &cfg);
+        assert!(
+            m.iter().any(
+                |x| x.rule_id == "ai_context.unicode_tag_chars" && x.severity == Severity::High
+            ),
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn detects_bidi_controls_with_path_sensitive_severity() {
+        let cfg = RuleEngineConfig::default();
+        let code = scan_content("let label = \"abc\u{202E}def\";", "demo.rs", &cfg);
+        assert!(
+            code.iter()
+                .any(|x| x.rule_id == "ai_context.bidi_control" && x.severity == Severity::High),
+            "{code:?}"
+        );
+
+        let doc = scan_content("text \u{202E} text", "demo.md", &cfg);
+        assert!(
+            doc.iter()
+                .any(|x| x.rule_id == "ai_context.bidi_control" && x.severity == Severity::Low),
+            "{doc:?}"
+        );
+    }
+
+    #[test]
+    fn treats_common_extensionless_build_files_as_code() {
+        let cfg = RuleEngineConfig::default();
+        for path in ["Dockerfile", "Dockerfile.dev", "Makefile", "build/Makefile"] {
+            let m = scan_content("RUN echo safe\u{202E}tail", path, &cfg);
+            assert!(
+                m.iter()
+                    .any(|x| x.rule_id == "ai_context.bidi_control"
+                        && x.severity == Severity::High),
+                "expected high severity for {path}: {m:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn detects_embedded_bom_but_allows_leading_bom() {
+        let cfg = RuleEngineConfig::default();
+        let leading = scan_content("\u{FEFF}title", "demo.txt", &cfg);
+        assert!(
+            !leading
+                .iter()
+                .any(|x| x.rule_id == "ai_context.embedded_bom"),
+            "{leading:?}"
+        );
+
+        let embedded = scan_content("title\u{FEFF}tail", "demo.txt", &cfg);
+        assert!(
+            embedded
+                .iter()
+                .any(|x| x.rule_id == "ai_context.embedded_bom" && x.severity == Severity::Medium),
+            "{embedded:?}"
+        );
+    }
+
+    #[test]
+    fn detects_invisible_format_chars_as_high_signal_ai_context() {
+        let cfg = RuleEngineConfig::default();
+        for (sample, path) in [
+            ("ignore\u{200B} previous instruction", "prompt.md"),
+            ("let name = \"safe\u{200D}tail\";", "demo.rs"),
+            ("word\u{2060}joiner", "notes.txt"),
+        ] {
+            let m = scan_content(sample, path, &cfg);
+            assert!(
+                m.iter()
+                    .any(|x| x.rule_id == "ai_context.invisible_format_chars"
+                        && x.severity == Severity::High),
+                "missing invisible format char finding for {path}: {m:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn detects_variation_selectors_without_high_severity() {
+        let cfg = RuleEngineConfig::default();
+        let m = scan_content("selector\u{FE0F}tail", "prompt.md", &cfg);
+        assert!(
+            m.iter()
+                .any(|x| x.rule_id == "ai_context.variation_selector"
+                    && x.severity == Severity::Medium),
+            "{m:?}"
+        );
+        assert!(
+            !m.iter()
+                .any(|x| x.rule_id == "ai_context.variation_selector"
+                    && x.severity == Severity::High),
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn detects_unsafe_javascript_and_executable_data_uri() {
+        let cfg = RuleEngineConfig::default();
+        let m = scan_content(
+            concat!(
+                "[run](java",
+                "script:alert(1))\n",
+                r#"<a href="data"#,
+                r#":text/html,<script></script>">x</a>"#
+            ),
+            "demo.md",
+            &cfg,
+        );
+        let hits = m
+            .iter()
+            .filter(|x| x.rule_id == "ai_context.unsafe_uri")
+            .count();
+        assert_eq!(hits, 2, "{m:?}");
+    }
+
+    #[test]
+    fn svg_data_uri_is_not_reported_as_high_unsafe_uri() {
+        let cfg = RuleEngineConfig::default();
+        let m = scan_content(
+            r#"background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 1 1'%3E%3C/svg%3E");"#,
+            "style.css",
+            &cfg,
+        );
+        assert!(
+            !m.iter()
+                .any(|x| x.rule_id == "ai_context.unsafe_uri" && x.severity == Severity::High),
+            "{m:?}"
+        );
+        assert!(
+            m.iter()
+                .any(|x| x.rule_id == "ai_context.unsafe_uri" && x.severity == Severity::Medium),
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn ai_context_rules_can_be_disabled() {
+        let cfg = RuleEngineConfig {
+            ai_context: false,
+            ..RuleEngineConfig::default()
+        };
+        let m = scan_content(
+            concat!(
+                "prompt\u{E0000}\n",
+                "zero\u{200B} selector\u{FE0F}\n",
+                "url = \"java",
+                "script:alert(1)\""
+            ),
+            "demo.js",
+            &cfg,
+        );
+        assert!(
+            !m.iter().any(|x| x.rule_id.starts_with("ai_context.")),
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn internal_terms_does_not_gate_ai_context_rules() {
+        for internal_terms in [false, true] {
+            let cfg = RuleEngineConfig {
+                internal_terms,
+                ..RuleEngineConfig::default()
+            };
+            let m = scan_content("prompt\u{E0000}tail", "demo.md", &cfg);
+            assert!(
+                m.iter()
+                    .any(|x| x.rule_id == "ai_context.unicode_tag_chars"),
+                "internal_terms={internal_terms}: {m:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ai_context_columns_count_multibyte_chars() {
+        let cfg = RuleEngineConfig::default();
+        let m = scan_content("あい\u{E0000}tail", "demo.md", &cfg);
+        let hit = m
+            .iter()
+            .find(|x| x.rule_id == "ai_context.unicode_tag_chars")
+            .expect("tag char hit");
+        assert_eq!((hit.line, hit.column), (1, 3), "{m:?}");
+    }
+
+    #[test]
+    fn redact_line_handles_ai_context_patterns() {
+        let cfg = RuleEngineConfig::default();
+        let line = concat!(
+            "prompt\u{E0000} bidi\u{202E} ",
+            "zero\u{200B}width selector\u{FE0F} ",
+            r#"<a href="java"#,
+            r#"script:alert(1)">x</a> "#,
+            r#"<a href="data:text/html,<script></script>">x</a>"#
+        );
+        let redacted = redact_line_for_display(line, &cfg);
+        assert!(redacted.contains("[REDACTED]"), "{redacted}");
+        assert!(!redacted.contains('\u{E0000}'), "{redacted}");
+        assert!(!redacted.contains('\u{202E}'), "{redacted}");
+        assert!(!redacted.contains('\u{200B}'), "{redacted}");
+        assert!(!redacted.contains('\u{FE0F}'), "{redacted}");
+        assert!(
+            !redacted.to_ascii_lowercase().contains("javascript:"),
+            "{redacted}"
+        );
+        assert!(
+            !redacted.to_ascii_lowercase().contains("data:text/html"),
+            "{redacted}"
+        );
+
+        let disabled = redact_line_for_display(
+            "prompt\u{E0000} bidi\u{202E} zero\u{200B} selector\u{FE0F} javascript:alert(1)",
+            &RuleEngineConfig {
+                ai_context: false,
+                ..RuleEngineConfig::default()
+            },
+        );
+        assert!(disabled.contains('\u{E0000}'), "{disabled}");
+        assert!(disabled.contains('\u{202E}'), "{disabled}");
+        assert!(disabled.contains('\u{200B}'), "{disabled}");
+        assert!(disabled.contains('\u{FE0F}'), "{disabled}");
+        assert!(disabled.contains("javascript:"), "{disabled}");
     }
 
     #[test]
