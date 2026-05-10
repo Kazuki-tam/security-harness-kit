@@ -322,7 +322,7 @@ Managed entries are tagged with `"_shk_managed": true` or `# shk-managed-start` 
 
 See [Uninstall](installation.md#uninstall) for removing managed hooks, skills, generated workflows, and stored dotenvx keys.
 
-In pre-hook mode, `shk` also runs an action guard before content scanning. It blocks sensitive file access, destructive filesystem operations, direct database mutation commands, privilege or system changes, external transfer commands, and package manager operations when they are visible in the hook payload. Tune this with `[action_guard]` in `shk.toml`; `--audit` remains non-blocking.
+In pre-hook mode, `shk` also runs an action guard before content scanning. It blocks sensitive file access, environment dump commands, destructive filesystem operations, direct database mutation commands, privilege or system changes, external transfer commands, and package manager operations when they are visible in the hook payload. Tune this with `[action_guard]` in `shk.toml`; `--audit` remains non-blocking.
 
 ## `shk ci init github`
 
@@ -333,7 +333,7 @@ shk ci init github
 shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
-shk ci init github --shk-version v0.2.6
+shk ci init github --shk-version v0.2.7
 shk ci init github --output .github/workflows/security.yml --force
 ```
 
@@ -345,7 +345,7 @@ Options:
 | `--fail-on <severity>` | Severity threshold for blocking mode. Valid values: `info`, `low`, `medium`, `high` (default), `critical`. Ignored under `--mode audit` (a warning is printed). |
 | `--path <path>` | Path passed to `shk scan`. Defaults to `.`. |
 | `--repo <owner/name>` | GitHub repository hosting `shk` releases. Defaults to `Kazuki-tam/security-harness-kit`. |
-| `--shk-version <version>` | Release version to install. Accepts `latest` (default) or a SemVer-ish tag such as `v0.2.6`. |
+| `--shk-version <version>` | Release version to install. Accepts `latest` (default) or a SemVer-ish tag such as `v0.2.7`. |
 | `--installer-name <name>` | cargo-dist shell installer asset name. Defaults to `shk-cli-installer.sh`. |
 | `--output <path>` | Workflow destination path. Defaults to `.github/workflows/shk.yml`. |
 | `--dry-run` | Print the workflow YAML to stdout without writing it. |
