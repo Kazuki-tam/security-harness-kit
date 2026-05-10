@@ -88,7 +88,7 @@ These are pattern-based detections. Review findings before treating them as conf
 
 In pre-hook mode, `shk scan --hook-mode <tool>` checks the AI tool payload for dangerous actions before scanning text content. This guard is separate from secret and PII detection: it looks at operation intent such as file paths and shell commands.
 
-The initial guard blocks sensitive file reads/writes, `.env` dump commands, destructive recursive removal, direct database mutation commands, privilege or system changes, external transfer commands, and package manager operations. Projects can tune it with `[action_guard]` in `shk.toml`, including `profile`, `allow`, and `deny` patterns. In `strict` profile, opaque execution such as `bash -c`, `python -c`, and `node -e` is blocked rather than deeply interpreted. Audit mode still records findings without blocking.
+The initial guard blocks sensitive file reads/writes, `.env` dump commands, environment dump commands such as `printenv`, `env`, `export -p`, `set | ...`, shell `-c` environment dumps, and common interpreter environment reads such as Python `os.environ`, Node `process.env`, Ruby `ENV`, and Perl `%ENV`, destructive recursive removal, direct database mutation commands, privilege or system changes, external transfer commands, and package manager operations. Projects can tune it with `[action_guard]` in `shk.toml`, including `profile`, `allow`, and `deny` patterns. In `strict` profile, opaque execution such as `bash -c`, `python -c`, and `node -e` is blocked rather than deeply interpreted. Audit mode still records findings without blocking.
 
 ## PII Coverage
 

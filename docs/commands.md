@@ -322,7 +322,7 @@ Managed entries are tagged with `"_shk_managed": true` or `# shk-managed-start` 
 
 See [Uninstall](installation.md#uninstall) for removing managed hooks, skills, generated workflows, and stored dotenvx keys.
 
-In pre-hook mode, `shk` also runs an action guard before content scanning. It blocks sensitive file access, destructive filesystem operations, direct database mutation commands, privilege or system changes, external transfer commands, and package manager operations when they are visible in the hook payload. Tune this with `[action_guard]` in `shk.toml`; `--audit` remains non-blocking.
+In pre-hook mode, `shk` also runs an action guard before content scanning. It blocks sensitive file access, environment dump commands, destructive filesystem operations, direct database mutation commands, privilege or system changes, external transfer commands, and package manager operations when they are visible in the hook payload. Tune this with `[action_guard]` in `shk.toml`; `--audit` remains non-blocking.
 
 ## `shk ci init github`
 

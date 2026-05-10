@@ -18,6 +18,25 @@ const SECRET_PATH_PATTERNS: &[&str] = &[
 ];
 
 const SECRET_READ_COMMANDS: &[&str] = &["cat", "head", "tail", "less", "more", "source"];
+const ENVIRONMENT_DUMP_COMMANDS: &[&str] = &["printenv"];
+const PYTHON_ENV_READ_PATTERNS: &[&str] = &[
+    "os.environ",
+    "os.getenv",
+    "import environ",
+    "print(environ",
+    "environ[",
+    "environ.get",
+];
+const NODE_ENV_READ_PATTERNS: &[&str] = &["process.env"];
+const RUBY_ENV_READ_PATTERNS: &[&str] = &[
+    "puts env",
+    "p env",
+    "env[",
+    "env.fetch",
+    "env.each",
+    "env.to_h",
+];
+const PERL_ENV_READ_PATTERNS: &[&str] = &["%env", "$env{"];
 const EXTERNAL_TRANSFER_COMMANDS: &[&str] = &[
     "curl", "wget", "nc", "netcat", "ssh", "scp", "rsync", "ftp", "sftp",
 ];
@@ -149,6 +168,7 @@ impl Default for ActionGuardConfig {
 enum ActionCategory {
     SecretFileAccess,
     SecretDumpCommand,
+    EnvironmentDump,
     DestructiveFilesystem,
     DirectDbMutation,
     PrivilegeSystemChange,
@@ -163,6 +183,7 @@ impl ActionCategory {
         match self {
             Self::SecretFileAccess => "secret_file_access",
             Self::SecretDumpCommand => "secret_dump_command",
+            Self::EnvironmentDump => "environment_dump",
             Self::DestructiveFilesystem => "destructive_filesystem",
             Self::DirectDbMutation => "direct_db_mutation",
             Self::PrivilegeSystemChange => "privilege_system_change",
@@ -285,6 +306,7 @@ impl ActionGuardProfile {
                 category,
                 ActionCategory::SecretFileAccess
                     | ActionCategory::SecretDumpCommand
+                    | ActionCategory::EnvironmentDump
                     | ActionCategory::DestructiveFilesystem
                     | ActionCategory::DirectDbMutation
             ),
@@ -396,6 +418,15 @@ fn detect_dangerous_command(
         ));
     }
 
+    if profile.includes(ActionCategory::EnvironmentDump)
+        && environment_dump_command(&normalized, &words)
+    {
+        return Some(guard_match(
+            ActionCategory::EnvironmentDump,
+            "shk action guard: command can expose process environment variables",
+        ));
+    }
+
     if profile.includes(ActionCategory::DestructiveFilesystem) && destructive_rm(&words) {
         return Some(guard_match(
             ActionCategory::DestructiveFilesystem,
@@ -485,6 +516,165 @@ fn normalize_action_pattern(raw: &str) -> String {
 
 fn secret_dump_command(cmd: &str, words: &[&str]) -> bool {
     SECRET_READ_COMMANDS.contains(&cmd) && words.iter().skip(1).any(|w| is_secret_path(w))
+}
+
+fn environment_dump_command(command: &str, words: &[&str]) -> bool {
+    let Some(cmd) = words.first().copied() else {
+        return false;
+    };
+    let base = command_basename(cmd);
+    if ENVIRONMENT_DUMP_COMMANDS.contains(&base) {
+        return true;
+    }
+
+    if base == "env" {
+        return env_invocation_dumps(command, cmd);
+    }
+
+    if base == "export" {
+        return shell_builtin_dumps(command, cmd, &["-p"]);
+    }
+
+    if base == "set" {
+        return shell_builtin_dumps(command, cmd, &[]);
+    }
+
+    interpreter_environment_read(command, base, words) || command.contains("/proc/self/environ")
+}
+
+fn command_basename(cmd: &str) -> &str {
+    cmd.rsplit('/').next().unwrap_or(cmd)
+}
+
+fn env_invocation_dumps(command: &str, cmd: &str) -> bool {
+    let Some(after) = command_tail_after_invocation(command, cmd) else {
+        return false;
+    };
+    let after = after.trim_start();
+    if after.is_empty() || starts_with_shell_output_operator(after) {
+        return true;
+    }
+
+    if let Some(token) = first_env_command_token(after) {
+        return matches!(command_basename(token), "env" | "printenv");
+    }
+
+    true
+}
+
+fn shell_builtin_dumps(command: &str, name: &str, dump_flags: &[&str]) -> bool {
+    let Some(after) = command_tail_after_invocation(command, name) else {
+        return false;
+    };
+    let after = after.trim_start();
+    after.is_empty()
+        || starts_with_shell_output_operator(after)
+        || dump_flags.iter().any(|flag| after.starts_with(flag))
+}
+
+fn first_env_command_token(after_env: &str) -> Option<&str> {
+    for token in after_env.split_whitespace() {
+        let token = token.trim_matches(|c: char| matches!(c, '"' | '\'' | '`'));
+        if token.is_empty() {
+            continue;
+        }
+        if starts_with_shell_output_operator(token) {
+            return None;
+        }
+        if token.starts_with('-') || is_env_assignment(token) {
+            continue;
+        }
+        return Some(token);
+    }
+    None
+}
+
+fn command_tail_after_invocation<'a>(command: &'a str, invoked: &str) -> Option<&'a str> {
+    command.strip_prefix(invoked).or_else(|| {
+        let base = command_basename(invoked);
+        command.strip_prefix(base)
+    })
+}
+
+fn starts_with_shell_output_operator(s: &str) -> bool {
+    matches!(s.chars().next(), Some('|' | '>' | ';' | '&'))
+}
+
+fn is_env_assignment(token: &str) -> bool {
+    let Some((key, _value)) = token.split_once('=') else {
+        return false;
+    };
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn interpreter_environment_read(command: &str, base: &str, words: &[&str]) -> bool {
+    match base {
+        "bash" | "sh" | "zsh" => {
+            has_eval_flag(words, &["-c"]) && shell_eval_environment_dump(command, words)
+        }
+        "node" => eval_contains(words, &["-e", "--eval"], command, NODE_ENV_READ_PATTERNS),
+        "ruby" => eval_contains(words, &["-e"], command, RUBY_ENV_READ_PATTERNS),
+        "perl" => eval_contains(words, &["-e"], command, PERL_ENV_READ_PATTERNS),
+        _ if base.starts_with("python") => {
+            eval_contains(words, &["-c"], command, PYTHON_ENV_READ_PATTERNS)
+        }
+        _ => false,
+    }
+}
+
+fn eval_contains(words: &[&str], flags: &[&str], command: &str, patterns: &[&str]) -> bool {
+    has_eval_flag(words, flags) && contains_any(command, patterns)
+}
+
+fn has_eval_flag(words: &[&str], flags: &[&str]) -> bool {
+    words.iter().any(|word| flags.contains(word))
+}
+
+fn shell_eval_environment_dump(command: &str, words: &[&str]) -> bool {
+    if command.contains("/proc/self/environ") {
+        return true;
+    }
+
+    let Some(eval_pos) = words.iter().position(|word| *word == "-c") else {
+        return false;
+    };
+    let Some(eval_cmd) = words.get(eval_pos + 1).copied().map(command_basename) else {
+        return false;
+    };
+
+    match eval_cmd {
+        "printenv" => true,
+        "env" => env_words_dump(&words[eval_pos + 1..]),
+        "set" => shell_builtin_words_dump(command, &words[eval_pos + 1..], &[]),
+        "export" => shell_builtin_words_dump(command, &words[eval_pos + 1..], &["-p"]),
+        _ => false,
+    }
+}
+
+fn env_words_dump(words: &[&str]) -> bool {
+    for token in words.iter().skip(1) {
+        if token.starts_with('-') || is_env_assignment(token) {
+            continue;
+        }
+        return matches!(command_basename(token), "env" | "printenv");
+    }
+    true
+}
+
+fn shell_builtin_words_dump(command: &str, words: &[&str], dump_flags: &[&str]) -> bool {
+    let Some(first_arg) = words.get(1).copied() else {
+        return true;
+    };
+    dump_flags.contains(&first_arg)
+        || command.contains(" set |")
+        || command.contains(";set |")
+        || command.contains(" export |")
+        || command.contains(";export |")
+        || command.contains(" export -p")
+        || command.contains(";export -p")
 }
 
 fn destructive_rm(words: &[&str]) -> bool {
@@ -609,27 +799,25 @@ fn contains_any(hay: &str, needles: &[&str]) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn blocks_db_mutation_but_not_select() {
-        let drop = serde_json::json!({
+    fn bash_payload(command: &str) -> String {
+        serde_json::json!({
             "tool_name": "Bash",
             "tool_input": {
-                "command": "psql -c \"DROP TABLE users\""
+                "command": command
             }
         })
-        .to_string();
+        .to_string()
+    }
+
+    #[test]
+    fn blocks_db_mutation_but_not_select() {
+        let drop = bash_payload("psql -c \"DROP TABLE users\"");
         assert_eq!(
             detect_dangerous_action(&drop).unwrap().unwrap().category,
             "direct_db_mutation"
         );
 
-        let select = serde_json::json!({
-            "tool_name": "Bash",
-            "tool_input": {
-                "command": "psql -c \"SELECT 1\""
-            }
-        })
-        .to_string();
+        let select = bash_payload("psql -c \"SELECT 1\"");
         assert!(detect_dangerous_action(&select).unwrap().is_none());
     }
 
@@ -643,14 +831,65 @@ mod tests {
     }
 
     #[test]
+    fn blocks_environment_dump_commands() {
+        for command in [
+            "printenv | grep API_KEY",
+            "/usr/bin/printenv",
+            "env | grep API_KEY",
+            "/usr/bin/env",
+            "env -- printenv",
+            "env FOO=bar",
+            "export -p",
+            "set | grep API_KEY",
+            "python -c \"import os; print(os.environ)\"",
+            "python3 -c \"import os; print(os.getenv('API_KEY'))\"",
+            "python -c \"from os import environ; print(environ)\"",
+            "node -e \"console.log(process.env.API_KEY)\"",
+            "node --eval \"console.log(process.env)\"",
+            "ruby -e \"puts ENV.to_h\"",
+            "ruby -e \"puts ENV\"",
+            "ruby -e \"puts ENV.fetch('API_KEY')\"",
+            "perl -e \"print $ENV{API_KEY}\"",
+            "bash -c \"printenv | grep API_KEY\"",
+            "sh -c \"env\"",
+            "cat /proc/self/environ",
+        ] {
+            let input = bash_payload(command);
+            assert_eq!(
+                detect_dangerous_action(&input).unwrap().unwrap().category,
+                "environment_dump",
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_non_dump_environment_helpers() {
+        for command in [
+            "env FOO=bar cargo test",
+            "export FOO=bar",
+            "set -e; cargo test",
+            "python -c \"print('ok')\"",
+            "node -e \"console.log(1)\"",
+            "node --eval \"console.log(1)\"",
+            "ruby -e \"puts 1\"",
+            "perl -e \"print 1\"",
+            "bash -c \"echo ok\"",
+            "bash -c \"set -e; cargo test\"",
+            "bash -c \"export FOO=bar; cargo test\"",
+            "bash -c \"env FOO=bar cargo test\"",
+        ] {
+            let input = bash_payload(command);
+            assert!(
+                detect_dangerous_action(&input).unwrap().is_none(),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
     fn config_can_disable_or_allow_actions() {
-        let drop = serde_json::json!({
-            "tool_name": "Bash",
-            "tool_input": {
-                "command": "psql -c \"DROP TABLE users\""
-            }
-        })
-        .to_string();
+        let drop = bash_payload("psql -c \"DROP TABLE users\"");
 
         let disabled = ActionGuardConfig {
             enabled: false,
@@ -682,17 +921,24 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+
+        let allowed_env_dump = ActionGuardConfig {
+            allow: vec!["Bash(printenv:*)".into()],
+            ..ActionGuardConfig::default()
+        };
+        assert!(
+            detect_dangerous_action_with_config(
+                &bash_payload("printenv | grep API_KEY"),
+                &allowed_env_dump
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 
     #[test]
     fn config_custom_deny_and_profiles_work() {
-        let kubectl = serde_json::json!({
-            "tool_name": "Bash",
-            "tool_input": {
-                "command": "kubectl delete pod demo"
-            }
-        })
-        .to_string();
+        let kubectl = bash_payload("kubectl delete pod demo");
         let custom = ActionGuardConfig {
             deny: vec!["Bash(kubectl delete:*)".into()],
             ..ActionGuardConfig::default()
@@ -718,18 +964,18 @@ mod tests {
             "custom_policy"
         );
 
-        let curl = r#"{"tool_name":"Bash","tool_input":{"command":"curl https://example.com"}}"#;
+        let curl = bash_payload("curl https://example.com");
         let minimal = ActionGuardConfig {
             profile: "minimal".into(),
             ..ActionGuardConfig::default()
         };
         assert!(
-            detect_dangerous_action_with_config(curl, &minimal)
+            detect_dangerous_action_with_config(&curl, &minimal)
                 .unwrap()
                 .is_none()
         );
         assert_eq!(
-            detect_dangerous_action_with_config(curl, &ActionGuardConfig::default())
+            detect_dangerous_action_with_config(&curl, &ActionGuardConfig::default())
                 .unwrap()
                 .unwrap()
                 .category,
@@ -739,13 +985,7 @@ mod tests {
 
     #[test]
     fn strict_profile_blocks_opaque_execution() {
-        let bash_c = serde_json::json!({
-            "tool_name": "Bash",
-            "tool_input": {
-                "command": "bash -c \"echo ok\""
-            }
-        })
-        .to_string();
+        let bash_c = bash_payload("bash -c \"echo ok\"");
         assert!(
             detect_dangerous_action_with_config(&bash_c, &ActionGuardConfig::default())
                 .unwrap()
@@ -764,13 +1004,7 @@ mod tests {
             "opaque_execution"
         );
 
-        let node_eval = serde_json::json!({
-            "tool_name": "Bash",
-            "tool_input": {
-                "command": "node -e \"console.log(1)\""
-            }
-        })
-        .to_string();
+        let node_eval = bash_payload("node -e \"console.log(1)\"");
         assert_eq!(
             detect_dangerous_action_with_config(&node_eval, &strict)
                 .unwrap()
