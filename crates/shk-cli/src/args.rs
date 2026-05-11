@@ -20,12 +20,38 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Create starter `shk.toml`
+    /// Interactive first-run setup for policy, hooks, and agent skills
     Init {
+        /// Use the strict starter policy profile.
         #[arg(long)]
         strict: bool,
+        /// Overwrite existing managed files where supported.
         #[arg(long)]
         force: bool,
+        /// Accept recommended defaults without prompting.
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Install AI hooks in audit-only mode.
+        #[arg(long)]
+        audit: bool,
+        /// AI tools to configure: claude-code, codex, cursor. Repeat or use commas.
+        #[arg(long, value_enum, value_delimiter = ',')]
+        tool: Vec<AiTool>,
+        /// Skip Git pre-commit hook setup.
+        #[arg(long)]
+        no_git_hook: bool,
+        /// Skip AI editor hook setup.
+        #[arg(long)]
+        no_ai_hooks: bool,
+        /// Skip bundled agent skill setup.
+        #[arg(long)]
+        no_skills: bool,
+        /// Write AI hooks and skills to user-level config directories.
+        #[arg(long)]
+        global: bool,
+        /// Apply supported AI-tool sandbox hardening while installing hooks.
+        #[arg(long)]
+        apply_sandbox: bool,
     },
     /// Scan repository or path for secrets and PII
     Scan {

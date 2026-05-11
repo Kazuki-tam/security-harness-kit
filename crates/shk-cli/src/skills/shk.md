@@ -21,7 +21,8 @@ shk scan . --json                    # JSON report
 shk scan --staged                    # scan git-staged files (pre-commit)
 shk mask < file.txt                  # mask PII/secrets from stdin
 shk mask file.txt --json             # JSON output with findings + masked content
-shk init                             # create starter shk.toml
+shk init                             # interactive first-run setup
+shk init --yes --tool codex --audit  # non-interactive setup with audit hooks
 shk status                           # concise project health summary
 shk hooks install                    # install Git pre-commit hook
 shk hooks install-ai                 # install hooks for Claude Code / Cursor / Codex

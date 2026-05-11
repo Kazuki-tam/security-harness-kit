@@ -44,7 +44,32 @@ pub fn run() -> Result<()> {
     let cwd = std::env::current_dir().context("current directory")?;
 
     match cli.command {
-        Commands::Init { strict, force } => policy_cmd::init(&cwd, strict, force)?,
+        Commands::Init {
+            strict,
+            force,
+            yes,
+            audit,
+            tool,
+            no_git_hook,
+            no_ai_hooks,
+            no_skills,
+            global,
+            apply_sandbox,
+        } => commands::init::run(
+            &cwd,
+            commands::init::InitArgs {
+                strict,
+                force,
+                yes,
+                audit,
+                tools: tool,
+                no_git_hook,
+                no_ai_hooks,
+                no_skills,
+                global,
+                apply_sandbox,
+            },
+        )?,
         Commands::Scan {
             path,
             staged,

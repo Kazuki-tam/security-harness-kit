@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -1294,6 +1295,98 @@ fn init_creates_project_policy() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(dir.path().join("shk.toml").is_file());
+}
+
+#[test]
+fn init_strict_with_piped_stdin_keeps_policy_only_behavior() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(shk_bin())
+        .args(["init", "--strict"])
+        .current_dir(dir.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.as_mut().unwrap().write_all(b"")?;
+            child.wait_with_output()
+        })
+        .expect("init --strict with piped stdin");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let policy = std::fs::read_to_string(dir.path().join("shk.toml")).unwrap();
+    assert!(policy.contains("default_fail_on = \"medium\""), "{policy}");
+    assert!(!dir.path().join(".codex/config.toml").exists());
+    assert!(!dir.path().join(".agents/skills/shk/SKILL.md").exists());
+}
+
+#[test]
+fn init_interactive_retries_invalid_tool_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(shk_bin())
+        .args(["init", "--no-ai-hooks", "--no-skills"])
+        .current_dir(dir.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.as_mut().unwrap().write_all(b"\n\n9\n2\n")?;
+            child.wait_with_output()
+        })
+        .expect("init retries invalid tool");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.starts_with("shk init"), "{stdout}");
+    assert!(stdout.contains("  2) Codex"), "{stdout}");
+    assert!(stdout.contains("Invalid choice `9`"), "{stdout}");
+    assert!(dir.path().join("shk.toml").is_file());
+}
+
+#[test]
+fn init_yes_sets_up_selected_ai_tool_and_skill() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(shk_bin())
+        .args([
+            "init",
+            "--yes",
+            "--tool",
+            "codex",
+            "--audit",
+            "--no-git-hook",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("init --yes");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(dir.path().join("shk.toml").is_file());
+    let codex_config = std::fs::read_to_string(dir.path().join(".codex/config.toml")).unwrap();
+    assert!(
+        codex_config.contains("codex_hooks = true"),
+        "{codex_config}"
+    );
+    assert!(
+        codex_config.contains("shk scan --hook-mode codex --audit"),
+        "{codex_config}"
+    );
+    assert!(dir.path().join(".agents/skills/shk/SKILL.md").is_file());
+    assert!(!dir.path().join(".claude/skills/shk.md").exists());
 }
 
 #[test]
