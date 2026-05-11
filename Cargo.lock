@@ -1655,7 +1655,7 @@ dependencies = [
 
 [[package]]
 name = "shk-cli"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1678,7 +1678,7 @@ dependencies = [
 
 [[package]]
 name = "shk-core"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1700,7 +1700,7 @@ dependencies = [
 
 [[package]]
 name = "shk-integrations"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "serde",
@@ -1710,7 +1710,7 @@ dependencies = [
 
 [[package]]
 name = "shk-rules"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "once_cell",
  "regex",
@@ -2582,7 +2582,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "regex",
