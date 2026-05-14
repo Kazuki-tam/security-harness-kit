@@ -59,6 +59,10 @@ shk scan . --fail-on medium
 shk scan . --include-binary
 shk scan . --follow-symlinks
 shk scan --staged
+shk scan --git-history
+shk scan --git-history --preview
+shk scan --git-history --ref HEAD~50..HEAD
+shk scan --git-history --since 30.days.ago
 shk scan . --no-color
 ```
 
@@ -73,7 +77,16 @@ Options:
 | `--include-binary` | Scan binary-looking files instead of reporting `scan.binary_skipped` info findings. |
 | `--follow-symlinks` | Follow symlinks during traversal. |
 | `--staged` | Scan Git-staged files. Intended for pre-commit usage. |
+| `--git-history` | Scan committed Git history reachable from refs. Reports paths as `<commit>:<path>`. |
+| `--preview` | With `--git-history`, print candidate commit/path/blob counts and sample paths without scanning blob contents. |
+| `--ref <rev>` | With `--git-history`, scan a Git revision or revision range instead of `--all`, e.g. `main` or `HEAD~50..HEAD`. |
+| `--since <date>` | With `--git-history`, limit history to commits newer than a Git date expression, e.g. `30.days.ago` or `2026-01-01`. |
+| `--max-commits <n>` | With `--git-history`, limit history traversal to the most recent `n` commits in the selected scope. |
 | `--no-color` | Disable colored human-readable output. This is a global option. |
+
+`--git-history` scans committed blobs from Git history, not the working tree or index. By default it uses `git log --all`, so local branches, tags, and remote-tracking refs are considered. Deleted secrets can still be detected because the older blob is read from the commit where the file existed. Uncommitted changes and unreachable objects are not scanned.
+
+Use `--preview` before a broad history scan to see the selected scope, candidate commit/path counts, unique blob count, policy-filtered blob count, and up to 10 sample `<commit>:<path>` labels. With `--json`, preview emits the same metadata as machine-readable JSON and exits `0`.
 
 Exit codes:
 
@@ -81,7 +94,7 @@ Exit codes:
 |------|---------|
 | `0` | No findings at or above the active threshold, or command completed successfully. |
 | `1` | Scan findings met or exceeded the active threshold. |
-| `2` | Blocking AI pre-hook triggered, or `shk scan --staged` was run outside a Git repository. |
+| `2` | Blocking AI pre-hook triggered, or a Git-specific scan mode was run outside a Git repository. |
 
 ## `shk scan --hook-mode`
 
@@ -333,7 +346,7 @@ shk ci init github
 shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
-shk ci init github --shk-version v0.2.9
+shk ci init github --shk-version v0.2.10
 shk ci init github --output .github/workflows/security.yml --force
 ```
 
@@ -345,7 +358,7 @@ Options:
 | `--fail-on <severity>` | Severity threshold for blocking mode. Valid values: `info`, `low`, `medium`, `high` (default), `critical`. Ignored under `--mode audit` (a warning is printed). |
 | `--path <path>` | Path passed to `shk scan`. Defaults to `.`. |
 | `--repo <owner/name>` | GitHub repository hosting `shk` releases. Defaults to `Kazuki-tam/security-harness-kit`. |
-| `--shk-version <version>` | Release version to install. Accepts `latest` (default) or a SemVer-ish tag such as `v0.2.9`. |
+| `--shk-version <version>` | Release version to install. Accepts `latest` (default) or a SemVer-ish tag such as `v0.2.10`. |
 | `--installer-name <name>` | cargo-dist shell installer asset name. Defaults to `shk-cli-installer.sh`. |
 | `--output <path>` | Workflow destination path. Defaults to `.github/workflows/shk.yml`. |
 | `--dry-run` | Print the workflow YAML to stdout without writing it. |

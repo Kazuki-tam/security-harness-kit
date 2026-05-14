@@ -121,6 +121,9 @@ shk init --strict
 shk scan .
 shk scan . --json
 shk scan --staged
+shk scan --git-history
+shk scan --git-history --preview
+shk scan --git-history --ref HEAD~50..HEAD
 
 shk mask < prompt.txt
 shk mask --json < prompt.txt
@@ -136,7 +139,7 @@ shk hooks install-ai --audit
 shk ci init github
 shk ci init github --dry-run
 shk ci init github --mode audit
-shk ci init github --shk-version v0.2.9
+shk ci init github --shk-version v0.2.10
 
 shk skills install
 shk skills install --tool claude-code --global
@@ -167,11 +170,12 @@ See [Configuration](docs/configuration.md) for the full `shk.toml` reference, cu
 |------|---------|
 | `0` | No findings at or above the active threshold, or command completed successfully. |
 | `1` | Scan findings met or exceeded the active threshold. |
-| `2` | Blocking AI pre-hook triggered, or `shk scan --staged` was run outside a Git repository. |
+| `2` | Blocking AI pre-hook triggered, or a Git-specific scan mode was run outside a Git repository. |
 
 ## Safety Notes
 
 - Scans and masking run locally.
+- `shk scan --git-history` scans committed blobs reachable from Git refs. Use `--preview` to inspect candidate counts before a broad history scan, and `--ref`, `--since`, or `--max-commits` to narrow the scope.
 - Built-in detection is pattern-based and includes hand-tuned `shk` rules plus generated gitleaks-derived `secret.gitleaks.*` rules; use it as an AI/local workflow guardrail, not as a complete replacement for dedicated secret scanning platforms.
 - JSON reports use `redacted_value: "[REDACTED]"`.
 - Hook audit logs contain metadata such as counts, tool name, hook phase, and display path.

@@ -59,6 +59,21 @@ pub enum Commands {
         path: PathBuf,
         #[arg(long)]
         staged: bool,
+        /// Scan committed Git history reachable from refs.
+        #[arg(long, conflicts_with = "staged")]
+        git_history: bool,
+        /// Show the Git history scan scope and candidate counts without scanning blob contents.
+        #[arg(long, requires = "git_history")]
+        preview: bool,
+        /// Limit --git-history to a Git revision or revision range, e.g. main or HEAD~50..HEAD.
+        #[arg(long = "ref", value_name = "REV", requires = "git_history")]
+        git_history_ref: Option<String>,
+        /// Limit --git-history to commits newer than this Git date expression, e.g. 30.days.ago.
+        #[arg(long, value_name = "DATE", requires = "git_history")]
+        since: Option<String>,
+        /// Limit --git-history to the most recent N commits in the selected scope.
+        #[arg(long, value_name = "N", requires = "git_history")]
+        max_commits: Option<usize>,
         #[arg(long)]
         json: bool,
         /// Show informational skip findings in human-readable output.

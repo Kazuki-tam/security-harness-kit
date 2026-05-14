@@ -73,6 +73,11 @@ pub fn run() -> Result<()> {
         Commands::Scan {
             path,
             staged,
+            git_history,
+            preview,
+            git_history_ref,
+            since,
+            max_commits,
             json,
             verbose,
             fail_on,
@@ -84,6 +89,11 @@ pub fn run() -> Result<()> {
         } => commands::scan::run(commands::scan::ScanInvocation {
             path,
             staged,
+            git_history,
+            preview,
+            git_history_ref,
+            since,
+            max_commits,
             json,
             verbose,
             fail_on,
