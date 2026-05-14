@@ -14,6 +14,10 @@ use zeroize::Zeroize;
 
 pub struct ScanOptions {
     pub staged: bool,
+    pub git_history: bool,
+    pub git_history_ref: Option<String>,
+    pub git_history_since: Option<String>,
+    pub git_history_max_commits: Option<usize>,
     pub json: bool,
     pub fail_on_override: Option<Severity>,
     pub use_pre_commit_threshold: bool,
@@ -30,6 +34,21 @@ pub struct ScanResult {
     pub exit_threshold: Severity,
     pub suppressed: u64,
     pub deduplicated: u64,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct GitHistoryPreview {
+    pub version: u32,
+    pub mode: String,
+    pub scope: String,
+    pub since: Option<String>,
+    pub max_commits: Option<usize>,
+    pub candidate_commits: usize,
+    pub candidate_paths: usize,
+    pub unique_blobs: usize,
+    pub policy_filtered_blobs: usize,
+    pub sample_paths: Vec<String>,
+    pub policy_path: Option<String>,
 }
 
 impl ScanResult {
@@ -73,6 +92,25 @@ impl ScanResult {
             },
         }
     }
+}
+
+fn git_history_options(opts: &ScanOptions) -> git::GitHistoryOptions {
+    git::GitHistoryOptions {
+        rev: opts.git_history_ref.clone(),
+        since: opts.git_history_since.clone(),
+        max_commits: opts.git_history_max_commits,
+    }
+}
+
+struct GitHistorySelection {
+    repo: PathBuf,
+    policy: Policy,
+    policy_path: Option<PathBuf>,
+    history_opts: git::GitHistoryOptions,
+    candidate_commits: usize,
+    candidate_paths: usize,
+    unique_blobs: usize,
+    filtered_blobs: Vec<git::GitHistoryBlob>,
 }
 
 fn is_probably_binary(head: &[u8]) -> bool {
@@ -396,8 +434,38 @@ fn scan_staged_blob(
     scan_bytes(&rel, bytes, prepared, include_context)
 }
 
+fn scan_history_blob(
+    repo: &Path,
+    blob: &git::GitHistoryBlob,
+    prepared: &PreparedScan<'_>,
+    include_context: bool,
+) -> Result<ScanChunk> {
+    let rel = blob.path.to_string_lossy().replace('\\', "/");
+    let label = history_display_label(blob);
+    let bytes = git::history_blob_bytes(repo, &blob.oid)?;
+    scan_bytes_with_display(&rel, &label, bytes, prepared, include_context)
+}
+
+fn history_display_label(blob: &git::GitHistoryBlob) -> String {
+    format!(
+        "{}:{}",
+        blob.short_commit(),
+        blob.path.to_string_lossy().replace('\\', "/")
+    )
+}
+
 fn scan_bytes(
     rel: &str,
+    bytes: Vec<u8>,
+    prepared: &PreparedScan<'_>,
+    include_context: bool,
+) -> Result<ScanChunk> {
+    scan_bytes_with_display(rel, rel, bytes, prepared, include_context)
+}
+
+fn scan_bytes_with_display(
+    scan_rel: &str,
+    display_rel: &str,
     mut bytes: Vec<u8>,
     prepared: &PreparedScan<'_>,
     include_context: bool,
@@ -405,7 +473,7 @@ fn scan_bytes(
     if bytes.len() as u64 > prepared.policy.scan.max_file_size_bytes {
         let f = vec![skipped_finding(
             "scan.file_too_large",
-            rel.to_string(),
+            display_rel.to_string(),
             format!(
                 "Skipped: file exceeds max_file_size_bytes ({})",
                 prepared.policy.scan.max_file_size_bytes
@@ -418,14 +486,21 @@ fn scan_bytes(
     if !prepared.policy.scan.include_binary && is_probably_binary(&bytes[..take]) {
         let f = vec![skipped_finding(
             "scan.binary_skipped",
-            rel.to_string(),
+            display_rel.to_string(),
             "Skipped: binary file (null byte in head)".into(),
         )];
         bytes.zeroize();
         return Ok(ScanChunk::skipped(f));
     }
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
-    let result = scan_text_prepared(rel, &text, prepared, include_context);
+    let mut result = scan_text_prepared(scan_rel, &text, prepared, include_context);
+    if scan_rel != display_rel
+        && let Ok(chunk) = &mut result
+    {
+        for finding in &mut chunk.findings {
+            finding.file = display_rel.to_string();
+        }
+    }
     text.zeroize();
     bytes.zeroize();
     result
@@ -514,9 +589,116 @@ pub fn scan_staged(cwd: &Path, opts: ScanOptions) -> Result<ScanResult> {
     })
 }
 
+pub fn scan_git_history(cwd: &Path, opts: ScanOptions) -> Result<ScanResult> {
+    let selection = select_git_history(cwd, &opts)?;
+    let include_context = opts.include_context || opts.json;
+    let exit_threshold = if opts.use_pre_commit_threshold {
+        opts.fail_on_override
+            .unwrap_or_else(|| selection.policy.pre_commit_fail_on())
+    } else {
+        opts.fail_on_override
+            .unwrap_or_else(|| selection.policy.scan_fail_on())
+    };
+
+    let mut findings = suppression::expired_allowlist_warnings(&selection.policy.allowlist);
+    let prepared = PreparedScan::new(&selection.policy)?;
+    let scanned: Vec<String> = selection
+        .filtered_blobs
+        .iter()
+        .map(history_display_label)
+        .collect();
+    let chunk_results: Vec<Result<ScanChunk>> = selection
+        .filtered_blobs
+        .par_iter()
+        .map(|blob| scan_history_blob(&selection.repo, blob, &prepared, include_context))
+        .collect();
+    let mut suppressed_total = 0u64;
+    let mut deduplicated_total = 0u64;
+    for chunk in chunk_results {
+        let chunk = chunk?;
+        findings.extend(chunk.findings);
+        suppressed_total += chunk.suppressed;
+        deduplicated_total += chunk.deduplicated;
+    }
+    drop(prepared);
+    Ok(ScanResult {
+        findings,
+        scanned_paths: scanned,
+        policy: selection.policy,
+        policy_path: selection.policy_path,
+        exit_threshold,
+        suppressed: suppressed_total,
+        deduplicated: deduplicated_total,
+    })
+}
+
+pub fn preview_git_history(cwd: &Path, opts: ScanOptions) -> Result<GitHistoryPreview> {
+    let selection = select_git_history(cwd, &opts)?;
+    let sample_paths = selection
+        .filtered_blobs
+        .iter()
+        .take(10)
+        .map(history_display_label)
+        .collect();
+
+    Ok(GitHistoryPreview {
+        version: 1,
+        mode: "git-history-preview".into(),
+        scope: selection.history_opts.scope_label(),
+        since: selection.history_opts.since,
+        max_commits: selection.history_opts.max_commits,
+        candidate_commits: selection.candidate_commits,
+        candidate_paths: selection.candidate_paths,
+        unique_blobs: selection.unique_blobs,
+        policy_filtered_blobs: selection.filtered_blobs.len(),
+        sample_paths,
+        policy_path: selection
+            .policy_path
+            .as_ref()
+            .map(|p| p.display().to_string()),
+    })
+}
+
+fn select_git_history(cwd: &Path, opts: &ScanOptions) -> Result<GitHistorySelection> {
+    let repo = git::discover_repo_root(cwd).context("not a git repository")?;
+    let repo = fs::canonicalize(&repo).unwrap_or(repo);
+    if !git::is_inside_git_work_tree(&repo) {
+        bail!("shk scan --git-history requires a Git repository");
+    }
+    let (mut policy, policy_path) = Policy::load_from_dir(&repo)?;
+    apply_scan_flag_overrides(&mut policy, opts);
+    let filters = PathFilters::from_policy(&policy)?;
+    let history_opts = git_history_options(opts);
+    let inventory = git::history_inventory(&repo, &history_opts)?;
+    let git::GitHistoryInventory {
+        candidate_commits,
+        candidate_paths,
+        blobs,
+    } = inventory;
+    let unique_blobs = blobs.len();
+    let filtered_blobs: Vec<_> = blobs
+        .into_iter()
+        .filter(|blob| filters.allows(&blob.path.to_string_lossy().replace('\\', "/")))
+        .collect();
+
+    Ok(GitHistorySelection {
+        repo,
+        policy,
+        policy_path,
+        history_opts,
+        candidate_commits,
+        candidate_paths,
+        unique_blobs,
+        filtered_blobs,
+    })
+}
+
 pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
     if opts.staged {
         return scan_staged(target, opts);
+    }
+    if opts.git_history {
+        return scan_git_history(target, opts);
     }
 
     let scan_root = canonical_or_same(&scan_root_for_target(target));

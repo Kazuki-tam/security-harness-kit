@@ -1,9 +1,57 @@
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn shk_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_shk"))
+}
+
+fn init_git_repo(dir: &Path) {
+    let init = Command::new("git")
+        .args(["init"])
+        .current_dir(dir)
+        .output()
+        .expect("git init");
+    assert!(
+        init.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&init.stdout),
+        String::from_utf8_lossy(&init.stderr)
+    );
+}
+
+fn git_commit_all(dir: &Path, message: &str) {
+    let add = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(dir)
+        .output()
+        .expect("git add");
+    assert!(
+        add.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&add.stdout),
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let commit = Command::new("git")
+        .args([
+            "-c",
+            "user.name=shk test",
+            "-c",
+            "user.email=shk@example.invalid",
+            "commit",
+            "-m",
+            message,
+        ])
+        .current_dir(dir)
+        .output()
+        .expect("git commit");
+    assert!(
+        commit.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&commit.stdout),
+        String::from_utf8_lossy(&commit.stderr)
+    );
 }
 
 #[test]
@@ -627,6 +675,390 @@ fn scan_staged_reads_index_not_worktree() {
             .iter()
             .any(|f| f["rule_id"] == "secret.openai_api_key"),
         "{v}"
+    );
+}
+
+#[test]
+fn scan_git_history_detects_removed_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    std::fs::write(
+        dir.path().join("secret.txt"),
+        // not real credential: synthetic detector fixture value only
+        "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
+    )
+    .unwrap();
+    git_commit_all(dir.path(), "add secret fixture");
+
+    std::fs::remove_file(dir.path().join("secret.txt")).unwrap();
+    git_commit_all(dir.path(), "remove secret fixture");
+
+    let out = Command::new(shk_bin())
+        .args(["scan", "--git-history", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan git history");
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let findings = v["findings"].as_array().unwrap();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f["rule_id"] == "secret.openai_api_key"
+                && f["file"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .ends_with(":secret.txt")),
+        "{v}"
+    );
+    assert!(
+        v["scanned_paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p.as_str().unwrap_or_default().ends_with(":secret.txt")),
+        "{v}"
+    );
+}
+
+#[test]
+fn scan_git_history_scans_duplicate_blob_once() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    let secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+    std::fs::write(dir.path().join("a.txt"), format!("{secret}\n")).unwrap();
+    std::fs::write(dir.path().join("b.txt"), format!("{secret}\n")).unwrap();
+    git_commit_all(dir.path(), "add duplicate blob fixture");
+
+    let out = Command::new(shk_bin())
+        .args(["scan", "--git-history", "--json", "--fail-on", "critical"])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan git history");
+
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let findings = v["findings"].as_array().unwrap();
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|f| f["rule_id"] == "secret.openai_api_key")
+            .count(),
+        1,
+        "{v}"
+    );
+}
+
+#[test]
+fn scan_git_history_labels_binary_skip_with_commit_path() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    std::fs::write(dir.path().join("blob.dat"), b"abc\0def").unwrap();
+    git_commit_all(dir.path(), "add binary fixture");
+
+    let out = Command::new(shk_bin())
+        .args(["scan", "--git-history", "--json", "--fail-on", "critical"])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan git history");
+
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let findings = v["findings"].as_array().unwrap();
+    let file = findings
+        .iter()
+        .find(|f| f["rule_id"] == "scan.binary_skipped")
+        .and_then(|f| f["file"].as_str())
+        .unwrap_or_default();
+    assert!(file.contains(':'), "{v}");
+    assert!(file.ends_with(":blob.dat"), "{v}");
+}
+
+#[test]
+fn scan_git_history_outside_git_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["scan", "--git-history"])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan git history outside git");
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("shk scan --git-history requires a Git repository"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn scan_git_history_respects_policy_exclude() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    std::fs::write(
+        dir.path().join("shk.toml"),
+        "[scan]\nexclude = [\"ignored/**\"]\n",
+    )
+    .unwrap();
+    std::fs::create_dir(dir.path().join("ignored")).unwrap();
+    std::fs::create_dir(dir.path().join("kept")).unwrap();
+    let secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+    std::fs::write(dir.path().join("ignored/secret.txt"), format!("{secret}\n")).unwrap();
+    std::fs::write(dir.path().join("kept/clean.txt"), "nothing sensitive\n").unwrap();
+    git_commit_all(dir.path(), "add excluded history fixture");
+
+    let out = Command::new(shk_bin())
+        .args(["scan", "--git-history", "--json", "--fail-on", "critical"])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan git history");
+
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v["findings"].as_array().unwrap().is_empty(), "{v}");
+    assert!(
+        !v["scanned_paths"].as_array().unwrap().iter().any(|p| p
+            .as_str()
+            .unwrap_or_default()
+            .ends_with(":ignored/secret.txt")),
+        "{v}"
+    );
+}
+
+#[test]
+fn scan_git_history_works_from_repo_subdirectory() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("src/secret.txt"),
+        // not real credential: synthetic detector fixture value only
+        "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
+    )
+    .unwrap();
+    git_commit_all(dir.path(), "add nested history fixture");
+
+    let out = Command::new(shk_bin())
+        .args(["scan", "--git-history", "--json"])
+        .current_dir(dir.path().join("src"))
+        .output()
+        .expect("scan git history from subdir");
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        v["findings"].as_array().unwrap().iter().any(|f| f["file"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with(":src/secret.txt")),
+        "{v}"
+    );
+}
+
+#[test]
+fn scan_git_history_handles_hex_looking_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    let hex_path = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    std::fs::write(
+        dir.path().join(hex_path),
+        // not real credential: synthetic detector fixture value only
+        "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
+    )
+    .unwrap();
+    git_commit_all(dir.path(), "add hex-looking path fixture");
+
+    let out = Command::new(shk_bin())
+        .args(["scan", "--git-history", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan git history");
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        v["findings"].as_array().unwrap().iter().any(|f| f["file"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with(&format!(":{hex_path}"))),
+        "{v}"
+    );
+}
+
+#[test]
+fn scan_git_history_preview_json_reports_candidate_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    std::fs::write(
+        dir.path().join("secret.txt"),
+        // not real credential: synthetic detector fixture value only
+        "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
+    )
+    .unwrap();
+    git_commit_all(dir.path(), "add preview fixture");
+
+    let out = Command::new(shk_bin())
+        .args(["scan", "--git-history", "--preview", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("preview git history");
+
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["mode"], "git-history-preview");
+    assert_eq!(v["scope"], "--all");
+    assert!(
+        v["candidate_commits"].as_u64().unwrap_or_default() >= 1,
+        "{v}"
+    );
+    assert!(
+        v["candidate_paths"].as_u64().unwrap_or_default() >= 1,
+        "{v}"
+    );
+    assert!(v["unique_blobs"].as_u64().unwrap_or_default() >= 1, "{v}");
+    assert!(
+        v["sample_paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p.as_str().unwrap_or_default().ends_with(":secret.txt")),
+        "{v}"
+    );
+    assert!(
+        v.get("findings").is_none(),
+        "preview should not emit scan findings: {v}"
+    );
+}
+
+#[test]
+fn scan_git_history_ref_limits_scanned_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    let path = dir.path().join("secret.txt");
+    std::fs::write(
+        &path,
+        // not real credential: synthetic detector fixture value only
+        "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
+    )
+    .unwrap();
+    git_commit_all(dir.path(), "add old secret fixture");
+    std::fs::write(&path, "clean now\n").unwrap();
+    git_commit_all(dir.path(), "remove old secret fixture");
+
+    let all = Command::new(shk_bin())
+        .args(["scan", "--git-history", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan all history");
+    assert_eq!(
+        all.status.code(),
+        Some(1),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&all.stdout),
+        String::from_utf8_lossy(&all.stderr)
+    );
+
+    let latest_only = Command::new(shk_bin())
+        .args([
+            "scan",
+            "--git-history",
+            "--ref",
+            "HEAD~1..HEAD",
+            "--json",
+            "--fail-on",
+            "critical",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan latest history range");
+    assert!(
+        latest_only.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&latest_only.stdout),
+        String::from_utf8_lossy(&latest_only.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&latest_only.stdout).unwrap();
+    assert!(
+        !v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["rule_id"] == "secret.openai_api_key"),
+        "{v}"
+    );
+}
+
+#[test]
+fn scan_git_history_rejects_since_that_looks_like_option() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    std::fs::write(dir.path().join("clean.txt"), "nothing sensitive\n").unwrap();
+    git_commit_all(dir.path(), "add clean fixture");
+
+    let out = Command::new(shk_bin())
+        .args(["scan", "--git-history", "--preview", "--since=-bad"])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan git history invalid since");
+
+    assert!(
+        !out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--since must be a Git date expression"),
+        "{stderr}"
     );
 }
 

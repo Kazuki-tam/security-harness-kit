@@ -5,7 +5,9 @@ use crate::output;
 use crate::safety;
 use anyhow::{Context, Result, bail};
 use shk_core::policy::{ColorMode, Policy, Severity};
-use shk_core::scanner::{ScanOptions, scan_path, scan_string};
+use shk_core::scanner::{
+    GitHistoryPreview, ScanOptions, preview_git_history, scan_path, scan_string,
+};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +21,11 @@ const HOOK_DENY_REASON_DEFAULT: &str =
 pub struct ScanInvocation {
     pub path: PathBuf,
     pub staged: bool,
+    pub git_history: bool,
+    pub preview: bool,
+    pub git_history_ref: Option<String>,
+    pub since: Option<String>,
+    pub max_commits: Option<usize>,
     pub json: bool,
     pub verbose: bool,
     pub fail_on: Option<SeverityArg>,
@@ -33,8 +40,8 @@ pub struct ScanInvocation {
 pub fn run(inv: ScanInvocation) -> Result<()> {
     let cwd = std::env::current_dir().context("current directory for policy resolution")?;
 
-    if inv.hook_mode.is_some() && inv.staged {
-        bail!("`--hook-mode` cannot be combined with `--staged`");
+    if inv.hook_mode.is_some() && (inv.staged || inv.git_history) {
+        bail!("`--hook-mode` cannot be combined with `--staged` or `--git-history`");
     }
 
     if let Some(tool) = inv.hook_mode {
@@ -44,6 +51,10 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
     let fail_on_override = inv.fail_on.map(Severity::from);
     let opts = ScanOptions {
         staged: inv.staged,
+        git_history: inv.git_history,
+        git_history_ref: inv.git_history_ref.clone(),
+        git_history_since: inv.since.clone(),
+        git_history_max_commits: inv.max_commits,
         json: inv.json,
         fail_on_override,
         use_pre_commit_threshold: inv.staged,
@@ -53,6 +64,19 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
     };
     if inv.staged && shk_core::git::discover_repo_root(&inv.path).is_none() {
         return Err(CliExit::message(2, "shk scan --staged requires a Git repository").into());
+    }
+    if inv.git_history && shk_core::git::discover_repo_root(&inv.path).is_none() {
+        return Err(CliExit::message(2, "shk scan --git-history requires a Git repository").into());
+    }
+
+    if inv.preview {
+        let preview = preview_git_history(&inv.path, opts).context("git history preview failed")?;
+        if inv.json {
+            println!("{}", serde_json::to_string_pretty(&preview)?);
+        } else {
+            print!("{}", format_git_history_preview(&preview));
+        }
+        return Ok(());
     }
 
     let res = scan_path(&inv.path, opts).context("scan failed")?;
@@ -84,6 +108,40 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
         return Err(CliExit::silent(1).into());
     }
     Ok(())
+}
+
+fn format_git_history_preview(preview: &GitHistoryPreview) -> String {
+    let mut out = String::new();
+    out.push_str("Git history scan preview\n\n");
+    out.push_str(&format!("scope: {}\n", preview.scope));
+    if let Some(since) = &preview.since {
+        out.push_str(&format!("since: {since}\n"));
+    }
+    if let Some(max) = preview.max_commits {
+        out.push_str(&format!("max_commits: {max}\n"));
+    }
+    out.push_str(&format!(
+        "candidate_commits: {}\n",
+        preview.candidate_commits
+    ));
+    out.push_str(&format!("candidate_paths: {}\n", preview.candidate_paths));
+    out.push_str(&format!("unique_blobs: {}\n", preview.unique_blobs));
+    out.push_str(&format!(
+        "policy_filtered_blobs: {}\n",
+        preview.policy_filtered_blobs
+    ));
+    if let Some(policy_path) = &preview.policy_path {
+        out.push_str(&format!("policy_path: {policy_path}\n"));
+    }
+    if preview.sample_paths.is_empty() {
+        out.push_str("\nsample_paths: none\n");
+    } else {
+        out.push_str("\nsample_paths:\n");
+        for path in &preview.sample_paths {
+            out.push_str(&format!("  {path}\n"));
+        }
+    }
+    out
 }
 
 fn resolve_repo_root(cwd: &Path, path_arg: &Path) -> PathBuf {
@@ -250,6 +308,10 @@ fn run_user_prompt_mode(
 fn hook_scan_options(fail_on: Option<SeverityArg>, use_pre_commit_threshold: bool) -> ScanOptions {
     ScanOptions {
         staged: false,
+        git_history: false,
+        git_history_ref: None,
+        git_history_since: None,
+        git_history_max_commits: None,
         json: false,
         fail_on_override: fail_on.map(Severity::from),
         use_pre_commit_threshold,
