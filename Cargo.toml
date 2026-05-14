@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.8"
+version = "0.2.9"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Kazuki-tam/security-harness-kit"
@@ -35,6 +35,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 dirs = "5"
 tempfile = "3"
 zeroize = "1.8"
+dialoguer = "0.11"
 
 # The profile that 'dist' will build with
 [profile.dist]
