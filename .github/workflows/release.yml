@@ -15,6 +15,7 @@ permissions:
 
 env:
   DIST_VERSION: "0.31.0"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   build-local-artifacts:
