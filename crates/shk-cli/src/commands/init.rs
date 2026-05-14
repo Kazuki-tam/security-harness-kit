@@ -2,6 +2,7 @@ use crate::args::AiTool;
 use crate::commands::skills::{SkillTool, SkillsInstallArgs};
 use crate::{hooks, policy_cmd, safety};
 use anyhow::Result;
+use dialoguer::{Confirm, MultiSelect, Select, theme::ColorfulTheme};
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
@@ -49,6 +50,28 @@ const AI_TOOL_CHOICES: &[PromptChoice<AiTool>] = &[
     PromptChoice {
         value: AiTool::Cursor,
         label: "Cursor",
+    },
+];
+
+const PROFILE_CHOICES: &[PromptChoice<Profile>] = &[
+    PromptChoice {
+        value: Profile::Default,
+        label: "Default  (recommended for most projects)",
+    },
+    PromptChoice {
+        value: Profile::Strict,
+        label: "Strict   (fails on medium-severity findings)",
+    },
+];
+
+const HOOK_MODE_CHOICES: &[PromptChoice<HookMode>] = &[
+    PromptChoice {
+        value: HookMode::Blocking,
+        label: "Blocking  (stops on findings)",
+    },
+    PromptChoice {
+        value: HookMode::Audit,
+        label: "Audit     (log only, never blocks)",
     },
 ];
 
@@ -189,16 +212,28 @@ fn skill_tool_for(tools: &[AiTool]) -> SkillTool {
 
 struct Prompt {
     yes: bool,
+    rich: bool,
+    theme: ColorfulTheme,
 }
 
 impl Prompt {
     fn new(yes: bool) -> Self {
-        Self { yes }
+        Self {
+            yes,
+            rich: io::stdin().is_terminal() && io::stdout().is_terminal(),
+            theme: ColorfulTheme::default(),
+        }
     }
 
     fn confirm(&mut self, label: &str, default: bool) -> Result<bool> {
         if self.yes {
             return Ok(default);
+        }
+        if self.rich {
+            return Ok(Confirm::with_theme(&self.theme)
+                .with_prompt(label)
+                .default(default)
+                .interact()?);
         }
         loop {
             print!("{label} {} ", if default { "[Y/n]" } else { "[y/N]" });
@@ -220,6 +255,9 @@ impl Prompt {
         if self.yes {
             return Ok(default);
         }
+        if self.rich {
+            return self.select_choice(label, PROFILE_CHOICES, default);
+        }
         loop {
             print!("{label} [default/strict] ({}) ", profile_label(default));
             io::stdout().flush()?;
@@ -240,6 +278,9 @@ impl Prompt {
         if self.yes {
             return Ok(default);
         }
+        if self.rich {
+            return self.select_choice(label, HOOK_MODE_CHOICES, default);
+        }
         loop {
             print!("{label} [block/audit] ({}) ", hook_mode_label(default));
             io::stdout().flush()?;
@@ -257,10 +298,29 @@ impl Prompt {
     }
 
     fn tools(&mut self, label: &str, default: &[AiTool]) -> Result<Vec<AiTool>> {
-        if self.yes {
-            return Ok(default.to_vec());
-        }
         self.multi_select(label, AI_TOOL_CHOICES, default)
+    }
+
+    fn select_choice<T: Copy + PartialEq>(
+        &mut self,
+        label: &str,
+        choices: &[PromptChoice<T>],
+        default: T,
+    ) -> Result<T> {
+        if self.yes {
+            return Ok(default);
+        }
+        let labels: Vec<&str> = choices.iter().map(|choice| choice.label).collect();
+        let default_idx = choices
+            .iter()
+            .position(|choice| choice.value == default)
+            .unwrap_or(0);
+        let selected = Select::with_theme(&self.theme)
+            .with_prompt(label)
+            .items(&labels)
+            .default(default_idx)
+            .interact()?;
+        Ok(choices[selected].value)
     }
 
     fn multi_select<T: Copy + PartialEq>(
@@ -269,6 +329,29 @@ impl Prompt {
         choices: &[PromptChoice<T>],
         default: &[T],
     ) -> Result<Vec<T>> {
+        if self.yes {
+            return Ok(default.to_vec());
+        }
+        if self.rich {
+            let labels: Vec<&str> = choices.iter().map(|choice| choice.label).collect();
+            let defaults: Vec<bool> = choices
+                .iter()
+                .map(|choice| default.contains(&choice.value))
+                .collect();
+            loop {
+                let selected = MultiSelect::with_theme(&self.theme)
+                    .with_prompt(label)
+                    .items(&labels)
+                    .defaults(&defaults)
+                    .interact()?;
+                if !selected.is_empty() {
+                    let values: Vec<T> =
+                        selected.into_iter().map(|idx| choices[idx].value).collect();
+                    return Ok(dedupe_values(&values));
+                }
+                println!("Choose at least one option.");
+            }
+        }
         print_choices(label, choices);
         'prompt: loop {
             print!("Select numbers (comma-separated), or press Enter for all: ");
@@ -299,7 +382,7 @@ impl Prompt {
             if !selected.is_empty() {
                 return Ok(selected);
             }
-            println!("Choose at least one tool, or 0 for all.");
+            println!("Choose at least one option, or 0 for all.");
         }
     }
 }
