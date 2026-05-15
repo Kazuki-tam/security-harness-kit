@@ -1,4 +1,4 @@
-use crate::safety;
+use crate::{npm_hardening, safety};
 use anyhow::Result;
 use serde_json::Value;
 use shk_core::git;
@@ -416,10 +416,46 @@ pub(crate) fn has_shk_pre_commit(root: &Path) -> bool {
 pub fn run_all(root: &Path, json: bool) -> Result<()> {
     let hook_ok = has_shk_pre_commit(root);
     let ai_managed = has_managed_ai_hooks(root);
+    let npm = npm_hardening::status(root);
     if json {
         let v = serde_json::json!({
             "git_pre_commit_shk": hook_ok,
             "ai_managed_hooks": ai_managed,
+            "npm_supply_chain_hardening": {
+                "package_json_detected": npm.has_npm_projects(),
+                "package_dirs": npm.package_dirs,
+                "package_dirs_without_lockfile": npm.package_dirs_without_lockfile,
+                "package_managers": npm.package_managers.iter().map(|manager| manager.as_str()).collect::<Vec<_>>(),
+                "npmrc": npm.npmrc_path,
+                "pnpm_workspace": npm.pnpm_workspace_path,
+                "yarnrc": npm.yarnrc_path,
+                "bunfig": npm.bunfig_path,
+                "ignore_scripts": npm.ignore_scripts_ok,
+                "min_release_age": npm.min_release_age,
+                "min_release_age_ok": npm.min_release_age_ok,
+                "pnpm_min_release_age_minutes": npm.pnpm_min_release_age_minutes,
+                "pnpm_min_release_age_ok": npm.pnpm_min_release_age_ok,
+                "yarn_min_release_age_minutes": npm.yarn_min_release_age_minutes,
+                "yarn_min_release_age_ok": npm.yarn_min_release_age_ok,
+                "bun_min_release_age_seconds": npm.bun_min_release_age_seconds,
+                "bun_min_release_age_ok": npm.bun_min_release_age_ok,
+                "package_scripts_ok": npm.package_scripts_ok(),
+                "age_gates_ok": npm.age_gates_ok(),
+                "dependabot": {
+                    "configured": npm.dependabot.configured,
+                    "config_path": npm.dependabot.config_path,
+                    "cooldown_days": npm.dependabot.cooldown_days,
+                    "cooldown_ok": npm.dependabot.cooldown_ok,
+                },
+                "renovate": {
+                    "configured": npm.renovate.configured,
+                    "config_path": npm.renovate.config_path,
+                    "cooldown_days": npm.renovate.cooldown_days,
+                    "cooldown_ok": npm.renovate.cooldown_ok,
+                },
+                "dependency_bot_cooldown_ok": npm.dependency_bot_cooldown_ok(),
+                "ok": npm.ok(),
+            },
         });
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
@@ -441,9 +477,130 @@ pub fn run_all(root: &Path, json: bool) -> Result<()> {
     run_ignore(root, false)?;
     println!();
     run_env(root, false)?;
+    println!();
+    run_npm_hardening_check(root);
     Ok(())
 }
 
 pub fn doctor_ignore_path(path: Option<PathBuf>) -> PathBuf {
     path.unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn run_npm_hardening_check(root: &Path) {
+    let status = npm_hardening::status(root);
+    if !status.has_npm_projects() {
+        println!("npm hardening: no package.json detected under project");
+        return;
+    }
+
+    if status.ok() {
+        println!(
+            "npm hardening: OK ({} package.json file(s), lockfile and cooldown present)",
+            status.package_dirs.len()
+        );
+        return;
+    }
+
+    println!(
+        "npm hardening: package.json detected, missing recommended package-manager hardening:"
+    );
+    if !status.package_scripts_ok() {
+        println!("  - {}: ignore-scripts=true", status.npmrc_path.display());
+    }
+    if status
+        .package_managers
+        .contains(&npm_hardening::PackageManager::Npm)
+        && !status.min_release_age_ok
+    {
+        match status.min_release_age {
+            Some(days) => println!(
+                "  - {}: min-release-age=7 days (current: {days} days)",
+                status.npmrc_path.display()
+            ),
+            None => println!(
+                "  - {}: min-release-age=7 days",
+                status.npmrc_path.display()
+            ),
+        }
+    }
+    if status
+        .package_managers
+        .contains(&npm_hardening::PackageManager::Pnpm)
+        && !status.pnpm_min_release_age_ok
+    {
+        match status.pnpm_min_release_age_minutes {
+            Some(minutes) => println!(
+                "  - {}: minimumReleaseAge=10080 minutes for pnpm (current: {minutes} minutes)",
+                status.pnpm_workspace_path.display()
+            ),
+            None => println!(
+                "  - {}: minimumReleaseAge=10080 minutes for pnpm",
+                status.pnpm_workspace_path.display()
+            ),
+        }
+    }
+    if status
+        .package_managers
+        .contains(&npm_hardening::PackageManager::Yarn)
+        && !status.yarn_min_release_age_ok
+    {
+        match status.yarn_min_release_age_minutes {
+            Some(minutes) => println!(
+                "  - {}: npmMinimalAgeGate=10080 minutes for Yarn (current: {minutes} minutes)",
+                status.yarnrc_path.display()
+            ),
+            None => println!(
+                "  - {}: npmMinimalAgeGate=10080 minutes for Yarn",
+                status.yarnrc_path.display()
+            ),
+        }
+    }
+    if status
+        .package_managers
+        .contains(&npm_hardening::PackageManager::Bun)
+        && !status.bun_min_release_age_ok
+    {
+        match status.bun_min_release_age_seconds {
+            Some(seconds) => println!(
+                "  - {}: install.minimumReleaseAge=604800 seconds for Bun (current: {seconds} seconds)",
+                status.bunfig_path.display()
+            ),
+            None => println!(
+                "  - {}: install.minimumReleaseAge=604800 seconds for Bun",
+                status.bunfig_path.display()
+            ),
+        }
+    }
+    if !status.package_dirs_without_lockfile.is_empty() {
+        println!("  - lockfile missing for package.json directory:");
+        for dir in &status.package_dirs_without_lockfile {
+            println!("    - {}", dir.display());
+        }
+    }
+    if !status.dependency_bot_cooldown_ok() {
+        println!("  - Renovate minimumReleaseAge=7 days or Dependabot cooldown.default-days=7");
+        print_dependency_bot_status("dependabot", &status.dependabot);
+        print_dependency_bot_status("renovate", &status.renovate);
+    }
+    if !status.package_scripts_ok() || !status.age_gates_ok() {
+        println!(
+            "  recommendation: run `shk init --yes` from the project root to apply package-manager settings"
+        );
+    }
+    if !status.package_dirs_without_lockfile.is_empty() {
+        println!("  recommendation: commit a package lockfile manually");
+    }
+    if !status.dependency_bot_cooldown_ok() {
+        println!("  recommendation: add update-bot cooldown manually");
+    }
+}
+
+fn print_dependency_bot_status(name: &str, status: &npm_hardening::DependencyBotStatus) {
+    match (&status.config_path, status.cooldown_days) {
+        (Some(path), Some(days)) => {
+            println!("    {name}: {} cooldown is {days} day(s)", path.display())
+        }
+        (Some(path), None) => println!("    {name}: {} has no cooldown", path.display()),
+        (None, _) => println!("    {name}: config not found"),
+    }
 }

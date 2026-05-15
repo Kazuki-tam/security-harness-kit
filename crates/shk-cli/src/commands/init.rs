@@ -1,6 +1,6 @@
 use crate::args::AiTool;
 use crate::commands::skills::{SkillTool, SkillsInstallArgs};
-use crate::{hooks, policy_cmd, safety};
+use crate::{hooks, npm_hardening, policy_cmd, safety};
 use anyhow::Result;
 use dialoguer::{Confirm, MultiSelect, Select, theme::ColorfulTheme};
 use std::io::{self, IsTerminal, Write};
@@ -16,6 +16,7 @@ pub struct InitArgs {
     pub no_git_hook: bool,
     pub no_ai_hooks: bool,
     pub no_skills: bool,
+    pub no_npm_hardening: bool,
     pub global: bool,
     pub apply_sandbox: bool,
 }
@@ -101,6 +102,33 @@ pub fn run(cwd: &Path, args: InitArgs) -> Result<()> {
         println!("Skipped shk.toml");
     }
 
+    let npm_status = npm_hardening::status(cwd);
+    if args.no_npm_hardening {
+        if npm_status.has_npm_projects() {
+            println!("Skipped npm supply-chain hardening");
+        }
+    } else if npm_status.has_npm_projects()
+        && prompt.confirm("Apply npm supply-chain hardening?", true)?
+    {
+        for path in npm_status.apply_paths() {
+            safety::ensure_writable_path_allowed(path)?;
+        }
+        if let Some(status) = npm_hardening::apply(cwd)? {
+            println!(
+                "Applied package manager hardening ({} package.json file(s), manager(s): {})",
+                status.package_dirs.len(),
+                status
+                    .package_managers
+                    .iter()
+                    .map(|manager| manager.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    } else if npm_status.has_npm_projects() {
+        println!("Skipped npm supply-chain hardening");
+    }
+
     let repo_root = shk_core::git::discover_repo_root(cwd);
     if !args.no_git_hook {
         match repo_root.as_deref() {
@@ -169,6 +197,7 @@ fn should_run_legacy_policy_init(args: &InitArgs) -> bool {
         && !args.no_git_hook
         && !args.no_ai_hooks
         && !args.no_skills
+        && !args.no_npm_hardening
         && !args.global
         && !args.apply_sandbox
 }

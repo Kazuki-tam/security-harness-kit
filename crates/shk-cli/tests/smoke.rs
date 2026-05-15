@@ -2073,6 +2073,203 @@ fn init_yes_sets_up_selected_ai_tool_and_skill() {
 }
 
 #[test]
+fn init_yes_applies_npm_hardening_when_package_json_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{"name":"demo"}"#).unwrap();
+    std::fs::write(
+        dir.path().join(".npmrc"),
+        "registry=https://registry.npmjs.org/\nignore-scripts=false\nmin-release-age=1\n",
+    )
+    .unwrap();
+
+    let out = Command::new(shk_bin())
+        .args([
+            "init",
+            "--yes",
+            "--no-git-hook",
+            "--no-ai-hooks",
+            "--no-skills",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("init --yes npm");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let npmrc = std::fs::read_to_string(dir.path().join(".npmrc")).unwrap();
+    assert!(
+        npmrc.contains("registry=https://registry.npmjs.org/"),
+        "{npmrc}"
+    );
+    assert!(npmrc.contains("ignore-scripts=true\n"), "{npmrc}");
+    assert!(npmrc.contains("min-release-age=7\n"), "{npmrc}");
+    assert_eq!(npmrc.matches("ignore-scripts=").count(), 1, "{npmrc}");
+    assert_eq!(npmrc.matches("min-release-age=").count(), 1, "{npmrc}");
+}
+
+#[test]
+fn init_yes_can_skip_npm_hardening() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{"name":"demo"}"#).unwrap();
+
+    let out = Command::new(shk_bin())
+        .args([
+            "init",
+            "--yes",
+            "--no-git-hook",
+            "--no-ai-hooks",
+            "--no-skills",
+            "--no-npm-hardening",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("init --yes --no-npm-hardening");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Skipped npm supply-chain hardening"),
+        "{stdout}"
+    );
+    assert!(!dir.path().join(".npmrc").exists());
+}
+
+#[test]
+fn init_no_npm_hardening_is_quiet_without_package_json() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = Command::new(shk_bin())
+        .args([
+            "init",
+            "--yes",
+            "--no-git-hook",
+            "--no-ai-hooks",
+            "--no-skills",
+            "--no-npm-hardening",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("init --yes --no-npm-hardening without package.json");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("Skipped npm supply-chain hardening"),
+        "{stdout}"
+    );
+    assert!(!dir.path().join(".npmrc").exists());
+}
+
+#[test]
+fn init_yes_applies_package_manager_specific_age_gates() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("package.json"),
+        r#"{"packageManager":"pnpm@10.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\n",
+    )
+    .unwrap();
+
+    let out = Command::new(shk_bin())
+        .args([
+            "init",
+            "--yes",
+            "--no-git-hook",
+            "--no-ai-hooks",
+            "--no-skills",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("init --yes pnpm");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let npmrc = std::fs::read_to_string(dir.path().join(".npmrc")).unwrap();
+    assert!(npmrc.contains("ignore-scripts=true"), "{npmrc}");
+    assert!(!npmrc.contains("min-release-age=7"), "{npmrc}");
+    let pnpm_workspace = std::fs::read_to_string(dir.path().join("pnpm-workspace.yaml")).unwrap();
+    assert!(
+        pnpm_workspace.contains("minimumReleaseAge: 10080"),
+        "{pnpm_workspace}"
+    );
+
+    let yarn_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        yarn_dir.path().join("package.json"),
+        r#"{"packageManager":"yarn@4.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(yarn_dir.path().join("yarn.lock"), "").unwrap();
+    let out = Command::new(shk_bin())
+        .args([
+            "init",
+            "--yes",
+            "--no-git-hook",
+            "--no-ai-hooks",
+            "--no-skills",
+        ])
+        .current_dir(yarn_dir.path())
+        .output()
+        .expect("init --yes yarn");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let yarnrc = std::fs::read_to_string(yarn_dir.path().join(".yarnrc.yml")).unwrap();
+    assert!(yarnrc.contains("npmMinimalAgeGate: 10080"), "{yarnrc}");
+
+    let bun_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        bun_dir.path().join("package.json"),
+        r#"{"packageManager":"bun@1.2.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(bun_dir.path().join("bun.lock"), "").unwrap();
+    let out = Command::new(shk_bin())
+        .args([
+            "init",
+            "--yes",
+            "--no-git-hook",
+            "--no-ai-hooks",
+            "--no-skills",
+        ])
+        .current_dir(bun_dir.path())
+        .output()
+        .expect("init --yes bun");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bunfig = std::fs::read_to_string(bun_dir.path().join("bunfig.toml")).unwrap();
+    assert!(bunfig.contains("minimumReleaseAge = 604800"), "{bunfig}");
+}
+
+#[test]
 fn mask_output_requires_project_policy() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input.txt");
@@ -2707,6 +2904,113 @@ codex_hooks = true
         stdout.contains("codex config: approval_policy=on-request"),
         "{stdout}"
     );
+}
+
+#[test]
+fn doctor_reports_missing_npm_hardening_for_package_json_project() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{"name":"demo"}"#).unwrap();
+    std::fs::write(dir.path().join(".npmrc"), "ignore-scripts=false\n").unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["doctor"])
+        .current_dir(dir.path())
+        .output()
+        .expect("doctor");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("npm hardening: package.json detected"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("ignore-scripts=true"), "{stdout}");
+    assert!(stdout.contains("min-release-age=7"), "{stdout}");
+    assert!(stdout.contains("lockfile missing"), "{stdout}");
+    assert!(stdout.contains("minimumReleaseAge"), "{stdout}");
+    assert!(stdout.contains(".npmrc"), "{stdout}");
+    assert!(stdout.contains("days"), "{stdout}");
+}
+
+#[test]
+fn doctor_accepts_npm_hardening_for_nested_package_json_project() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("packages/web")).unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::write(
+        dir.path().join("packages/web/package.json"),
+        r#"{"name":"web"}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("package-lock.json"), "{}").unwrap();
+    std::fs::write(
+        dir.path().join("renovate.json"),
+        r#"{"packageRules":[{"matchManagers":["npm"],"minimumReleaseAge":"7 days"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join(".npmrc"),
+        "ignore-scripts=true\nmin-release-age=7\n",
+    )
+    .unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["doctor"])
+        .current_dir(dir.path())
+        .output()
+        .expect("doctor");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("npm hardening: OK"), "{stdout}");
+}
+
+#[test]
+fn doctor_accepts_dependabot_npm_cooldown() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".github")).unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{"name":"demo"}"#).unwrap();
+    std::fs::write(dir.path().join("package-lock.json"), "{}").unwrap();
+    std::fs::write(
+        dir.path().join(".npmrc"),
+        "ignore-scripts=true\nmin-release-age=7\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join(".github/dependabot.yml"),
+        r#"
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["doctor"])
+        .current_dir(dir.path())
+        .output()
+        .expect("doctor");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("npm hardening: OK"), "{stdout}");
 }
 
 #[test]
