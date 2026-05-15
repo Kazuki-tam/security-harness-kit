@@ -10,9 +10,12 @@ Create a starter `shk.toml` policy file in the current directory.
 shk init
 shk init --strict
 shk init --force
+shk init --yes --no-npm-hardening
 ```
 
 `--strict` writes medium fail thresholds. `--force` overwrites an existing policy file.
+
+When `package.json` is detected, `shk init` can apply package-manager supply-chain hardening. For npm projects it writes project `.npmrc` settings such as `ignore-scripts=true` and `min-release-age=7`. For pnpm, Yarn, or Bun projects it writes the corresponding age-gate setting to `pnpm-workspace.yaml`, `.yarnrc.yml`, or `bunfig.toml`. Pass `--no-npm-hardening` to skip this step, including in `--yes` mode.
 
 `shk policy init` is also available as a longer alias:
 
@@ -168,7 +171,7 @@ shk doctor
 shk doctor --json
 ```
 
-`shk doctor` runs the available diagnostics for the current directory.
+`shk doctor` runs the available diagnostics for the current directory. The full check includes Git hooks, managed AI hooks, ignore coverage, plaintext env files, and npm/package-manager supply-chain hardening when `package.json` is present.
 
 ### `shk doctor ignore`
 
@@ -357,7 +360,7 @@ shk ci init github
 shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
-shk ci init github --shk-version v0.3.0
+shk ci init github --shk-version v0.3.1
 shk ci init github --output .github/workflows/security.yml --force
 ```
 

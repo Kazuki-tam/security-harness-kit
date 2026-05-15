@@ -60,7 +60,7 @@ macOS and Linux releases include a generated Homebrew formula (`shk-cli.rb`) as 
 brew install --formula https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk-cli.rb
 ```
 
-To install a pinned release, replace `latest/download` with `download/<tag>` (e.g. `download/v0.3.0`).
+To install a pinned release, replace `latest/download` with `download/<tag>` (e.g. `download/v0.3.1`).
 
 Intel macOS, Apple Silicon macOS, Linux x86_64/aarch64, and Windows x86_64 are supported. Scoop manifests are not published by the current `dist`-based release pipeline.
 
@@ -118,6 +118,7 @@ Source build: run `cargo clean` in the cloned repository to remove build output,
 | Source | Path | Notes |
 |--------|------|-------|
 | `shk init` / `shk policy init` | `shk.toml` | Project policy file. |
+| `shk init` with npm hardening | `.npmrc`, `pnpm-workspace.yaml`, `.yarnrc.yml`, `bunfig.toml` as applicable | Project package-manager hardening files. Remove only settings added for `ignore-scripts` or package age gates if the file also contains your own package-manager configuration. |
 | `shk scan --audit`, audit-mode hooks | `.shk/audit.log` and the `.shk/` directory | Metadata-only audit log. |
 | `shk hooks install` | `.git/hooks/pre-commit` | Managed block delimited by `# shk-managed-start` / `# shk-managed-end`. Delete the file if `shk` is the only owner, or remove just the managed block to keep other pre-commit logic. |
 | `shk hooks install-ai` (Claude Code) | `.claude/settings.json` | Remove entries tagged with `"_shk_managed": true`. Delete the file if it has no remaining entries. If you used `--apply-deny` or `--apply-sandbox`, also review the `permissions.deny` and `sandbox` settings that were merged into the same file. |

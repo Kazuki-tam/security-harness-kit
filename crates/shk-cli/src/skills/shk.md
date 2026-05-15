@@ -27,6 +27,7 @@ shk mask report.docx --output report.redacted.docx
 shk init                             # interactive first-run setup
 shk init --strict                    # stricter starter policy
 shk init --yes --tool codex --audit  # non-interactive setup with audit hooks
+shk init --yes --no-npm-hardening    # skip package-manager hardening
 shk completions zsh                  # generate shell completions
 shk status                           # concise project health summary
 shk hooks install                    # install Git pre-commit hook
@@ -180,7 +181,7 @@ shk ci init github                      # write .github/workflows/shk.yml
 shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
-shk ci init github --shk-version v0.3.0
+shk ci init github --shk-version v0.3.1
 shk ci init github --output .github/workflows/security.yml --force
 ```
 

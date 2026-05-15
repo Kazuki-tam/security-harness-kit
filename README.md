@@ -117,6 +117,7 @@ shk doctor ignore
 ```bash
 shk init
 shk init --strict
+shk init --yes --no-npm-hardening
 
 shk scan .
 shk scan . --json
@@ -140,7 +141,7 @@ shk hooks install-ai --audit
 shk ci init github
 shk ci init github --dry-run
 shk ci init github --mode audit
-shk ci init github --shk-version v0.3.0
+shk ci init github --shk-version v0.3.1
 
 shk skills install
 shk skills install --tool claude-code --global
@@ -162,6 +163,8 @@ Create a stricter starter policy:
 ```bash
 shk init --strict
 ```
+
+When `package.json` is present, `shk init` can also apply package-manager supply-chain hardening such as `ignore-scripts=true`, npm `min-release-age=7`, and equivalent pnpm/Yarn/Bun age gates. Use `--no-npm-hardening` to skip that setup in automated runs.
 
 See [Configuration](docs/configuration.md) for the full `shk.toml` reference, custom rules, and suppression options.
 
