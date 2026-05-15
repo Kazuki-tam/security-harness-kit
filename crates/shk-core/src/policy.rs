@@ -14,6 +14,8 @@ pub enum Severity {
 }
 
 impl Severity {
+    pub const VALID_VALUES: &'static str = "info, low, medium, high, critical";
+
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "info" => Some(Self::Info),
@@ -287,6 +289,8 @@ impl Default for ThresholdsSection {
 pub struct MaskSection {
     #[serde(default = "default_mask_mode")]
     pub mode: String,
+    #[serde(default = "default_mask_min_severity")]
+    pub min_severity: String,
     #[serde(default = "default_redaction")]
     pub redaction: String,
     #[serde(default = "default_preserve")]
@@ -297,6 +301,10 @@ pub struct MaskSection {
 
 fn default_mask_mode() -> String {
     "strict".into()
+}
+
+fn default_mask_min_severity() -> String {
+    "medium".into()
 }
 
 fn default_redaction() -> String {
@@ -311,6 +319,7 @@ impl Default for MaskSection {
     fn default() -> Self {
         Self {
             mode: default_mask_mode(),
+            min_severity: default_mask_min_severity(),
             redaction: default_redaction(),
             preserve_prefix: default_preserve(),
             preserve_suffix: default_preserve(),
@@ -472,6 +481,16 @@ impl Policy {
             .unwrap_or(Severity::High)
     }
 
+    pub fn mask_min_severity(&self) -> Result<Severity> {
+        Severity::parse(&self.mask.min_severity).with_context(|| {
+            format!(
+                "unsupported mask.min_severity `{}` (supported: {})",
+                self.mask.min_severity,
+                Severity::VALID_VALUES
+            )
+        })
+    }
+
     pub fn rule_engine_config(&self) -> shk_rules::RuleEngineConfig {
         shk_rules::RuleEngineConfig {
             secrets: self.rules.secrets,
@@ -545,6 +564,7 @@ pre_commit_fail_on = "medium"
 
 [mask]
 mode = "strict"
+min_severity = "medium"
 redaction = "match"
 # preserve_prefix = 4 # only when redaction = "partial"
 # preserve_suffix = 4
@@ -646,6 +666,7 @@ pre_commit_fail_on = "high"
 
 [mask]
 mode = "strict"
+min_severity = "medium"
 redaction = "match"
 # preserve_prefix = 4 # only when redaction = "partial"
 # preserve_suffix = 4
@@ -793,5 +814,11 @@ format = "dotenv"
         assert!(!cfg.env);
         assert!(cfg.internal_terms);
         assert!(!cfg.ai_context);
+    }
+
+    #[test]
+    fn default_mask_min_severity_is_medium() {
+        let policy = Policy::default();
+        assert_eq!(policy.mask_min_severity().unwrap(), Severity::Medium);
     }
 }

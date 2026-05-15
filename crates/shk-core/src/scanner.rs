@@ -1,4 +1,5 @@
 use crate::custom_rules;
+use crate::document_masker;
 use crate::finding::{Finding, ScanJsonReport, ScanSummary};
 use crate::git;
 use crate::policy::{ColorMode, Policy, Severity};
@@ -286,6 +287,12 @@ impl ScanChunk {
             deduplicated: 0,
         }
     }
+
+    fn append(&mut self, mut other: Self) {
+        self.findings.append(&mut other.findings);
+        self.suppressed += other.suppressed;
+        self.deduplicated += other.deduplicated;
+    }
 }
 
 #[cfg(test)]
@@ -482,6 +489,22 @@ fn scan_bytes_with_display(
         bytes.zeroize();
         return Ok(ScanChunk::skipped(f));
     }
+    match scan_document_bytes(scan_rel, display_rel, &bytes, prepared, include_context) {
+        Ok(Some(chunk)) => {
+            bytes.zeroize();
+            return Ok(chunk);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            let f = vec![skipped_finding(
+                "scan.file_read_error",
+                display_rel.to_string(),
+                format!("Skipped: could not read document text ({err})"),
+            )];
+            bytes.zeroize();
+            return Ok(ScanChunk::skipped(f));
+        }
+    }
     let take = prepared.policy.scan.binary_detection_bytes.min(bytes.len());
     if !prepared.policy.scan.include_binary && is_probably_binary(&bytes[..take]) {
         let f = vec![skipped_finding(
@@ -497,13 +520,60 @@ fn scan_bytes_with_display(
     if scan_rel != display_rel
         && let Ok(chunk) = &mut result
     {
-        for finding in &mut chunk.findings {
-            finding.file = display_rel.to_string();
-        }
+        rewrite_finding_paths(&mut chunk.findings, display_rel);
     }
     text.zeroize();
     bytes.zeroize();
     result
+}
+
+fn scan_document_bytes(
+    scan_rel: &str,
+    display_rel: &str,
+    bytes: &[u8],
+    prepared: &PreparedScan<'_>,
+    include_context: bool,
+) -> Result<Option<ScanChunk>> {
+    let Some(entries) = document_masker::extract_document_text_entries(scan_rel, bytes)? else {
+        return Ok(None);
+    };
+    if entries.is_empty() {
+        let f = vec![skipped_finding(
+            "scan.document_text_empty",
+            display_rel.to_string(),
+            "Skipped: document contains no extractable text".into(),
+        )];
+        return Ok(Some(ScanChunk::skipped(f)));
+    }
+
+    let mut combined = ScanChunk::empty();
+    for mut entry in entries {
+        let scan_label = document_entry_label(scan_rel, &entry.entry_path);
+        let display_label = document_entry_label(display_rel, &entry.entry_path);
+        let chunk_result = scan_text_prepared(&scan_label, &entry.text, prepared, include_context);
+        entry.text.zeroize();
+        let mut chunk = chunk_result?;
+        if scan_label != display_label {
+            rewrite_finding_paths(&mut chunk.findings, &display_label);
+        }
+        combined.append(chunk);
+    }
+
+    Ok(Some(combined))
+}
+
+fn document_entry_label(base: &str, entry_path: &str) -> String {
+    if entry_path.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}:{entry_path}")
+    }
+}
+
+fn rewrite_finding_paths(findings: &mut [Finding], display_rel: &str) {
+    for finding in findings {
+        finding.file = display_rel.to_string();
+    }
 }
 
 /// Scan a single synthetic path (stdin / AI hook payloads) relative to configured project root `root`.

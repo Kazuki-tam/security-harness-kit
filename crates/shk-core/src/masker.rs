@@ -1,5 +1,5 @@
 use crate::custom_rules;
-use crate::policy::Policy;
+use crate::policy::{Policy, Severity};
 use anyhow::{Result, bail};
 use serde::Serialize;
 use shk_rules::{RuleEngineConfig, scan_content};
@@ -28,7 +28,7 @@ pub fn mask_text(
     rel_path: &str,
     redaction: MaskRedaction,
 ) -> (String, Vec<crate::finding::Finding>) {
-    mask_text_with_custom(content, cfg, &[], rel_path, redaction)
+    mask_text_with_custom(content, cfg, &[], rel_path, redaction, Severity::Info)
 }
 
 fn mask_text_with_custom(
@@ -37,6 +37,7 @@ fn mask_text_with_custom(
     custom: &[custom_rules::CompiledCustomRule],
     rel_path: &str,
     redaction: MaskRedaction,
+    min_severity: Severity,
 ) -> (String, Vec<crate::finding::Finding>) {
     let mut findings = Vec::new();
     let ends_with_newline = content.ends_with('\n');
@@ -46,7 +47,9 @@ fn mask_text_with_custom(
             out.push('\n');
         }
         let mut ms = scan_content(line, rel_path, cfg);
+        ms.retain(|m| Severity::from(m.severity).meets_threshold(min_severity));
         let mut custom_ms = custom_rules::scan_content(line, custom);
+        custom_ms.retain(|m| m.severity.meets_threshold(min_severity));
         for m in &mut ms {
             m.line = i + 1;
         }
@@ -178,6 +181,7 @@ pub fn mask_from_policy(
             policy.mask.mode
         );
     }
+    let min_severity = policy.mask_min_severity()?;
     let cfg = policy.rule_engine_config();
     let custom = custom_rules::compile_for_policy(&policy.custom_rules, cfg.internal_terms)?;
     let redaction = match policy.mask.redaction.to_ascii_lowercase().as_str() {
@@ -190,7 +194,12 @@ pub fn mask_from_policy(
         other => bail!("unsupported mask.redaction `{other}` (supported: full, match, partial)"),
     };
     Ok(mask_text_with_custom(
-        content, &cfg, &custom, rel_path, redaction,
+        content,
+        &cfg,
+        &custom,
+        rel_path,
+        redaction,
+        min_severity,
     ))
 }
 
@@ -301,6 +310,57 @@ mod tests {
         assert!(
             err.to_string().contains("unsupported mask.redaction"),
             "{err:#}"
+        );
+    }
+
+    #[test]
+    fn mask_from_policy_rejects_unsupported_min_severity() {
+        let mut policy = Policy::default();
+        policy.mask.min_severity = "severe".into();
+        let err = mask_from_policy("hello@example.com\n", &policy, "<stdin>").unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported mask.min_severity"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn mask_from_policy_masks_medium_and_above_by_default() {
+        let policy = Policy::default();
+        let (out, findings) = mask_from_policy(
+            // not real credential: synthetic detector fixture value only
+            "contact hello@example.com\ntoken sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
+            &policy,
+            "<stdin>",
+        )
+        .unwrap();
+
+        assert!(out.contains("contact [REDACTED]"), "{out}");
+        assert!(out.contains("token [REDACTED]"), "{out}");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "secret.openai_api_key"),
+            "{findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| f.rule_id == "pii.email"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn mask_from_policy_can_raise_min_severity() {
+        let mut policy = Policy::default();
+        policy.mask.min_severity = "high".into();
+
+        let (out, findings) = mask_from_policy("contact hello@example.com\n", &policy, "<stdin>")
+            .expect("mask with high threshold");
+
+        assert_eq!(out, "contact hello@example.com\n");
+        assert!(
+            !findings.iter().any(|f| f.rule_id == "pii.email"),
+            "{findings:?}"
         );
     }
 

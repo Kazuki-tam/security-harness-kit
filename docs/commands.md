@@ -48,7 +48,7 @@ Supported shells are `bash`, `zsh`, `fish`, `powershell`, and `elvish`.
 
 ## `shk scan`
 
-Scan a repository or path for secrets, PII, and configured custom rules.
+Scan a repository or path for secrets, PII, and configured custom rules. Text is also extracted from supported document formats: `.docx`, `.xlsx`, `.pptx`, and text-layer `.pdf` files.
 
 ```bash
 shk scan
@@ -88,6 +88,12 @@ Options:
 
 Use `--preview` before a broad history scan to see the selected scope, candidate commit/path counts, unique blob count, policy-filtered blob count, and up to 10 sample `<commit>:<path>` labels. With `--json`, preview emits the same metadata as machine-readable JSON and exits `0`.
 
+Document scan notes:
+
+- Office findings are labelled as `<file>:<internal-entry>`, for example `report.docx:word/document.xml` or `workbook.xlsx:xl/sharedStrings.xml`. Use the same label in `[[allowlist]].path` when suppressing a finding by path.
+- PDF findings are labelled with the PDF file path itself, for example `report.pdf`.
+- PDF support uses the embedded text layer. Image-only PDFs are not OCRed; they produce `scan.document_text_empty` when no extractable text is found.
+
 Exit codes:
 
 | Code | Meaning |
@@ -123,9 +129,11 @@ Redact sensitive values from stdin or a file.
 shk mask < prompt.txt
 shk mask prompt.txt
 shk mask prompt.txt --output out.txt
+shk mask report.docx --output report.redacted.docx
 shk mask --json < prompt.txt
 shk mask --redaction match < prompt.txt
 shk mask --redaction partial < prompt.txt
+shk mask --min-severity medium < prompt.txt
 shk mask --hook-mode cursor < payload.json
 ```
 
@@ -139,6 +147,7 @@ Options:
 | `--redaction full` | Replace any line containing a finding with `[REDACTED_LINE]`. |
 | `--redaction match` | Replace only matched values with `[REDACTED]` (default). |
 | `--redaction partial` | Replace matched values and preserve the configured prefix/suffix. |
+| `--min-severity <severity>` | Override `[mask].min_severity` for this run. Defaults to `medium`. |
 | `--hook-mode <tool>` | Read a hook payload from stdin and print tool-specific masked hook output. |
 | `--post` | Post-tool hook mode. Requires `--hook-mode <tool>`. |
 
@@ -147,6 +156,8 @@ terminal, run it with input redirection (`shk mask < prompt.txt`) or provide a
 file path (`shk mask prompt.txt`).
 
 `mask --output` refuses sensitive env files and protected home configuration files. Binary or non-UTF-8 input is passed through unchanged in human-readable output and reported as `mask.binary_passthrough` in JSON output.
+
+Office document masking supports `.docx`, `.xlsx`, and `.pptx` files and always requires `--output` so the original document is left unchanged. JSON output reports `[DOCUMENT_WRITTEN]` as `masked_content` and includes findings from the rewritten document. PDF masking is not supported; use `shk scan` to detect text-layer PDF findings and convert or redact PDFs with a dedicated PDF tool.
 
 ## `shk doctor`
 
@@ -346,7 +357,7 @@ shk ci init github
 shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
-shk ci init github --shk-version v0.2.10
+shk ci init github --shk-version v0.3.0
 shk ci init github --output .github/workflows/security.yml --force
 ```
 
@@ -358,7 +369,7 @@ Options:
 | `--fail-on <severity>` | Severity threshold for blocking mode. Valid values: `info`, `low`, `medium`, `high` (default), `critical`. Ignored under `--mode audit` (a warning is printed). |
 | `--path <path>` | Path passed to `shk scan`. Defaults to `.`. |
 | `--repo <owner/name>` | GitHub repository hosting `shk` releases. Defaults to `Kazuki-tam/security-harness-kit`. |
-| `--shk-version <version>` | Release version to install. Accepts `latest` (default) or a SemVer-ish tag such as `v0.2.10`. |
+| `--shk-version <version>` | Release version to install. Accepts `latest` (default) or a SemVer-ish tag such as `v0.3.0`. |
 | `--installer-name <name>` | cargo-dist shell installer asset name. Defaults to `shk-cli-installer.sh`. |
 | `--output <path>` | Workflow destination path. Defaults to `.github/workflows/shk.yml`. |
 | `--dry-run` | Print the workflow YAML to stdout without writing it. |

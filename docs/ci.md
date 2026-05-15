@@ -101,11 +101,11 @@ shk ci init github --mode audit
 Pinning gives reproducible CI runs and protects against unexpected upstream behaviour changes:
 
 ```bash
-shk ci init github --shk-version v0.2.10
+shk ci init github --shk-version v0.3.0
 ```
 
 The workflow installer URL becomes
-`https://github.com/Kazuki-tam/security-harness-kit/releases/download/v0.2.10/shk-cli-installer.sh`.
+`https://github.com/Kazuki-tam/security-harness-kit/releases/download/v0.3.0/shk-cli-installer.sh`.
 Re-run `shk ci init github --shk-version <new tag> --force` to bump the pin.
 
 `--shk-version` accepts either `latest` or a SemVer-ish tag (`v?MAJOR.MINOR.PATCH[-pre]`). Other values are rejected at CLI parse time so they cannot reach the installer URL.
@@ -160,13 +160,13 @@ The installer downloads a single prebuilt binary, so a cache is usually unnecess
         id: shk-cache
         with:
           path: ~/.cargo/bin/shk
-          key: shk-${{ runner.os }}-v0.2.10
+          key: shk-${{ runner.os }}-v0.3.0
 
       - name: Install shk
         if: steps.shk-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Kazuki-tam/security-harness-kit/releases/download/v0.2.10/shk-cli-installer.sh | sh
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Kazuki-tam/security-harness-kit/releases/download/v0.3.0/shk-cli-installer.sh | sh
 ```
 
 Cache only when you have pinned `--shk-version`; caching `latest` defeats the purpose.

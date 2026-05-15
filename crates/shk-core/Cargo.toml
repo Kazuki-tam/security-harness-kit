@@ -8,7 +8,7 @@ description = "Core scanning, masking, and policy for shk"
 publish = false
 
 [dependencies]
-shk-rules = { version = "0.2.10", path = "../shk-rules" }
+shk-rules = { version = "0.3.0", path = "../shk-rules" }
 anyhow.workspace = true
 ignore.workspace = true
 rayon.workspace = true
@@ -23,6 +23,9 @@ hmac.workspace = true
 sha2.workspace = true
 chrono.workspace = true
 zeroize.workspace = true
+quick-xml.workspace = true
+zip.workspace = true
+pdf-extract.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

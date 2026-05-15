@@ -78,6 +78,7 @@ pre_commit_fail_on = "high"
 
 [mask]
 mode = "strict"
+min_severity = "medium"
 redaction = "match"
 # preserve_prefix = 4
 # preserve_suffix = 4
@@ -125,6 +126,8 @@ confirm = true
 | `follow_symlinks` | `false` | Whether scanner traversal follows symlinks. |
 | `include_binary` | `false` | Whether binary-looking files are scanned instead of skipped. |
 
+Supported document formats (`.docx`, `.xlsx`, `.pptx`, and text-layer `.pdf`) are text-extracted before binary skipping. Office findings are labelled with internal entry paths such as `report.docx:word/document.xml`; PDF findings use the PDF path itself. Image-only PDFs are not OCRed and produce `scan.document_text_empty` when no text can be extracted.
+
 ## Rule Settings
 
 | Key | Default | Behavior |
@@ -153,6 +156,7 @@ The `--fail-on` CLI option overrides the configured threshold for that command i
 | Key | Default | Behavior |
 |-----|---------|----------|
 | `mode` | `strict` | Only `strict` is supported. Other values are rejected. |
+| `min_severity` | `medium` | Minimum finding severity to redact. Use `info`, `low`, `medium`, `high`, or `critical`. |
 | `redaction` | `match` | `match` redacts only matched values; `full` redacts entire lines; `partial` preserves configured matched-value edges. |
 | `preserve_prefix` | `4` | Characters preserved at the start of a matched value when `redaction = "partial"`. |
 | `preserve_suffix` | `4` | Characters preserved at the end of a matched value when `redaction = "partial"`. |
@@ -273,6 +277,15 @@ rule_id = "secret.generic_api_key"
 path = "fixtures/**"
 reason = "Intentional test fixture"
 expires = "2026-12-31"
+```
+
+For Office document findings, match the internal entry label shown in reports:
+
+```toml
+[[allowlist]]
+rule_id = "secret.openai_api_key"
+path = "report.docx:word/document.xml"
+reason = "Intentional document fixture"
 ```
 
 Policy allowlists can also suppress by value hash:
