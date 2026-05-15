@@ -24,8 +24,8 @@ AI coding agents can read project files, run commands, and transform sensitive i
 
 `shk` can:
 
-- Scan project paths and Git-staged files for common secrets and PII.
-- Mask sensitive content from stdin or files.
+- Scan project paths and Git-staged files for common secrets and PII, including text in `.docx`, `.xlsx`, `.pptx`, and text-layer `.pdf` files.
+- Mask sensitive content from stdin, text files, and Office documents (`.docx`, `.xlsx`, `.pptx`).
 - Install Git pre-commit hooks.
 - Install managed hooks for Claude Code, Cursor, and Codex.
 - Generate a GitHub Actions workflow that runs `shk scan` on every pull request.
@@ -127,6 +127,7 @@ shk scan --git-history --ref HEAD~50..HEAD
 
 shk mask < prompt.txt
 shk mask --json < prompt.txt
+shk mask report.docx --output report.redacted.docx
 
 shk doctor
 shk doctor ignore --fix
@@ -175,6 +176,8 @@ See [Configuration](docs/configuration.md) for the full `shk.toml` reference, cu
 ## Safety Notes
 
 - Scans and masking run locally.
+- Document scanning extracts text from Office documents and text-layer PDFs. Image-only PDFs require OCR outside `shk`; when no text can be extracted, scan reports an informational skip finding.
+- Office document masking writes a new `.docx`, `.xlsx`, or `.pptx` file and requires `--output`.
 - `shk scan --git-history` scans committed blobs reachable from Git refs. Use `--preview` to inspect candidate counts before a broad history scan, and `--ref`, `--since`, or `--max-commits` to narrow the scope.
 - Built-in detection is pattern-based and includes hand-tuned `shk` rules plus generated gitleaks-derived `secret.gitleaks.*` rules; use it as an AI/local workflow guardrail, not as a complete replacement for dedicated secret scanning platforms.
 - JSON reports use `redacted_value: "[REDACTED]"`.

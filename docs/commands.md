@@ -48,7 +48,7 @@ Supported shells are `bash`, `zsh`, `fish`, `powershell`, and `elvish`.
 
 ## `shk scan`
 
-Scan a repository or path for secrets, PII, and configured custom rules.
+Scan a repository or path for secrets, PII, and configured custom rules. Text is also extracted from supported document formats: `.docx`, `.xlsx`, `.pptx`, and text-layer `.pdf` files.
 
 ```bash
 shk scan
@@ -88,6 +88,12 @@ Options:
 
 Use `--preview` before a broad history scan to see the selected scope, candidate commit/path counts, unique blob count, policy-filtered blob count, and up to 10 sample `<commit>:<path>` labels. With `--json`, preview emits the same metadata as machine-readable JSON and exits `0`.
 
+Document scan notes:
+
+- Office findings are labelled as `<file>:<internal-entry>`, for example `report.docx:word/document.xml` or `workbook.xlsx:xl/sharedStrings.xml`. Use the same label in `[[allowlist]].path` when suppressing a finding by path.
+- PDF findings are labelled with the PDF file path itself, for example `report.pdf`.
+- PDF support uses the embedded text layer. Image-only PDFs are not OCRed; they produce `scan.document_text_empty` when no extractable text is found.
+
 Exit codes:
 
 | Code | Meaning |
@@ -123,6 +129,7 @@ Redact sensitive values from stdin or a file.
 shk mask < prompt.txt
 shk mask prompt.txt
 shk mask prompt.txt --output out.txt
+shk mask report.docx --output report.redacted.docx
 shk mask --json < prompt.txt
 shk mask --redaction match < prompt.txt
 shk mask --redaction partial < prompt.txt
@@ -147,6 +154,8 @@ terminal, run it with input redirection (`shk mask < prompt.txt`) or provide a
 file path (`shk mask prompt.txt`).
 
 `mask --output` refuses sensitive env files and protected home configuration files. Binary or non-UTF-8 input is passed through unchanged in human-readable output and reported as `mask.binary_passthrough` in JSON output.
+
+Office document masking supports `.docx`, `.xlsx`, and `.pptx` files and always requires `--output` so the original document is left unchanged. JSON output reports `[DOCUMENT_WRITTEN]` as `masked_content` and includes findings from the rewritten document. PDF masking is not supported; use `shk scan` to detect text-layer PDF findings and convert or redact PDFs with a dedicated PDF tool.
 
 ## `shk doctor`
 

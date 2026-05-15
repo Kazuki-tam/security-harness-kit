@@ -131,6 +131,19 @@ In human-readable output, informational skip findings are hidden unless `--verbo
 
 Use `--include-binary` or `scan.include_binary = true` to opt into scanning binary-looking files.
 
+## Document Text Extraction
+
+Before binary skipping, `shk scan` attempts text extraction for supported document formats:
+
+- `.docx`: scans `word/document.xml`.
+- `.xlsx`: scans shared strings and worksheet inline strings.
+- `.pptx`: scans slide, notes slide, and comment text.
+- `.pdf`: scans the embedded text layer.
+
+Office findings use internal entry labels such as `report.docx:word/document.xml` or `workbook.xlsx:xl/sharedStrings.xml`. PDF findings use the PDF file path itself. Path-based allowlists should match those labels.
+
+The extractor handles common Office rich-text splits by joining text within logical document text groups before scanning. PDF support does not perform OCR; image-only PDFs report `scan.document_text_empty` when no text can be extracted.
+
 ## JSON Output
 
 ```bash
@@ -180,6 +193,8 @@ JSON scans include redacted surrounding context when context lines are available
 - `redaction = "partial"` replaces matched values with a `[REDACTED]` marker while preserving `preserve_prefix` and `preserve_suffix` characters.
 
 Binary or non-UTF-8 input is not scanned by `shk mask`. Human output passes it through unchanged; JSON output reports `mask.binary_passthrough` and uses `[BINARY_PASSTHROUGH]` as masked content.
+
+Office document masking supports `.docx`, `.xlsx`, and `.pptx` with `--output`; it writes a new document and leaves the original unchanged. PDF masking is not supported.
 
 ## Audit Log
 

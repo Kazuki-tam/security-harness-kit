@@ -19,25 +19,39 @@ PII, masks sensitive content, manages AI tool hooks, and runs project diagnostic
 shk scan [PATH]                      # scan directory (default: .)
 shk scan . --json                    # JSON report
 shk scan --staged                    # scan git-staged files (pre-commit)
+shk scan --git-history --preview     # inspect history scan scope
+shk scan --git-history --ref HEAD~50..HEAD
 shk mask < file.txt                  # mask PII/secrets from stdin
 shk mask file.txt --json             # JSON output with findings + masked content
+shk mask report.docx --output report.redacted.docx
+shk init                             # interactive first-run setup
+shk init --strict                    # stricter starter policy
+shk completions zsh                  # generate shell completions
+shk status                           # concise project health summary
+shk hooks install                    # install Git pre-commit hook
 shk hooks install-ai                 # install hooks for Claude Code / Cursor / Codex
 shk hooks install-ai --tool claude-code --global
+shk hooks install-ai --apply-sandbox # harden supported tool sandbox settings
 shk hooks install-ai --dry-run       # preview changes
+shk ci init github --dry-run         # preview GitHub Actions workflow
 shk doctor                           # full project diagnostics
 shk doctor ignore --fix              # fix missing .gitignore entries
+shk doctor env --dotenvx             # include dotenvx artifact checks
+shk doctor version                   # check latest release
 shk env dotenvx import-keys .env.keys # store dotenvx private keys in OS credential store
 shk env dotenvx run -- npm test       # inject stored keys only into child process
+shk env dotenvx delete --all
 shk secrets push --profile prod       # push dotenv payload to AWS/GCP secret manager
 shk secrets push --profile prod --dry-run
-shk skills install                   # install this skill (claude-code + codex)
+shk skills install                   # install this skill (claude-code + codex/cursor)
 shk skills install --tool claude-code --global
 shk skills install --tool codex --global
+shk skills install --tool cursor --global
 ```
 
 ## Scanning
 
-Run `shk scan .` to detect secrets, API keys, and PII in the current directory.
+Run `shk scan .` to detect secrets, API keys, and PII in the current directory. Scan also extracts text from `.docx`, `.xlsx`, `.pptx`, and text-layer `.pdf` files.
 
 Exit codes:
 - 0: no findings at or above threshold
@@ -49,6 +63,16 @@ Useful flags:
 - `--verbose` — show informational skip findings
 - `--json` — machine-readable JSON report
 - `--staged` — only scan git-staged files
+- `--git-history` — scan committed blobs reachable from Git refs
+- `--preview` — with `--git-history`, show candidate counts without scanning contents
+- `--ref`, `--since`, `--max-commits` — narrow Git history scans
+- `--include-binary` — scan binary-looking files instead of reporting skip findings
+- `--follow-symlinks` — follow symlinks during traversal
+
+Document notes:
+- Office findings are labelled with internal entries such as `report.docx:word/document.xml`.
+- PDF findings use the PDF path itself.
+- Image-only PDFs are not OCRed; no extractable text is reported as an informational skip finding.
 
 ## Masking
 
@@ -60,6 +84,17 @@ shk mask prompt.txt | claude
 
 # Partial redaction (preserve 4-char prefix/suffix)
 shk mask --redaction partial < data.txt
+
+# Redact an Office document into a new file
+shk mask report.docx --output report.redacted.docx
+```
+
+Office document masking supports `.docx`, `.xlsx`, and `.pptx` and requires `--output`. PDF masking is not supported.
+
+Hook-mode masking:
+```bash
+shk mask --hook-mode cursor < payload.json
+shk mask --hook-mode claude-code --post < response_payload.json
 ```
 
 ## Local dotenvx key storage
@@ -72,7 +107,9 @@ shk env dotenvx list
 shk env dotenvx run -- npm test
 shk env dotenvx run -f .env.production -- npm start
 shk env dotenvx run --env production -- npm start
+shk env dotenvx run --key DOTENV_PRIVATE_KEY_PRODUCTION -- npm start
 shk env dotenvx delete --env production
+shk env dotenvx delete --key DOTENV_PRIVATE_KEY_PRODUCTION
 shk env dotenvx delete --all
 ```
 
@@ -119,7 +156,31 @@ shk hooks install-ai --audit                     # non-blocking, writes .shk/aud
 shk hooks install-ai --tool claude-code
 shk hooks install-ai --tool claude-code --global
 shk hooks install-ai --tool claude-code --apply-deny
+shk hooks install-ai --apply-sandbox
+shk hooks install-ai --tool cursor --fail-closed
 ```
+
+Important hook behavior:
+- Without `--tool`, installs managed hooks for Claude Code, Codex, and Cursor.
+- `--audit` makes installed hooks non-blocking and writes metadata-only entries to `.shk/audit.log`.
+- `--apply-sandbox` hardens supported tool sandbox settings. Cursor has no local sandbox setting in `hooks.json`, so this sets managed hooks fail-closed.
+- Pre-hook mode runs action guard before content scanning. Tune with `[action_guard]` in `shk.toml`.
+
+## Git hook and CI integration
+
+```bash
+shk hooks install                       # install Git pre-commit hook
+shk hooks install --pre-commit
+
+shk ci init github                      # write .github/workflows/shk.yml
+shk ci init github --dry-run
+shk ci init github --mode audit
+shk ci init github --fail-on critical
+shk ci init github --shk-version v0.2.10
+shk ci init github --output .github/workflows/security.yml --force
+```
+
+The generated workflow runs `shk scan . --json --fail-on high` by default. Use audit mode for a non-blocking rollout.
 
 ## External data sources and MCP integration
 
@@ -208,9 +269,11 @@ Apply these rules regardless of whether shk reports findings:
 
 ```bash
 shk doctor                   # full suite: hooks, ignore, env, AI tool status
+shk doctor --json
 shk doctor ignore            # check .gitignore / AI tool ignore coverage
 shk doctor ignore --fix      # append missing patterns to .gitignore
 shk doctor env               # detect plaintext .env secrets
+shk doctor env --dotenvx     # include dotenvx artifact checks
 shk doctor version           # check for shk updates
 ```
 
@@ -223,9 +286,23 @@ shk doctor version           # check for shk updates
 secrets = true
 pii = true
 pii_languages = ["en", "ja"]
+env = true
+ai_context = true
+internal_terms = false
+
+[action_guard]
+enabled = true
+profile = "recommended" # minimal | recommended | strict
+allow = []
+deny = []
 
 [thresholds]
 default_fail_on = "high"
+scan_fail_on = "high"
+pre_commit_fail_on = "high"
+
+[doctor.ignore]
+required_patterns = [".env", ".env.*", "!.env.example", "secrets/**", "credentials/**"]
 
 [secrets.profiles.prod]
 provider = "aws"
@@ -241,7 +318,14 @@ path = "fixtures/**"
 reason = "Test fixture"
 ```
 
-Inline suppression: append `# shk-ignore` or `# shk-ignore-next-line <rule_id>` to a line.
+Suppression and ignore methods agents should know:
+- Same-line suppression: `value # shk-ignore <rule_id>` or `value // shk-ignore <rule_id>`.
+- Next-line suppression: `# shk-ignore-next-line <rule_id>` or `// shk-ignore-next-line <rule_id>`.
+- Markdown-friendly suppression: `<!-- shk-ignore-next-line <rule_id> -->` before the line, or `value <!-- shk-ignore <rule_id> -->` on the same line.
+- Omit `<rule_id>` only when intentionally suppressing all rules on the target line.
+- Prefer `[[allowlist]]` for durable project policy. Use `path` + `rule_id` when possible; use `value_hash` for value-specific suppression. Never put raw secret values in `shk.toml`.
+- Office document findings use paths such as `report.docx:word/document.xml` in reports and allowlists.
+- Scanner skip notices and policy warnings with kind `ignore` are not file-content findings, so they are not suppressed by inline comments. Use scan settings, `[[allowlist]]`, or `[doctor.ignore]` as appropriate.
 
 For `shk secrets push`, profile keys are limited to supported fields such as `provider`, `mode`,
 `target`, `target_prefix`, `source`, `region`, `project`, `location`, `audit`, `confirm`,
@@ -252,11 +336,14 @@ For `shk secrets push`, profile keys are limited to supported fields such as `pr
 ```bash
 shk skills list                              # show available built-in skills
 shk skills status                            # check installation status
-shk skills install                           # install for all tools (claude-code + codex)
+shk skills install                           # install for all tools (claude-code + codex/cursor)
 shk skills install --tool claude-code        # .claude/skills/shk.md
 shk skills install --tool codex             # .agents/skills/shk/SKILL.md
+shk skills install --tool cursor            # .agents/skills/shk/SKILL.md
+shk skills install --tool all --global
 shk skills install --tool claude-code --global   # ~/.claude/skills/shk.md
 shk skills install --tool codex --global    # ~/.agents/skills/shk/SKILL.md
+shk skills install --tool cursor --global   # ~/.agents/skills/shk/SKILL.md
 shk skills install --force                  # overwrite existing
 shk skills install --dry-run                # preview without writing
 ```

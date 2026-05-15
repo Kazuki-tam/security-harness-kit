@@ -125,6 +125,8 @@ confirm = true
 | `follow_symlinks` | `false` | Whether scanner traversal follows symlinks. |
 | `include_binary` | `false` | Whether binary-looking files are scanned instead of skipped. |
 
+Supported document formats (`.docx`, `.xlsx`, `.pptx`, and text-layer `.pdf`) are text-extracted before binary skipping. Office findings are labelled with internal entry paths such as `report.docx:word/document.xml`; PDF findings use the PDF path itself. Image-only PDFs are not OCRed and produce `scan.document_text_empty` when no text can be extracted.
+
 ## Rule Settings
 
 | Key | Default | Behavior |
@@ -273,6 +275,15 @@ rule_id = "secret.generic_api_key"
 path = "fixtures/**"
 reason = "Intentional test fixture"
 expires = "2026-12-31"
+```
+
+For Office document findings, match the internal entry label shown in reports:
+
+```toml
+[[allowlist]]
+rule_id = "secret.openai_api_key"
+path = "report.docx:word/document.xml"
+reason = "Intentional document fixture"
 ```
 
 Policy allowlists can also suppress by value hash:
