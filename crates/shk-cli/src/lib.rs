@@ -8,6 +8,7 @@ mod doctor;
 mod exit;
 mod hook_output;
 mod hooks;
+mod npm_hardening;
 mod output;
 mod policy_cmd;
 mod safety;
@@ -53,6 +54,7 @@ pub fn run() -> Result<()> {
             no_git_hook,
             no_ai_hooks,
             no_skills,
+            no_npm_hardening,
             global,
             apply_sandbox,
         } => commands::init::run(
@@ -66,6 +68,7 @@ pub fn run() -> Result<()> {
                 no_git_hook,
                 no_ai_hooks,
                 no_skills,
+                no_npm_hardening,
                 global,
                 apply_sandbox,
             },

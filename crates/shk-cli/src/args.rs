@@ -46,6 +46,9 @@ pub enum Commands {
         /// Skip bundled agent skill setup.
         #[arg(long)]
         no_skills: bool,
+        /// Skip npm/package-manager supply-chain hardening setup.
+        #[arg(long)]
+        no_npm_hardening: bool,
         /// Write AI hooks and skills to user-level config directories.
         #[arg(long)]
         global: bool,
