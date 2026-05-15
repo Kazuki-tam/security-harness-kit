@@ -107,6 +107,9 @@ pub enum Commands {
         output: Option<PathBuf>,
         #[arg(long, value_enum)]
         redaction: Option<RedactionMode>,
+        /// Minimum finding severity to mask.
+        #[arg(long, value_enum, value_name = "SEVERITY")]
+        min_severity: Option<SeverityArg>,
         /// Interpret stdin as AI tool hook JSON and return masked hook output.
         #[arg(long, value_enum)]
         hook_mode: Option<AiTool>,

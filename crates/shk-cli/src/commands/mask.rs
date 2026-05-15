@@ -1,4 +1,4 @@
-use crate::args::{AiTool, RedactionMode};
+use crate::args::{AiTool, RedactionMode, SeverityArg};
 use crate::hook_output;
 use crate::safety;
 use anyhow::{Context, Result, bail};
@@ -10,37 +10,50 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroize;
 
-pub fn run(
-    project_root: &Path,
-    file: Option<PathBuf>,
-    json: bool,
-    output: Option<PathBuf>,
-    redaction: Option<RedactionMode>,
-    hook_mode: Option<AiTool>,
-    post: bool,
-) -> Result<()> {
-    if let Some(tool) = hook_mode {
-        if file.is_some() || output.is_some() || json {
+#[derive(Clone, Debug)]
+pub struct MaskInvocation {
+    pub project_root: PathBuf,
+    pub file: Option<PathBuf>,
+    pub json: bool,
+    pub output: Option<PathBuf>,
+    pub redaction: Option<RedactionMode>,
+    pub min_severity: Option<SeverityArg>,
+    pub hook_mode: Option<AiTool>,
+    pub post: bool,
+}
+
+pub fn run(inv: MaskInvocation) -> Result<()> {
+    if let Some(tool) = inv.hook_mode {
+        if inv.file.is_some() || inv.output.is_some() || inv.json {
             bail!("`mask --hook-mode` cannot be combined with FILE, `--output`, or `--json`");
         }
-        return run_hook_mode(project_root, tool, post);
+        return run_hook_mode(
+            &inv.project_root,
+            tool,
+            inv.post,
+            inv.redaction,
+            inv.min_severity,
+        );
     }
-    if post {
+    if inv.post {
         bail!("`mask --post` requires `--hook-mode <tool>`");
     }
-    if let Some(outp) = output.as_ref() {
-        safety::require_project_policy(project_root, "mask --output")?;
+    if let Some(outp) = inv.output.as_ref() {
+        safety::require_project_policy(&inv.project_root, "mask --output")?;
         safety::ensure_writable_path_allowed(outp)?;
     }
 
-    let (mut policy, _) = Policy::load_from_dir(project_root)?;
-    apply_redaction_override(&mut policy, redaction);
+    let (mut policy, _) = Policy::load_from_dir(&inv.project_root)?;
+    apply_redaction_override(&mut policy, inv.redaction);
+    apply_min_severity_override(&mut policy, inv.min_severity);
 
-    if let Some((input, format)) = file
+    if let Some((input, format)) = inv
+        .file
         .as_ref()
         .and_then(|p| office_format(p).map(|format| (p, format)))
     {
-        let outp = output
+        let outp = inv
+            .output
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Office document masking requires --output"))?;
         let result = match format {
@@ -48,7 +61,7 @@ pub fn run(
             OfficeFormat::Xlsx => shk_core::document_masker::mask_xlsx(input, outp, &policy)?,
             OfficeFormat::Pptx => shk_core::document_masker::mask_pptx(input, outp, &policy)?,
         };
-        if json {
+        if inv.json {
             let out = MaskJsonOutput {
                 masked_content: "[DOCUMENT_WRITTEN]".into(),
                 findings: result.findings,
@@ -60,11 +73,11 @@ pub fn run(
         return Ok(());
     }
 
-    let (rel_label, mut bytes) = read_mask_input(file.as_ref())?;
+    let (rel_label, mut bytes) = read_mask_input(inv.file.as_ref())?;
 
     if is_binary_or_non_utf8(&bytes, policy.scan.binary_detection_bytes) {
         let findings = vec![binary_passthrough_finding(&rel_label)];
-        let result: Result<()> = if json {
+        let result: Result<()> = if inv.json {
             let out = MaskJsonOutput {
                 masked_content: "[BINARY_PASSTHROUGH]".into(),
                 findings,
@@ -82,7 +95,7 @@ pub fn run(
                 Err(e) => Err(e.into()),
             }
         };
-        let output_result: Result<()> = if let Some(outp) = output {
+        let output_result: Result<()> = if let Some(outp) = inv.output {
             match fs::write(&outp, &bytes) {
                 Ok(()) => Ok(()),
                 Err(e) => Err(e.into()),
@@ -100,7 +113,7 @@ pub fn run(
     let mask_result = shk_core::masker::mask_from_policy(&buf, &policy, &rel_label);
     buf.zeroize();
     let (masked, findings) = mask_result?;
-    if json {
+    if inv.json {
         let out = MaskJsonOutput {
             masked_content: masked.clone(),
             findings,
@@ -109,7 +122,7 @@ pub fn run(
     } else {
         print!("{masked}");
     }
-    if let Some(outp) = output {
+    if let Some(outp) = inv.output {
         fs::write(&outp, masked)?;
     }
     Ok(())
@@ -142,6 +155,12 @@ fn apply_redaction_override(policy: &mut Policy, redaction: Option<RedactionMode
     }
 }
 
+fn apply_min_severity_override(policy: &mut Policy, min_severity: Option<SeverityArg>) {
+    if let Some(severity) = min_severity {
+        policy.mask.min_severity = severity.as_str().into();
+    }
+}
+
 fn read_mask_input(file: Option<&PathBuf>) -> Result<(String, Vec<u8>)> {
     let mut bytes = Vec::new();
     let rel_label = if let Some(f) = file {
@@ -161,7 +180,13 @@ fn read_mask_input(file: Option<&PathBuf>) -> Result<(String, Vec<u8>)> {
     Ok((rel_label, bytes))
 }
 
-fn run_hook_mode(cwd: &Path, tool: AiTool, post: bool) -> Result<()> {
+fn run_hook_mode(
+    cwd: &Path,
+    tool: AiTool,
+    post: bool,
+    redaction: Option<RedactionMode>,
+    min_severity: Option<SeverityArg>,
+) -> Result<()> {
     let mut stdin_raw = Vec::new();
     let mut stdin = io::stdin();
     if stdin.is_terminal() {
@@ -186,7 +211,9 @@ fn run_hook_mode(cwd: &Path, tool: AiTool, post: bool) -> Result<()> {
     );
     stdin_str.zeroize();
     let (disp, mut body) = hook_body_result?;
-    let (policy, _) = Policy::load_from_dir(&repo_root)?;
+    let (mut policy, _) = Policy::load_from_dir(&repo_root)?;
+    apply_redaction_override(&mut policy, redaction);
+    apply_min_severity_override(&mut policy, min_severity);
     let mask_result = shk_core::masker::mask_from_policy(&body, &policy, &disp);
     body.zeroize();
     let (mut masked, findings) = mask_result.context("hook mask failed")?;

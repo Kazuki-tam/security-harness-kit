@@ -176,6 +176,33 @@ fn mask_partial_redaction_json_preserves_edges() {
 }
 
 #[test]
+fn mask_min_severity_filters_lower_risk_findings() {
+    use std::io::Write;
+
+    let out = Command::new(shk_bin())
+        .args(["mask", "--json", "--min-severity", "high"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin
+                .as_mut()
+                .unwrap()
+                .write_all(b"contact hello@example.com\n")?;
+            c.wait_with_output()
+        })
+        .expect("mask with high min severity");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["masked_content"], "contact hello@example.com\n");
+    assert!(v["findings"].as_array().unwrap().is_empty(), "{v}");
+}
+
+#[test]
 fn mask_binary_stdin_passes_through() {
     use std::io::Write;
 

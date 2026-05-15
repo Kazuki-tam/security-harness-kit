@@ -133,6 +133,7 @@ shk mask report.docx --output report.redacted.docx
 shk mask --json < prompt.txt
 shk mask --redaction match < prompt.txt
 shk mask --redaction partial < prompt.txt
+shk mask --min-severity medium < prompt.txt
 shk mask --hook-mode cursor < payload.json
 ```
 
@@ -146,6 +147,7 @@ Options:
 | `--redaction full` | Replace any line containing a finding with `[REDACTED_LINE]`. |
 | `--redaction match` | Replace only matched values with `[REDACTED]` (default). |
 | `--redaction partial` | Replace matched values and preserve the configured prefix/suffix. |
+| `--min-severity <severity>` | Override `[mask].min_severity` for this run. Defaults to `medium`. |
 | `--hook-mode <tool>` | Read a hook payload from stdin and print tool-specific masked hook output. |
 | `--post` | Post-tool hook mode. Requires `--hook-mode <tool>`. |
 
