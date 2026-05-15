@@ -33,9 +33,34 @@ pub fn run(
         safety::ensure_writable_path_allowed(outp)?;
     }
 
-    let (rel_label, mut bytes) = read_mask_input(file.as_ref())?;
     let (mut policy, _) = Policy::load_from_dir(project_root)?;
     apply_redaction_override(&mut policy, redaction);
+
+    if let Some((input, format)) = file
+        .as_ref()
+        .and_then(|p| office_format(p).map(|format| (p, format)))
+    {
+        let outp = output
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Office document masking requires --output"))?;
+        let result = match format {
+            OfficeFormat::Docx => shk_core::document_masker::mask_docx(input, outp, &policy)?,
+            OfficeFormat::Xlsx => shk_core::document_masker::mask_xlsx(input, outp, &policy)?,
+            OfficeFormat::Pptx => shk_core::document_masker::mask_pptx(input, outp, &policy)?,
+        };
+        if json {
+            let out = MaskJsonOutput {
+                masked_content: "[DOCUMENT_WRITTEN]".into(),
+                findings: result.findings,
+            };
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        } else {
+            println!("Wrote masked document to {}", outp.display());
+        }
+        return Ok(());
+    }
+
+    let (rel_label, mut bytes) = read_mask_input(file.as_ref())?;
 
     if is_binary_or_non_utf8(&bytes, policy.scan.binary_detection_bytes) {
         let findings = vec![binary_passthrough_finding(&rel_label)];
@@ -88,6 +113,22 @@ pub fn run(
         fs::write(&outp, masked)?;
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum OfficeFormat {
+    Docx,
+    Xlsx,
+    Pptx,
+}
+
+fn office_format(path: &Path) -> Option<OfficeFormat> {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("docx") => Some(OfficeFormat::Docx),
+        Some(ext) if ext.eq_ignore_ascii_case("xlsx") => Some(OfficeFormat::Xlsx),
+        Some(ext) if ext.eq_ignore_ascii_case("pptx") => Some(OfficeFormat::Pptx),
+        _ => None,
+    }
 }
 
 fn apply_redaction_override(policy: &mut Policy, redaction: Option<RedactionMode>) {

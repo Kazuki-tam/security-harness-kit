@@ -23,6 +23,8 @@ hmac.workspace = true
 sha2.workspace = true
 chrono.workspace = true
 zeroize.workspace = true
+quick-xml.workspace = true
+zip.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

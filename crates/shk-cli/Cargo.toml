@@ -36,3 +36,4 @@ tempfile.workspace = true
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"] }
 
 [dev-dependencies]
+zip.workspace = true

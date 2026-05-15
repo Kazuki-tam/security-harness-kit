@@ -6,6 +6,10 @@ fn shk_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_shk"))
 }
 
+fn synthetic_openai_key(seed: char) -> String {
+    format!("sk-proj-{seed}bcdefghijklmnopqrstuvwxyz0123456789")
+}
+
 fn init_git_repo(dir: &Path) {
     let init = Command::new("git")
         .args(["init"])
@@ -188,6 +192,226 @@ fn mask_binary_stdin_passes_through() {
         .expect("mask binary");
     assert!(out.status.success());
     assert_eq!(out.stdout, data);
+}
+
+#[test]
+fn mask_docx_requires_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("report.docx");
+    let secret = synthetic_openai_key('a');
+    create_minimal_docx(&input, &secret);
+
+    let out = Command::new(shk_bin())
+        .args(["mask", input.to_str().unwrap()])
+        .current_dir(dir.path())
+        .output()
+        .expect("mask docx without output");
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Office document masking requires --output"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn mask_docx_writes_redacted_output() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let input = dir.path().join("report.docx");
+    let output = dir.path().join("report.redacted.docx");
+    let secret = synthetic_openai_key('a');
+    create_minimal_docx(&input, &format!("token={secret}"));
+
+    let out = Command::new(shk_bin())
+        .args([
+            "mask",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("mask docx");
+
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["masked_content"], "[DOCUMENT_WRITTEN]");
+    assert!(!v["findings"].as_array().unwrap().is_empty());
+
+    let redacted = read_docx_document_xml(&output);
+    assert!(redacted.contains("[REDACTED]"), "{redacted}");
+    assert!(!redacted.contains(&secret), "{redacted}");
+
+    let original = read_docx_document_xml(&input);
+    assert!(original.contains(&secret), "{original}");
+}
+
+#[test]
+fn mask_xlsx_writes_redacted_output() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let input = dir.path().join("workbook.xlsx");
+    let output = dir.path().join("workbook.redacted.xlsx");
+    let shared_secret = synthetic_openai_key('a');
+    let inline_secret = synthetic_openai_key('b');
+    create_minimal_xlsx(&input, &shared_secret, &inline_secret);
+
+    let out = Command::new(shk_bin())
+        .args([
+            "mask",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("mask xlsx");
+
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["masked_content"], "[DOCUMENT_WRITTEN]");
+    assert!(v["findings"].as_array().unwrap().len() >= 2, "{v}");
+
+    let shared = read_zip_entry(&output, "xl/sharedStrings.xml");
+    let sheet = read_zip_entry(&output, "xl/worksheets/sheet1.xml");
+    assert!(shared.contains("[REDACTED]"), "{shared}");
+    assert!(sheet.contains("[REDACTED]"), "{sheet}");
+    assert!(!shared.contains(&shared_secret), "{shared}");
+    assert!(!sheet.contains(&inline_secret), "{sheet}");
+}
+
+#[test]
+fn mask_pptx_writes_redacted_output() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let input = dir.path().join("slides.pptx");
+    let output = dir.path().join("slides.redacted.pptx");
+    let secret = synthetic_openai_key('a');
+    create_minimal_pptx(&input, &secret);
+
+    let out = Command::new(shk_bin())
+        .args([
+            "mask",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("mask pptx");
+
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["masked_content"], "[DOCUMENT_WRITTEN]");
+    assert!(!v["findings"].as_array().unwrap().is_empty());
+
+    let slide = read_zip_entry(&output, "ppt/slides/slide1.xml");
+    assert!(slide.contains("[REDACTED]"), "{slide}");
+    assert!(!slide.contains(&secret), "{slide}");
+}
+
+fn create_minimal_docx(path: &Path, text: &str) {
+    let file = std::fs::File::create(path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let options =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    zip.start_file("[Content_Types].xml", options).unwrap();
+    zip.write_all(
+        br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+    )
+    .unwrap();
+
+    zip.start_file("word/document.xml", options).unwrap();
+    write!(
+        zip,
+        r#"<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>"#
+    )
+    .unwrap();
+    zip.finish().unwrap();
+}
+
+fn create_minimal_xlsx(path: &Path, shared_text: &str, inline_text: &str) {
+    let file = std::fs::File::create(path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let options =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    zip.start_file("[Content_Types].xml", options).unwrap();
+    zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#).unwrap();
+
+    zip.start_file("xl/workbook.xml", options).unwrap();
+    zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/></sheets></workbook>"#).unwrap();
+
+    zip.start_file("xl/sharedStrings.xml", options).unwrap();
+    write!(
+        zip,
+        r#"<?xml version="1.0" encoding="UTF-8"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>{shared_text}</t></si></sst>"#
+    )
+    .unwrap();
+
+    zip.start_file("xl/worksheets/sheet1.xml", options).unwrap();
+    write!(
+        zip,
+        r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{inline_text}</t></is></c></row></sheetData></worksheet>"#
+    )
+    .unwrap();
+    zip.finish().unwrap();
+}
+
+fn create_minimal_pptx(path: &Path, text: &str) {
+    let file = std::fs::File::create(path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let options =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    zip.start_file("[Content_Types].xml", options).unwrap();
+    zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#).unwrap();
+
+    zip.start_file("ppt/presentation.xml", options).unwrap();
+    zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldIdLst/></p:presentation>"#).unwrap();
+
+    zip.start_file("ppt/slides/slide1.xml", options).unwrap();
+    write!(
+        zip,
+        r#"<?xml version="1.0" encoding="UTF-8"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#
+    )
+    .unwrap();
+    zip.finish().unwrap();
+}
+
+fn read_docx_document_xml(path: &Path) -> String {
+    read_zip_entry(path, "word/document.xml")
+}
+
+fn read_zip_entry(path: &Path, name: &str) -> String {
+    let file = std::fs::File::open(path).unwrap();
+    let mut zip = zip::ZipArchive::new(file).unwrap();
+    let mut entry = zip.by_name(name).unwrap();
+    let mut body = String::new();
+    use std::io::Read;
+    entry.read_to_string(&mut body).unwrap();
+    body
 }
 
 #[test]
