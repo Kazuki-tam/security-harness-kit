@@ -107,8 +107,12 @@ pub fn run(cwd: &Path, args: InitArgs) -> Result<()> {
         if npm_status.has_npm_projects() {
             println!("Skipped npm supply-chain hardening");
         }
-    } else if npm_status.has_npm_projects()
-        && prompt.confirm("Apply npm supply-chain hardening?", true)?
+    } else if npm_status.has_npm_projects() && {
+        println!(
+            "Note: ignore-scripts=true may break packages that require native compilation (e.g. sharp, bcrypt). Verify after applying."
+        );
+        prompt.confirm("Apply npm supply-chain hardening?", true)?
+    }
     {
         for path in npm_status.apply_paths() {
             safety::ensure_writable_path_allowed(path)?;
