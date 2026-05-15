@@ -38,6 +38,7 @@ zeroize = "1.8"
 dialoguer = "0.11"
 quick-xml = "0.31"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
+pdf-extract = "0.10.0"
 
 # The profile that 'dist' will build with
 [profile.dist]

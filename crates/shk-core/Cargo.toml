@@ -25,6 +25,7 @@ chrono.workspace = true
 zeroize.workspace = true
 quick-xml.workspace = true
 zip.workspace = true
+pdf-extract.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

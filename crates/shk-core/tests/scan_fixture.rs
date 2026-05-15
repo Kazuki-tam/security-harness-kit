@@ -2,7 +2,8 @@ use shk_core::policy::{Policy, Severity};
 use shk_core::scanner::{ScanOptions, scan_path};
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 fn default_scan_options() -> ScanOptions {
     ScanOptions {
@@ -184,6 +185,147 @@ fn scan_reports_binary_skips() {
     );
 }
 
+#[test]
+fn scan_detects_docx_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("report.docx");
+    let secret = synthetic_openai_key('a');
+    create_minimal_docx(&file, &secret);
+
+    let res = scan_path(&file, default_scan_options()).expect("scan docx");
+
+    assert!(
+        has_finding(
+            &res,
+            "secret.openai_api_key",
+            "report.docx:word/document.xml"
+        ),
+        "{:?}",
+        res.findings
+    );
+    assert!(
+        !has_finding(&res, "scan.binary_skipped", "report.docx"),
+        "{:?}",
+        res.findings
+    );
+}
+
+#[test]
+fn scan_allows_office_entry_path_suppression() {
+    let dir = tempfile::tempdir().unwrap();
+    write_policy(
+        dir.path(),
+        r#"[[allowlist]]
+rule_id = "secret.openai_api_key"
+path = "report.docx:word/document.xml"
+reason = "fixture"
+"#,
+    );
+    let file = dir.path().join("report.docx");
+    let secret = synthetic_openai_key('a');
+    create_minimal_docx(&file, &secret);
+
+    let res = scan_path(&file, default_scan_options()).expect("scan docx");
+
+    assert!(
+        !has_rule(&res, "secret.openai_api_key"),
+        "{:?}",
+        res.findings
+    );
+    assert_eq!(res.suppressed, 1, "{:?}", res.findings);
+}
+
+#[test]
+fn scan_detects_xlsx_content_split_across_rich_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("workbook.xlsx");
+    let secret = synthetic_openai_key('a');
+    let (left, right) = secret.split_at(9);
+    create_minimal_xlsx(
+        &file,
+        &format!("{left}</t><r><t>{right}</t></r><t>"),
+        "clean",
+    );
+
+    let res = scan_path(&file, default_scan_options()).expect("scan xlsx");
+
+    assert!(
+        has_finding(
+            &res,
+            "secret.openai_api_key",
+            "workbook.xlsx:xl/sharedStrings.xml"
+        ),
+        "{:?}",
+        res.findings
+    );
+}
+
+#[test]
+fn scan_detects_pptx_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("slides.pptx");
+    let secret = synthetic_openai_key('a');
+    create_minimal_pptx(&file, &secret);
+
+    let res = scan_path(&file, default_scan_options()).expect("scan pptx");
+
+    assert!(
+        has_finding(
+            &res,
+            "secret.openai_api_key",
+            "slides.pptx:ppt/slides/slide1.xml"
+        ),
+        "{:?}",
+        res.findings
+    );
+}
+
+#[test]
+fn scan_detects_pdf_text_layer_secret_and_pii() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("report.pdf");
+    let secret = synthetic_openai_key('a');
+    create_minimal_pdf(&file, &format!("token {secret} contact alice@example.com"));
+
+    let res = scan_path(&file, default_scan_options()).expect("scan pdf");
+
+    assert!(
+        has_finding(&res, "secret.openai_api_key", "report.pdf"),
+        "{:?}",
+        res.findings
+    );
+    assert!(
+        has_finding(&res, "pii.email", "report.pdf"),
+        "{:?}",
+        res.findings
+    );
+    assert!(
+        !has_finding(&res, "scan.binary_skipped", "report.pdf"),
+        "{:?}",
+        res.findings
+    );
+}
+
+#[test]
+fn scan_reports_pdf_without_extractable_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("empty.pdf");
+    create_minimal_pdf(&file, "");
+
+    let res = scan_path(&file, default_scan_options()).expect("scan empty pdf");
+
+    assert!(
+        has_finding(&res, "scan.document_text_empty", "empty.pdf"),
+        "{:?}",
+        res.findings
+    );
+    assert!(
+        !has_finding(&res, "scan.binary_skipped", "empty.pdf"),
+        "{:?}",
+        res.findings
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn scan_reports_unreadable_file_skips() {
@@ -295,4 +437,114 @@ fn scan_one_file_via_rules() {
         ms.iter().any(|m| m.rule_id == "secret.openai_api_key"),
         "{ms:?}"
     );
+}
+
+fn synthetic_openai_key(seed: char) -> String {
+    format!("sk-proj-{seed}bcdefghijklmnopqrstuvwxyz0123456789")
+}
+
+fn create_minimal_docx(path: &Path, text: &str) {
+    let file = fs::File::create(path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let options =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    zip.start_file("[Content_Types].xml", options).unwrap();
+    zip.write_all(
+        br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+    )
+    .unwrap();
+
+    zip.start_file("word/document.xml", options).unwrap();
+    write!(
+        zip,
+        r#"<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>"#
+    )
+    .unwrap();
+    zip.finish().unwrap();
+}
+
+fn create_minimal_xlsx(path: &Path, shared_text: &str, inline_text: &str) {
+    let file = fs::File::create(path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let options =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    zip.start_file("[Content_Types].xml", options).unwrap();
+    zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#).unwrap();
+
+    zip.start_file("xl/workbook.xml", options).unwrap();
+    zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/></sheets></workbook>"#).unwrap();
+
+    zip.start_file("xl/sharedStrings.xml", options).unwrap();
+    write!(
+        zip,
+        r#"<?xml version="1.0" encoding="UTF-8"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>{shared_text}</t></si></sst>"#
+    )
+    .unwrap();
+
+    zip.start_file("xl/worksheets/sheet1.xml", options).unwrap();
+    write!(
+        zip,
+        r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{inline_text}</t></is></c></row></sheetData></worksheet>"#
+    )
+    .unwrap();
+    zip.finish().unwrap();
+}
+
+fn create_minimal_pptx(path: &Path, text: &str) {
+    let file = fs::File::create(path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let options =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    zip.start_file("[Content_Types].xml", options).unwrap();
+    zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#).unwrap();
+
+    zip.start_file("ppt/presentation.xml", options).unwrap();
+    zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldIdLst/></p:presentation>"#).unwrap();
+
+    zip.start_file("ppt/slides/slide1.xml", options).unwrap();
+    write!(
+        zip,
+        r#"<?xml version="1.0" encoding="UTF-8"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#
+    )
+    .unwrap();
+    zip.finish().unwrap();
+}
+
+fn create_minimal_pdf(path: &Path, text: &str) {
+    let escaped = pdf_string_escape(text);
+    let stream = format!("BT /F1 12 Tf 72 720 Td ({escaped}) Tj ET\n");
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{stream}endstream", stream.len()),
+    ];
+
+    let mut body = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::new();
+    for (idx, object) in objects.iter().enumerate() {
+        offsets.push(body.len());
+        body.push_str(&format!("{} 0 obj\n{object}\nendobj\n", idx + 1));
+    }
+
+    let xref_offset = body.len();
+    body.push_str("xref\n0 6\n0000000000 65535 f \n");
+    for offset in offsets {
+        body.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    body.push_str(&format!(
+        "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
+    ));
+
+    fs::write(path, body).unwrap();
+}
+
+fn pdf_string_escape(text: &str) -> String {
+    text.replace('\\', r"\\")
+        .replace('(', r"\(")
+        .replace(')', r"\)")
 }

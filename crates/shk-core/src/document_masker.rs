@@ -16,46 +16,36 @@ pub struct DocumentMaskResult {
     pub findings: Vec<Finding>,
 }
 
+pub struct DocumentTextEntry {
+    pub entry_path: String,
+    pub text: String,
+}
+
+impl DocumentTextEntry {
+    fn new(entry_path: impl Into<String>, text: String) -> Self {
+        Self {
+            entry_path: entry_path.into(),
+            text,
+        }
+    }
+}
+
+impl Drop for DocumentTextEntry {
+    fn drop(&mut self) {
+        self.text.zeroize();
+    }
+}
+
 pub fn mask_docx(input: &Path, output: &Path, policy: &Policy) -> Result<DocumentMaskResult> {
-    mask_ooxml(
-        input,
-        output,
-        policy,
-        OoxmlFormat {
-            label: ".docx",
-            required_entry: "word/document.xml",
-            should_mask_entry: is_docx_mask_target,
-            text_group: TextGroupKind::Docx,
-        },
-    )
+    mask_ooxml(input, output, policy, OoxmlFormat::docx())
 }
 
 pub fn mask_xlsx(input: &Path, output: &Path, policy: &Policy) -> Result<DocumentMaskResult> {
-    mask_ooxml(
-        input,
-        output,
-        policy,
-        OoxmlFormat {
-            label: ".xlsx",
-            required_entry: "xl/workbook.xml",
-            should_mask_entry: is_xlsx_mask_target,
-            text_group: TextGroupKind::Xlsx,
-        },
-    )
+    mask_ooxml(input, output, policy, OoxmlFormat::xlsx())
 }
 
 pub fn mask_pptx(input: &Path, output: &Path, policy: &Policy) -> Result<DocumentMaskResult> {
-    mask_ooxml(
-        input,
-        output,
-        policy,
-        OoxmlFormat {
-            label: ".pptx",
-            required_entry: "ppt/presentation.xml",
-            should_mask_entry: is_pptx_mask_target,
-            text_group: TextGroupKind::Pptx,
-        },
-    )
+    mask_ooxml(input, output, policy, OoxmlFormat::pptx())
 }
 
 struct OoxmlFormat {
@@ -63,6 +53,48 @@ struct OoxmlFormat {
     required_entry: &'static str,
     should_mask_entry: fn(&str) -> bool,
     text_group: TextGroupKind,
+}
+
+impl OoxmlFormat {
+    fn docx() -> Self {
+        Self {
+            label: ".docx",
+            required_entry: "word/document.xml",
+            should_mask_entry: is_docx_mask_target,
+            text_group: TextGroupKind::Docx,
+        }
+    }
+
+    fn xlsx() -> Self {
+        Self {
+            label: ".xlsx",
+            required_entry: "xl/workbook.xml",
+            should_mask_entry: is_xlsx_mask_target,
+            text_group: TextGroupKind::Xlsx,
+        }
+    }
+
+    fn pptx() -> Self {
+        Self {
+            label: ".pptx",
+            required_entry: "ppt/presentation.xml",
+            should_mask_entry: is_pptx_mask_target,
+            text_group: TextGroupKind::Pptx,
+        }
+    }
+
+    fn from_path(path: &str) -> Option<Self> {
+        let ext = Path::new(path).extension()?.to_str()?;
+        if ext.eq_ignore_ascii_case("docx") {
+            Some(Self::docx())
+        } else if ext.eq_ignore_ascii_case("xlsx") {
+            Some(Self::xlsx())
+        } else if ext.eq_ignore_ascii_case("pptx") {
+            Some(Self::pptx())
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -148,6 +180,80 @@ fn mask_ooxml(
         .with_context(|| format!("finish output {} zip container", format.label))?;
 
     Ok(DocumentMaskResult { findings })
+}
+
+pub fn extract_ooxml_text_entries(
+    scan_rel: &str,
+    bytes: &[u8],
+) -> Result<Option<Vec<DocumentTextEntry>>> {
+    let Some(format) = OoxmlFormat::from_path(scan_rel) else {
+        return Ok(None);
+    };
+
+    let mut archive = ZipArchive::new(Cursor::new(bytes))
+        .with_context(|| format!("read {} zip container", format.label))?;
+    if archive.by_name(format.required_entry).is_err() {
+        bail!(
+            "unsupported {}: missing {}",
+            format.label,
+            format.required_entry
+        );
+    }
+
+    let mut entries = Vec::new();
+    for idx in 0..archive.len() {
+        let mut entry = archive
+            .by_index(idx)
+            .with_context(|| format!("read zip entry {idx}"))?;
+        let name = entry.name().to_string();
+        if entry.is_dir() || !(format.should_mask_entry)(&name) {
+            continue;
+        }
+
+        let mut entry_bytes = Vec::new();
+        entry
+            .read_to_end(&mut entry_bytes)
+            .with_context(|| format!("read zip entry {name}"))?;
+        let text_result = extract_xml_text(&entry_bytes, format.text_group)
+            .with_context(|| format!("extract XML text from {name}"));
+        entry_bytes.zeroize();
+        let mut text = text_result?;
+        if text.is_empty() {
+            continue;
+        }
+        entries.push(DocumentTextEntry::new(name, std::mem::take(&mut text)));
+    }
+
+    Ok(Some(entries))
+}
+
+pub fn extract_document_text_entries(
+    scan_rel: &str,
+    bytes: &[u8],
+) -> Result<Option<Vec<DocumentTextEntry>>> {
+    if let Some(entries) = extract_ooxml_text_entries(scan_rel, bytes)? {
+        return Ok(Some(entries));
+    }
+    if is_pdf_path(scan_rel) {
+        return extract_pdf_text_entry(bytes).map(Some);
+    }
+    Ok(None)
+}
+
+fn is_pdf_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+}
+
+fn extract_pdf_text_entry(bytes: &[u8]) -> Result<Vec<DocumentTextEntry>> {
+    let mut text = pdf_extract::extract_text_from_mem(bytes).context("extract PDF text")?;
+    if text.trim().is_empty() {
+        text.zeroize();
+        return Ok(Vec::new());
+    }
+    Ok(vec![DocumentTextEntry::new("", text)])
 }
 
 fn is_docx_mask_target(name: &str) -> bool {
@@ -314,6 +420,70 @@ fn mask_xml_text(
     }
 
     Ok((writer.into_inner(), findings))
+}
+
+fn extract_xml_text(xml: &[u8], text_group: TextGroupKind) -> Result<String> {
+    let mut reader = Reader::from_reader(Cursor::new(xml));
+    reader.trim_text(false);
+    let mut buf = Vec::new();
+    let mut out = String::new();
+    let mut group_depth: Option<usize> = None;
+    let mut group_text = String::new();
+
+    loop {
+        match reader.read_event_into(&mut buf).context("read XML event")? {
+            Event::Eof => break,
+            Event::Start(start) => {
+                if let Some(depth) = group_depth.as_mut() {
+                    *depth += 1;
+                } else if starts_text_group(start.name().as_ref(), text_group) {
+                    group_depth = Some(1);
+                    group_text.clear();
+                }
+            }
+            Event::End(_) => {
+                if let Some(depth) = group_depth {
+                    if depth == 1 {
+                        out.push_str(&group_text);
+                        out.push('\n');
+                        group_depth = None;
+                        group_text.zeroize();
+                    } else {
+                        group_depth = Some(depth - 1);
+                    }
+                }
+            }
+            Event::Text(text) => {
+                let mut decoded = text.unescape().context("decode XML text")?.into_owned();
+                if group_depth.is_some() {
+                    group_text.push_str(&decoded);
+                } else {
+                    out.push_str(&decoded);
+                    out.push('\n');
+                }
+                decoded.zeroize();
+            }
+            Event::CData(cdata) => {
+                let mut decoded = String::from_utf8_lossy(cdata.as_ref()).to_string();
+                if group_depth.is_some() {
+                    group_text.push_str(&decoded);
+                } else {
+                    out.push_str(&decoded);
+                    out.push('\n');
+                }
+                decoded.zeroize();
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    if !group_text.is_empty() {
+        out.push_str(&group_text);
+        out.push('\n');
+        group_text.zeroize();
+    }
+    Ok(out)
 }
 
 fn push_text_item(
