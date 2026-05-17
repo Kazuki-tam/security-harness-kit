@@ -43,6 +43,8 @@ shk doctor version                   # check latest release
 shk env encrypt .env --in-place  # native shk dotenv encryption; adds [SHK_NATIVE_ENV] header
 shk env run -- npm test           # decrypt native env values only for the child process
 shk env key import                # register the default local decryption key in the OS store
+shk env key list                  # show native key names for this project, not values
+shk env key delete --env staging  # remove a native decryption key from the OS store
 shk env key export --instructions # show safe handoff instructions; no raw key output
 shk env decrypt .env --output .env.local
 shk env dotenvx import-keys .env.keys # store dotenvx private keys in OS credential store

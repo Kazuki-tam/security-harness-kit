@@ -260,6 +260,9 @@ Register local decryption keys and show safe team handoff instructions without c
 shk env key import
 shk env key import --env production --stdin
 shk env key import --key DOTENV_PRIVATE_KEY_STAGING --force
+shk env key list
+shk env key delete --env staging
+shk env key delete --all
 shk env key export --env production --instructions
 ```
 
@@ -269,6 +272,8 @@ shk env key export --env production --instructions
 op read "op://Project/prod/DOTENV_PRIVATE_KEY_PRODUCTION" \
   | shk env key import --env production --stdin
 ```
+
+`list` prints only native key names indexed for the current project, never key material. `delete` removes stored native keys and requires an explicit target: `--all`, `--key <DOTENV_PRIVATE_KEY*>`, or `--env <name>`. Keys created by older versions that are not indexed can still be removed with an exact `--key` or `--env` target.
 
 `export --instructions` intentionally does not print raw key material. It prints the key name, whether a key is already present on this machine, and a recommended local handoff flow: store the key in a team password manager, share vault access with the teammate, and have the recipient run `shk env key import`.
 

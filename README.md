@@ -138,6 +138,8 @@ shk env dotenvx import-keys .env.keys
 shk env encrypt .env --in-place
 shk env run -- npm test
 shk env key import
+shk env key list
+shk env key delete --env staging
 shk env key export --instructions
 shk env decrypt .env --output .env.local
 

@@ -207,6 +207,8 @@ pub fn run() -> Result<()> {
             EnvCmd::Run(args) => commands::env::run(&cwd, args)?,
             EnvCmd::Key { cmd } => match cmd {
                 EnvKeyCmd::Import(args) => commands::env::key_import(&cwd, args)?,
+                EnvKeyCmd::List => commands::env::key_list(&cwd)?,
+                EnvKeyCmd::Delete(args) => commands::env::key_delete(&cwd, args)?,
                 EnvKeyCmd::Export(args) => commands::env::key_export(&cwd, args)?,
             },
             EnvCmd::Dotenvx { cmd } => match cmd {

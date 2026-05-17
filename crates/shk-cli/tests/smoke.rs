@@ -2720,6 +2720,24 @@ fn env_encrypt_help_documents_in_place() {
 }
 
 #[test]
+fn env_decrypt_help_hides_encrypt_only_options() {
+    let out = Command::new(shk_bin())
+        .args(["env", "decrypt", "--help"])
+        .output()
+        .expect("env decrypt help");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("--output"), "{stdout}");
+    assert!(stdout.contains("--force"), "{stdout}");
+    assert!(!stdout.contains("--in-place"), "{stdout}");
+    assert!(!stdout.contains("--remove-source"), "{stdout}");
+}
+
+#[test]
 fn env_run_help_is_registered() {
     let out = Command::new(shk_bin())
         .args(["env", "run", "--help"])
@@ -2771,7 +2789,19 @@ fn env_key_help_is_registered_without_raw_export() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("import"), "{stdout}");
+    assert!(stdout.contains("list"), "{stdout}");
+    assert!(stdout.contains("delete"), "{stdout}");
     assert!(stdout.contains("export"), "{stdout}");
+
+    let out = Command::new(shk_bin())
+        .args(["env", "key", "delete"])
+        .output()
+        .expect("env key delete");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--all"), "{stderr}");
+    assert!(stderr.contains("--key"), "{stderr}");
+    assert!(stderr.contains("--env"), "{stderr}");
 
     let out = Command::new(shk_bin())
         .args(["env", "key", "export", "--help"])

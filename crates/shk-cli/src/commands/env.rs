@@ -1,5 +1,6 @@
 use crate::args::{
-    DotenvxDeleteArgs, DotenvxRunArgs, EnvCryptArgs, EnvKeyExportArgs, EnvKeyImportArgs, EnvRunArgs,
+    DotenvxDeleteArgs, DotenvxRunArgs, EnvDecryptArgs, EnvEncryptArgs, EnvKeyDeleteArgs,
+    EnvKeyExportArgs, EnvKeyImportArgs, EnvRunArgs,
 };
 use crate::exit::CliExit;
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -68,9 +69,9 @@ pub fn dotenvx_import_keys(cwd: &Path, file: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn encrypt(cwd: &Path, args: EnvCryptArgs) -> Result<()> {
+pub fn encrypt(cwd: &Path, args: EnvEncryptArgs) -> Result<()> {
     let project_root = project_root(cwd)?;
-    let private_key_name = env_crypt_key_name(&args)?;
+    let private_key_name = env_key_name(args.key.as_ref(), &args.env)?;
     let public_key_name = private_to_public_key_name(&private_key_name);
     if args.remove_source {
         ensure!(
@@ -114,21 +115,10 @@ pub fn encrypt(cwd: &Path, args: EnvCryptArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn decrypt(cwd: &Path, args: EnvCryptArgs) -> Result<()> {
-    ensure!(
-        !args.remove_source,
-        "--remove-source is only supported by `shk env encrypt`"
-    );
-    ensure!(
-        !args.in_place,
-        "--in-place is only supported by `shk env encrypt`"
-    );
-    let output = args
-        .output
-        .as_deref()
-        .ok_or_else(|| anyhow!("--output is required for `shk env decrypt`"))?;
+pub fn decrypt(cwd: &Path, args: EnvDecryptArgs) -> Result<()> {
+    let output = &args.output;
     let project_root = project_root(cwd)?;
-    let private_key_name = env_crypt_key_name(&args)?;
+    let private_key_name = env_key_name(args.key.as_ref(), &args.env)?;
     let native_store = KeyringSecretStore::native_env();
     let dotenvx_store = KeyringSecretStore::dotenvx();
     let body = std::fs::read_to_string(&args.file)
@@ -199,6 +189,33 @@ pub fn key_import(cwd: &Path, args: EnvKeyImportArgs) -> Result<()> {
     Ok(())
 }
 
+pub fn key_list(cwd: &Path) -> Result<()> {
+    let project_root = project_root(cwd)?;
+    let store = KeyringSecretStore::native_env();
+    let index = read_index(&store, &project_root)?;
+    if index.is_empty() {
+        println!(
+            "native env: no indexed private keys for {}",
+            project_root.display()
+        );
+        println!(
+            "Keys created by older versions can still be removed with `shk env key delete --key <DOTENV_PRIVATE_KEY*>`."
+        );
+    } else {
+        println!("native env private keys for {}:", project_root.display());
+        for key in index {
+            println!("  - {key}");
+        }
+    }
+    Ok(())
+}
+
+pub fn key_delete(cwd: &Path, args: EnvKeyDeleteArgs) -> Result<()> {
+    let project_root = project_root(cwd)?;
+    let store = KeyringSecretStore::native_env();
+    key_delete_with_store(&store, &project_root, args)
+}
+
 pub fn key_export(cwd: &Path, args: EnvKeyExportArgs) -> Result<()> {
     ensure!(
         args.instructions,
@@ -224,6 +241,32 @@ pub fn key_export(cwd: &Path, args: EnvKeyExportArgs) -> Result<()> {
             status
         )
     );
+    Ok(())
+}
+
+fn key_delete_with_store(
+    store: &impl SecretStore,
+    project_root: &Path,
+    args: EnvKeyDeleteArgs,
+) -> Result<()> {
+    let mut index = read_index(store, project_root)?;
+    let targets = native_delete_targets(store, project_root, args, &index)?;
+    if targets.is_empty() {
+        println!(
+            "native env: no matching private keys for {}",
+            project_root.display()
+        );
+        return Ok(());
+    }
+
+    for key in &targets {
+        store
+            .delete(&env_account(project_root, key))
+            .with_context(|| format!("delete {key} from OS credential store"))?;
+        index.remove(key);
+    }
+    write_index(store, project_root, &index)?;
+    println!("Deleted {} native env private key(s)", targets.len());
     Ok(())
 }
 
@@ -765,6 +808,29 @@ fn delete_targets(args: DotenvxDeleteArgs, index: &BTreeSet<String>) -> Result<V
     Ok(index.contains(&key).then_some(key).into_iter().collect())
 }
 
+fn native_delete_targets(
+    store: &impl SecretStore,
+    project_root: &Path,
+    args: EnvKeyDeleteArgs,
+    index: &BTreeSet<String>,
+) -> Result<Vec<String>> {
+    if args.all {
+        return Ok(index.iter().cloned().collect());
+    }
+    let key = match (args.key, args.env) {
+        (Some(key), None) => key,
+        (None, Some(env)) => env_to_key(&env),
+        (None, None) => bail!("pass --all, --key, or --env to choose private keys to delete"),
+        (Some(_), Some(_)) => bail!("pass only one of --key or --env"),
+    };
+    validate_private_key_name(&key)?;
+    if index.contains(&key) || store_has_key(store, &env_account(project_root, &key))? {
+        Ok(vec![key])
+    } else {
+        Ok(Vec::new())
+    }
+}
+
 fn run_targets(args: &DotenvxRunArgs, index: &BTreeSet<String>) -> Result<Vec<String>> {
     let mut selected = BTreeSet::new();
     for key in &args.keys {
@@ -799,10 +865,6 @@ fn validate_private_key_name(key: &str) -> Result<()> {
     }
 }
 
-fn env_crypt_key_name(args: &EnvCryptArgs) -> Result<String> {
-    env_key_name(args.key.as_ref(), &args.env)
-}
-
 fn env_key_name(key: Option<&String>, env: &str) -> Result<String> {
     if key.is_some() && !env.eq_ignore_ascii_case("default") {
         bail!("pass only one of --key or --env");
@@ -815,7 +877,7 @@ fn env_key_name(key: Option<&String>, env: &str) -> Result<String> {
     Ok(key)
 }
 
-fn env_encrypt_output_path(args: &EnvCryptArgs) -> Result<&Path> {
+fn env_encrypt_output_path(args: &EnvEncryptArgs) -> Result<&Path> {
     if args.in_place {
         return Ok(&args.file);
     }
@@ -884,7 +946,11 @@ fn store_native_env_key(
         .put(&env_account(project_root, private_key_name), &encoded)
         .with_context(|| format!("store {private_key_name} in OS credential store"));
     encoded.zeroize();
-    result
+    result?;
+
+    let mut index = read_index(store, project_root)?;
+    index.insert(private_key_name.to_string());
+    write_index(store, project_root, &index)
 }
 
 fn read_native_env_key(
@@ -1687,6 +1753,10 @@ mod tests {
             .unwrap();
         assert_eq!(stored.public_key, keypair.public_key());
         assert_eq!(stored.private_key, keypair.private_key());
+        assert_eq!(
+            read_index(&store, root).unwrap(),
+            BTreeSet::from(["DOTENV_PRIVATE_KEY".to_string()])
+        );
     }
 
     #[test]
@@ -1726,6 +1796,103 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.private_key, second.private_key());
+    }
+
+    #[test]
+    fn native_key_delete_updates_store_index() {
+        let store = MockSecretStore::default();
+        let root = Path::new("/repo");
+        let default = Keypair::generate();
+        let production = Keypair::generate();
+        import_native_env_key_with_store(
+            &store,
+            root,
+            "DOTENV_PRIVATE_KEY",
+            &default.private_key(),
+            false,
+        )
+        .unwrap();
+        import_native_env_key_with_store(
+            &store,
+            root,
+            "DOTENV_PRIVATE_KEY_PRODUCTION",
+            &production.private_key(),
+            false,
+        )
+        .unwrap();
+
+        key_delete_with_store(
+            &store,
+            root,
+            EnvKeyDeleteArgs {
+                all: false,
+                key: None,
+                env: Some("production".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert!(
+            read_native_env_key(&store, root, "DOTENV_PRIVATE_KEY_PRODUCTION")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            read_index(&store, root).unwrap(),
+            BTreeSet::from(["DOTENV_PRIVATE_KEY".to_string()])
+        );
+
+        key_delete_with_store(
+            &store,
+            root,
+            EnvKeyDeleteArgs {
+                all: true,
+                key: None,
+                env: None,
+            },
+        )
+        .unwrap();
+        assert!(read_index(&store, root).unwrap().is_empty());
+        assert!(
+            read_native_env_key(&store, root, "DOTENV_PRIVATE_KEY")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn native_key_delete_can_remove_unindexed_explicit_key() {
+        let store = MockSecretStore::default();
+        let root = Path::new("/repo");
+        let keypair = Keypair::generate();
+        let material = NativeEnvKeyMaterial {
+            public_key: keypair.public_key(),
+            private_key: keypair.private_key(),
+        };
+        store
+            .put(
+                &env_account(root, "DOTENV_PRIVATE_KEY_STAGING"),
+                &serde_json::to_string(&material).unwrap(),
+            )
+            .unwrap();
+
+        key_delete_with_store(
+            &store,
+            root,
+            EnvKeyDeleteArgs {
+                all: false,
+                key: Some("DOTENV_PRIVATE_KEY_STAGING".to_string()),
+                env: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            store
+                .get(&env_account(root, "DOTENV_PRIVATE_KEY_STAGING"))
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

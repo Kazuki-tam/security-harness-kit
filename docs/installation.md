@@ -150,6 +150,7 @@ If you used `shk env dotenvx import-keys` to store dotenvx private keys in the o
 
 ```bash
 shk env dotenvx delete --all
+shk env key delete --all
 ```
 
-Those imported dotenvx keys are stored under the service name `security-harness-kit/dotenvx`. Native keys created by `shk env encrypt`, adopted from dotenvx, or imported with `shk env key import` are stored under `security-harness-kit/env`. There is no raw-key export/delete command for native keys yet; remove orphaned native entries through the platform credential store UI if needed. If `shk` has already been removed, both stores can be cleaned up by searching for those service names.
+Those imported dotenvx keys are stored under the service name `security-harness-kit/dotenvx`. Native keys created by `shk env encrypt`, adopted from dotenvx, or imported with `shk env key import` are stored under `security-harness-kit/env` and can be removed with `shk env key delete`. If `shk` has already been removed, both stores can be cleaned up by searching for those service names in the platform credential store UI.
