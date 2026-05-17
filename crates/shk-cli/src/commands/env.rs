@@ -333,6 +333,7 @@ fn build_dotenvx_run_command(
     cmd.arg("--");
     cmd.args(&args.command);
     cmd.current_dir(cwd);
+    remove_inherited_private_key_env(&mut cmd);
 
     for key in selected {
         let mut value = store
@@ -396,6 +397,7 @@ fn build_native_env_run_command(
     let mut cmd = Command::new(program);
     cmd.args(command_args);
     cmd.current_dir(cwd);
+    remove_inherited_private_key_env(&mut cmd);
 
     let files = native_run_files(args);
     for file in files {
@@ -413,6 +415,23 @@ fn build_native_env_run_command(
         }
     }
     Ok(cmd)
+}
+
+fn remove_inherited_private_key_env(cmd: &mut Command) {
+    remove_private_key_env_vars(cmd, std::env::vars_os());
+}
+
+fn remove_private_key_env_vars<I, K, V>(cmd: &mut Command, vars: I)
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<std::ffi::OsStr>,
+{
+    for (key, _) in vars {
+        let key = key.as_ref();
+        if key.to_str().is_some_and(is_dotenvx_private_key_name) {
+            cmd.env_remove(key);
+        }
+    }
 }
 
 fn native_run_files(args: &EnvRunArgs) -> Vec<PathBuf> {
@@ -1937,6 +1956,36 @@ mod tests {
             *key == "API_KEY" && value.as_deref() == Some(std::ffi::OsStr::new("secret"))
         }));
         assert!(!envs.iter().any(|(key, _)| *key == "DOTENV_PRIVATE_KEY"));
+    }
+
+    #[test]
+    fn run_commands_remove_inherited_private_key_env_vars() {
+        let mut cmd = Command::new("npm");
+        remove_private_key_env_vars(
+            &mut cmd,
+            [
+                ("DOTENV_PRIVATE_KEY", "default-secret"),
+                ("DOTENV_PRIVATE_KEY_PRODUCTION", "production-secret"),
+                ("DOTENV_PRIVATE_KEY_production", "invalid-lowercase"),
+                ("APP_SECRET", "app-secret"),
+            ],
+        );
+
+        let envs = cmd.get_envs().collect::<Vec<_>>();
+        assert!(
+            envs.iter()
+                .any(|(key, value)| { *key == "DOTENV_PRIVATE_KEY" && value.is_none() })
+        );
+        assert!(
+            envs.iter()
+                .any(|(key, value)| { *key == "DOTENV_PRIVATE_KEY_PRODUCTION" && value.is_none() })
+        );
+        assert!(!envs.iter().any(|(key, _)| *key == "APP_SECRET"));
+        assert!(
+            !envs
+                .iter()
+                .any(|(key, _)| *key == "DOTENV_PRIVATE_KEY_production")
+        );
     }
 
     #[test]
