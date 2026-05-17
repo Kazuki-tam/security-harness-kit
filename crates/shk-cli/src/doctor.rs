@@ -27,11 +27,19 @@ const IGNORE_CANDIDATES: &[&str] = &[
 const DOTENVX_PRIVATE_KEY_FILE: &str = ".env.keys";
 const DOTENVX_VAULT_FILE: &str = ".env.vault";
 const DOTENVX_HINT_FILES: &[&str] = &[DOTENVX_PRIVATE_KEY_FILE, DOTENVX_VAULT_FILE];
-const DOTENVX_ENCRYPTED_VALUE_PREFIX: &str = "encrypted:";
-const DOTENVX_PUBLIC_KEY_PREFIX: &str = "DOTENV_PUBLIC_KEY";
-const DOTENVX_PRIVATE_KEY_PREFIX: &str = "DOTENV_PRIVATE_KEY";
+const DOTENV_ENCRYPTED_VALUE_PREFIX: &str = "encrypted:";
+const DOTENV_PUBLIC_KEY_PREFIX: &str = "DOTENV_PUBLIC_KEY";
+const DOTENV_PRIVATE_KEY_PREFIX: &str = "DOTENV_PRIVATE_KEY";
 const CODEX_RISKY_SANDBOX_MODE: &str = "danger-full-access";
 const CODEX_RISKY_APPROVAL_POLICY: &str = "never";
+
+#[derive(Debug, Eq, PartialEq)]
+enum EnvFileEncryptionState {
+    Plaintext,
+    FullyEncrypted,
+    MixedPlaintext { keys: Vec<String> },
+}
+
 pub fn run_ignore(root: &Path, fix: bool) -> Result<()> {
     if fix {
         safety::require_project_policy(root, "doctor ignore --fix")?;
@@ -222,6 +230,7 @@ fn directory_pattern_covers(existing: &str, required: &str) -> bool {
 pub fn run_env(root: &Path, dotenvx: bool) -> Result<()> {
     let (_policy, _) = Policy::load_from_dir(root)?;
     let mut env_files = Vec::new();
+    let mut mixed_env_files = Vec::new();
     for e in fs::read_dir(root)? {
         let e = e?;
         let name = e.file_name().to_string_lossy().to_string();
@@ -229,14 +238,20 @@ pub fn run_env(root: &Path, dotenvx: bool) -> Result<()> {
             && e.path().is_file()
         {
             let content = fs::read_to_string(e.path()).unwrap_or_default();
-            if !is_dotenvx_encrypted_env(&content) {
-                env_files.push((name, e.path(), content));
+            match dotenv_encryption_state(&content) {
+                EnvFileEncryptionState::FullyEncrypted => {}
+                EnvFileEncryptionState::MixedPlaintext { keys } => {
+                    mixed_env_files.push((name, keys));
+                }
+                EnvFileEncryptionState::Plaintext => {
+                    env_files.push((name, e.path(), content));
+                }
             }
         }
     }
-    if env_files.is_empty() {
+    if env_files.is_empty() && mixed_env_files.is_empty() {
         println!("env: no plaintext .env / .env.* (except .env.example) at repo root");
-    } else {
+    } else if !env_files.is_empty() {
         println!("env: plaintext env files detected (review + prefer dotenvx / secret manager):");
         for (name, _path, content) in env_files {
             let findings = scan_string(root, &name, &content, env_scan_options())?
@@ -254,14 +269,34 @@ pub fn run_env(root: &Path, dotenvx: bool) -> Result<()> {
         println!("  recommendation: deny direct AI reads of .env files via tool-specific controls");
     }
 
+    if !mixed_env_files.is_empty() {
+        println!("env: encrypted env files contain plaintext values:");
+        for (name, keys) in mixed_env_files {
+            let preview = keys.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+            let suffix = if keys.len() > 5 {
+                format!(" (+{} more)", keys.len() - 5)
+            } else {
+                String::new()
+            };
+            println!(
+                "  - {name} ({} plaintext key(s): {preview}{suffix})",
+                keys.len()
+            );
+        }
+        println!(
+            "  recommendation: run `shk env encrypt <file> --in-place` after editing encrypted env files"
+        );
+    }
+
     if dotenvx {
         run_dotenvx(root);
     }
     Ok(())
 }
 
-fn is_dotenvx_encrypted_env(content: &str) -> bool {
+fn dotenv_encryption_state(content: &str) -> EnvFileEncryptionState {
     let mut saw_encrypted_value = false;
+    let mut plaintext_keys = Vec::new();
 
     for raw_line in content.lines() {
         let line = raw_line.trim();
@@ -271,28 +306,34 @@ fn is_dotenvx_encrypted_env(content: &str) -> bool {
 
         let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
         let Some((raw_key, raw_value)) = line.split_once('=') else {
-            return false;
+            return EnvFileEncryptionState::Plaintext;
         };
         let key = raw_key.trim();
-        if key.is_empty() || is_dotenvx_private_key_name(key) {
-            return false;
+        if key.is_empty() || is_dotenv_private_key_name(key) {
+            return EnvFileEncryptionState::Plaintext;
         }
-        if is_dotenvx_public_key_name(key) {
+        if is_dotenv_public_key_name(key) {
             continue;
         }
 
         let Some(value) = dotenv_value_without_wrapping_quotes(raw_value.trim()) else {
-            return false;
+            return EnvFileEncryptionState::Plaintext;
         };
-        if value.starts_with(DOTENVX_ENCRYPTED_VALUE_PREFIX) {
+        if value.starts_with(DOTENV_ENCRYPTED_VALUE_PREFIX) {
             saw_encrypted_value = true;
             continue;
         }
 
-        return false;
+        plaintext_keys.push(key.to_string());
     }
 
-    saw_encrypted_value
+    match (saw_encrypted_value, plaintext_keys.is_empty()) {
+        (true, true) => EnvFileEncryptionState::FullyEncrypted,
+        (true, false) => EnvFileEncryptionState::MixedPlaintext {
+            keys: plaintext_keys,
+        },
+        _ => EnvFileEncryptionState::Plaintext,
+    }
 }
 
 fn dotenv_value_without_wrapping_quotes(value: &str) -> Option<&str> {
@@ -315,17 +356,17 @@ fn dotenv_value_without_wrapping_quotes(value: &str) -> Option<&str> {
     }
 }
 
-fn is_dotenvx_public_key_name(key: &str) -> bool {
-    key == DOTENVX_PUBLIC_KEY_PREFIX
+fn is_dotenv_public_key_name(key: &str) -> bool {
+    key == DOTENV_PUBLIC_KEY_PREFIX
         || key
-            .strip_prefix(&format!("{DOTENVX_PUBLIC_KEY_PREFIX}_"))
+            .strip_prefix(&format!("{DOTENV_PUBLIC_KEY_PREFIX}_"))
             .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(is_env_key_char))
 }
 
-fn is_dotenvx_private_key_name(key: &str) -> bool {
-    key == DOTENVX_PRIVATE_KEY_PREFIX
+fn is_dotenv_private_key_name(key: &str) -> bool {
+    key == DOTENV_PRIVATE_KEY_PREFIX
         || key
-            .strip_prefix(&format!("{DOTENVX_PRIVATE_KEY_PREFIX}_"))
+            .strip_prefix(&format!("{DOTENV_PRIVATE_KEY_PREFIX}_"))
             .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(is_env_key_char))
 }
 

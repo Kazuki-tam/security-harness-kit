@@ -60,7 +60,7 @@ macOS and Linux releases include a generated Homebrew formula (`shk-cli.rb`) as 
 brew install --formula https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk-cli.rb
 ```
 
-To install a pinned release, replace `latest/download` with `download/<tag>` (e.g. `download/v0.3.1`).
+To install a pinned release, replace `latest/download` with `download/<tag>` (e.g. `download/v0.3.2`).
 
 Intel macOS, Apple Silicon macOS, Linux x86_64/aarch64, and Windows x86_64 are supported. Scoop manifests are not published by the current `dist`-based release pipeline.
 
@@ -144,12 +144,13 @@ For commands that support it, re-running with `--dry-run` is a safe way to confi
 
 Managed entries use the same markers as project installs (`"_shk_managed": true` for JSON files, `# shk-managed-start` / `# shk-managed-end` for shell and TOML files), so they are safe to identify and remove by hand. Settings merged by `--apply-deny` and `--apply-sandbox` are not individually tagged; review them before removing so you do not discard unrelated user configuration.
 
-### 4. Remove Stored dotenvx Keys
+### 4. Remove Stored Env Keys
 
 If you used `shk env dotenvx import-keys` to store dotenvx private keys in the operating system credential store (macOS Keychain, Windows Credential Manager, or Linux Secret Service / keyutils), delete them before removing the binary so they are not orphaned. Stored keys are scoped to the canonical project root, so run this from each project where you imported keys:
 
 ```bash
 shk env dotenvx delete --all
+shk env key delete --all
 ```
 
-The keys are stored under the service name `security-harness-kit/dotenvx`. If `shk` has already been removed, they can also be removed through the platform credential store UI by searching for that service name.
+Those imported dotenvx keys are stored under the service name `security-harness-kit/dotenvx`. Native keys created by `shk env encrypt`, adopted from dotenvx, or imported with `shk env key import` are stored under `security-harness-kit/env` and can be removed with `shk env key delete`. If `shk` has already been removed, both stores can be cleaned up by searching for those service names in the platform credential store UI.

@@ -134,6 +134,15 @@ shk doctor
 shk doctor ignore --fix
 shk doctor env --dotenvx
 
+shk env dotenvx import-keys .env.keys
+shk env encrypt .env --in-place
+shk env run -- npm test
+shk env key import
+shk env key list
+shk env key delete --env staging
+shk env key export --instructions
+shk env decrypt .env --output .env.local
+
 shk hooks install
 shk hooks install-ai --dry-run
 shk hooks install-ai --audit
@@ -141,7 +150,7 @@ shk hooks install-ai --audit
 shk ci init github
 shk ci init github --dry-run
 shk ci init github --mode audit
-shk ci init github --shk-version v0.3.1
+shk ci init github --shk-version v0.3.2
 
 shk skills install
 shk skills install --tool claude-code --global

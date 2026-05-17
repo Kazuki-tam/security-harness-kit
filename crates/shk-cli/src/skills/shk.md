@@ -40,6 +40,13 @@ shk doctor                           # full project diagnostics
 shk doctor ignore --fix              # fix missing .gitignore entries
 shk doctor env --dotenvx             # include dotenvx artifact checks
 shk doctor version                   # check latest release
+shk env encrypt .env --in-place  # native shk dotenv encryption; adds [SHK_NATIVE_ENV] header
+shk env run -- npm test           # decrypt native env values only for the child process
+shk env key import                # register the default local decryption key in the OS store
+shk env key list                  # show native key names for this project, not values
+shk env key delete --env staging  # remove a native decryption key from the OS store
+shk env key export --instructions # show safe handoff instructions; no raw key output
+shk env decrypt .env --output .env.local
 shk env dotenvx import-keys .env.keys # store dotenvx private keys in OS credential store
 shk env dotenvx run -- npm test       # inject stored keys only into child process
 shk env dotenvx delete --all
@@ -105,10 +112,12 @@ shk mask --hook-mode claude-code --post < response_payload.json
 ## Local dotenvx key storage
 
 Use `shk env dotenvx` when a project has `.env.keys` or `DOTENV_PRIVATE_KEY*` values that should not stay in plaintext files.
+After importing dotenvx keys, prefer `shk env run` when the project can use shk's native decryptor and no longer needs the external `dotenvx` binary at runtime.
 
 ```bash
 shk env dotenvx import-keys .env.keys
 shk env dotenvx list
+shk env run -f .env -- npm test
 shk env dotenvx run -- npm test
 shk env dotenvx run -f .env.production -- npm start
 shk env dotenvx run --env production -- npm start
@@ -121,7 +130,7 @@ shk env dotenvx delete --all
 Important behavior:
 - Keys are stored in the OS credential store through the platform keychain/credential backend.
 - `run` injects keys only into the child `dotenvx run -- <command>` environment.
-- There is no export command; do not print raw private keys.
+- There is no raw-key export under `shk env dotenvx`; use `shk env key export --instructions` only for handoff guidance.
 - `delete` requires an explicit target: `--all`, `--key <DOTENV_PRIVATE_KEY*>`, or `--env <name>`.
 
 ## Secret manager push
@@ -181,7 +190,7 @@ shk ci init github                      # write .github/workflows/shk.yml
 shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
-shk ci init github --shk-version v0.3.1
+shk ci init github --shk-version v0.3.2
 shk ci init github --output .github/workflows/security.yml --force
 ```
 

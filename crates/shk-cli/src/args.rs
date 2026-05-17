@@ -389,11 +389,147 @@ pub enum SkillsCmd {
 
 #[derive(Subcommand)]
 pub enum EnvCmd {
+    /// Encrypt a dotenv-style file with shk native encryption
+    Encrypt(EnvEncryptArgs),
+    /// Decrypt an encrypted dotenv file with shk native keys
+    Decrypt(EnvDecryptArgs),
+    /// Run a command with encrypted dotenv files decrypted in-memory
+    Run(EnvRunArgs),
+    /// Import local decryption keys and show safe handoff instructions
+    Key {
+        #[command(subcommand)]
+        cmd: EnvKeyCmd,
+    },
     /// Store and inject dotenvx private keys with the OS credential store
     Dotenvx {
         #[command(subcommand)]
         cmd: DotenvxCmd,
     },
+}
+
+#[derive(Args)]
+pub struct EnvEncryptArgs {
+    /// Source file.
+    #[arg(value_name = "FILE")]
+    pub file: PathBuf,
+    /// Destination file. Required so plaintext is never printed accidentally.
+    #[arg(
+        short = 'o',
+        long = "output",
+        value_name = "FILE",
+        required_unless_present = "in_place"
+    )]
+    pub output: Option<PathBuf>,
+    /// Encrypt only: replace the source file contents with encrypted data.
+    #[arg(long, conflicts_with = "output")]
+    pub in_place: bool,
+    /// Key environment label. Use default for the project default key.
+    #[arg(long = "env", default_value = "default")]
+    pub env: String,
+    /// Use this exact DOTENV_PRIVATE_KEY* variable name.
+    #[arg(long = "key")]
+    pub key: Option<String>,
+    /// Overwrite an existing output file.
+    #[arg(long)]
+    pub force: bool,
+    /// Encrypt only: delete the source file after the encrypted output is written.
+    #[arg(long)]
+    pub remove_source: bool,
+}
+
+#[derive(Args)]
+pub struct EnvDecryptArgs {
+    /// Source file.
+    #[arg(value_name = "FILE")]
+    pub file: PathBuf,
+    /// Destination file. Required so plaintext is never printed accidentally.
+    #[arg(short = 'o', long = "output", value_name = "FILE", required = true)]
+    pub output: PathBuf,
+    /// Key environment label. Use default for the project default key.
+    #[arg(long = "env", default_value = "default")]
+    pub env: String,
+    /// Use this exact DOTENV_PRIVATE_KEY* variable name.
+    #[arg(long = "key")]
+    pub key: Option<String>,
+    /// Overwrite an existing output file.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Args)]
+pub struct EnvRunArgs {
+    /// Encrypted dotenv file to load. Repeat as needed. Defaults to .env when omitted.
+    #[arg(short = 'f', long = "file", value_name = "FILE")]
+    pub files: Vec<PathBuf>,
+    /// Only use this exact DOTENV_PRIVATE_KEY* variable. Repeat as needed.
+    #[arg(long = "key")]
+    pub keys: Vec<String>,
+    /// Only use DOTENV_PRIVATE_KEY_<ENV>. Use `default` for DOTENV_PRIVATE_KEY.
+    #[arg(long = "env")]
+    pub envs: Vec<String>,
+    /// Command to run after env values are decrypted.
+    #[arg(last = true, required = true)]
+    pub command: Vec<String>,
+}
+
+#[derive(Subcommand)]
+pub enum EnvKeyCmd {
+    /// Import a DOTENV_PRIVATE_KEY* value into the OS credential store
+    Import(EnvKeyImportArgs),
+    /// List stored native shk private key names for this project
+    List,
+    /// Delete stored native shk private keys for this project
+    Delete(EnvKeyDeleteArgs),
+    /// Show safe local handoff instructions without printing key material
+    Export(EnvKeyExportArgs),
+}
+
+#[derive(Args)]
+pub struct EnvKeyImportArgs {
+    /// Key environment label. Use default for DOTENV_PRIVATE_KEY.
+    #[arg(long = "env", default_value = "default")]
+    pub env: String,
+    /// Use this exact DOTENV_PRIVATE_KEY* variable name.
+    #[arg(long = "key")]
+    pub key: Option<String>,
+    /// Read the private key from stdin instead of prompting.
+    #[arg(long)]
+    pub stdin: bool,
+    /// Replace an existing stored key.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Args)]
+#[command(group(
+    ArgGroup::new("target")
+        .required(true)
+        .multiple(false)
+        .args(["all", "key", "env"])
+))]
+pub struct EnvKeyDeleteArgs {
+    /// Delete every indexed native shk private key for this project.
+    #[arg(long)]
+    pub all: bool,
+    /// Delete this exact DOTENV_PRIVATE_KEY* variable.
+    #[arg(long)]
+    pub key: Option<String>,
+    /// Delete DOTENV_PRIVATE_KEY_<ENV>. Use `default` for DOTENV_PRIVATE_KEY.
+    #[arg(long)]
+    pub env: Option<String>,
+}
+
+#[derive(Args)]
+pub struct EnvKeyExportArgs {
+    /// Key environment label. Use default for DOTENV_PRIVATE_KEY.
+    #[arg(long = "env", default_value = "default")]
+    pub env: String,
+    /// Use this exact DOTENV_PRIVATE_KEY* variable name.
+    #[arg(long = "key")]
+    pub key: Option<String>,
+    /// Show safe handoff instructions without printing the private key.
+    #[arg(long, required = true)]
+    pub instructions: bool,
 }
 
 #[derive(Subcommand)]

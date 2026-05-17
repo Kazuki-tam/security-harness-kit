@@ -16,8 +16,8 @@ mod version_check;
 
 use anyhow::{Context, Result};
 use args::{
-    CiCmd, CiInitProvider, Cli, Commands, DoctorCmd, DotenvxCmd, EnvCmd, HooksCmd, PolicyCmd,
-    SecretsCmd, SkillToolArg, SkillsCmd,
+    CiCmd, CiInitProvider, Cli, Commands, DoctorCmd, DotenvxCmd, EnvCmd, EnvKeyCmd, HooksCmd,
+    PolicyCmd, SecretsCmd, SkillToolArg, SkillsCmd,
 };
 use clap::Parser;
 use shk_core::policy::ColorMode;
@@ -202,6 +202,15 @@ pub fn run() -> Result<()> {
             })?,
         },
         Commands::Env { cmd } => match cmd {
+            EnvCmd::Encrypt(args) => commands::env::encrypt(&cwd, args)?,
+            EnvCmd::Decrypt(args) => commands::env::decrypt(&cwd, args)?,
+            EnvCmd::Run(args) => commands::env::run(&cwd, args)?,
+            EnvCmd::Key { cmd } => match cmd {
+                EnvKeyCmd::Import(args) => commands::env::key_import(&cwd, args)?,
+                EnvKeyCmd::List => commands::env::key_list(&cwd)?,
+                EnvKeyCmd::Delete(args) => commands::env::key_delete(&cwd, args)?,
+                EnvKeyCmd::Export(args) => commands::env::key_export(&cwd, args)?,
+            },
             EnvCmd::Dotenvx { cmd } => match cmd {
                 DotenvxCmd::ImportKeys { file } => commands::env::dotenvx_import_keys(&cwd, &file)?,
                 DotenvxCmd::List => commands::env::dotenvx_list(&cwd)?,
