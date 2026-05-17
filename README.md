@@ -2,7 +2,7 @@
 
 ![Overview illustration of shk scanning code, masking secrets, enforcing hooks, and producing safe reports](docs/assets/shk-overview.jpg)
 
-`shk` is a local-first guardrail for AI-assisted development. It helps keep secrets, PII, and risky project surfaces out of AI tool context, Git commits, generated output, and everyday local workflows.
+`shk` is a local-first guardrail for AI-assisted development. It helps keep secrets, PII, and risky project surfaces out of AI tool context, Git commits, generated output, and everyday local workflows. It can also encrypt `.env` files and inject decrypted values only when running local commands.
 
 ```bash
 shk scan .
@@ -22,10 +22,11 @@ MED   pii.en.ssn             docs/test.md:8   US Social Security Number detected
 
 AI coding agents can read project files, run commands, and transform sensitive input into new files. `shk` adds local checks around those workflows so teams can audit, mask, or block risky content before it leaves the intended boundary.
 
-`shk` can:
+With `shk`, you can:
 
-- Scan project paths and Git-staged files for common secrets and PII, including text in `.docx`, `.xlsx`, `.pptx`, and text-layer `.pdf` files.
+- Scan project paths and Git-staged files for common secrets and PII across source code, Markdown, plain text, Office documents (`.docx`, `.xlsx`, `.pptx`), and text-layer `.pdf` files.
 - Mask sensitive content from stdin, text files, and Office documents (`.docx`, `.xlsx`, `.pptx`).
+- Encrypt `.env` files, store private keys in the OS credential store, and run commands with decrypted values injected only at runtime.
 - Install Git pre-commit hooks.
 - Install managed hooks for Claude Code, Cursor, and Codex.
 - Generate a GitHub Actions workflow that runs `shk scan` on every pull request.
@@ -72,6 +73,13 @@ Mask sensitive content from stdin:
 
 ```bash
 shk mask < prompt.txt
+```
+
+Encrypt a `.env` file and run a command with decrypted values:
+
+```bash
+shk env encrypt .env --in-place
+shk env run -- npm test
 ```
 
 Install a Git pre-commit hook:
