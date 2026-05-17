@@ -134,6 +134,13 @@ shk doctor
 shk doctor ignore --fix
 shk doctor env --dotenvx
 
+shk env dotenvx import-keys .env.keys
+shk env encrypt .env --in-place
+shk env run -- npm test
+shk env key import
+shk env key export --instructions
+shk env decrypt .env --output .env.local
+
 shk hooks install
 shk hooks install-ai --dry-run
 shk hooks install-ai --audit

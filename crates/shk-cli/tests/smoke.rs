@@ -2478,6 +2478,35 @@ fn doctor_env_skips_dotenvx_encrypted_files() {
 }
 
 #[test]
+fn doctor_env_skips_shk_encrypted_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".env.local"),
+        r#"
+DOTENV_PUBLIC_KEY_LOCAL="03f98bf6e00bce6fdb933bc47738d671dffb75a916fa8c89854bdfa3483902632f"
+DATABASE_URL="encrypted:BE9f1wzB2Rf6Sg=="
+"#,
+    )
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["doctor", "env", dir.path().to_str().unwrap()])
+        .output()
+        .expect("doctor env");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("env: no plaintext .env / .env.*"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("plaintext env files detected"), "{stdout}");
+    assert!(!stdout.contains(".env.local ("), "{stdout}");
+}
+
+#[test]
 fn doctor_env_reports_dotenvx_files_with_plaintext_values() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -2671,6 +2700,91 @@ fn env_dotenvx_help_is_registered() {
     assert!(stdout.contains("import-keys"), "{stdout}");
     assert!(stdout.contains("run"), "{stdout}");
     assert!(!stdout.contains("export"), "{stdout}");
+}
+
+#[test]
+fn env_encrypt_help_documents_in_place() {
+    let out = Command::new(shk_bin())
+        .args(["env", "encrypt", "--help"])
+        .output()
+        .expect("env encrypt help");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("--output"), "{stdout}");
+    assert!(stdout.contains("--in-place"), "{stdout}");
+    assert!(stdout.contains("--remove-source"), "{stdout}");
+}
+
+#[test]
+fn env_run_help_is_registered() {
+    let out = Command::new(shk_bin())
+        .args(["env", "run", "--help"])
+        .output()
+        .expect("env run help");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("--file"), "{stdout}");
+    assert!(stdout.contains("--env"), "{stdout}");
+    assert!(stdout.contains("--key"), "{stdout}");
+}
+
+#[test]
+fn env_run_reports_missing_key_with_migration_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".env"),
+        r#"
+DOTENV_PUBLIC_KEY="03f98bf6e00bce6fdb933bc47738d671dffb75a916fa8c89854bdfa3483902632f"
+DATABASE_URL="encrypted:BE9f1wzB2Rf6Sg=="
+"#,
+    )
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .current_dir(dir.path())
+        .args(["env", "run", "--", "sh", "-c", "true"])
+        .output()
+        .expect("env run");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("shk env encrypt"), "{stderr}");
+    assert!(stderr.contains("shk env dotenvx import-keys"), "{stderr}");
+}
+
+#[test]
+fn env_key_help_is_registered_without_raw_export() {
+    let out = Command::new(shk_bin())
+        .args(["env", "key", "--help"])
+        .output()
+        .expect("env key help");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("import"), "{stdout}");
+    assert!(stdout.contains("export"), "{stdout}");
+
+    let out = Command::new(shk_bin())
+        .args(["env", "key", "export", "--help"])
+        .output()
+        .expect("env key export help");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("--instructions"), "{stdout}");
+    assert!(!stdout.contains("--print"), "{stdout}");
 }
 
 #[test]

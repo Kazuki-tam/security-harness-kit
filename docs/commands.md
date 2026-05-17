@@ -199,7 +199,7 @@ shk doctor env --dotenvx
 shk doctor env ./path
 ```
 
-`.env.example` and dotenvx-encrypted env files are excluded from the plaintext env file warning. With `--dotenvx`, the diagnostic also reports known dotenvx artifact files such as `.env.keys` and `.env.vault`.
+`.env.example`, dotenvx-encrypted env files, and `shk env encrypt` output files are excluded from the plaintext env file warning. With `--dotenvx`, the diagnostic also reports known dotenvx artifact files such as `.env.keys` and `.env.vault`.
 
 ### `shk doctor version`
 
@@ -211,6 +211,66 @@ shk doctor --json version
 ```
 
 This command reports whether an update is available. It does not modify the installed binary.
+
+## `shk env encrypt` / `shk env decrypt`
+
+Encrypt and decrypt dotenv payloads with `shk` native encryption. This is separate from the external dotenvx command integration: dotenvx support remains available under `shk env dotenvx`, while native encryption lets `shk` operate without an external dotenv encryption tool.
+
+```bash
+shk env encrypt .env --in-place
+shk env run -- npm test
+shk env key import
+shk env key export --instructions
+shk env decrypt .env --output .env.local
+shk env encrypt .env --output .env.shk
+shk env encrypt .env.production --env production --output .env.production.shk
+shk env run -f .env.production --env production -- npm start
+shk env decrypt .env.production.shk --env production --output .env.production.local
+```
+
+The encryption key pair is generated per project and environment label, with the public key written to the `.env` file as `DOTENV_PUBLIC_KEY*` and the private key stored in the operating system credential store as `DOTENV_PRIVATE_KEY*`. Values are encrypted in dotenvx-style form as `KEY="encrypted:..."`, preserving key names and the dotenv file shape. Use `--in-place` on `encrypt` to keep the `.env` filename while replacing plaintext values with encrypted values. Use `--output` to write a separate encrypted file instead. Existing output files are refused unless `--force` is passed. `decrypt` always requires `--output` so plaintext is not written to stdout accidentally. Prefer `shk env run` for day-to-day use: it decrypts values in memory and injects only the resulting application variables into the child process.
+
+Files written by `shk env encrypt` include a comment-only `[SHK_NATIVE_ENV]` header before the `DOTENV_PUBLIC_KEY*` block. This makes native `shk` output recognizable when reading the file, while preserving the existing encrypted dotenv value shape.
+
+For existing dotenvx users, import keys once and then switch the runtime command:
+
+```bash
+shk env dotenvx import-keys .env.keys
+shk env run -f .env -- npm test
+```
+
+`shk env run`, `decrypt`, and `encrypt` first use native `shk` keys. If none exist, they can reuse imported dotenvx `DOTENV_PRIVATE_KEY*` values from the OS credential store, derive the public key when needed, and adopt the key into the native store. This keeps existing dotenvx-encrypted files usable while removing the external `dotenvx` binary from the normal execution path. After a successful native command, the imported dotenvx copy can be removed with `shk env dotenvx delete --all` if the project no longer needs `shk env dotenvx run`.
+
+| Option | Meaning |
+|--------|---------|
+| `--output <file>` | Destination file. Required unless `encrypt --in-place` is used. |
+| `--in-place` | Encrypt only: replace the source file contents with encrypted data. |
+| `--env <name>` | Use `DOTENV_PRIVATE_KEY_<NAME>` and `DOTENV_PUBLIC_KEY_<NAME>`. Use `default` for `DOTENV_PRIVATE_KEY` / `DOTENV_PUBLIC_KEY`. Defaults to `default`. |
+| `--key <DOTENV_PRIVATE_KEY*>` | Use an exact private key variable name instead of deriving one from `--env`. |
+| `--force` | Overwrite an existing output file. |
+| `--remove-source` | Encrypt only: delete the plaintext source file after successful encryption. |
+
+`shk env run` accepts `-f, --file <file>` repeatedly and defaults to `.env` when no file is provided. It uses the default project key unless `--env` or `--key` is supplied. Unlike `shk env dotenvx run`, it does not invoke an external `dotenvx` binary and does not pass `DOTENV_PRIVATE_KEY*` into the child process.
+
+## `shk env key`
+
+Register local decryption keys and show safe team handoff instructions without committing `.env.keys`.
+
+```bash
+shk env key import
+shk env key import --env production --stdin
+shk env key import --key DOTENV_PRIVATE_KEY_STAGING --force
+shk env key export --env production --instructions
+```
+
+`import` stores one `DOTENV_PRIVATE_KEY*` value in the native `shk` OS credential store for the current project. Without `--stdin`, it prompts for the key without echoing input. With `--stdin`, it can read from a password manager CLI:
+
+```bash
+op read "op://Project/prod/DOTENV_PRIVATE_KEY_PRODUCTION" \
+  | shk env key import --env production --stdin
+```
+
+`export --instructions` intentionally does not print raw key material. It prints the key name, whether a key is already present on this machine, and a recommended local handoff flow: store the key in a team password manager, share vault access with the teammate, and have the recipient run `shk env key import`.
 
 ## `shk env dotenvx`
 
