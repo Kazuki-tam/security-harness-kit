@@ -2507,7 +2507,7 @@ DATABASE_URL="encrypted:BE9f1wzB2Rf6Sg=="
 }
 
 #[test]
-fn doctor_env_reports_dotenvx_files_with_plaintext_values() {
+fn doctor_env_warns_when_encrypted_file_contains_plaintext_values() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join(".env.local"),
@@ -2528,8 +2528,19 @@ fn doctor_env_reports_dotenvx_files_with_plaintext_values() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("plaintext env files detected"), "{stdout}");
-    assert!(stdout.contains(".env.local ("), "{stdout}");
+    assert!(
+        stdout.contains("encrypted env files contain plaintext values"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(".env.local (1 plaintext key(s): API_TOKEN)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("shk env encrypt <file> --in-place"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("plaintext env files detected"), "{stdout}");
     assert!(!stdout.contains("plaintext-token"), "{stdout}");
 }
 

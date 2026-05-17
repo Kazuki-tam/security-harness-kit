@@ -199,7 +199,7 @@ shk doctor env --dotenvx
 shk doctor env ./path
 ```
 
-`.env.example`, dotenvx-encrypted env files, and `shk env encrypt` output files are excluded from the plaintext env file warning. With `--dotenvx`, the diagnostic also reports known dotenvx artifact files such as `.env.keys` and `.env.vault`.
+`.env.example`, dotenvx-encrypted env files, and `shk env encrypt` output files are excluded from the plaintext env file warning. If an encrypted env file contains newly added or edited plaintext values, `doctor env` reports the plaintext key names and recommends re-running `shk env encrypt <file> --in-place`. With `--dotenvx`, the diagnostic also reports known dotenvx artifact files such as `.env.keys` and `.env.vault`.
 
 ### `shk doctor version`
 
@@ -231,6 +231,16 @@ shk env decrypt .env.production.shk --env production --output .env.production.lo
 The encryption key pair is generated per project and environment label, with the public key written to the `.env` file as `DOTENV_PUBLIC_KEY*` and the private key stored in the operating system credential store as `DOTENV_PRIVATE_KEY*`. Values are written as `KEY="encrypted:..."`, preserving key names and the dotenv file shape. Use `--in-place` on `encrypt` to keep the `.env` filename while replacing plaintext values with encrypted values. Use `--output` to write a separate encrypted file instead. Existing output files are refused unless `--force` is passed. `decrypt` always requires `--output` so plaintext is not written to stdout accidentally. Prefer `shk env run` for day-to-day use: it decrypts values in memory and injects only the resulting application variables into the child process.
 
 Files written by `shk env encrypt` include a comment-only `[SHK_NATIVE_ENV]` header before the `DOTENV_PUBLIC_KEY*` block. This makes native `shk` output recognizable when reading the file, while preserving the existing encrypted dotenv value shape.
+
+To add or update a variable in an encrypted env file, edit the line as plaintext, then immediately re-run encryption:
+
+```bash
+# Add or edit lines in .env, for example NEW_API_KEY=...
+shk env encrypt .env --in-place
+shk doctor env
+```
+
+Existing `encrypted:` values are left encrypted, and only plaintext values are encrypted on the next `encrypt` run. `doctor env` warns when an encrypted env file still contains plaintext keys, which helps catch a missed re-encryption step before commit or release.
 
 For existing dotenvx users, import keys once and then switch the runtime command:
 
