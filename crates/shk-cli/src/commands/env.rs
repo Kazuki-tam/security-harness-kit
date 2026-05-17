@@ -400,15 +400,39 @@ fn read_native_env_run_keys(
     let selected = native_run_targets(args)?;
     let mut keys = Vec::new();
     for key in selected {
-        let material = read_or_adopt_env_key_material(native_store, dotenvx_store, project_root, &key)?
-            .ok_or_else(|| {
-                anyhow!(
-                    "no stored {key}; run `shk env encrypt` or `shk env dotenvx import-keys .env.keys` first"
-                )
-            })?;
+        let material =
+            match read_or_adopt_env_key_material(native_store, dotenvx_store, project_root, &key) {
+                Ok(Some(material)) => material,
+                Ok(None) => return Err(missing_env_key_error(&key)),
+                Err(err) if is_secret_store_unavailable(&err) => {
+                    return Err(err.context(missing_env_key_message(&key)));
+                }
+                Err(err) => return Err(err),
+            };
         keys.push(material);
     }
     Ok(keys)
+}
+
+fn missing_env_key_error(private_key_name: &str) -> anyhow::Error {
+    anyhow!(missing_env_key_message(private_key_name))
+}
+
+fn missing_env_key_message(private_key_name: &str) -> String {
+    format!(
+        "no stored {private_key_name}; run `shk env encrypt` or `shk env dotenvx import-keys .env.keys` first"
+    )
+}
+
+fn is_secret_store_unavailable(err: &anyhow::Error) -> bool {
+    err.chain().any(|source| {
+        source.downcast_ref::<keyring::Error>().is_some_and(|err| {
+            matches!(
+                err,
+                keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_)
+            )
+        })
+    })
 }
 
 fn native_run_targets(args: &EnvRunArgs) -> Result<Vec<String>> {

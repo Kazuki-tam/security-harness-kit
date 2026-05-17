@@ -19,6 +19,11 @@ allow = [
   "Unicode-3.0",
 ]
 
+exceptions = [
+  { allow = ["CC0-1.0"], crate = "secp256k1" },
+  { allow = ["CC0-1.0"], crate = "secp256k1-sys" },
+]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "allow"
