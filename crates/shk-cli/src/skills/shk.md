@@ -128,7 +128,7 @@ shk env dotenvx delete --all
 Important behavior:
 - Keys are stored in the OS credential store through the platform keychain/credential backend.
 - `run` injects keys only into the child `dotenvx run -- <command>` environment.
-- There is no export command; do not print raw private keys.
+- There is no raw-key export under `shk env dotenvx`; use `shk env key export --instructions` only for handoff guidance.
 - `delete` requires an explicit target: `--all`, `--key <DOTENV_PRIVATE_KEY*>`, or `--env <name>`.
 
 ## Secret manager push
