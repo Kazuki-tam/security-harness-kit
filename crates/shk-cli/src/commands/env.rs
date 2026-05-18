@@ -28,12 +28,33 @@ const SHK_NATIVE_ENV_HEADER_END: &str =
     "#/------------------------------------------------------------/";
 const DOTENV_PUBLIC_KEY_HEADER_START: &str =
     "#/-------------------[DOTENV_PUBLIC_KEY]--------------------/";
-const DOTENV_PUBLIC_KEY_HEADER_BODY: &str =
-    "#/            public-key encryption for .env files          /";
-const DOTENV_PUBLIC_KEY_HEADER_LINK: &str =
-    "#/       [how it works](https://dotenvx.com/encryption)     /";
-const DOTENV_PUBLIC_KEY_HEADER_END: &str =
+const SHK_PUBLIC_KEY_HEADER_BODY: &str =
+    "#/           public key for shk native env encryption       /";
+const SHK_PUBLIC_KEY_HEADER_DETAIL: &str =
+    "#/       private key is stored in the OS credential store   /";
+const SHK_PUBLIC_KEY_HEADER_END: &str =
     "#/----------------------------------------------------------/";
+const LEGACY_DOTENV_PUBLIC_KEY_HEADER_BODY: &str =
+    "#/            public-key encryption for .env files          /";
+const LEGACY_DOTENV_PUBLIC_KEY_HEADER_LINK: &str =
+    "#/       [how it works](https://dotenvx.com/encryption)     /";
+const SHK_NATIVE_ENV_HEADER_LINES: [&str; 3] = [
+    SHK_NATIVE_ENV_HEADER_START,
+    SHK_NATIVE_ENV_HEADER_BODY,
+    SHK_NATIVE_ENV_HEADER_END,
+];
+const SHK_PUBLIC_KEY_HEADER_LINES: [&str; 4] = [
+    DOTENV_PUBLIC_KEY_HEADER_START,
+    SHK_PUBLIC_KEY_HEADER_BODY,
+    SHK_PUBLIC_KEY_HEADER_DETAIL,
+    SHK_PUBLIC_KEY_HEADER_END,
+];
+const LEGACY_DOTENV_PUBLIC_KEY_HEADER_LINES: [&str; 4] = [
+    DOTENV_PUBLIC_KEY_HEADER_START,
+    LEGACY_DOTENV_PUBLIC_KEY_HEADER_BODY,
+    LEGACY_DOTENV_PUBLIC_KEY_HEADER_LINK,
+    SHK_PUBLIC_KEY_HEADER_END,
+];
 
 #[derive(Deserialize, Serialize)]
 struct NativeEnvKeyMaterial {
@@ -1196,26 +1217,22 @@ fn validate_dotenv_assignment_key(key: &str) -> Result<()> {
 }
 
 fn is_managed_env_header_line(line: &str) -> bool {
-    matches!(
-        line,
-        SHK_NATIVE_ENV_HEADER_START
-            | SHK_NATIVE_ENV_HEADER_BODY
-            | SHK_NATIVE_ENV_HEADER_END
-            | DOTENV_PUBLIC_KEY_HEADER_START
-            | DOTENV_PUBLIC_KEY_HEADER_BODY
-            | DOTENV_PUBLIC_KEY_HEADER_LINK
-            | DOTENV_PUBLIC_KEY_HEADER_END
-    )
+    SHK_NATIVE_ENV_HEADER_LINES.contains(&line)
+        || SHK_PUBLIC_KEY_HEADER_LINES.contains(&line)
+        || LEGACY_DOTENV_PUBLIC_KEY_HEADER_LINES.contains(&line)
 }
 
 fn push_shk_public_key_header(out: &mut Vec<String>, public_key_name: &str, public_key: &str) {
-    out.push(SHK_NATIVE_ENV_HEADER_START.to_string());
-    out.push(SHK_NATIVE_ENV_HEADER_BODY.to_string());
-    out.push(SHK_NATIVE_ENV_HEADER_END.to_string());
-    out.push(DOTENV_PUBLIC_KEY_HEADER_START.to_string());
-    out.push(DOTENV_PUBLIC_KEY_HEADER_BODY.to_string());
-    out.push(DOTENV_PUBLIC_KEY_HEADER_LINK.to_string());
-    out.push(DOTENV_PUBLIC_KEY_HEADER_END.to_string());
+    out.extend(
+        SHK_NATIVE_ENV_HEADER_LINES
+            .iter()
+            .map(|line| line.to_string()),
+    );
+    out.extend(
+        SHK_PUBLIC_KEY_HEADER_LINES
+            .iter()
+            .map(|line| line.to_string()),
+    );
     out.push(format!("{public_key_name}=\"{public_key}\""));
 }
 
@@ -1697,12 +1714,44 @@ mod tests {
 
         assert_eq!(encrypted_again.matches("[SHK_NATIVE_ENV]").count(), 1);
         assert_eq!(encrypted_again.matches("[DOTENV_PUBLIC_KEY]").count(), 1);
-        assert_eq!(encrypted_again.matches("public-key encryption").count(), 1);
+        assert_eq!(
+            encrypted_again.matches("shk native env encryption").count(),
+            1
+        );
+        assert_eq!(encrypted_again.matches("dotenvx.com").count(), 0);
         assert_eq!(encrypted_again.matches("DOTENV_PUBLIC_KEY=").count(), 1);
         assert!(
             encrypted_again.contains("API_KEY=\"encrypted:"),
             "{encrypted_again}"
         );
+    }
+
+    #[test]
+    fn encrypt_replaces_legacy_dotenvx_public_key_header() {
+        let keypair = Keypair::generate();
+        let encrypted = format!(
+            "{}\n{}\n{}\n{}\nDOTENV_PUBLIC_KEY=\"{}\"\nAPI_KEY=\"encrypted:already\"\n",
+            DOTENV_PUBLIC_KEY_HEADER_START,
+            LEGACY_DOTENV_PUBLIC_KEY_HEADER_BODY,
+            LEGACY_DOTENV_PUBLIC_KEY_HEADER_LINK,
+            SHK_PUBLIC_KEY_HEADER_END,
+            keypair.public_key(),
+        );
+
+        let encrypted_again =
+            encrypt_dotenv_body(&encrypted, "DOTENV_PUBLIC_KEY", &keypair.public_key()).unwrap();
+
+        assert!(
+            encrypted_again.contains("[DOTENV_PUBLIC_KEY]"),
+            "{encrypted_again}"
+        );
+        assert!(encrypted_again.contains("shk native env encryption"));
+        assert!(!encrypted_again.contains("public-key encryption"));
+        assert!(
+            !encrypted_again.contains("dotenvx.com"),
+            "{encrypted_again}"
+        );
+        assert!(encrypted_again.contains("API_KEY=\"encrypted:already\""));
     }
 
     #[test]
@@ -1719,7 +1768,11 @@ mod tests {
 
         assert!(!plaintext.contains("[SHK_NATIVE_ENV]"), "{plaintext}");
         assert!(!plaintext.contains("[DOTENV_PUBLIC_KEY]"), "{plaintext}");
-        assert!(!plaintext.contains("public-key encryption"), "{plaintext}");
+        assert!(
+            !plaintext.contains("shk native env encryption"),
+            "{plaintext}"
+        );
+        assert!(!plaintext.contains("dotenvx.com"), "{plaintext}");
         assert!(plaintext.contains("API_KEY=\"secret\""), "{plaintext}");
     }
 
