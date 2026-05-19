@@ -1064,9 +1064,7 @@ fn encrypt_dotenv_body(body: &str, public_key_name: &str, public_key: &str) -> R
         if is_managed_env_header_line(line.trim()) {
             continue;
         }
-        let Some((raw_key, raw_value)) =
-            line.strip_prefix("export ").unwrap_or(line).split_once('=')
-        else {
+        let Some((raw_key, raw_value)) = split_dotenv_assignment(raw_line) else {
             out.push(raw_line.to_string());
             continue;
         };
@@ -1115,9 +1113,7 @@ fn decrypt_dotenv_body(body: &str, private_key: &str) -> Result<Vec<u8>> {
         if is_managed_env_header_line(line.trim()) {
             continue;
         }
-        let Some((raw_key, raw_value)) =
-            line.strip_prefix("export ").unwrap_or(line).split_once('=')
-        else {
+        let Some((raw_key, raw_value)) = split_dotenv_assignment(raw_line) else {
             out.push(raw_line.to_string());
             continue;
         };
@@ -1154,12 +1150,7 @@ fn decrypt_dotenv_env_pairs(
     );
     let mut out = Vec::new();
     for raw_line in body.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
-        let Some((raw_key, raw_value)) = line.split_once('=') else {
+        let Some((raw_key, raw_value)) = split_dotenv_assignment(raw_line) else {
             continue;
         };
         let key = raw_key.trim();
@@ -1178,6 +1169,18 @@ fn decrypt_dotenv_env_pairs(
         out.push((key.to_string(), value));
     }
     Ok(out)
+}
+
+fn split_dotenv_assignment(raw_line: &str) -> Option<(&str, &str)> {
+    let line = raw_line.trim_start();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let line = line
+        .strip_prefix("export ")
+        .map(str::trim_start)
+        .unwrap_or(line);
+    line.split_once('=')
 }
 
 fn decrypt_env_value(
@@ -1698,6 +1701,26 @@ mod tests {
         let plaintext = String::from_utf8(plaintext).unwrap();
         assert!(plaintext.contains("API_KEY=\"secret\""), "{plaintext}");
         assert!(plaintext.contains("PUBLIC_VALUE=\"ok\""), "{plaintext}");
+    }
+
+    #[test]
+    fn encrypt_decrypt_preserve_commented_dotenv_assignments() {
+        let keypair = Keypair::generate();
+        // shk-ignore-next-line secret.generic_api_key
+        let commented = "  # API_KEY=commented-secret";
+        let body = format!("{commented}\nexport   ACTIVE=secret\n");
+        let encrypted =
+            encrypt_dotenv_body(&body, "DOTENV_PUBLIC_KEY", &keypair.public_key()).unwrap();
+
+        assert!(encrypted.contains(commented), "{encrypted}");
+        assert!(encrypted.contains("ACTIVE=\"encrypted:"), "{encrypted}");
+        assert!(!encrypted.contains("# API_KEY=\"encrypted:"), "{encrypted}");
+
+        let plaintext = decrypt_dotenv_body(&encrypted, &keypair.private_key()).unwrap();
+        let plaintext = String::from_utf8(plaintext).unwrap();
+
+        assert!(plaintext.contains(commented), "{plaintext}");
+        assert!(plaintext.contains("ACTIVE=\"secret\""), "{plaintext}");
     }
 
     #[test]
