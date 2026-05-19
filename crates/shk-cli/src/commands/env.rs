@@ -1706,24 +1706,20 @@ mod tests {
     #[test]
     fn encrypt_decrypt_preserve_commented_dotenv_assignments() {
         let keypair = Keypair::generate();
-        let body = "  # API_KEY=commented-secret\nexport   ACTIVE=secret\n";
+        // shk-ignore-next-line secret.generic_api_key
+        let commented = "  # API_KEY=commented-secret";
+        let body = format!("{commented}\nexport   ACTIVE=secret\n");
         let encrypted =
-            encrypt_dotenv_body(body, "DOTENV_PUBLIC_KEY", &keypair.public_key()).unwrap();
+            encrypt_dotenv_body(&body, "DOTENV_PUBLIC_KEY", &keypair.public_key()).unwrap();
 
-        assert!(
-            encrypted.contains("  # API_KEY=commented-secret"),
-            "{encrypted}"
-        );
+        assert!(encrypted.contains(commented), "{encrypted}");
         assert!(encrypted.contains("ACTIVE=\"encrypted:"), "{encrypted}");
         assert!(!encrypted.contains("# API_KEY=\"encrypted:"), "{encrypted}");
 
         let plaintext = decrypt_dotenv_body(&encrypted, &keypair.private_key()).unwrap();
         let plaintext = String::from_utf8(plaintext).unwrap();
 
-        assert!(
-            plaintext.contains("  # API_KEY=commented-secret"),
-            "{plaintext}"
-        );
+        assert!(plaintext.contains(commented), "{plaintext}");
         assert!(plaintext.contains("ACTIVE=\"secret\""), "{plaintext}");
     }
 
