@@ -9,6 +9,7 @@ import { useProjects } from "./hooks/useProjects";
 import { useI18n } from "./i18n";
 import {
   applyNpmHardening,
+  applyRecommendedFixes,
   fetchProjectStatus,
   fixDoctorIgnore,
   initPolicy,
@@ -185,7 +186,12 @@ function App() {
                 (currentProjectStatus.status === "done" && currentProjectStatus.data.policy.exists),
             }),
           ),
-        onFixDoctorIgnore: () => runSetupAction(() => fixDoctorIgnore(selectedProject.path)),
+        onApplyRecommendedFixes: (fixIds: string[], ignoreTargets: string[]) =>
+          runSetupAction(() =>
+            applyRecommendedFixes(selectedProject.path, { fixIds, ignoreTargets }),
+          ),
+        onFixDoctorIgnore: (targets: string[]) =>
+          runSetupAction(() => fixDoctorIgnore(selectedProject.path, { targets })),
         onInstallPreCommit: () => runSetupAction(() => installPreCommitHook(selectedProject.path)),
         onInstallAiHooks: () =>
           runSetupAction(() =>
@@ -194,7 +200,31 @@ function App() {
               dryRun: false,
               global: false,
               failClosed: false,
+              applyDeny: false,
+              applySandbox: false,
+            }),
+          ),
+        onInstallClaudeDeny: () =>
+          runSetupAction(() =>
+            installAiHooks(selectedProject.path, {
+              audit: false,
+              dryRun: false,
+              global: false,
+              tool: "claude-code",
+              failClosed: false,
               applyDeny: true,
+              applySandbox: false,
+            }),
+          ),
+        onInstallCodexSandbox: () =>
+          runSetupAction(() =>
+            installAiHooks(selectedProject.path, {
+              audit: false,
+              dryRun: false,
+              global: false,
+              tool: "codex",
+              failClosed: false,
+              applyDeny: false,
               applySandbox: true,
             }),
           ),

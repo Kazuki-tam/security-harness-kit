@@ -1,6 +1,6 @@
 use shk_cli::desktop_api::{
-    self, ActionResult, InitPolicyOptions, InstallAiHooksOptions, InstallSkillsOptions,
-    ProjectStatus,
+    self, ActionResult, ApplyRecommendedFixesOptions, FixDoctorIgnoreOptions, InitPolicyOptions,
+    InstallAiHooksOptions, InstallSkillsOptions, ProjectStatus,
 };
 use shk_core::ScanJsonReport;
 use shk_core::policy::ColorMode;
@@ -74,8 +74,19 @@ fn install_ai_hooks(
 }
 
 #[tauri::command]
-fn fix_doctor_ignore(path: String) -> Result<ActionResult, AppError> {
-    desktop_api::fix_doctor_ignore(&path).map_err(map_err)
+fn fix_doctor_ignore(
+    path: String,
+    options: FixDoctorIgnoreOptions,
+) -> Result<ActionResult, AppError> {
+    desktop_api::fix_doctor_ignore(&path, options).map_err(map_err)
+}
+
+#[tauri::command]
+fn apply_recommended_fixes(
+    path: String,
+    options: ApplyRecommendedFixesOptions,
+) -> Result<ActionResult, AppError> {
+    desktop_api::apply_recommended_fixes(&path, options).map_err(map_err)
 }
 
 #[tauri::command]
@@ -98,6 +109,7 @@ pub fn run() {
             install_pre_commit_hook,
             install_ai_hooks,
             fix_doctor_ignore,
+            apply_recommended_fixes,
             apply_npm_hardening,
             install_skills,
         ])

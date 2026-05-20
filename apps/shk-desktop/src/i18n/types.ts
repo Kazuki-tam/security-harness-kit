@@ -106,8 +106,20 @@ export type Messages = {
     ignore: {
       title: string;
       description: string;
-      apply: string;
+      applySelected: string;
       policyRequired: string;
+      targetsLabel: string;
+      targetExists: string;
+      targetNew: string;
+      targetNames: Record<string, string>;
+    };
+    recommendedFixes: {
+      title: string;
+      description: string;
+      applySelected: string;
+      ignoreTargetsLabel: string;
+      available: string;
+      fixLabels: Record<string, string>;
     };
     gitHook: {
       title: string;
@@ -119,6 +131,10 @@ export type Messages = {
       title: string;
       description: string;
       install: string;
+      claudeDeny: string;
+      codexSandbox: string;
+      installClaudeDeny: string;
+      installCodexSandbox: string;
     };
     npm: {
       title: string;
@@ -138,6 +154,8 @@ export type Messages = {
       gitHook: string;
       aiHooks: string;
       ignore: string;
+      claudeDeny: string;
+      codexConfig: string;
       env: string;
       npm: string;
     };

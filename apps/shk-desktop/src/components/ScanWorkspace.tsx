@@ -15,9 +15,12 @@ type WorkspaceTab = "overview" | "findings" | "setup";
 
 type SetupHandlers = {
   onInitPolicy: (strict: boolean) => void;
-  onFixDoctorIgnore: () => void;
+  onApplyRecommendedFixes: (fixIds: string[], ignoreTargets: string[]) => void;
+  onFixDoctorIgnore: (targets: string[]) => void;
   onInstallPreCommit: () => void;
   onInstallAiHooks: () => void;
+  onInstallClaudeDeny: () => void;
+  onInstallCodexSandbox: () => void;
   onApplyNpmHardening: () => void;
   onInstallSkills: () => void;
 };
@@ -175,9 +178,12 @@ export function ScanWorkspace({
                 status={projectStatus.data}
                 actionState={actionState}
                 onInitPolicy={setupHandlers.onInitPolicy}
+                onApplyRecommendedFixes={setupHandlers.onApplyRecommendedFixes}
                 onFixDoctorIgnore={setupHandlers.onFixDoctorIgnore}
                 onInstallPreCommit={setupHandlers.onInstallPreCommit}
                 onInstallAiHooks={setupHandlers.onInstallAiHooks}
+                onInstallClaudeDeny={setupHandlers.onInstallClaudeDeny}
+                onInstallCodexSandbox={setupHandlers.onInstallCodexSandbox}
                 onApplyNpmHardening={setupHandlers.onApplyNpmHardening}
                 onInstallSkills={setupHandlers.onInstallSkills}
               />

@@ -105,9 +105,40 @@ export const en: Messages = {
     ignore: {
       title: ".gitignore / ignore coverage",
       description:
-        "Ensure required patterns from shk.toml are present in .gitignore and related ignore files.",
-      apply: "Append missing patterns to .gitignore",
+        "Check required patterns from shk.toml across ignore files and append missing entries to the targets you select.",
+      applySelected: "Apply to selected targets",
       policyRequired: "Create a policy first",
+      targetsLabel: "Targets",
+      targetExists: "exists",
+      targetNew: "will create",
+      targetNames: {
+        ".gitignore": "Git (.gitignore)",
+        ".cursorignore": "Cursor (.cursorignore)",
+        ".cursorindexingignore": "Cursor indexing (.cursorindexingignore)",
+        ".codeiumignore": "Codeium (.codeiumignore)",
+        ".clineignore": "Cline (.clineignore)",
+        ".aiderignore": "Aider (.aiderignore)",
+        ".continueignore": "Continue (.continueignore)",
+        ".tabnineignore": "Tabnine (.tabnineignore)",
+        ".ignore": "Generic (.ignore)",
+        ".aiignore": "Generic AI (.aiignore)",
+      },
+    },
+    recommendedFixes: {
+      title: "Recommended fixes",
+      description:
+        "Select safe, automatic fixes detected by Doctor. Claude deny and Codex sandbox are applied separately from ignore patterns.",
+      applySelected: "Apply selected fixes",
+      ignoreTargetsLabel: "Ignore targets",
+      available: "{{count}} recommended fixes",
+      fixLabels: {
+        ignore: "Append missing ignore patterns",
+        git_pre_commit: "Git pre-commit hook",
+        ai_hooks: "AI managed scan hooks",
+        ai_claude_deny: "Claude Code permissions.deny",
+        ai_codex_sandbox: "Codex sandbox hardening",
+        npm_hardening: "npm supply-chain hardening",
+      },
     },
     gitHook: {
       title: "Git pre-commit hook",
@@ -117,8 +148,13 @@ export const en: Messages = {
     },
     aiHooks: {
       title: "AI editor hooks",
-      description: "Install managed hooks for Cursor, Claude Code, and Codex.",
-      install: "Install hooks",
+      description:
+        "Managed scan hooks for Cursor, Claude Code, and Codex. Use Recommended fixes for Claude deny and Codex sandbox.",
+      install: "Install scan hooks",
+      claudeDeny: "Claude deny",
+      codexSandbox: "Codex sandbox",
+      installClaudeDeny: "Apply deny",
+      installCodexSandbox: "Apply sandbox",
     },
     npm: {
       title: "npm supply-chain hardening",
@@ -138,6 +174,8 @@ export const en: Messages = {
       gitHook: "Git pre-commit hook",
       aiHooks: "AI managed hooks",
       ignore: "Ignore coverage",
+      claudeDeny: "Claude deny",
+      codexConfig: "Codex config",
       env: "Env file hygiene",
       npm: "npm hardening",
     },

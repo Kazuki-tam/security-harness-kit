@@ -14,6 +14,8 @@ export function DoctorPanel({ doctor }: Props) {
     { ok: doctor.gitPreCommit, label: m.gitHook },
     { ok: doctor.aiManagedHooks, label: m.aiHooks },
     { ok: doctor.ignoreOk, label: m.ignore },
+    { ok: doctor.claudeDenyOk, label: m.claudeDeny },
+    { ok: doctor.codexConfigOk, label: m.codexConfig },
     { ok: doctor.envOk, label: m.env },
     { ok: doctor.npmOk, label: m.npm },
   ];

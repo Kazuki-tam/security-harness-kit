@@ -1,14 +1,21 @@
+import { useEffect, useState } from "react";
 import { useI18n } from "../i18n";
 import type { ActionState, ProjectStatus } from "../types";
+import { Button } from "./Button";
+import { DEFAULT_IGNORE_TARGETS, IgnoreTargetsPicker } from "./IgnoreTargetsPicker";
+import { RecommendedFixesCard } from "./RecommendedFixesCard";
 import { SetupActionCard } from "./SetupActionCard";
 
 type Props = {
   status: ProjectStatus;
   actionState: ActionState;
   onInitPolicy: (strict: boolean) => void;
-  onFixDoctorIgnore: () => void;
+  onApplyRecommendedFixes: (fixIds: string[], ignoreTargets: string[]) => void;
+  onFixDoctorIgnore: (targets: string[]) => void;
   onInstallPreCommit: () => void;
   onInstallAiHooks: () => void;
+  onInstallClaudeDeny: () => void;
+  onInstallCodexSandbox: () => void;
   onApplyNpmHardening: () => void;
   onInstallSkills: () => void;
 };
@@ -17,9 +24,12 @@ export function ProjectSetupPanel({
   status,
   actionState,
   onInitPolicy,
+  onApplyRecommendedFixes,
   onFixDoctorIgnore,
   onInstallPreCommit,
   onInstallAiHooks,
+  onInstallClaudeDeny,
+  onInstallCodexSandbox,
   onApplyNpmHardening,
   onInstallSkills,
 }: Props) {
@@ -34,6 +44,18 @@ export function ProjectSetupPanel({
   const npmReady = status.npmHardening.ok;
   const projectSkills = status.skills.filter((s) => s.label.includes("(project)"));
   const skillsInstalled = projectSkills.some((s) => s.installed);
+  const [selectedIgnoreTargets, setSelectedIgnoreTargets] =
+    useState<string[]>(DEFAULT_IGNORE_TARGETS);
+
+  useEffect(() => {
+    setSelectedIgnoreTargets(DEFAULT_IGNORE_TARGETS);
+  }, [status.path]);
+
+  const toggleIgnoreTarget = (name: string) => {
+    setSelectedIgnoreTargets((prev) =>
+      prev.includes(name) ? prev.filter((target) => target !== name) : [...prev, name],
+    );
+  };
 
   return (
     <div className="grid gap-4">
@@ -50,6 +72,13 @@ export function ProjectSetupPanel({
         primaryDisabled={running}
       />
 
+      <RecommendedFixesCard
+        status={status}
+        running={running}
+        policyExists={policyExists}
+        onApply={onApplyRecommendedFixes}
+      />
+
       <SetupActionCard
         title={m.ignore.title}
         description={m.ignore.description}
@@ -61,10 +90,12 @@ export function ProjectSetupPanel({
               : m.statusNeedsAttention
         }
         statusTone={!policyExists ? "neutral" : ignoreReady ? "ok" : "warn"}
-        primaryLabel={m.ignore.apply}
-        onPrimary={onFixDoctorIgnore}
+        primaryLabel={m.ignore.applySelected}
+        onPrimary={() => onFixDoctorIgnore(selectedIgnoreTargets)}
         primaryLoading={running}
-        primaryDisabled={running || !policyExists || ignoreReady}
+        primaryDisabled={
+          running || !policyExists || ignoreReady || selectedIgnoreTargets.length === 0
+        }
       >
         {ignoreMissingPatterns.length > 0 && (
           <ul className="grid gap-1 text-[11px] text-muted">
@@ -74,6 +105,18 @@ export function ProjectSetupPanel({
               </li>
             ))}
           </ul>
+        )}
+
+        {policyExists && !ignoreReady && status.ignoreFixTargets.length > 0 && (
+          <div className="mt-3 grid gap-2">
+            <p className="text-[11px] font-medium text-text">{m.ignore.targetsLabel}</p>
+            <IgnoreTargetsPicker
+              targets={status.ignoreFixTargets}
+              selectedTargets={selectedIgnoreTargets}
+              disabled={running}
+              onToggle={toggleIgnoreTarget}
+            />
+          </div>
         )}
       </SetupActionCard>
 
@@ -120,7 +163,39 @@ export function ProjectSetupPanel({
               <span>{tool.installed ? m.statusReady : m.statusMissing}</span>
             </li>
           ))}
+          <li className="flex items-center justify-between gap-2 text-[11px] text-muted">
+            <span className="font-medium text-text">{m.aiHooks.claudeDeny}</span>
+            <span>{status.doctor.claudeDenyOk ? m.statusReady : m.statusNeedsAttention}</span>
+          </li>
+          <li className="flex items-center justify-between gap-2 text-[11px] text-muted">
+            <span className="font-medium text-text">{m.aiHooks.codexSandbox}</span>
+            <span>{status.doctor.codexConfigOk ? m.statusReady : m.statusNeedsAttention}</span>
+          </li>
         </ul>
+        {policyExists && (!status.doctor.claudeDenyOk || !status.doctor.codexConfigOk) && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {!status.doctor.claudeDenyOk && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={onInstallClaudeDeny}
+                disabled={running}
+              >
+                {m.aiHooks.installClaudeDeny}
+              </Button>
+            )}
+            {!status.doctor.codexConfigOk && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={onInstallCodexSandbox}
+                disabled={running}
+              >
+                {m.aiHooks.installCodexSandbox}
+              </Button>
+            )}
+          </div>
+        )}
       </SetupActionCard>
 
       <SetupActionCard

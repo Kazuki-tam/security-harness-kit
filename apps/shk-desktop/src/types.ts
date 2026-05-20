@@ -53,9 +53,19 @@ export type DoctorStatus = {
   aiManagedHooks: boolean;
   ignoreOk: boolean;
   missingIgnorePatterns: string[];
+  claudeDenyOk: boolean;
+  codexConfigOk: boolean;
   envOk: boolean;
   npmOk: boolean;
   issues: DoctorIssue[];
+};
+
+export type RecommendedFix = {
+  id: string;
+  severity: string;
+  message: string;
+  requiresPolicy: boolean;
+  defaultSelected: boolean;
 };
 
 export type NpmHardeningStatus = {
@@ -75,6 +85,11 @@ export type SkillStatus = {
   installed: boolean;
 };
 
+export type IgnoreFixTarget = {
+  name: string;
+  exists: boolean;
+};
+
 export type ProjectStatus = {
   path: string;
   policy: PolicyStatus;
@@ -83,6 +98,8 @@ export type ProjectStatus = {
   doctor: DoctorStatus;
   npmHardening: NpmHardeningStatus;
   skills: SkillStatus[];
+  ignoreFixTargets: IgnoreFixTarget[];
+  recommendedFixes: RecommendedFix[];
 };
 
 export type ActionResult = {
@@ -94,6 +111,15 @@ export type ActionResult = {
 export type InitPolicyOptions = {
   strict: boolean;
   force: boolean;
+};
+
+export type FixDoctorIgnoreOptions = {
+  targets: string[];
+};
+
+export type ApplyRecommendedFixesOptions = {
+  fixIds: string[];
+  ignoreTargets: string[];
 };
 
 export type InstallAiHooksOptions = {
