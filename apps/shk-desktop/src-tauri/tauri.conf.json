@@ -13,10 +13,14 @@
     "windows": [
       {
         "title": "shk",
-        "width": 1180,
-        "height": 760,
-        "minWidth": 960,
-        "minHeight": 640
+        "width": 1280,
+        "height": 820,
+        "minWidth": 980,
+        "minHeight": 640,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "backgroundColor": "#0a0c12"
       }
     ],
     "security": {
