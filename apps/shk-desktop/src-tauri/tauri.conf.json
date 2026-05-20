@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "shk",
+  "version": "0.3.4",
+  "identifier": "com.securityharnesskit.shk",
+  "build": {
+    "beforeDevCommand": "pnpm run dev",
+    "beforeBuildCommand": "pnpm run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "shk",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 960,
+        "minHeight": 640
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost; script-src 'self'; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "Local-first security scanner",
+    "longDescription": "A local-first desktop app for scanning projects for secrets, PII, and risky AI context."
+  }
+}

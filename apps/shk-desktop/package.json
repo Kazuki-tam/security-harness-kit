@@ -1,0 +1,36 @@
+{
+  "name": "shk-desktop",
+  "version": "0.3.4",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.0.0",
+    "lucide-react": "^1.16.0",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.17",
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "oxfmt": "^0.51.0",
+    "oxlint": "^1.66.0",
+    "tailwindcss": "^4.1.17",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.13"
+  },
+  "packageManager": "pnpm@11.1.3"
+}

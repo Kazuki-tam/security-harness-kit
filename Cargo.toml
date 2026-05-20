@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "apps/shk-desktop/src-tauri",
     "crates/shk-core",
     "crates/shk-rules",
     "crates/shk-cli",

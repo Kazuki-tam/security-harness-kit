@@ -3,6 +3,10 @@
 **/*.rs.bk
 Cargo.lock.bak
 
+# ===== Node / pnpm =====
+node_modules/
+.pnpm-store/
+
 # ===== LLM / AI docs (private) =====
 _llm-docs/
 .claude/settings.local.json
