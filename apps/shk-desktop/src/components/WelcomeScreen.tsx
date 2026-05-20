@@ -1,138 +1,143 @@
-import { ArrowRight, FolderOpen, ShieldCheck, Sparkles } from "lucide-react";
+import { BookOpen, Command, FolderOpen, ShieldCheck } from "lucide-react";
+import { useState, type ReactNode } from "react";
 import type { Project } from "../types";
 import { actionableCount } from "../scan";
-import { dirnameOf, formatRelativeTime } from "../utils";
+import { formatRelativeTime, shortenPath } from "../utils";
+import { HelpModal } from "./HelpModal";
 
 type Props = {
   recentProjects: Project[];
+  totalProjects: number;
   onOpenFolder: () => void;
   onSelect: (id: string) => void;
 };
 
-export function WelcomeScreen({ recentProjects, onOpenFolder, onSelect }: Props) {
+export function WelcomeScreen({ recentProjects, totalProjects, onOpenFolder, onSelect }: Props) {
+  const [helpOpen, setHelpOpen] = useState(false);
+
   return (
     <div className="shk-scroll shk-fade-in min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto flex max-w-3xl flex-col gap-10 px-10 pt-16 pb-12">
-        <section className="text-center">
-          <div className="mx-auto mb-5 grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-sky-400/30 via-violet-400/20 to-emerald-400/20 text-sky-200 ring-1 ring-inset ring-sky-400/30">
-            <ShieldCheck size={26} aria-hidden="true" />
+      <div className="mx-auto flex min-h-full w-full max-w-[640px] flex-col justify-center px-8 py-12">
+        <section className="mb-10 flex items-center gap-3.5" aria-label="Security Harness Kit">
+          <div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-sky-400/30 via-violet-400/20 to-emerald-400/20 text-sky-200 ring-1 ring-inset ring-sky-400/30">
+            <ShieldCheck size={24} aria-hidden="true" />
           </div>
-          <h2 className="text-[28px] font-semibold tracking-tight text-white">shk へようこそ</h2>
-          <p className="mx-auto mt-3 max-w-md text-sm leading-relaxed text-[var(--color-muted)]">
-            AI コーディングエージェント向けのローカルファースト・セキュリティハーネス。
-            シークレットや PII をローカルで検出し、結果は外部送信しません。
-          </p>
-
-          <div className="mt-7 flex items-center justify-center gap-3">
-            <button
-              type="button"
-              onClick={onOpenFolder}
-              className="group inline-flex items-center gap-2 rounded-lg bg-sky-500 px-5 py-2.5 text-sm font-semibold text-slate-950 shadow-lg shadow-sky-500/20 transition hover:bg-sky-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70"
-            >
-              <FolderOpen size={16} aria-hidden="true" />
-              フォルダを開く
-              <ArrowRight
-                size={14}
-                aria-hidden="true"
-                className="transition group-hover:translate-x-0.5"
-              />
-            </button>
-            <a
-              href="https://agents.md"
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] px-4 py-2.5 text-sm font-medium text-[var(--color-text)] transition hover:border-sky-400/40 hover:text-white"
-            >
-              <Sparkles size={14} aria-hidden="true" />
-              ドキュメント
-            </a>
+          <div className="flex flex-col leading-tight">
+            <h1 className="text-[26px] font-semibold tracking-tight text-white">shk</h1>
+            <p className="mt-0.5 text-[12.5px] text-[var(--color-muted)]">Security Harness Kit</p>
           </div>
         </section>
 
-        <section className="grid gap-3 sm:grid-cols-3">
-          <FeatureCard
-            title="シークレット検出"
-            description="API キー / トークンなど 100+ パターンを高速にローカル走査。"
+        <section className="grid grid-cols-1 gap-3 sm:grid-cols-3" aria-label="アクション">
+          <ActionCard
+            icon={<FolderOpen size={18} aria-hidden="true" />}
+            label="プロジェクトを開く"
+            onClick={onOpenFolder}
+            primary
           />
-          <FeatureCard
-            title="PII / コンテキスト保護"
-            description="個人情報や AI 文脈に流出しがちな機微データを抽出。"
+          <ActionCard
+            icon={<Command size={18} aria-hidden="true" />}
+            label="ショートカット"
+            onClick={() => setHelpOpen(true)}
           />
-          <FeatureCard
-            title="エージェントと連携"
-            description="Cursor / Claude Code / Codex 等の Pre / Post フックに統合。"
+          <ActionCard
+            icon={<BookOpen size={18} aria-hidden="true" />}
+            label="ガイドを見る"
+            onClick={() => setHelpOpen(true)}
           />
         </section>
 
         {recentProjects.length > 0 && (
-          <section>
-            <div className="mb-3 flex items-baseline justify-between">
-              <h3 className="text-xs font-semibold tracking-[0.16em] text-[var(--color-faint)] uppercase">
+          <section className="mt-10" aria-label="最近のプロジェクト">
+            <div className="mb-2 flex items-baseline justify-between px-1">
+              <h2 className="text-[12px] font-medium text-[var(--color-muted)]">
                 最近のプロジェクト
-              </h3>
-              <span className="text-[11px] text-[var(--color-faint)]">
-                {recentProjects.length} 件
+              </h2>
+              <span className="text-[12px] text-[var(--color-faint)]">
+                すべて表示 ({totalProjects})
               </span>
             </div>
-            <ul className="grid gap-2">
-              {recentProjects.map((project) => {
-                const actionable = actionableCount(
-                  project.summary?.bySeverity as Record<string, number>,
-                );
-                const parent = dirnameOf(project.path);
-                return (
-                  <li key={project.id}>
-                    <button
-                      type="button"
-                      onClick={() => onSelect(project.id)}
-                      className="group flex w-full items-center gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)]/70 px-4 py-3 text-left transition hover:-translate-y-px hover:border-sky-400/40 hover:bg-[var(--color-surface-3)] focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
-                    >
-                      <span className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-[var(--color-surface-3)] text-[12px] font-semibold text-sky-200 ring-1 ring-inset ring-sky-400/20">
-                        {project.name.slice(0, 2).toUpperCase()}
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="flex items-center gap-2">
-                          <span className="truncate text-sm font-medium text-white">
-                            {project.name}
-                          </span>
-                          {actionable > 0 && (
-                            <span className="inline-flex h-4 items-center rounded-full bg-red-500/20 px-1.5 text-[10px] font-bold text-red-300 ring-1 ring-inset ring-red-500/40">
-                              {actionable} 件の要対応
-                            </span>
-                          )}
-                        </span>
-                        <span
-                          className="block truncate text-[11px] text-[var(--color-faint)]"
-                          title={project.path}
-                        >
-                          {parent || project.path}
-                        </span>
-                      </span>
-                      <span className="shrink-0 text-[11px] text-[var(--color-faint)]">
-                        {formatRelativeTime(project.lastScannedAt)}
-                      </span>
-                      <ArrowRight
-                        size={14}
-                        aria-hidden="true"
-                        className="ml-1 text-[var(--color-faint)] transition group-hover:translate-x-0.5 group-hover:text-sky-300"
-                      />
-                    </button>
-                  </li>
-                );
-              })}
+            <ul className="grid">
+              {recentProjects.map((project) => (
+                <li key={project.id}>
+                  <RecentRow project={project} onSelect={() => onSelect(project.id)} />
+                </li>
+              ))}
             </ul>
           </section>
         )}
       </div>
+
+      <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
   );
 }
 
-function FeatureCard({ title, description }: { title: string; description: string }) {
+function ActionCard({
+  icon,
+  label,
+  onClick,
+  primary,
+}: {
+  icon: ReactNode;
+  label: string;
+  onClick: () => void;
+  primary?: boolean;
+}) {
   return (
-    <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)]/60 p-4">
-      <h4 className="text-sm font-semibold text-white">{title}</h4>
-      <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--color-muted)]">{description}</p>
-    </div>
+    <button
+      type="button"
+      onClick={onClick}
+      className={`group flex flex-col items-start gap-3 rounded-xl border bg-[var(--color-surface-2)] px-4 py-4 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 ${
+        primary
+          ? "border-sky-400/30 hover:border-sky-400/60 hover:bg-sky-500/10"
+          : "border-[var(--color-border)] hover:border-[var(--color-border-strong)] hover:bg-[var(--color-surface-3)]"
+      }`}
+    >
+      <span
+        className={`grid h-8 w-8 place-items-center rounded-lg transition ${
+          primary
+            ? "bg-sky-400/15 text-sky-300 group-hover:bg-sky-400/25"
+            : "bg-[var(--color-surface-3)] text-[var(--color-muted)] group-hover:text-[var(--color-text)]"
+        }`}
+      >
+        {icon}
+      </span>
+      <span className="text-[13px] font-medium text-white">{label}</span>
+    </button>
+  );
+}
+
+function RecentRow({ project, onSelect }: { project: Project; onSelect: () => void }) {
+  const actionable = actionableCount(project.summary?.bySeverity as Record<string, number>);
+  const displayPath = shortenPath(project.path);
+
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className="group grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md px-2 py-2 text-left transition hover:bg-[var(--color-surface-2)] focus:outline-none focus-visible:bg-[var(--color-surface-2)]"
+    >
+      <span className="flex min-w-0 items-center gap-2">
+        <span className="truncate text-[13px] font-medium text-white">{project.name}</span>
+        {actionable > 0 && (
+          <span
+            className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500/20 px-1 text-[10px] font-semibold text-red-300 ring-1 ring-inset ring-red-500/40"
+            title={`${actionable} 件の要対応`}
+          >
+            {actionable}
+          </span>
+        )}
+        <span className="text-[10px] text-[var(--color-faint)]">
+          · {formatRelativeTime(project.lastScannedAt)}
+        </span>
+      </span>
+      <span
+        className="truncate text-right font-mono text-[12px] text-[var(--color-muted)] group-hover:text-[var(--color-text)]"
+        title={project.path}
+      >
+        {displayPath}
+      </span>
+    </button>
   );
 }

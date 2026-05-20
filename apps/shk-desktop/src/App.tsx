@@ -19,6 +19,7 @@ function App() {
     removeProject,
     selectProject,
     updateProjectSummary,
+    renameProject,
   } = useProjects();
 
   const [scanStates, setScanStates] = useState<Record<string, ScanState>>({});
@@ -115,6 +116,7 @@ function App() {
         onSelect={selectProject}
         onAdd={openFolder}
         onRemove={handleRemove}
+        onRename={renameProject}
         appVersion={APP_VERSION}
       />
 
@@ -131,6 +133,7 @@ function App() {
         ) : (
           <WelcomeScreen
             recentProjects={recentForWelcome}
+            totalProjects={projects.length}
             onOpenFolder={openFolder}
             onSelect={selectProject}
           />

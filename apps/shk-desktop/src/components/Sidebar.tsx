@@ -1,8 +1,15 @@
-import { FolderOpen, MoreHorizontal, Plus, ShieldCheck, Trash2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Copy, FolderOpen, MoreHorizontal, Pencil, Plus, ShieldCheck, Trash2 } from "lucide-react";
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import type { Project } from "../types";
 import { actionableCount } from "../scan";
-import { dirnameOf, formatRelativeTime } from "../utils";
+import { formatRelativeTime, shortenPath } from "../utils";
 
 type Props = {
   projects: Project[];
@@ -10,13 +17,23 @@ type Props = {
   onSelect: (id: string) => void;
   onAdd: () => void;
   onRemove: (id: string) => void;
+  onRename: (id: string, name: string) => void;
   appVersion: string;
 };
 
-export function Sidebar({ projects, selectedId, onSelect, onAdd, onRemove, appVersion }: Props) {
+export function Sidebar({
+  projects,
+  selectedId,
+  onSelect,
+  onAdd,
+  onRemove,
+  onRename,
+  appVersion,
+}: Props) {
   return (
     <aside className="flex h-full w-[268px] shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)]/80 backdrop-blur">
-      <div className="shk-drag flex items-center gap-3 px-5 pt-6 pb-5">
+      <div className="shk-drag h-11 shrink-0" aria-hidden="true" />
+      <div className="shk-drag flex items-center gap-3 px-5 pt-3 pb-5">
         <div className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-sky-400/30 to-violet-400/20 text-sky-200 ring-1 ring-inset ring-sky-300/30">
           <ShieldCheck size={18} aria-hidden="true" />
         </div>
@@ -26,37 +43,45 @@ export function Sidebar({ projects, selectedId, onSelect, onAdd, onRemove, appVe
         </div>
       </div>
 
-      <div className="shk-no-drag px-3">
-        <button
-          type="button"
-          onClick={onAdd}
-          className="group flex w-full items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-left text-sm font-medium text-[var(--color-text)] transition hover:border-sky-400/40 hover:bg-[var(--color-surface-3)] hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
-        >
-          <span className="grid h-6 w-6 place-items-center rounded-md bg-sky-400/15 text-sky-300 transition group-hover:bg-sky-400/25">
-            <Plus size={14} aria-hidden="true" />
-          </span>
-          <span>新しいプロジェクト</span>
-          <kbd className="ml-auto rounded border border-[var(--color-border)] bg-[var(--color-canvas)] px-1.5 py-0.5 text-[10px] font-mono text-[var(--color-muted)]">
-            ⌘O
-          </kbd>
-        </button>
-      </div>
+      {projects.length > 0 && (
+        <div className="shk-no-drag px-3">
+          <button
+            type="button"
+            onClick={onAdd}
+            className="group flex w-full items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-left text-sm font-medium text-[var(--color-text)] transition hover:border-sky-400/40 hover:bg-[var(--color-surface-3)] hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
+          >
+            <span className="grid h-6 w-6 place-items-center rounded-md bg-sky-400/15 text-sky-300 transition group-hover:bg-sky-400/25">
+              <Plus size={14} aria-hidden="true" />
+            </span>
+            <span>新しいプロジェクト</span>
+            <kbd className="ml-auto rounded border border-[var(--color-border)] bg-[var(--color-canvas)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--color-muted)]">
+              ⌘O
+            </kbd>
+          </button>
+        </div>
+      )}
 
-      <div className="mt-5 flex items-center justify-between px-5 pb-2">
-        <span className="text-[10px] font-semibold tracking-[0.14em] text-[var(--color-faint)] uppercase">
-          プロジェクト
-        </span>
-        <span className="text-[10px] font-medium text-[var(--color-faint)]">{projects.length}</span>
-      </div>
+      {projects.length > 0 && (
+        <div className="mt-5 flex items-center justify-between px-5 pb-2">
+          <span className="text-[10px] font-semibold tracking-[0.14em] text-[var(--color-faint)] uppercase">
+            プロジェクト
+          </span>
+          <span className="text-[10px] font-medium text-[var(--color-faint)]">
+            {projects.length}
+          </span>
+        </div>
+      )}
 
       <nav
-        className="shk-scroll min-h-0 flex-1 overflow-y-auto px-2 pb-4"
+        className={`shk-scroll min-h-0 flex-1 overflow-y-auto px-2 pb-4 ${
+          projects.length === 0 ? "pt-2" : ""
+        }`}
         aria-label="プロジェクト一覧"
       >
         {projects.length === 0 ? (
           <EmptyState onAdd={onAdd} />
         ) : (
-          <ul className="grid gap-1">
+          <ul className="grid gap-0.5">
             {projects.map((project) => (
               <li key={project.id}>
                 <ProjectRow
@@ -64,6 +89,7 @@ export function Sidebar({ projects, selectedId, onSelect, onAdd, onRemove, appVe
                   active={project.id === selectedId}
                   onSelect={() => onSelect(project.id)}
                   onRemove={() => onRemove(project.id)}
+                  onRename={(name) => onRename(project.id, name)}
                 />
               </li>
             ))}
@@ -104,84 +130,197 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
   );
 }
 
-function ProjectRow({
-  project,
-  active,
-  onSelect,
-  onRemove,
-}: {
+type ProjectRowProps = {
   project: Project;
   active: boolean;
   onSelect: () => void;
   onRemove: () => void;
-}) {
+  onRename: (name: string) => void;
+};
+
+function ProjectRow({ project, active, onSelect, onRemove, onRename }: ProjectRowProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(project.name);
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const rowRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const removeTimer = useRef<number | null>(null);
 
   useEffect(() => {
     if (!menuOpen) return;
-    function handle(event: MouseEvent) {
+    function handleDown(event: MouseEvent) {
       if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
         setMenuOpen(false);
       }
     }
-    window.addEventListener("mousedown", handle);
-    return () => window.removeEventListener("mousedown", handle);
+    function handleKey(event: KeyboardEvent) {
+      if (event.key === "Escape") setMenuOpen(false);
+    }
+    window.addEventListener("mousedown", handleDown);
+    window.addEventListener("keydown", handleKey);
+    return () => {
+      window.removeEventListener("mousedown", handleDown);
+      window.removeEventListener("keydown", handleKey);
+    };
   }, [menuOpen]);
 
+  useEffect(() => {
+    if (editing) {
+      setDraft(project.name);
+      requestAnimationFrame(() => {
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      });
+    }
+  }, [editing, project.name]);
+
+  useEffect(() => {
+    return () => {
+      if (removeTimer.current !== null) {
+        window.clearTimeout(removeTimer.current);
+      }
+    };
+  }, []);
+
+  function commitRename() {
+    const next = draft.trim();
+    if (next && next !== project.name) {
+      onRename(next);
+    }
+    setEditing(false);
+  }
+
+  function startRename() {
+    setMenuOpen(false);
+    setEditing(true);
+  }
+
+  async function copyPath() {
+    setMenuOpen(false);
+    try {
+      await navigator.clipboard.writeText(project.path);
+    } catch (error) {
+      console.warn("clipboard write failed", error);
+    }
+  }
+
+  function requestRemove() {
+    if (confirmingRemove) {
+      if (removeTimer.current !== null) {
+        window.clearTimeout(removeTimer.current);
+        removeTimer.current = null;
+      }
+      setConfirmingRemove(false);
+      setMenuOpen(false);
+      onRemove();
+      return;
+    }
+    setConfirmingRemove(true);
+    removeTimer.current = window.setTimeout(() => {
+      setConfirmingRemove(false);
+      removeTimer.current = null;
+    }, 2500);
+  }
+
+  function openMenuAt() {
+    setMenuOpen(true);
+  }
+
+  function onContext(event: ReactMouseEvent<HTMLDivElement>) {
+    event.preventDefault();
+    openMenuAt();
+  }
+
+  function onKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (event.key === "F2") {
+      event.preventDefault();
+      startRename();
+    }
+    if (event.key === "Delete" || event.key === "Backspace") {
+      if (event.metaKey || event.ctrlKey) {
+        event.preventDefault();
+        onRemove();
+      }
+    }
+  }
+
   const actionable = actionableCount(project.summary?.bySeverity as Record<string, number>);
-  const parent = dirnameOf(project.path);
+  const shortPath = shortenPath(project.path);
 
   return (
     <div
-      className={`group relative flex items-center gap-2 rounded-lg px-2.5 py-2 transition ${
+      ref={rowRef}
+      onContextMenu={onContext}
+      className={`group relative grid grid-cols-[32px_minmax(0,1fr)_24px] items-center gap-2 rounded-lg px-2 py-2 transition ${
         active
           ? "bg-sky-500/10 ring-1 ring-inset ring-sky-400/30"
           : "hover:bg-[var(--color-surface-2)]"
       }`}
     >
-      <button
-        type="button"
-        onClick={onSelect}
-        className="flex min-w-0 flex-1 items-center gap-2.5 text-left focus:outline-none"
+      <span
+        className={`grid h-8 w-8 shrink-0 place-items-center rounded-md text-[11px] font-bold uppercase ${
+          active
+            ? "bg-sky-400/20 text-sky-200 ring-1 ring-inset ring-sky-400/40"
+            : "bg-[var(--color-surface-3)] text-[var(--color-muted)] group-hover:text-[var(--color-text)]"
+        }`}
+        aria-hidden="true"
       >
-        <span
-          className={`grid h-8 w-8 shrink-0 place-items-center rounded-md text-[11px] font-bold uppercase ${
-            active
-              ? "bg-sky-400/20 text-sky-200 ring-1 ring-inset ring-sky-400/40"
-              : "bg-[var(--color-surface-3)] text-[var(--color-muted)] group-hover:text-[var(--color-text)]"
-          }`}
-          aria-hidden="true"
+        {initials(project.name)}
+      </span>
+
+      {editing ? (
+        <input
+          ref={inputRef}
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commitRename}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              commitRename();
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              setEditing(false);
+            }
+          }}
+          className="min-w-0 rounded-md border border-sky-400/50 bg-[var(--color-canvas)] px-2 py-1 text-sm text-white outline-none focus:border-sky-400/80"
+          aria-label="プロジェクト名を変更"
+        />
+      ) : (
+        <button
+          type="button"
+          onClick={onSelect}
+          onDoubleClick={startRename}
+          onKeyDown={onKeyDown}
+          className="grid min-w-0 grid-rows-[auto_auto] gap-0.5 text-left focus:outline-none"
+          title={project.path}
         >
-          {initials(project.name)}
-        </span>
-        <span className="min-w-0 flex-1">
           <span
-            className={`flex items-center gap-1.5 text-sm font-medium ${
+            className={`flex min-w-0 items-center gap-1.5 text-[13px] font-medium leading-tight ${
               active ? "text-white" : "text-[var(--color-text)]"
             }`}
           >
-            <span className="truncate">{project.name}</span>
+            <span className="min-w-0 flex-1 truncate">{project.name}</span>
             {actionable > 0 && (
               <span
-                className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500/20 px-1 text-[10px] font-bold text-red-300 ring-1 ring-inset ring-red-500/40"
+                className="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-red-500/20 px-1 text-[10px] font-bold text-red-300 ring-1 ring-inset ring-red-500/40"
                 title={`${actionable} 件の要対応`}
               >
                 {actionable}
               </span>
             )}
           </span>
-          <span
-            className="block truncate text-[11px] text-[var(--color-faint)]"
-            title={project.path}
-          >
-            {parent || project.path}
+          <span className="flex min-w-0 items-center gap-1 text-[10px] leading-tight text-[var(--color-faint)]">
+            <span className="min-w-0 flex-1 truncate font-mono" title={project.path}>
+              {shortPath}
+            </span>
+            <span className="shrink-0">· {formatRelativeTime(project.lastScannedAt)}</span>
           </span>
-          <span className="block text-[10px] text-[var(--color-faint)]">
-            {formatRelativeTime(project.lastScannedAt)}
-          </span>
-        </span>
-      </button>
+        </button>
+      )}
 
       <div ref={menuRef} className="relative">
         <button
@@ -191,8 +330,12 @@ function ProjectRow({
             setMenuOpen((prev) => !prev);
           }}
           aria-label={`${project.name} のメニュー`}
-          className={`grid h-7 w-7 place-items-center rounded-md text-[var(--color-faint)] opacity-0 transition hover:bg-[var(--color-surface-3)] hover:text-[var(--color-text)] focus:opacity-100 focus:outline-none group-hover:opacity-100 ${
-            menuOpen ? "opacity-100" : ""
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          className={`grid h-6 w-6 place-items-center rounded-md text-[var(--color-muted)] transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 ${
+            menuOpen
+              ? "bg-[var(--color-surface-3)] text-white opacity-100"
+              : "opacity-60 hover:bg-[var(--color-surface-3)] hover:text-white hover:opacity-100 group-hover:opacity-100"
           }`}
         >
           <MoreHorizontal size={14} aria-hidden="true" />
@@ -201,25 +344,61 @@ function ProjectRow({
         {menuOpen && (
           <div
             role="menu"
-            className="shk-fade-in absolute right-0 z-20 mt-1 w-44 overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-3)] shadow-xl shadow-black/40"
+            className="shk-fade-in absolute right-0 z-20 mt-1 w-48 overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-3)] py-1 shadow-xl shadow-black/40"
           >
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setMenuOpen(false);
-                onRemove();
-              }}
-              className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-red-300 hover:bg-red-500/15"
-            >
-              <Trash2 size={12} aria-hidden="true" />
-              プロジェクトを削除
-            </button>
+            <MenuItem icon={<Pencil size={12} aria-hidden="true" />} onClick={startRename}>
+              名前を変更
+            </MenuItem>
+            <MenuItem icon={<Copy size={12} aria-hidden="true" />} onClick={copyPath}>
+              パスをコピー
+            </MenuItem>
+            <MenuDivider />
+            <MenuItem icon={<Trash2 size={12} aria-hidden="true" />} onClick={requestRemove} danger>
+              {confirmingRemove ? "もう一度クリックで確定" : "プロジェクトを削除"}
+            </MenuItem>
           </div>
         )}
       </div>
     </div>
   );
+}
+
+function MenuItem({
+  icon,
+  children,
+  onClick,
+  danger,
+}: {
+  icon: ReactNode;
+  children: ReactNode;
+  onClick: () => void;
+  danger?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onClick}
+      className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition ${
+        danger
+          ? "text-red-300 hover:bg-red-500/15 hover:text-red-200"
+          : "text-[var(--color-text)] hover:bg-[var(--color-surface)]/60 hover:text-white"
+      }`}
+    >
+      <span
+        className={`grid h-5 w-5 place-items-center rounded ${
+          danger ? "text-red-300" : "text-[var(--color-muted)] group-hover:text-[var(--color-text)]"
+        }`}
+      >
+        {icon}
+      </span>
+      <span className="flex-1 truncate">{children}</span>
+    </button>
+  );
+}
+
+function MenuDivider() {
+  return <div className="my-1 h-px bg-[var(--color-border)]" aria-hidden="true" />;
 }
 
 function initials(name: string): string {

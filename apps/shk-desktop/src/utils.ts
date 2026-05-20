@@ -20,6 +20,20 @@ export function generateId(): string {
   return `proj_${Math.random().toString(36).slice(2)}_${Date.now().toString(36)}`;
 }
 
+export function shortenPath(path: string): string {
+  if (!path) return "";
+  const unix = path.match(/^(\/(?:Users|home)\/[^/]+)(\/.*)?$/);
+  if (unix) {
+    return `~${unix[2] ?? ""}`;
+  }
+  const win = path.match(/^[A-Za-z]:[\\/]Users[\\/][^\\/]+([\\/].*)?$/);
+  if (win) {
+    const rest = (win[1] ?? "").replace(/\\/g, "/");
+    return `~${rest}`;
+  }
+  return path;
+}
+
 export function formatRelativeTime(iso: string | undefined): string {
   if (!iso) return "未スキャン";
   const then = new Date(iso).getTime();
