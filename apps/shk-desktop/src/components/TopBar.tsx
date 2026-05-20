@@ -6,23 +6,28 @@ import { LanguageSwitcher } from "./LanguageSwitcher";
 
 type Props = {
   project: Project | null;
+  reserveWindowControls?: boolean;
   onOpenFolder: () => void;
 };
 
-export function TopBar({ project, onOpenFolder }: Props) {
+export function TopBar({ project, reserveWindowControls = false, onOpenFolder }: Props) {
   const { messages } = useI18n();
   const m = messages.topBar;
 
   return (
-    <div className="shk-drag flex h-11 shrink-0 items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-surface)]/60 px-4 backdrop-blur">
-      <div className="flex min-w-0 items-center gap-2 pl-16 text-[12px] text-[var(--color-muted)]">
+    <div className="shk-drag flex h-11 shrink-0 items-center justify-between border-b border-border bg-surface/60 px-4 backdrop-blur">
+      <div
+        className={`flex min-w-0 items-center gap-2 text-[12px] text-muted ${
+          reserveWindowControls ? "pl-16" : ""
+        }`}
+      >
         {project ? (
           <>
-            <span className="text-[var(--color-faint)]">{m.projectBreadcrumb}</span>
-            <span className="truncate font-medium text-[var(--color-text)]">{project.name}</span>
+            <span className="text-faint">{m.projectBreadcrumb}</span>
+            <span className="truncate font-medium text-text">{project.name}</span>
           </>
         ) : (
-          <span className="text-[var(--color-faint)]">{m.welcome}</span>
+          <span className="text-faint">{m.welcome}</span>
         )}
       </div>
       <div className="shk-no-drag flex items-center gap-1.5">

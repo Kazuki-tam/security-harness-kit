@@ -31,7 +31,7 @@ export const ja: Messages = {
   },
   welcome: {
     title: "Security Harness Kit",
-    subtitle: "情報漏えいと AI エージェントの過剰な操作を、ローカルで検出・防止します。",
+    subtitle: "情報漏えいリスクとAIエージェントの過剰な操作リスクを検出・防止します。",
     actions: "アクション",
     openProject: "プロジェクトを開く",
     shortcuts: "ショートカット",

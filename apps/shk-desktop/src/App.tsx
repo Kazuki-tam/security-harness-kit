@@ -241,21 +241,28 @@ function App() {
     : undefined;
 
   const recentForWelcome = projects.slice(0, 6);
+  const showSidebar = projects.length > 0;
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-transparent text-[var(--color-text)]">
-      <Sidebar
-        projects={projects}
-        selectedId={selectedId}
-        onSelect={selectProject}
-        onAdd={openFolder}
-        onRemove={handleRemove}
-        onRename={renameProject}
-        appVersion={APP_VERSION}
-      />
+    <div className="flex h-screen w-screen overflow-hidden bg-transparent text-text">
+      {showSidebar && (
+        <Sidebar
+          projects={projects}
+          selectedId={selectedId}
+          onSelect={selectProject}
+          onAdd={openFolder}
+          onRemove={handleRemove}
+          onRename={renameProject}
+          appVersion={APP_VERSION}
+        />
+      )}
 
       <main className="flex min-w-0 flex-1 flex-col">
-        <TopBar project={selectedProject} onOpenFolder={openFolder} />
+        <TopBar
+          project={selectedProject}
+          reserveWindowControls={!showSidebar}
+          onOpenFolder={openFolder}
+        />
 
         {selectedProject ? (
           <ScanWorkspace
