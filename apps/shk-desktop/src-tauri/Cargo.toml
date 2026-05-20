@@ -19,6 +19,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+shk-cli = { path = "../../../crates/shk-cli" }
 shk-core = { version = "0.3.4", path = "../../../crates/shk-core" }
 serde.workspace = true
 tauri = { version = "2", features = [] }

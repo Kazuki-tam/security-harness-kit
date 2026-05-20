@@ -1,3 +1,5 @@
+import type { Messages } from "./i18n/types";
+
 export function basenameOf(path: string): string {
   if (!path) return "";
   const trimmed = path.replace(/[\\/]+$/, "");
@@ -34,23 +36,27 @@ export function shortenPath(path: string): string {
   return path;
 }
 
-export function formatRelativeTime(iso: string | undefined): string {
-  if (!iso) return "未スキャン";
+function interpolate(template: string, count: number): string {
+  return template.replace(/\{\{count\}\}/g, String(count));
+}
+
+export function formatRelativeTime(iso: string | undefined, time: Messages["time"]): string {
+  if (!iso) return time.notScanned;
   const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return "未スキャン";
+  if (Number.isNaN(then)) return time.notScanned;
   const diff = Date.now() - then;
   const sec = Math.max(0, Math.floor(diff / 1000));
-  if (sec < 45) return "たった今";
+  if (sec < 45) return time.justNow;
   const min = Math.floor(sec / 60);
-  if (min < 60) return `${min} 分前`;
+  if (min < 60) return interpolate(time.minutesAgo, min);
   const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr} 時間前`;
+  if (hr < 24) return interpolate(time.hoursAgo, hr);
   const day = Math.floor(hr / 24);
-  if (day < 7) return `${day} 日前`;
+  if (day < 7) return interpolate(time.daysAgo, day);
   const week = Math.floor(day / 7);
-  if (week < 5) return `${week} 週間前`;
+  if (week < 5) return interpolate(time.weeksAgo, week);
   const month = Math.floor(day / 30);
-  if (month < 12) return `${month} ヶ月前`;
+  if (month < 12) return interpolate(time.monthsAgo, month);
   const year = Math.floor(day / 365);
-  return `${year} 年前`;
+  return interpolate(time.yearsAgo, year);
 }

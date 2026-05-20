@@ -35,7 +35,7 @@ const RENOVATE_FILES: &[&str] = &[
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct NpmHardeningStatus {
+pub struct NpmHardeningStatus {
     pub package_dirs: Vec<PathBuf>,
     pub package_dirs_without_lockfile: Vec<PathBuf>,
     pub package_managers: Vec<PackageManager>,
@@ -84,11 +84,11 @@ pub(crate) struct DependencyBotStatus {
 }
 
 impl NpmHardeningStatus {
-    pub(crate) fn has_npm_projects(&self) -> bool {
+    pub fn has_npm_projects(&self) -> bool {
         !self.package_dirs.is_empty()
     }
 
-    pub(crate) fn ok(&self) -> bool {
+    pub fn ok(&self) -> bool {
         !self.has_npm_projects()
             || (self.package_scripts_ok()
                 && self.age_gates_ok()
@@ -96,7 +96,7 @@ impl NpmHardeningStatus {
                 && self.dependency_bot_cooldown_ok())
     }
 
-    pub(crate) fn package_scripts_ok(&self) -> bool {
+    pub fn package_scripts_ok(&self) -> bool {
         !self
             .package_managers
             .iter()
@@ -104,7 +104,7 @@ impl NpmHardeningStatus {
             || self.ignore_scripts_ok
     }
 
-    pub(crate) fn age_gates_ok(&self) -> bool {
+    pub fn age_gates_ok(&self) -> bool {
         self.package_managers.iter().all(|manager| match manager {
             PackageManager::Npm => self.min_release_age_ok,
             PackageManager::Pnpm => self.pnpm_min_release_age_ok,
@@ -113,7 +113,7 @@ impl NpmHardeningStatus {
         })
     }
 
-    pub(crate) fn dependency_bot_cooldown_ok(&self) -> bool {
+    pub fn dependency_bot_cooldown_ok(&self) -> bool {
         self.dependabot.cooldown_ok || self.renovate.cooldown_ok
     }
 
@@ -139,7 +139,7 @@ impl NpmHardeningStatus {
     }
 }
 
-pub(crate) fn status(root: &Path) -> NpmHardeningStatus {
+pub fn status(root: &Path) -> NpmHardeningStatus {
     let package_dirs = find_package_dirs(root);
     let package_managers = detect_package_managers(root, &package_dirs);
     let npmrc_path = root.join(NPMRC_FILE);
@@ -198,7 +198,7 @@ pub(crate) fn status(root: &Path) -> NpmHardeningStatus {
     }
 }
 
-pub(crate) fn apply(root: &Path) -> Result<Option<NpmHardeningStatus>> {
+pub fn apply(root: &Path) -> Result<Option<NpmHardeningStatus>> {
     let before = status(root);
     if !before.has_npm_projects() {
         return Ok(None);

@@ -7,9 +7,11 @@ import {
   useRef,
   useState,
 } from "react";
+import { useI18n } from "../i18n";
 import type { Project } from "../types";
 import { actionableCount } from "../scan";
 import { formatRelativeTime, shortenPath } from "../utils";
+import { Button } from "./Button";
 
 type Props = {
   projects: Project[];
@@ -30,6 +32,9 @@ export function Sidebar({
   onRename,
   appVersion,
 }: Props) {
+  const { messages } = useI18n();
+  const m = messages.sidebar;
+
   return (
     <aside className="flex h-full w-[268px] shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)]/80 backdrop-blur">
       <div className="shk-drag h-11 shrink-0" aria-hidden="true" />
@@ -53,7 +58,7 @@ export function Sidebar({
             <span className="grid h-6 w-6 place-items-center rounded-md bg-sky-400/15 text-sky-300 transition group-hover:bg-sky-400/25">
               <Plus size={14} aria-hidden="true" />
             </span>
-            <span>新しいプロジェクト</span>
+            <span>{m.newProject}</span>
             <kbd className="ml-auto rounded border border-[var(--color-border)] bg-[var(--color-canvas)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--color-muted)]">
               ⌘O
             </kbd>
@@ -64,7 +69,7 @@ export function Sidebar({
       {projects.length > 0 && (
         <div className="mt-5 flex items-center justify-between px-5 pb-2">
           <span className="text-[10px] font-semibold tracking-[0.14em] text-[var(--color-faint)] uppercase">
-            プロジェクト
+            {m.projects}
           </span>
           <span className="text-[10px] font-medium text-[var(--color-faint)]">
             {projects.length}
@@ -76,7 +81,7 @@ export function Sidebar({
         className={`shk-scroll min-h-0 flex-1 overflow-y-auto px-2 pb-4 ${
           projects.length === 0 ? "pt-2" : ""
         }`}
-        aria-label="プロジェクト一覧"
+        aria-label={m.projectsAria}
       >
         {projects.length === 0 ? (
           <EmptyState onAdd={onAdd} />
@@ -101,7 +106,7 @@ export function Sidebar({
         <div className="flex items-center justify-between">
           <span>v{appVersion}</span>
           <span className="rounded-full bg-emerald-400/10 px-2 py-0.5 text-[10px] font-medium text-emerald-300 ring-1 ring-inset ring-emerald-400/20">
-            ローカル動作
+            {m.runsLocally}
           </span>
         </div>
       </footer>
@@ -110,22 +115,26 @@ export function Sidebar({
 }
 
 function EmptyState({ onAdd }: { onAdd: () => void }) {
+  const { messages } = useI18n();
+  const m = messages.sidebar;
+
   return (
     <div className="grid gap-3 rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-surface-2)]/50 px-4 py-6 text-center">
       <FolderOpen className="mx-auto text-[var(--color-faint)]" size={22} aria-hidden="true" />
       <p className="text-xs text-[var(--color-muted)]">
-        プロジェクトを追加すると
+        {m.emptyHintLine1}
         <br />
-        ここに表示されます。
+        {m.emptyHintLine2}
       </p>
-      <button
-        type="button"
+      <Button
+        variant="primary"
+        size="sm"
         onClick={onAdd}
-        className="mx-auto inline-flex items-center gap-1.5 rounded-md bg-sky-500/15 px-3 py-1.5 text-xs font-semibold text-sky-300 ring-1 ring-inset ring-sky-400/30 hover:bg-sky-500/25"
+        className="mx-auto"
+        icon={<Plus size={12} aria-hidden="true" className="shrink-0" />}
       >
-        <Plus size={12} aria-hidden="true" />
-        フォルダを開く
-      </button>
+        {m.openFolder}
+      </Button>
     </div>
   );
 }
@@ -139,6 +148,8 @@ type ProjectRowProps = {
 };
 
 function ProjectRow({ project, active, onSelect, onRemove, onRename }: ProjectRowProps) {
+  const { messages, t } = useI18n();
+  const m = messages.sidebar;
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(project.name);
@@ -246,7 +257,7 @@ function ProjectRow({ project, active, onSelect, onRemove, onRename }: ProjectRo
     }
   }
 
-  const actionable = actionableCount(project.summary?.bySeverity as Record<string, number>);
+  const actionable = actionableCount(project.summary?.bySeverity);
   const shortPath = shortenPath(project.path);
 
   return (
@@ -287,7 +298,7 @@ function ProjectRow({ project, active, onSelect, onRemove, onRename }: ProjectRo
             }
           }}
           className="min-w-0 rounded-md border border-sky-400/50 bg-[var(--color-canvas)] px-2 py-1 text-sm text-white outline-none focus:border-sky-400/80"
-          aria-label="プロジェクト名を変更"
+          aria-label={m.renameAria}
         />
       ) : (
         <button
@@ -307,7 +318,7 @@ function ProjectRow({ project, active, onSelect, onRemove, onRename }: ProjectRo
             {actionable > 0 && (
               <span
                 className="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-red-500/20 px-1 text-[10px] font-bold text-red-300 ring-1 ring-inset ring-red-500/40"
-                title={`${actionable} 件の要対応`}
+                title={t(m.actionableCount, { count: actionable })}
               >
                 {actionable}
               </span>
@@ -317,7 +328,9 @@ function ProjectRow({ project, active, onSelect, onRemove, onRename }: ProjectRo
             <span className="min-w-0 flex-1 truncate font-mono" title={project.path}>
               {shortPath}
             </span>
-            <span className="shrink-0">· {formatRelativeTime(project.lastScannedAt)}</span>
+            <span className="shrink-0">
+              · {formatRelativeTime(project.lastScannedAt, messages.time)}
+            </span>
           </span>
         </button>
       )}
@@ -329,7 +342,7 @@ function ProjectRow({ project, active, onSelect, onRemove, onRename }: ProjectRo
             event.stopPropagation();
             setMenuOpen((prev) => !prev);
           }}
-          aria-label={`${project.name} のメニュー`}
+          aria-label={t(m.menuAria, { name: project.name })}
           aria-haspopup="menu"
           aria-expanded={menuOpen}
           className={`grid h-6 w-6 place-items-center rounded-md text-[var(--color-muted)] transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 ${
@@ -347,14 +360,14 @@ function ProjectRow({ project, active, onSelect, onRemove, onRename }: ProjectRo
             className="shk-fade-in absolute right-0 z-20 mt-1 w-48 overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-3)] py-1 shadow-xl shadow-black/40"
           >
             <MenuItem icon={<Pencil size={12} aria-hidden="true" />} onClick={startRename}>
-              名前を変更
+              {m.rename}
             </MenuItem>
             <MenuItem icon={<Copy size={12} aria-hidden="true" />} onClick={copyPath}>
-              パスをコピー
+              {m.copyPath}
             </MenuItem>
             <MenuDivider />
             <MenuItem icon={<Trash2 size={12} aria-hidden="true" />} onClick={requestRemove} danger>
-              {confirmingRemove ? "もう一度クリックで確定" : "プロジェクトを削除"}
+              {confirmingRemove ? m.removeConfirm : m.removeProject}
             </MenuItem>
           </div>
         )}

@@ -6,11 +6,23 @@ import { TopBar } from "./components/TopBar";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ScanWorkspace } from "./components/ScanWorkspace";
 import { useProjects } from "./hooks/useProjects";
+import { useI18n } from "./i18n";
+import {
+  applyNpmHardening,
+  fetchProjectStatus,
+  fixDoctorIgnore,
+  initPolicy,
+  installAiHooks,
+  installPreCommitHook,
+  installSkills,
+} from "./project";
 import { asSeverity, type ScanReport, type ScanState, type Severity } from "./scan";
+import type { ActionState, ProjectStatusState } from "./types";
 
 const APP_VERSION = "0.3.4";
 
 function App() {
+  const { messages } = useI18n();
   const {
     projects,
     selectedId,
@@ -23,21 +35,71 @@ function App() {
   } = useProjects();
 
   const [scanStates, setScanStates] = useState<Record<string, ScanState>>({});
+  const [projectStatusStates, setProjectStatusStates] = useState<
+    Record<string, ProjectStatusState>
+  >({});
+  const [actionState, setActionState] = useState<ActionState>({ status: "idle" });
 
   const currentScanState: ScanState = selectedId
     ? (scanStates[selectedId] ?? { status: "idle" })
+    : { status: "idle" };
+
+  const currentProjectStatus: ProjectStatusState = selectedId
+    ? (projectStatusStates[selectedId] ?? { status: "idle" })
     : { status: "idle" };
 
   const setScanStateFor = useCallback((id: string, state: ScanState) => {
     setScanStates((prev) => ({ ...prev, [id]: state }));
   }, []);
 
+  const refreshProjectStatus = useCallback(async (projectId: string, path: string) => {
+    setProjectStatusStates((prev) => ({ ...prev, [projectId]: { status: "loading" } }));
+    try {
+      const data = await fetchProjectStatus(path);
+      setProjectStatusStates((prev) => ({
+        ...prev,
+        [projectId]: { status: "done", data, loadedAt: new Date().toISOString() },
+      }));
+    } catch (error) {
+      setProjectStatusStates((prev) => ({
+        ...prev,
+        [projectId]: {
+          status: "error",
+          message: error instanceof Error ? error.message : String(error),
+        },
+      }));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!selectedProject) return;
+    void refreshProjectStatus(selectedProject.id, selectedProject.path);
+  }, [selectedProject?.id, selectedProject?.path, refreshProjectStatus]);
+
+  const runSetupAction = useCallback(
+    async (runner: () => Promise<{ success: boolean; message: string; details: string[] }>) => {
+      if (!selectedProject) return;
+      setActionState({ status: "running" });
+      try {
+        const result = await runner();
+        setActionState({ status: "done", result });
+        await refreshProjectStatus(selectedProject.id, selectedProject.path);
+      } catch (error) {
+        setActionState({
+          status: "error",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+    [refreshProjectStatus, selectedProject],
+  );
+
   const openFolder = useCallback(async () => {
     try {
       const path = await open({
         directory: true,
         multiple: false,
-        title: "スキャンするフォルダを選択",
+        title: messages.app.selectFolder,
       });
       if (typeof path === "string" && path) {
         addProject(path);
@@ -45,7 +107,7 @@ function App() {
     } catch (error) {
       console.error("failed to open folder:", error);
     }
-  }, [addProject]);
+  }, [addProject, messages.app.selectFolder]);
 
   const runScan = useCallback(async () => {
     if (!selectedProject) return;
@@ -101,10 +163,52 @@ function App() {
         delete next[id];
         return next;
       });
+      setProjectStatusStates((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       removeProject(id);
     },
     [removeProject],
   );
+
+  const setupHandlers = selectedProject
+    ? {
+        onInitPolicy: (strict: boolean) =>
+          runSetupAction(() =>
+            initPolicy(selectedProject.path, {
+              strict,
+              force:
+                strict ||
+                (currentProjectStatus.status === "done" && currentProjectStatus.data.policy.exists),
+            }),
+          ),
+        onFixDoctorIgnore: () => runSetupAction(() => fixDoctorIgnore(selectedProject.path)),
+        onInstallPreCommit: () => runSetupAction(() => installPreCommitHook(selectedProject.path)),
+        onInstallAiHooks: () =>
+          runSetupAction(() =>
+            installAiHooks(selectedProject.path, {
+              audit: false,
+              dryRun: false,
+              global: false,
+              failClosed: false,
+              applyDeny: true,
+              applySandbox: true,
+            }),
+          ),
+        onApplyNpmHardening: () => runSetupAction(() => applyNpmHardening(selectedProject.path)),
+        onInstallSkills: () =>
+          runSetupAction(() =>
+            installSkills(selectedProject.path, {
+              global: false,
+              dryRun: false,
+              force: true,
+            }),
+          ),
+      }
+    : undefined;
 
   const recentForWelcome = projects.slice(0, 6);
 
@@ -128,7 +232,10 @@ function App() {
             key={selectedProject.id}
             project={selectedProject}
             scanState={currentScanState}
+            projectStatus={currentProjectStatus}
+            actionState={actionState}
             onScan={runScan}
+            setupHandlers={setupHandlers}
           />
         ) : (
           <WelcomeScreen

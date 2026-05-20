@@ -1,5 +1,6 @@
 import { BookOpen, Command, FolderOpen, ShieldCheck } from "lucide-react";
 import { useState, type ReactNode } from "react";
+import { useI18n } from "../i18n";
 import type { Project } from "../types";
 import { actionableCount } from "../scan";
 import { formatRelativeTime, shortenPath } from "../utils";
@@ -13,48 +14,50 @@ type Props = {
 };
 
 export function WelcomeScreen({ recentProjects, totalProjects, onOpenFolder, onSelect }: Props) {
+  const { messages, t } = useI18n();
+  const m = messages.welcome;
   const [helpOpen, setHelpOpen] = useState(false);
 
   return (
     <div className="shk-scroll shk-fade-in min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto flex min-h-full w-full max-w-[640px] flex-col justify-center px-8 py-12">
-        <section className="mb-10 flex items-center gap-3.5" aria-label="Security Harness Kit">
-          <div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-sky-400/30 via-violet-400/20 to-emerald-400/20 text-sky-200 ring-1 ring-inset ring-sky-400/30">
-            <ShieldCheck size={24} aria-hidden="true" />
+        <section className="mb-10 flex flex-col items-center text-center" aria-label={m.title}>
+          <div className="grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-sky-400/30 via-violet-400/20 to-emerald-400/20 text-sky-200 ring-1 ring-inset ring-sky-400/30">
+            <ShieldCheck size={28} aria-hidden="true" />
           </div>
-          <div className="flex flex-col leading-tight">
-            <h1 className="text-[26px] font-semibold tracking-tight text-white">shk</h1>
-            <p className="mt-0.5 text-[12.5px] text-[var(--color-muted)]">Security Harness Kit</p>
-          </div>
+          <h1 className="mt-4 max-w-sm text-[26px] leading-tight font-semibold tracking-tight text-white">
+            {m.title}
+          </h1>
+          <p className="mt-2 max-w-md text-[12.5px] text-[var(--color-muted)]">{m.subtitle}</p>
         </section>
 
-        <section className="grid grid-cols-1 gap-3 sm:grid-cols-3" aria-label="アクション">
+        <section className="grid grid-cols-1 gap-3 sm:grid-cols-3" aria-label={m.actions}>
           <ActionCard
             icon={<FolderOpen size={18} aria-hidden="true" />}
-            label="プロジェクトを開く"
+            label={m.openProject}
             onClick={onOpenFolder}
             primary
           />
           <ActionCard
             icon={<Command size={18} aria-hidden="true" />}
-            label="ショートカット"
+            label={m.shortcuts}
             onClick={() => setHelpOpen(true)}
           />
           <ActionCard
             icon={<BookOpen size={18} aria-hidden="true" />}
-            label="ガイドを見る"
+            label={m.viewGuide}
             onClick={() => setHelpOpen(true)}
           />
         </section>
 
         {recentProjects.length > 0 && (
-          <section className="mt-10" aria-label="最近のプロジェクト">
+          <section className="mt-10" aria-label={m.recentProjects}>
             <div className="mb-2 flex items-baseline justify-between px-1">
               <h2 className="text-[12px] font-medium text-[var(--color-muted)]">
-                最近のプロジェクト
+                {m.recentProjects}
               </h2>
               <span className="text-[12px] text-[var(--color-faint)]">
-                すべて表示 ({totalProjects})
+                {t(m.showAll, { count: totalProjects })}
               </span>
             </div>
             <ul className="grid">
@@ -109,7 +112,8 @@ function ActionCard({
 }
 
 function RecentRow({ project, onSelect }: { project: Project; onSelect: () => void }) {
-  const actionable = actionableCount(project.summary?.bySeverity as Record<string, number>);
+  const { messages, t } = useI18n();
+  const actionable = actionableCount(project.summary?.bySeverity);
   const displayPath = shortenPath(project.path);
 
   return (
@@ -123,13 +127,13 @@ function RecentRow({ project, onSelect }: { project: Project; onSelect: () => vo
         {actionable > 0 && (
           <span
             className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500/20 px-1 text-[10px] font-semibold text-red-300 ring-1 ring-inset ring-red-500/40"
-            title={`${actionable} 件の要対応`}
+            title={t(messages.sidebar.actionableCount, { count: actionable })}
           >
             {actionable}
           </span>
         )}
         <span className="text-[10px] text-[var(--color-faint)]">
-          · {formatRelativeTime(project.lastScannedAt)}
+          · {formatRelativeTime(project.lastScannedAt, messages.time)}
         </span>
       </span>
       <span

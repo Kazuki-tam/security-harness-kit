@@ -1,11 +1,11 @@
 import { CheckCircle2, FileCode2, Hash } from "lucide-react";
 import { useMemo } from "react";
+import { useI18n } from "../i18n";
 import {
   asSeverity,
   type Finding,
   severityBadge,
   severityDot,
-  severityLabels,
   severityOrder,
   type Severity,
 } from "../scan";
@@ -17,6 +17,10 @@ type Props = {
 };
 
 export function FindingList({ findings, filter }: Props) {
+  const { messages, t } = useI18n();
+  const m = messages.findings;
+  const severityLabels = messages.severity;
+
   const visible = useMemo(() => {
     const sorted = [...findings].sort((a, b) => {
       return (
@@ -31,15 +35,18 @@ export function FindingList({ findings, filter }: Props) {
   return (
     <section
       className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)]"
-      aria-label="検出一覧"
+      aria-label={m.listAria}
     >
       <header className="flex items-center justify-between border-b border-[var(--color-border)] px-5 py-3">
         <div>
-          <h3 className="text-sm font-semibold text-white">検出一覧</h3>
+          <h3 className="text-sm font-semibold text-white">{m.title}</h3>
           <p className="mt-0.5 text-[11px] text-[var(--color-muted)]">
             {filter === "all"
-              ? `${visible.length} 件すべての検出`
-              : `${severityLabels[filter]}・${visible.length} 件`}
+              ? t(m.allFindings, { count: visible.length })
+              : t(m.filteredCount, {
+                  severity: severityLabels[filter],
+                  count: visible.length,
+                })}
           </p>
         </div>
       </header>
@@ -47,7 +54,7 @@ export function FindingList({ findings, filter }: Props) {
       {visible.length === 0 ? (
         <div className="grid place-items-center gap-2 px-6 py-14 text-center">
           <CheckCircle2 size={28} className="text-emerald-400" aria-hidden="true" />
-          <p className="text-sm text-[var(--color-muted)]">この条件に一致する検出はありません。</p>
+          <p className="text-sm text-[var(--color-muted)]">{m.noMatch}</p>
         </div>
       ) : (
         <ul className="divide-y divide-[var(--color-border)]">
@@ -65,6 +72,9 @@ export function FindingList({ findings, filter }: Props) {
 }
 
 function FindingRow({ finding }: { finding: Finding }) {
+  const { messages, t } = useI18n();
+  const m = messages.findings;
+  const severityLabels = messages.severity;
   const severity = asSeverity(finding.severity);
   const fileName = basenameOf(finding.file);
   const folder = dirnameOf(finding.file);
@@ -95,12 +105,12 @@ function FindingRow({ finding }: { finding: Finding }) {
 
         <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
           <Tag icon={<Hash size={10} aria-hidden="true" />}>
-            行 {finding.line}:{finding.column}
+            {t(m.lineTag, { line: finding.line, column: finding.column })}
           </Tag>
           <Tag>{finding.kind}</Tag>
           <Tag muted>{finding.rule_id}</Tag>
           {finding.confidence > 0 && (
-            <Tag muted>信頼度 {(finding.confidence * 100).toFixed(0)}%</Tag>
+            <Tag muted>{t(m.confidence, { percent: (finding.confidence * 100).toFixed(0) })}</Tag>
           )}
         </div>
       </div>

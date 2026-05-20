@@ -4031,6 +4031,7 @@ name = "shk-desktop"
 version = "0.3.4"
 dependencies = [
  "serde",
+ "shk-cli",
  "shk-core",
  "tauri",
  "tauri-build",

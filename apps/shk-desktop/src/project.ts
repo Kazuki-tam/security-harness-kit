@@ -1,0 +1,39 @@
+import { invoke } from "@tauri-apps/api/core";
+import type {
+  ActionResult,
+  InstallAiHooksOptions,
+  InstallSkillsOptions,
+  InitPolicyOptions,
+  ProjectStatus,
+} from "./types";
+
+export function fetchProjectStatus(path: string): Promise<ProjectStatus> {
+  return invoke<ProjectStatus>("project_status", { path });
+}
+
+export function initPolicy(path: string, options: InitPolicyOptions): Promise<ActionResult> {
+  return invoke<ActionResult>("init_policy", { path, options });
+}
+
+export function installPreCommitHook(path: string): Promise<ActionResult> {
+  return invoke<ActionResult>("install_pre_commit_hook", { path });
+}
+
+export function installAiHooks(
+  path: string,
+  options: InstallAiHooksOptions,
+): Promise<ActionResult> {
+  return invoke<ActionResult>("install_ai_hooks", { path, options });
+}
+
+export function fixDoctorIgnore(path: string): Promise<ActionResult> {
+  return invoke<ActionResult>("fix_doctor_ignore", { path });
+}
+
+export function applyNpmHardening(path: string): Promise<ActionResult> {
+  return invoke<ActionResult>("apply_npm_hardening", { path });
+}
+
+export function installSkills(path: string, options: InstallSkillsOptions): Promise<ActionResult> {
+  return invoke<ActionResult>("install_skills", { path, options });
+}

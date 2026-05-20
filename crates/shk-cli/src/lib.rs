@@ -4,6 +4,7 @@ mod args;
 mod audit_log;
 mod color;
 mod commands;
+pub mod desktop_api;
 mod doctor;
 mod exit;
 mod hook_output;

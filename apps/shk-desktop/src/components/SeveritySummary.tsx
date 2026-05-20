@@ -1,5 +1,6 @@
+import { useI18n } from "../i18n";
 import type { ScanReport, Severity } from "../scan";
-import { severityDot, severityLabels, severityOrder, severityText } from "../scan";
+import { severityDot, severityOrder, severityText } from "../scan";
 
 type Props = {
   report: ScanReport;
@@ -8,8 +9,15 @@ type Props = {
 };
 
 export function SeveritySummary({ report, filter, onFilterChange }: Props) {
+  const { messages } = useI18n();
+  const severityLabels = messages.severity;
+  const countSuffix = messages.findings.countSuffix;
+
   return (
-    <section className="grid grid-cols-2 gap-3 sm:grid-cols-5" aria-label="重大度別の検出件数">
+    <section
+      className="grid grid-cols-2 gap-3 sm:grid-cols-5"
+      aria-label={messages.findings.bySeverity}
+    >
       {severityOrder.map((severity) => {
         const count = report.summary.by_severity[severity] ?? 0;
         const active = filter === severity;
@@ -38,7 +46,9 @@ export function SeveritySummary({ report, filter, onFilterChange }: Props) {
               <span className={`text-3xl font-semibold tabular-nums ${severityText[severity]}`}>
                 {count}
               </span>
-              <span className="text-[11px] text-[var(--color-faint)]">件</span>
+              {countSuffix && (
+                <span className="text-[11px] text-[var(--color-faint)]">{countSuffix}</span>
+              )}
             </div>
           </button>
         );

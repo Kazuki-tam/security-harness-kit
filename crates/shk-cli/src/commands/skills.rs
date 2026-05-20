@@ -109,7 +109,7 @@ pub fn status() -> Result<()> {
     Ok(())
 }
 
-pub fn status_entries() -> Vec<SkillStatus> {
+pub fn status_entries_for(root: &Path) -> Vec<SkillStatus> {
     let tools = [
         ("claude-code (project)", SkillTool::ClaudeCode, false),
         ("claude-code (global)", SkillTool::ClaudeCode, true),
@@ -119,19 +119,67 @@ pub fn status_entries() -> Vec<SkillStatus> {
 
     tools
         .into_iter()
-        .map(|(label, tool, global)| match dest_path(tool, global) {
-            Ok(path) => SkillStatus {
-                label,
-                installed: path.exists(),
-                path: Some(path),
-            },
-            Err(_) => SkillStatus {
-                label,
-                installed: false,
-                path: None,
-            },
+        .map(|(label, tool, global)| {
+            match resolve_base_for(root, global).and_then(|base| dest_path_for(&base, tool, global))
+            {
+                Ok(path) => SkillStatus {
+                    label,
+                    installed: path.exists(),
+                    path: Some(path),
+                },
+                Err(_) => SkillStatus {
+                    label,
+                    installed: false,
+                    path: None,
+                },
+            }
         })
         .collect()
+}
+
+pub fn install_for(root: &Path, args: SkillsInstallArgs) -> Result<Vec<String>> {
+    let plans = selected_tools(args.tool.unwrap_or(SkillTool::All))
+        .into_iter()
+        .map(|tool| {
+            let base = resolve_base_for(root, args.global)?;
+            Ok(InstallPlan {
+                tool,
+                dest: dest_path_for(&base, tool, args.global)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    if !args.dry_run && !args.force {
+        ensure_no_existing_destinations(&plans)?;
+    }
+
+    let mut details = Vec::new();
+    for plan in &plans {
+        if args.dry_run {
+            details.push(format!(
+                "[dry-run] would write {} skill to {} ({} bytes)",
+                plan.tool.label(),
+                plan.dest.display(),
+                SKILL_CONTENT.len()
+            ));
+            continue;
+        }
+
+        let parent = plan.dest.parent().expect("destination has parent");
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        std::fs::write(&plan.dest, SKILL_CONTENT)
+            .with_context(|| format!("write {}", plan.dest.display()))?;
+        details.push(format!(
+            "Installed {} skill → {}",
+            plan.tool.label(),
+            plan.dest.display()
+        ));
+    }
+    Ok(details)
+}
+
+pub fn status_entries() -> Vec<SkillStatus> {
+    status_entries_for(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 fn print_status_line(label: &str, path: Option<&Path>) {
@@ -143,7 +191,20 @@ fn print_status_line(label: &str, path: Option<&Path>) {
 }
 
 fn dest_path(tool: SkillTool, global: bool) -> Result<PathBuf> {
-    let base = resolve_base(global)?;
+    let root = std::env::current_dir().context("current directory")?;
+    let base = resolve_base_for(&root, global)?;
+    dest_path_for(&base, tool, global)
+}
+
+fn resolve_base_for(root: &Path, global: bool) -> Result<PathBuf> {
+    if global {
+        dirs::home_dir().context("home directory not found")
+    } else {
+        Ok(root.to_path_buf())
+    }
+}
+
+fn dest_path_for(base: &Path, tool: SkillTool, _global: bool) -> Result<PathBuf> {
     Ok(match tool {
         SkillTool::ClaudeCode => base
             .join(".claude")
@@ -166,13 +227,5 @@ impl SkillTool {
             Self::Cursor => "cursor",
             Self::All => "all",
         }
-    }
-}
-
-fn resolve_base(global: bool) -> Result<PathBuf> {
-    if global {
-        dirs::home_dir().context("home directory not found")
-    } else {
-        std::env::current_dir().context("current directory")
     }
 }

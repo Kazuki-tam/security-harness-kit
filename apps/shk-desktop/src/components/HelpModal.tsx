@@ -1,5 +1,6 @@
 import { X } from "lucide-react";
 import { useEffect } from "react";
+import { useI18n } from "../i18n";
 
 type Props = {
   open: boolean;
@@ -7,6 +8,9 @@ type Props = {
 };
 
 export function HelpModal({ open, onClose }: Props) {
+  const { messages } = useI18n();
+  const m = messages.help;
+
   useEffect(() => {
     if (!open) return;
     function onKey(event: KeyboardEvent) {
@@ -35,12 +39,12 @@ export function HelpModal({ open, onClose }: Props) {
       >
         <header className="flex items-center justify-between border-b border-[var(--color-border)] px-5 py-4">
           <h2 id="shk-help-title" className="text-sm font-semibold text-white">
-            shk ガイド
+            {m.title}
           </h2>
           <button
             type="button"
             onClick={onClose}
-            aria-label="閉じる"
+            aria-label={messages.common.close}
             className="grid h-7 w-7 place-items-center rounded-md text-[var(--color-muted)] transition hover:bg-[var(--color-surface-3)] hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
           >
             <X size={14} aria-hidden="true" />
@@ -49,30 +53,28 @@ export function HelpModal({ open, onClose }: Props) {
 
         <section className="px-5 py-4">
           <h3 className="text-[11px] font-semibold tracking-[0.16em] text-[var(--color-faint)] uppercase">
-            クイックスタート
+            {m.quickStart}
           </h3>
           <ol className="mt-3 grid gap-2 text-[13px] text-[var(--color-text)]">
-            <Step number={1}>「プロジェクトを開く」でフォルダを選択します。</Step>
-            <Step number={2}>右上の「スキャンを実行」でローカル走査が始まります。</Step>
-            <Step number={3}>重大度カードをクリックして検出を絞り込めます。</Step>
+            <Step number={1}>{m.step1}</Step>
+            <Step number={2}>{m.step2}</Step>
+            <Step number={3}>{m.step3}</Step>
           </ol>
         </section>
 
         <section className="border-t border-[var(--color-border)] px-5 py-4">
           <h3 className="text-[11px] font-semibold tracking-[0.16em] text-[var(--color-faint)] uppercase">
-            ショートカット
+            {m.shortcuts}
           </h3>
           <dl className="mt-3 grid gap-1.5">
-            <Shortcut label="フォルダを開く" keys={["⌘", "O"]} />
-            <Shortcut label="再スキャン" keys={["⌘", "R"]} />
-            <Shortcut label="このダイアログを閉じる" keys={["Esc"]} />
+            <Shortcut label={m.shortcutOpen} keys={["⌘", "O"]} />
+            <Shortcut label={m.shortcutRescan} keys={["⌘", "R"]} />
+            <Shortcut label={m.shortcutClose} keys={["Esc"]} />
           </dl>
         </section>
 
         <footer className="border-t border-[var(--color-border)] bg-[var(--color-surface-2)]/60 px-5 py-3">
-          <p className="text-[11px] text-[var(--color-muted)]">
-            スキャン結果は外部に送信されず、すべてローカルで処理されます。
-          </p>
+          <p className="text-[11px] text-[var(--color-muted)]">{m.footer}</p>
         </footer>
       </div>
     </div>

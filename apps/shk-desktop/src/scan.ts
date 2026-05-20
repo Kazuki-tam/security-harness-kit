@@ -35,14 +35,6 @@ export type ScanState =
 
 export const severityOrder: Severity[] = ["critical", "high", "medium", "low", "info"];
 
-export const severityLabels: Record<Severity, string> = {
-  critical: "緊急対応",
-  high: "対応が必要",
-  medium: "確認推奨",
-  low: "低リスク",
-  info: "情報",
-};
-
 export const severityText: Record<Severity, string> = {
   critical: "text-red-400",
   high: "text-orange-300",
@@ -79,7 +71,9 @@ export function asSeverity(value: string): Severity {
   return severityOrder.includes(value as Severity) ? (value as Severity) : "info";
 }
 
-export function actionableCount(by: Record<string, number> | undefined): number {
+export function actionableCount(
+  by: Partial<Record<Severity, number>> | Record<string, number> | undefined,
+): number {
   if (!by) return 0;
   return (by.critical ?? 0) + (by.high ?? 0);
 }

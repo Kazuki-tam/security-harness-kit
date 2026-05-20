@@ -67,6 +67,18 @@ fn hook_scan_cli_command_with_fail_on(
 }
 
 pub fn install_ai(cwd: &Path, maybe_tool: Option<AiTool>, opts: InstallAiOptions) -> Result<()> {
+    let summaries = install_ai_with_summaries(cwd, maybe_tool, opts)?;
+    for summary in summaries {
+        println!("{summary}");
+    }
+    Ok(())
+}
+
+pub fn install_ai_with_summaries(
+    cwd: &Path,
+    maybe_tool: Option<AiTool>,
+    opts: InstallAiOptions,
+) -> Result<Vec<String>> {
     let tools = if let Some(t) = maybe_tool {
         vec![t]
     } else {
@@ -78,29 +90,39 @@ pub fn install_ai(cwd: &Path, maybe_tool: Option<AiTool>, opts: InstallAiOptions
         opts.global, opts.audit, opts.dry_run, opts.apply_sandbox
     );
     let cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let mut summaries = Vec::new();
 
     for t in tools {
         let path = resolve_ai_config_path(t, &cwd, opts.global)?;
-        let summary = match t {
-            AiTool::ClaudeCode => apply_claude(
-                &path,
-                opts.audit,
-                opts.dry_run,
-                opts.apply_deny,
-                opts.apply_sandbox,
-                !opts.global,
-            )?,
-            AiTool::Cursor => apply_cursor(
-                &path,
-                opts.audit,
-                opts.dry_run,
-                opts.fail_closed || opts.apply_sandbox,
-            )?,
-            AiTool::Codex => apply_codex(&path, opts.audit, opts.dry_run, opts.apply_sandbox)?,
-        };
-        println!("{}: {}", path.display(), summary.trim_end_matches('\n'));
+        let summary = apply_tool(&path, t, opts, !opts.global)?;
+        summaries.push(format!("{}: {}", path.display(), summary.trim()));
     }
-    Ok(())
+    Ok(summaries)
+}
+
+fn apply_tool(
+    path: &Path,
+    tool: AiTool,
+    opts: InstallAiOptions,
+    restrict_sandbox_reads_to_project: bool,
+) -> Result<String> {
+    match tool {
+        AiTool::ClaudeCode => apply_claude(
+            path,
+            opts.audit,
+            opts.dry_run,
+            opts.apply_deny,
+            opts.apply_sandbox,
+            restrict_sandbox_reads_to_project,
+        ),
+        AiTool::Cursor => apply_cursor(
+            path,
+            opts.audit,
+            opts.dry_run,
+            opts.fail_closed || opts.apply_sandbox,
+        ),
+        AiTool::Codex => apply_codex(path, opts.audit, opts.dry_run, opts.apply_sandbox),
+    }
 }
 
 fn save_json_formatted(path: &Path, v: &Value, dry_run: bool) -> Result<()> {
