@@ -1,27 +1,27 @@
 import { AlertTriangle, CheckCircle2, RefreshCcw, Search, ShieldCheck } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
-import { actionableCount, type ScanState, type Severity } from "../scan";
-import type { ActionState, Project, ProjectStatusState } from "../types";
+import { actionableCount, type ScanState, type Severity, visibleScanResult } from "../scan";
+import { countPendingQuickSetup } from "../setup/plan";
+import type { ActionState, AiHookSetupSelection, Project, ProjectStatusState } from "../types";
 import { formatRelativeTime } from "../utils";
 import { Button } from "./Button";
 import { DoctorPanel } from "./DoctorPanel";
 import { FindingList } from "./FindingList";
 import { ProjectSetupPanel } from "./ProjectSetupPanel";
+import { ScanProgressCard } from "./ScanProgressCard";
 import { SetupLoadingCard } from "./SetupActionCard";
 import { SeveritySummary } from "./SeveritySummary";
 
 type WorkspaceTab = "overview" | "findings" | "setup";
 
 type SetupHandlers = {
-  onInitPolicy: (strict: boolean) => void;
-  onApplyRecommendedFixes: (fixIds: string[], ignoreTargets: string[]) => void;
+  onQuickSetup: (fixIds: string[], ignoreTargets: string[]) => void;
+  onInitPolicy: (request: { strict: boolean; force: boolean }) => void;
   onFixDoctorIgnore: (targets: string[]) => void;
   onInstallPreCommit: () => void;
-  onInstallAiHooks: () => void;
-  onInstallClaudeDeny: () => void;
-  onInstallCodexSandbox: () => void;
-  onApplyNpmHardening: () => void;
+  onInstallAiHooks: (selection: AiHookSetupSelection) => void;
+  onApplyNpmHardening: (enabled: boolean) => void;
   onInstallSkills: () => void;
 };
 
@@ -30,6 +30,7 @@ type Props = {
   scanState: ScanState;
   projectStatus: ProjectStatusState;
   actionState: ActionState;
+  onDismissActionFeedback: () => void;
   onScan: () => void;
   setupHandlers?: SetupHandlers;
 };
@@ -39,6 +40,7 @@ export function ScanWorkspace({
   scanState,
   projectStatus,
   actionState,
+  onDismissActionFeedback,
   onScan,
   setupHandlers,
 }: Props) {
@@ -47,28 +49,40 @@ export function ScanWorkspace({
   const w = messages.workspace;
   const [tab, setTab] = useState<WorkspaceTab>("overview");
   const [filter, setFilter] = useState<Severity | "all">("all");
+  const autoOpenedSetupRef = useRef(false);
   const isScanning = scanState.status === "running";
-  const report = scanState.status === "done" ? scanState.report : undefined;
-  const finishedAt = scanState.status === "done" ? scanState.finishedAt : project.lastScannedAt;
+  const visibleResult = visibleScanResult(scanState);
+  const report = visibleResult?.report;
+  const finishedAt = visibleResult?.finishedAt ?? project.lastScannedAt;
   const actionable = report
     ? actionableCount(report.summary.by_severity)
     : actionableCount(project.summary?.bySeverity);
+  const setupPendingCount =
+    projectStatus.status === "done" ? countPendingQuickSetup(projectStatus.data) : 0;
+  const showSetupBadge = setupPendingCount > 0;
+
+  useEffect(() => {
+    if (autoOpenedSetupRef.current) return;
+    if (projectStatus.status !== "done") return;
+    if (setupPendingCount === 0) return;
+    if (scanState.status === "running") return;
+    if (scanState.status === "done") return;
+    setTab("setup");
+    autoOpenedSetupRef.current = true;
+  }, [projectStatus.status, setupPendingCount, scanState.status]);
 
   return (
     <div className="shk-scroll shk-fade-in min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto flex max-w-5xl flex-col gap-5 px-8 pt-6 pb-10">
         <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
-            <p className="text-[11px] font-semibold tracking-[0.18em] text-[var(--color-faint)] uppercase">
+            <p className="text-[11px] font-semibold tracking-[0.18em] text-faint uppercase">
               {m.project}
             </p>
             <h2 className="mt-1 truncate text-[22px] font-semibold tracking-tight text-white">
               {project.name}
             </h2>
-            <p
-              className="mt-0.5 truncate font-mono text-[12px] text-[var(--color-muted)]"
-              title={project.path}
-            >
+            <p className="mt-0.5 truncate font-mono text-[12px] text-muted" title={project.path}>
               {project.path}
             </p>
           </div>
@@ -93,25 +107,34 @@ export function ScanWorkspace({
           </Button>
         </header>
 
-        <nav className="flex flex-wrap gap-2 border-b border-[var(--color-border)] pb-3">
+        <nav className="flex flex-wrap gap-2 border-b border-border pb-3">
           {(["overview", "findings", "setup"] as const).map((key) => (
             <button
               key={key}
               type="button"
               onClick={() => setTab(key)}
               aria-current={tab === key ? "page" : undefined}
-              className={`rounded-lg px-3 py-1.5 text-[12px] font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 ${
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 ${
                 tab === key
                   ? "bg-sky-500/12 text-sky-100 ring-1 ring-inset ring-sky-400/35"
-                  : "text-[var(--color-muted)] hover:bg-[var(--color-surface-2)] hover:text-white"
+                  : "text-muted hover:bg-surface-2 hover:text-white"
               }`}
             >
               {w.tabs[key]}
+              {key === "setup" && showSetupBadge && (
+                <span className="rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-amber-100 ring-1 ring-inset ring-amber-400/35">
+                  {w.setupTabBadge}
+                </span>
+              )}
             </button>
           ))}
         </nav>
 
         <MetaBar finishedAt={finishedAt} report={report} />
+
+        {scanState.status === "running" && (
+          <ScanProgressCard startedAt={scanState.startedAt} hasPreviousResults={Boolean(report)} />
+        )}
 
         {scanState.status === "error" && (
           <div
@@ -136,10 +159,17 @@ export function ScanWorkspace({
             )}
             {projectStatus.status === "done" && (
               <>
-                <DoctorPanel doctor={projectStatus.data.doctor} />
+                <DoctorPanel
+                  doctor={projectStatus.data.doctor}
+                  npmApplicable={projectStatus.data.npmHardening.hasProjects}
+                  onOpenSetup={() => setTab("setup")}
+                />
                 {!projectStatus.data.policy.exists && (
-                  <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[12px] text-amber-100">
-                    {w.policyRequired}
+                  <div className="flex flex-col gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[12px] text-amber-100 sm:flex-row sm:items-center sm:justify-between">
+                    <p>{w.policyRequired}</p>
+                    <Button variant="primary" size="sm" onClick={() => setTab("setup")}>
+                      {w.openSetup}
+                    </Button>
                   </div>
                 )}
               </>
@@ -177,13 +207,12 @@ export function ScanWorkspace({
               <ProjectSetupPanel
                 status={projectStatus.data}
                 actionState={actionState}
+                onDismissActionFeedback={onDismissActionFeedback}
+                onQuickSetup={setupHandlers.onQuickSetup}
                 onInitPolicy={setupHandlers.onInitPolicy}
-                onApplyRecommendedFixes={setupHandlers.onApplyRecommendedFixes}
                 onFixDoctorIgnore={setupHandlers.onFixDoctorIgnore}
                 onInstallPreCommit={setupHandlers.onInstallPreCommit}
                 onInstallAiHooks={setupHandlers.onInstallAiHooks}
-                onInstallClaudeDeny={setupHandlers.onInstallClaudeDeny}
-                onInstallCodexSandbox={setupHandlers.onInstallCodexSandbox}
                 onApplyNpmHardening={setupHandlers.onApplyNpmHardening}
                 onInstallSkills={setupHandlers.onInstallSkills}
               />
@@ -206,18 +235,18 @@ function MetaBar({
   const m = messages.scan;
 
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-[var(--color-muted)]">
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-muted">
       <span className="inline-flex items-center gap-1.5">
         <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden="true" />
         {m.lastScan} {formatRelativeTime(finishedAt, messages.time)}
       </span>
       {report && (
         <>
-          <span className="text-[var(--color-faint)]">·</span>
+          <span className="text-faint">·</span>
           <span>{t(m.detected, { count: report.summary.total })}</span>
-          <span className="text-[var(--color-faint)]">·</span>
+          <span className="text-faint">·</span>
           <span>{t(m.suppressed, { count: report.suppressed })}</span>
-          <span className="text-[var(--color-faint)]">·</span>
+          <span className="text-faint">·</span>
           <span>{t(m.deduplicated, { count: report.deduplicated })}</span>
         </>
       )}
@@ -277,15 +306,13 @@ function EmptyHero({ isScanning, onScan }: { isScanning: boolean; onScan: () => 
   const m = messages.scan;
 
   return (
-    <section className="grid place-items-center gap-4 rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-surface-2)]/40 px-6 py-14 text-center">
-      <div className="grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br from-sky-400/25 via-violet-400/10 to-emerald-400/10 text-sky-200 ring-1 ring-inset ring-sky-400/25">
+    <section className="grid place-items-center gap-4 rounded-xl border border-dashed border-border bg-surface-2/40 px-6 py-14 text-center">
+      <div className="grid h-12 w-12 place-items-center rounded-2xl bg-linear-to-br from-sky-400/25 via-violet-400/10 to-emerald-400/10 text-sky-200 ring-1 ring-inset ring-sky-400/25">
         <ShieldCheck size={24} aria-hidden="true" />
       </div>
       <div className="grid gap-1.5">
         <h3 className="text-base font-semibold text-white">{m.readyTitle}</h3>
-        <p className="max-w-md text-[13px] leading-relaxed text-[var(--color-muted)]">
-          {m.readyHint}
-        </p>
+        <p className="max-w-md text-[13px] leading-relaxed text-muted">{m.readyHint}</p>
       </div>
       <Button
         variant="primary"

@@ -1,12 +1,15 @@
 import { AlertTriangle, CheckCircle2, Info, XCircle } from "lucide-react";
 import { useI18n } from "../i18n";
 import type { DoctorIssue, DoctorStatus } from "../types";
+import { Button } from "./Button";
 
 type Props = {
   doctor: DoctorStatus;
+  npmApplicable: boolean;
+  onOpenSetup?: () => void;
 };
 
-export function DoctorPanel({ doctor }: Props) {
+export function DoctorPanel({ doctor, npmApplicable, onOpenSetup }: Props) {
   const { messages } = useI18n();
   const m = messages.setup.doctor;
 
@@ -17,39 +20,49 @@ export function DoctorPanel({ doctor }: Props) {
     { ok: doctor.claudeDenyOk, label: m.claudeDeny },
     { ok: doctor.codexConfigOk, label: m.codexConfig },
     { ok: doctor.envOk, label: m.env },
-    { ok: doctor.npmOk, label: m.npm },
+    ...(npmApplicable ? [{ ok: doctor.npmOk, label: m.npm }] : []),
   ];
+  const issues = npmApplicable
+    ? doctor.issues
+    : doctor.issues.filter((issue) => issue.id !== "npm_hardening");
 
   return (
-    <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)] p-4">
-      <div className="mb-3">
-        <h3 className="text-sm font-semibold text-white">{m.title}</h3>
-        <p className="mt-1 text-[12px] text-[var(--color-muted)]">{m.subtitle}</p>
+    <section className="rounded-xl border border-border bg-surface-2 p-4">
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h3 className="text-sm font-semibold text-white">{m.title}</h3>
+          <p className="mt-1 text-[12px] text-muted">{m.subtitle}</p>
+        </div>
+        {onOpenSetup && issues.length > 0 && (
+          <Button variant="primary" size="sm" className="shrink-0 self-start" onClick={onOpenSetup}>
+            {m.openSetup}
+          </Button>
+        )}
       </div>
 
       <ul className="grid gap-2 sm:grid-cols-2">
         {checks.map(({ ok, label }) => (
           <li
             key={label}
-            className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-3)]/50 px-3 py-2 text-[12px]"
+            className="flex items-center gap-2 rounded-lg border border-border bg-surface-3/50 px-3 py-2 text-[12px]"
           >
             {ok ? (
               <CheckCircle2 size={14} className="shrink-0 text-emerald-300" aria-hidden="true" />
             ) : (
               <AlertTriangle size={14} className="shrink-0 text-amber-300" aria-hidden="true" />
             )}
-            <span className={ok ? "text-[var(--color-text)]" : "text-amber-100"}>{label}</span>
+            <span className={ok ? "text-text" : "text-amber-100"}>{label}</span>
           </li>
         ))}
       </ul>
 
-      {doctor.issues.length > 0 && (
+      {issues.length > 0 && (
         <div className="mt-4">
-          <h4 className="text-[11px] font-semibold tracking-[0.14em] text-[var(--color-faint)] uppercase">
+          <h4 className="text-[11px] font-semibold tracking-[0.14em] text-faint uppercase">
             {m.issues}
           </h4>
           <ul className="mt-2 grid gap-2">
-            {doctor.issues.map((issue) => (
+            {issues.map((issue) => (
               <IssueRow key={`${issue.id}:${issue.message}`} issue={issue} />
             ))}
           </ul>

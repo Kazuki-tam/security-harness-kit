@@ -1,55 +1,104 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
-import type { ActionState, ProjectStatus } from "../types";
-import { Button } from "./Button";
+import {
+  aiHookSelectionFromStatus,
+  aiHookSelectionHasAdditions,
+  aiHookSelectionHasRemovals,
+  aiHookSelectionIsFullyDisabled,
+  aiHookSelectionMatches,
+  aiSafetyReady,
+  countPendingQuickSetup,
+  npmSettingsReady,
+  projectSkillsInstalled,
+  projectSkillStatuses,
+} from "../setup/plan";
+import type { ActionState, AiHookSetupSelection, ProjectStatus } from "../types";
 import { DEFAULT_IGNORE_TARGETS, IgnoreTargetsPicker } from "./IgnoreTargetsPicker";
-import { RecommendedFixesCard } from "./RecommendedFixesCard";
+import { ConfirmDialog } from "./ConfirmDialog";
+import { QuickSetupCard } from "./QuickSetupCard";
 import { SetupActionCard } from "./SetupActionCard";
+import { SetupAdvancedSection } from "./SetupAdvancedSection";
+import { SetupFeedback } from "./SetupFeedback";
+
+type InitPolicyRequest = {
+  strict: boolean;
+  force: boolean;
+};
 
 type Props = {
   status: ProjectStatus;
   actionState: ActionState;
-  onInitPolicy: (strict: boolean) => void;
-  onApplyRecommendedFixes: (fixIds: string[], ignoreTargets: string[]) => void;
+  onDismissActionFeedback: () => void;
+  onQuickSetup: (fixIds: string[], ignoreTargets: string[]) => void;
+  onInitPolicy: (request: InitPolicyRequest) => void;
   onFixDoctorIgnore: (targets: string[]) => void;
   onInstallPreCommit: () => void;
-  onInstallAiHooks: () => void;
-  onInstallClaudeDeny: () => void;
-  onInstallCodexSandbox: () => void;
-  onApplyNpmHardening: () => void;
+  onInstallAiHooks: (selection: AiHookSetupSelection) => void;
+  onApplyNpmHardening: (enabled: boolean) => void;
   onInstallSkills: () => void;
 };
 
 export function ProjectSetupPanel({
   status,
   actionState,
+  onDismissActionFeedback,
+  onQuickSetup,
   onInitPolicy,
-  onApplyRecommendedFixes,
   onFixDoctorIgnore,
   onInstallPreCommit,
   onInstallAiHooks,
-  onInstallClaudeDeny,
-  onInstallCodexSandbox,
   onApplyNpmHardening,
   onInstallSkills,
 }: Props) {
-  const { messages } = useI18n();
+  const { messages, t } = useI18n();
   const m = messages.setup;
   const running = actionState.status === "running";
   const policyExists = status.policy.exists;
   const ignoreMissingPatterns = status.doctor.missingIgnorePatterns;
   const ignoreReady = policyExists && status.doctor.ignoreOk;
-  const aiHooksInstalled = status.hooks.aiTools.some((tool) => tool.installed);
   const hasNpmProjects = status.npmHardening.hasProjects;
-  const npmReady = status.npmHardening.ok;
-  const projectSkills = status.skills.filter((s) => s.label.includes("(project)"));
-  const skillsInstalled = projectSkills.some((s) => s.installed);
+  const aiReady = aiSafetyReady(status);
+  const npmSettingsOk = npmSettingsReady(status);
+  const projectSkills = projectSkillStatuses(status);
+  const skillsInstalled = projectSkillsInstalled(status);
+  const pendingQuickSetup = countPendingQuickSetup(status);
+
   const [selectedIgnoreTargets, setSelectedIgnoreTargets] =
     useState<string[]>(DEFAULT_IGNORE_TARGETS);
+  const [aiHookSelection, setAiHookSelection] = useState<AiHookSetupSelection>(() =>
+    aiHookSelectionFromStatus(status),
+  );
+  const [npmHardeningEnabled, setNpmHardeningEnabled] = useState(true);
+  const [advancedOpen, setAdvancedOpen] = useState(pendingQuickSetup > 0);
+  const [confirmRecreatePolicy, setConfirmRecreatePolicy] = useState(false);
+  const [confirmNpmRemove, setConfirmNpmRemove] = useState(false);
+  const [confirmAiRemove, setConfirmAiRemove] = useState(false);
+  const advancedRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setSelectedIgnoreTargets(DEFAULT_IGNORE_TARGETS);
   }, [status.path]);
+
+  useEffect(() => {
+    setAiHookSelection(aiHookSelectionFromStatus(status));
+  }, [
+    status.path,
+    status.aiSafetyApplied.scanHooksClaudeCode,
+    status.aiSafetyApplied.scanHooksCursor,
+    status.aiSafetyApplied.scanHooksCodex,
+    status.aiSafetyApplied.claudeDeny,
+    status.aiSafetyApplied.claudeSandbox,
+    status.aiSafetyApplied.codexSandbox,
+  ]);
+
+  useEffect(() => {
+    setNpmHardeningEnabled(npmSettingsReady(status));
+  }, [status.path, status.npmHardening.ignoreScriptsOk, status.npmHardening.ageGatesOk]);
+
+  useEffect(() => {
+    if (pendingQuickSetup > 0) return;
+    setAdvancedOpen(false);
+  }, [status.path, pendingQuickSetup]);
 
   const toggleIgnoreTarget = (name: string) => {
     setSelectedIgnoreTargets((prev) =>
@@ -57,223 +106,390 @@ export function ProjectSetupPanel({
     );
   };
 
+  const toggleAiHookSelection = (key: keyof AiHookSetupSelection) => {
+    setAiHookSelection((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const openAdvanced = () => {
+    setAdvancedOpen(true);
+    requestAnimationFrame(() => {
+      advancedRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  };
+
+  const appliedAiHooks = aiHookSelectionFromStatus(status);
+  const aiHookSelectionChanged = !aiHookSelectionMatches(appliedAiHooks, aiHookSelection);
+  const aiHookHasRemovals = aiHookSelectionHasRemovals(appliedAiHooks, aiHookSelection);
+  const aiHookHasAdditions = aiHookSelectionHasAdditions(appliedAiHooks, aiHookSelection);
+  const aiHookPrimaryLabel =
+    aiHookHasRemovals && !aiHookHasAdditions
+      ? m.aiHooks.removeSelected
+      : aiHookHasRemovals
+        ? m.aiHooks.syncSelected
+        : m.aiHooks.applySelected;
+  const gitReady = status.hooks.preCommit.installed && status.hooks.preCommit.isGitRepo;
+  const gitDisabled = running || !policyExists || !status.hooks.preCommit.isGitRepo || gitReady;
+  const ignoreDisabled =
+    running || !policyExists || ignoreReady || selectedIgnoreTargets.length === 0;
+  const npmPrimaryDisabled = running || (npmHardeningEnabled && npmSettingsOk);
+
+  const handleNpmPrimary = () => {
+    if (!npmHardeningEnabled) {
+      setConfirmNpmRemove(true);
+      return;
+    }
+    onApplyNpmHardening(true);
+  };
+
+  const handleAiPrimary = () => {
+    if (
+      aiHookHasRemovals &&
+      aiHookSelectionIsFullyDisabled(aiHookSelection) &&
+      !aiHookHasAdditions
+    ) {
+      setConfirmAiRemove(true);
+      return;
+    }
+    onInstallAiHooks(aiHookSelection);
+  };
+
   return (
     <div className="grid gap-4">
-      <SetupActionCard
-        title={m.policy.title}
-        description={m.policy.description}
-        statusLabel={policyExists ? m.statusReady : m.statusMissing}
-        statusTone={policyExists ? "ok" : "warn"}
-        primaryLabel={policyExists ? m.policy.recreate : m.policy.create}
-        secondaryLabel={policyExists ? undefined : m.policy.createStrict}
-        onPrimary={() => onInitPolicy(false)}
-        onSecondary={policyExists ? undefined : () => onInitPolicy(true)}
-        primaryLoading={running}
-        primaryDisabled={running}
-      />
+      {actionState.status !== "idle" && actionState.status !== "running" && (
+        <SetupFeedback state={actionState} onDismiss={onDismissActionFeedback} />
+      )}
 
-      <RecommendedFixesCard
+      <QuickSetupCard
         status={status}
         running={running}
-        policyExists={policyExists}
-        onApply={onApplyRecommendedFixes}
+        onQuickSetup={onQuickSetup}
+        onOpenAdvanced={openAdvanced}
       />
 
-      <SetupActionCard
-        title={m.ignore.title}
-        description={m.ignore.description}
-        statusLabel={
-          !policyExists
-            ? m.ignore.policyRequired
-            : ignoreReady
-              ? m.statusReady
-              : m.statusNeedsAttention
-        }
-        statusTone={!policyExists ? "neutral" : ignoreReady ? "ok" : "warn"}
-        primaryLabel={m.ignore.applySelected}
-        onPrimary={() => onFixDoctorIgnore(selectedIgnoreTargets)}
-        primaryLoading={running}
-        primaryDisabled={
-          running || !policyExists || ignoreReady || selectedIgnoreTargets.length === 0
-        }
-      >
-        {ignoreMissingPatterns.length > 0 && (
-          <ul className="grid gap-1 text-[11px] text-muted">
-            {ignoreMissingPatterns.map((pat) => (
-              <li key={pat} className="font-mono">
-                · {pat}
-              </li>
-            ))}
-          </ul>
-        )}
+      <div ref={advancedRef}>
+        <SetupAdvancedSection
+          open={advancedOpen}
+          onToggle={() => setAdvancedOpen((value) => !value)}
+          pendingHint={
+            pendingQuickSetup > 0
+              ? t(messages.setup.advanced.pendingHint, { count: pendingQuickSetup })
+              : undefined
+          }
+        >
+          <SetupActionCard
+            title={m.policy.title}
+            description={m.policy.description}
+            statusLabel={policyExists ? m.statusReady : m.statusMissing}
+            statusTone={policyExists ? "ok" : "warn"}
+            primaryLabel={policyExists ? m.policy.recreate : m.policy.create}
+            secondaryLabel={policyExists ? undefined : m.policy.createStrict}
+            onPrimary={() =>
+              policyExists
+                ? setConfirmRecreatePolicy(true)
+                : onInitPolicy({ strict: false, force: false })
+            }
+            onSecondary={
+              policyExists ? undefined : () => onInitPolicy({ strict: true, force: false })
+            }
+            primaryLoading={running}
+            primaryDisabled={running}
+            secondaryDisabled={running}
+          >
+            {policyExists && <p className="text-[11px] text-faint">{m.policy.recreateHint}</p>}
+            {!policyExists && <p className="text-[11px] text-faint">{m.policy.strictHint}</p>}
+          </SetupActionCard>
 
-        {policyExists && !ignoreReady && status.ignoreFixTargets.length > 0 && (
-          <div className="mt-3 grid gap-2">
-            <p className="text-[11px] font-medium text-text">{m.ignore.targetsLabel}</p>
-            <IgnoreTargetsPicker
-              targets={status.ignoreFixTargets}
-              selectedTargets={selectedIgnoreTargets}
-              disabled={running}
-              onToggle={toggleIgnoreTarget}
-            />
-          </div>
-        )}
-      </SetupActionCard>
+          <SetupActionCard
+            title={m.ignore.title}
+            description={m.ignore.description}
+            statusLabel={
+              !policyExists
+                ? m.ignore.policyRequired
+                : ignoreReady
+                  ? m.statusReady
+                  : m.statusNeedsAttention
+            }
+            statusTone={!policyExists ? "neutral" : ignoreReady ? "ok" : "warn"}
+            primaryLabel={m.ignore.applySelected}
+            onPrimary={() => onFixDoctorIgnore(selectedIgnoreTargets)}
+            primaryLoading={running}
+            primaryDisabled={ignoreDisabled}
+            primaryDisabledReason={
+              !policyExists
+                ? m.hints.policyFirst
+                : ignoreReady
+                  ? m.hints.ignoreAlreadyOk
+                  : selectedIgnoreTargets.length === 0
+                    ? m.hints.selectIgnoreTarget
+                    : undefined
+            }
+          >
+            {ignoreMissingPatterns.length > 0 && (
+              <div className="grid gap-1 text-[11px] text-muted">
+                <p className="font-medium text-text">{m.ignore.missingLabel}</p>
+                <ul className="grid gap-1">
+                  {ignoreMissingPatterns.map((pat) => (
+                    <li key={pat}>
+                      · {m.ignore.patternDescriptions[pat] ?? pat}
+                      <span className="ml-1 font-mono text-[10px] text-faint">({pat})</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
-      <SetupActionCard
-        title={m.gitHook.title}
-        description={m.gitHook.description}
-        statusLabel={
-          !status.hooks.preCommit.isGitRepo
-            ? m.gitHook.notRepo
-            : status.hooks.preCommit.installed
-              ? m.statusReady
-              : m.statusMissing
-        }
-        statusTone={
-          status.hooks.preCommit.installed && status.hooks.preCommit.isGitRepo ? "ok" : "warn"
-        }
-        primaryLabel={m.gitHook.install}
-        onPrimary={onInstallPreCommit}
-        primaryLoading={running}
-        primaryDisabled={running || !policyExists || !status.hooks.preCommit.isGitRepo}
-      >
-        {status.hooks.preCommit.hookPath && (
-          <p className="font-mono text-[11px] text-faint">{status.hooks.preCommit.hookPath}</p>
-        )}
-      </SetupActionCard>
+            {policyExists && !ignoreReady && status.ignoreFixTargets.length > 0 && (
+              <div className="mt-3 grid gap-2">
+                <p className="text-[11px] font-medium text-text">{m.ignore.targetsLabel}</p>
+                <IgnoreTargetsPicker
+                  targets={status.ignoreFixTargets}
+                  selectedTargets={selectedIgnoreTargets}
+                  disabled={running}
+                  onToggle={toggleIgnoreTarget}
+                />
+              </div>
+            )}
+          </SetupActionCard>
 
-      <SetupActionCard
-        title={m.aiHooks.title}
-        description={m.aiHooks.description}
-        statusLabel={aiHooksInstalled ? m.statusReady : m.statusMissing}
-        statusTone={aiHooksInstalled ? "ok" : "warn"}
-        primaryLabel={m.aiHooks.install}
-        onPrimary={onInstallAiHooks}
-        primaryLoading={running}
-        primaryDisabled={running || !policyExists}
-      >
-        <ul className="grid gap-1.5">
-          {status.hooks.aiTools.map((tool) => (
-            <li
-              key={tool.tool}
-              className="flex items-center justify-between gap-2 text-[11px] text-muted"
+          <SetupActionCard
+            title={m.gitHook.title}
+            description={m.gitHook.description}
+            statusLabel={
+              !status.hooks.preCommit.isGitRepo
+                ? m.gitHook.notRepo
+                : status.hooks.preCommit.installed
+                  ? m.statusReady
+                  : m.statusMissing
+            }
+            statusTone={gitReady ? "ok" : "warn"}
+            primaryLabel={m.gitHook.install}
+            onPrimary={onInstallPreCommit}
+            primaryLoading={running}
+            primaryDisabled={gitDisabled}
+            primaryDisabledReason={
+              !policyExists
+                ? m.hints.policyFirst
+                : !status.hooks.preCommit.isGitRepo
+                  ? m.hints.notGitRepo
+                  : gitReady
+                    ? m.hints.gitHookAlreadyOk
+                    : undefined
+            }
+          />
+
+          <SetupActionCard
+            title={m.aiHooks.title}
+            description={m.aiHooks.description}
+            statusLabel={aiReady ? m.statusReady : m.statusNeedsAttention}
+            statusTone={aiReady ? "ok" : "warn"}
+            primaryLabel={aiHookPrimaryLabel}
+            onPrimary={handleAiPrimary}
+            primaryLoading={running}
+            primaryDisabled={running || !policyExists || !aiHookSelectionChanged}
+            primaryDisabledReason={
+              !policyExists
+                ? m.hints.policyFirst
+                : !aiHookSelectionChanged
+                  ? m.hints.aiNoChanges
+                  : undefined
+            }
+          >
+            <ul className="mb-3 grid gap-1.5">
+              {status.hooks.aiTools.map((tool) => (
+                <li
+                  key={tool.tool}
+                  className="flex items-center justify-between rounded-lg border border-border bg-surface-3/50 px-3 py-2 text-[11px]"
+                >
+                  <span className="font-medium text-text">
+                    {m.aiHooks.toolNames[tool.tool] ?? tool.tool}
+                  </span>
+                  <span className={tool.installed ? "text-emerald-300" : "text-amber-200"}>
+                    {tool.installed ? m.statusReady : m.statusMissing}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="mb-2 text-[11px] text-faint">{m.aiHooks.selectionHint}</p>
+            <p className="mb-1 text-[11px] font-medium text-text">{m.aiHooks.scanHooksGroup}</p>
+            <p className="mb-2 text-[11px] text-faint">{m.aiHooks.scanHooksHint}</p>
+            <ul className="mb-3 grid gap-1.5">
+              <AiHookOption
+                checked={aiHookSelection.scanHooksClaudeCode}
+                disabled={running}
+                label={m.aiHooks.toolNames["claude-code"]}
+                hint={m.aiHooks.scanHooksToolHint}
+                onToggle={() => toggleAiHookSelection("scanHooksClaudeCode")}
+              />
+              <AiHookOption
+                checked={aiHookSelection.scanHooksCursor}
+                disabled={running}
+                label={m.aiHooks.toolNames.cursor}
+                hint={m.aiHooks.scanHooksToolHint}
+                onToggle={() => toggleAiHookSelection("scanHooksCursor")}
+              />
+              <AiHookOption
+                checked={aiHookSelection.scanHooksCodex}
+                disabled={running}
+                label={m.aiHooks.toolNames.codex}
+                hint={m.aiHooks.scanHooksToolHint}
+                onToggle={() => toggleAiHookSelection("scanHooksCodex")}
+              />
+            </ul>
+            <ul className="grid gap-1.5">
+              <AiHookOption
+                checked={aiHookSelection.claudeDeny}
+                disabled={running}
+                label={m.aiHooks.claudeDeny}
+                hint={m.aiHooks.claudeDenyHint}
+                onToggle={() => toggleAiHookSelection("claudeDeny")}
+              />
+              <AiHookOption
+                checked={aiHookSelection.claudeSandbox}
+                disabled={running}
+                label={m.aiHooks.claudeSandbox}
+                hint={m.aiHooks.claudeSandboxHint}
+                onToggle={() => toggleAiHookSelection("claudeSandbox")}
+              />
+              <AiHookOption
+                checked={aiHookSelection.codexSandbox}
+                disabled={running}
+                label={m.aiHooks.codexSandbox}
+                hint={m.aiHooks.codexSandboxHint}
+                onToggle={() => toggleAiHookSelection("codexSandbox")}
+              />
+            </ul>
+          </SetupActionCard>
+
+          {hasNpmProjects && (
+            <SetupActionCard
+              title={m.npm.title}
+              description={m.npm.description}
+              statusLabel={npmSettingsOk ? m.statusReady : m.statusNeedsAttention}
+              statusTone={npmSettingsOk ? "ok" : "warn"}
+              primaryLabel={npmHardeningEnabled ? m.npm.apply : m.npm.remove}
+              onPrimary={handleNpmPrimary}
+              primaryLoading={running}
+              primaryDisabled={npmPrimaryDisabled}
+              primaryDisabledReason={
+                npmHardeningEnabled && npmSettingsOk ? m.hints.npmAlreadyOk : undefined
+              }
             >
-              <span className="font-medium text-text">{tool.tool}</span>
-              <span>{tool.installed ? m.statusReady : m.statusMissing}</span>
-            </li>
-          ))}
-          <li className="flex items-center justify-between gap-2 text-[11px] text-muted">
-            <span className="font-medium text-text">{m.aiHooks.claudeDeny}</span>
-            <span>{status.doctor.claudeDenyOk ? m.statusReady : m.statusNeedsAttention}</span>
-          </li>
-          <li className="flex items-center justify-between gap-2 text-[11px] text-muted">
-            <span className="font-medium text-text">{m.aiHooks.codexSandbox}</span>
-            <span>{status.doctor.codexConfigOk ? m.statusReady : m.statusNeedsAttention}</span>
-          </li>
-        </ul>
-        {policyExists && (!status.doctor.claudeDenyOk || !status.doctor.codexConfigOk) && (
-          <div className="mt-3 flex flex-wrap gap-2">
-            {!status.doctor.claudeDenyOk && (
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={onInstallClaudeDeny}
-                disabled={running}
-              >
-                {m.aiHooks.installClaudeDeny}
-              </Button>
-            )}
-            {!status.doctor.codexConfigOk && (
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={onInstallCodexSandbox}
-                disabled={running}
-              >
-                {m.aiHooks.installCodexSandbox}
-              </Button>
-            )}
-          </div>
-        )}
-      </SetupActionCard>
+              <label className="mb-3 flex cursor-pointer items-start gap-2 rounded-lg border border-border bg-surface-3/50 px-3 py-2 text-[11px] text-muted">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={npmHardeningEnabled}
+                  disabled={running}
+                  onChange={() => setNpmHardeningEnabled((enabled) => !enabled)}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block font-medium text-text">{m.npm.enableLabel}</span>
+                  <span className="text-[10px] text-faint">
+                    {npmHardeningEnabled ? m.npm.enabledHint : m.npm.disabledHint}
+                  </span>
+                </span>
+              </label>
+              {status.npmHardening.recommendations.length > 0 && (
+                <ul className="grid gap-1 text-[11px] text-muted">
+                  {status.npmHardening.recommendations.map((rec) => (
+                    <li key={rec}>· {rec}</li>
+                  ))}
+                </ul>
+              )}
+            </SetupActionCard>
+          )}
 
-      <SetupActionCard
-        title={m.npm.title}
-        description={m.npm.description}
-        statusLabel={
-          !hasNpmProjects ? m.npm.notApplicable : npmReady ? m.statusReady : m.statusNeedsAttention
-        }
-        statusTone={!hasNpmProjects ? "neutral" : npmReady ? "ok" : "warn"}
-        primaryLabel={m.npm.apply}
-        onPrimary={onApplyNpmHardening}
-        primaryLoading={running}
-        primaryDisabled={running || !hasNpmProjects}
-      >
-        {status.npmHardening.recommendations.length > 0 && (
-          <ul className="grid gap-1 text-[11px] text-muted">
-            {status.npmHardening.recommendations.map((rec) => (
-              <li key={rec}>· {rec}</li>
-            ))}
-          </ul>
-        )}
-      </SetupActionCard>
+          <SetupActionCard
+            title={m.skills.title}
+            description={m.skills.description}
+            statusLabel={skillsInstalled ? m.statusReady : m.statusMissing}
+            statusTone={skillsInstalled ? "ok" : "neutral"}
+            primaryLabel={m.skills.install}
+            onPrimary={onInstallSkills}
+            primaryLoading={running}
+            primaryDisabled={running}
+          >
+            <ul className="grid gap-1.5">
+              {projectSkills.map((skill) => (
+                <li key={skill.label} className="text-[11px] text-muted">
+                  {skill.label}: {skill.installed ? m.statusReady : m.statusMissing}
+                </li>
+              ))}
+            </ul>
+          </SetupActionCard>
+        </SetupAdvancedSection>
+      </div>
 
-      <SetupActionCard
-        title={m.skills.title}
-        description={m.skills.description}
-        statusLabel={skillsInstalled ? m.statusReady : m.statusMissing}
-        statusTone={skillsInstalled ? "ok" : "neutral"}
-        primaryLabel={m.skills.install}
-        onPrimary={onInstallSkills}
-        primaryLoading={running}
-        primaryDisabled={running}
-      >
-        <ul className="grid gap-1.5">
-          {projectSkills.map((skill) => (
-            <li key={skill.label} className="text-[11px] text-muted">
-              {skill.label}: {skill.installed ? m.statusReady : m.statusMissing}
-            </li>
-          ))}
-        </ul>
-      </SetupActionCard>
+      <ConfirmDialog
+        open={confirmRecreatePolicy}
+        title={m.policy.recreateConfirmTitle}
+        description={m.policy.recreateConfirmBody}
+        confirmLabel={m.policy.recreate}
+        variant="danger"
+        onCancel={() => setConfirmRecreatePolicy(false)}
+        onConfirm={() => {
+          setConfirmRecreatePolicy(false);
+          onInitPolicy({ strict: false, force: true });
+        }}
+      />
 
-      {actionState.status !== "idle" && actionState.status !== "running" && (
-        <ActionFeedback state={actionState} />
-      )}
+      <ConfirmDialog
+        open={confirmNpmRemove}
+        title={m.npm.removeConfirmTitle}
+        description={m.npm.removeConfirmBody}
+        confirmLabel={m.npm.remove}
+        variant="danger"
+        onCancel={() => setConfirmNpmRemove(false)}
+        onConfirm={() => {
+          setConfirmNpmRemove(false);
+          onApplyNpmHardening(false);
+        }}
+      />
+
+      <ConfirmDialog
+        open={confirmAiRemove}
+        title={m.aiHooks.removeConfirmTitle}
+        description={m.aiHooks.removeConfirmBody}
+        confirmLabel={m.aiHooks.removeSelected}
+        variant="danger"
+        onCancel={() => setConfirmAiRemove(false)}
+        onConfirm={() => {
+          setConfirmAiRemove(false);
+          onInstallAiHooks(aiHookSelection);
+        }}
+      />
     </div>
   );
 }
 
-function ActionFeedback({ state }: { state: ActionState }) {
-  const { messages } = useI18n();
-  const m = messages.setup.action;
-
-  if (state.status === "error") {
-    return (
-      <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-[12px] text-red-100">
-        <strong className="block">{m.failed}</strong>
-        <p className="mt-1">{state.message}</p>
-      </div>
-    );
-  }
-
-  if (state.status === "done") {
-    return (
-      <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-[12px] text-emerald-100">
-        <strong className="block">{state.result.message}</strong>
-        {state.result.details.length > 0 && (
-          <ul className="mt-2 grid gap-1 text-emerald-100/90">
-            {state.result.details.map((detail) => (
-              <li key={detail} className="font-mono text-[11px]">
-                {detail}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    );
-  }
-
-  return null;
+function AiHookOption({
+  checked,
+  disabled,
+  label,
+  hint,
+  onToggle,
+}: {
+  checked: boolean;
+  disabled: boolean;
+  label: string;
+  hint: string;
+  onToggle: () => void;
+}) {
+  return (
+    <li>
+      <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-border bg-surface-3/50 px-3 py-2 text-[11px] text-muted">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={checked}
+          disabled={disabled}
+          onChange={onToggle}
+        />
+        <span className="min-w-0 flex-1">
+          <span className="block font-medium text-text">{label}</span>
+          <span className="text-[10px] text-faint">{hint}</span>
+        </span>
+      </label>
+    </li>
+  );
 }

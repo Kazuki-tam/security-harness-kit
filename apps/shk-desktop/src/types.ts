@@ -54,6 +54,7 @@ export type DoctorStatus = {
   ignoreOk: boolean;
   missingIgnorePatterns: string[];
   claudeDenyOk: boolean;
+  claudeSandboxOk: boolean;
   codexConfigOk: boolean;
   envOk: boolean;
   npmOk: boolean;
@@ -71,12 +72,22 @@ export type RecommendedFix = {
 export type NpmHardeningStatus = {
   hasProjects: boolean;
   ok: boolean;
+  settingsOk: boolean;
   packageCount: number;
   missingLockfiles: string[];
   ignoreScriptsOk: boolean;
   ageGatesOk: boolean;
   dependencyBotCooldownOk: boolean;
   recommendations: string[];
+};
+
+export type AiSafetyAppliedStatus = {
+  scanHooksClaudeCode: boolean;
+  scanHooksCursor: boolean;
+  scanHooksCodex: boolean;
+  claudeDeny: boolean;
+  claudeSandbox: boolean;
+  codexSandbox: boolean;
 };
 
 export type SkillStatus = {
@@ -96,6 +107,7 @@ export type ProjectStatus = {
   git: GitStatus;
   hooks: HooksStatus;
   doctor: DoctorStatus;
+  aiSafetyApplied: AiSafetyAppliedStatus;
   npmHardening: NpmHardeningStatus;
   skills: SkillStatus[];
   ignoreFixTargets: IgnoreFixTarget[];
@@ -121,6 +133,21 @@ export type ApplyRecommendedFixesOptions = {
   fixIds: string[];
   ignoreTargets: string[];
 };
+
+export type ApplyNpmHardeningOptions = {
+  enabled: boolean;
+};
+
+export type ApplyAiHookSettingsOptions = {
+  scanHooksClaudeCode: boolean;
+  scanHooksCursor: boolean;
+  scanHooksCodex: boolean;
+  claudeDeny: boolean;
+  claudeSandbox: boolean;
+  codexSandbox: boolean;
+};
+
+export type AiHookSetupSelection = ApplyAiHookSettingsOptions;
 
 export type InstallAiHooksOptions = {
   audit: boolean;

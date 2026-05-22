@@ -35,5 +35,90 @@
         ]
       }
     ]
+  },
+  "permissions": {
+    "deny": [
+      "Read(.env)",
+      "Write(.env)",
+      "Read(.env.*)",
+      "Write(.env.*)",
+      "Write(tokens/*.json)",
+      "Read(tokens/*.json)",
+      "Read(**/*token*)",
+      "Read(**/*key*)",
+      "Read(**/*secret*)",
+      "Read(**/*password*)",
+      "Read(**/*credential*)",
+      "Write(**/*token*)",
+      "Write(**/*key*)",
+      "Write(**/*secret*)",
+      "Write(**/*password*)",
+      "Write(**/*credential*)",
+      "Bash(cat .env:*)",
+      "Bash(cat ./.env:*)",
+      "Bash(head .env:*)",
+      "Bash(head ./.env:*)",
+      "Bash(tail .env:*)",
+      "Bash(tail ./.env:*)",
+      "Bash(less .env:*)",
+      "Bash(more .env:*)",
+      "Bash(source .env:*)",
+      "Bash(cat tokens/:*)",
+      "Bash(cat ./tokens/:*)",
+      "Bash(head tokens/:*)",
+      "Bash(tail tokens/:*)",
+      "Bash(less tokens/:*)",
+      "Bash(more tokens/:*)",
+      "Bash(rm -rf /)",
+      "Bash(rm -rf ~)",
+      "Bash(rm -rf ~/*)",
+      "Bash(rm -rf /*)",
+      "Bash(rm -rf .)",
+      "Bash(rm -rf ..)",
+      "Bash(sudo:*)",
+      "Bash(su:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(nc:*)",
+      "Bash(netcat:*)",
+      "Bash(ssh:*)",
+      "Bash(scp:*)",
+      "Bash(rsync:*)",
+      "Bash(ftp:*)",
+      "Bash(sftp:*)",
+      "Bash(psql:*)",
+      "Bash(mysql:*)",
+      "Bash(mongosh:*)",
+      "Bash(mongo:*)",
+      "Bash(redis-cli:*)",
+      "Bash(sqlite3:*)",
+      "Bash(sqlite:*)",
+      "Bash(chmod 777:*)",
+      "Bash(chown:*)",
+      "Bash(chgrp:*)",
+      "Bash(mount:*)",
+      "Bash(umount:*)",
+      "Bash(systemctl:*)",
+      "Bash(service:*)",
+      "Bash(apt:*)",
+      "Bash(yum:*)",
+      "Bash(dnf:*)",
+      "Bash(pacman:*)",
+      "Bash(brew:*)"
+    ]
+  },
+  "sandbox": {
+    "allowUnsandboxedCommands": false,
+    "autoAllowBashIfSandboxed": true,
+    "enabled": true,
+    "failIfUnavailable": true,
+    "filesystem": {
+      "allowRead": [
+        "."
+      ],
+      "denyRead": [
+        "~/"
+      ]
+    }
   }
 }

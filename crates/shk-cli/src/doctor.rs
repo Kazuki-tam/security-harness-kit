@@ -66,6 +66,7 @@ pub struct EnvStatus {
 pub struct ClaudePermissionsStatus {
     pub settings_exists: bool,
     pub deny_ok: bool,
+    pub sandbox_ok: bool,
     pub missing_entries: Vec<String>,
 }
 
@@ -287,6 +288,7 @@ pub fn collect_claude_permissions_status(root: &Path) -> ClaudePermissionsStatus
         return ClaudePermissionsStatus {
             settings_exists: false,
             deny_ok: true,
+            sandbox_ok: true,
             missing_entries: Vec::new(),
         };
     }
@@ -295,6 +297,7 @@ pub fn collect_claude_permissions_status(root: &Path) -> ClaudePermissionsStatus
         return ClaudePermissionsStatus {
             settings_exists: true,
             deny_ok: false,
+            sandbox_ok: false,
             missing_entries: vec!["unable to read .claude/settings.json".into()],
         };
     };
@@ -302,6 +305,7 @@ pub fn collect_claude_permissions_status(root: &Path) -> ClaudePermissionsStatus
         return ClaudePermissionsStatus {
             settings_exists: true,
             deny_ok: false,
+            sandbox_ok: false,
             missing_entries: vec!["unable to parse .claude/settings.json".into()],
         };
     };
@@ -327,6 +331,7 @@ pub fn collect_claude_permissions_status(root: &Path) -> ClaudePermissionsStatus
     ClaudePermissionsStatus {
         settings_exists: true,
         deny_ok: missing_entries.is_empty(),
+        sandbox_ok: claude_sandbox_ok(&value),
         missing_entries,
     }
 }
@@ -344,12 +349,49 @@ fn run_claude_permissions_check(root: &Path) {
             println!("  - {pat}");
         }
     }
+    if status.sandbox_ok {
+        println!("claude sandbox: OK");
+    } else {
+        println!("claude sandbox: recommended project sandbox settings missing");
+    }
 }
 
 fn claude_deny_covers(denies: &[&str], required: &str) -> bool {
     denies
         .iter()
         .any(|entry| claude_deny_entry_covers(entry, required))
+}
+
+fn claude_sandbox_ok(value: &Value) -> bool {
+    let Some(sandbox) = value.get("sandbox") else {
+        return false;
+    };
+    let enabled = sandbox
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let fail_if_unavailable = sandbox
+        .get("failIfUnavailable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let blocks_unsandboxed = sandbox
+        .get("allowUnsandboxedCommands")
+        .and_then(Value::as_bool)
+        .map(|allowed| !allowed)
+        .unwrap_or(false);
+    let filesystem = sandbox.get("filesystem").unwrap_or(&Value::Null);
+    enabled
+        && fail_if_unavailable
+        && blocks_unsandboxed
+        && json_array_contains(filesystem.get("denyRead"), "~/")
+        && json_array_contains(filesystem.get("allowRead"), ".")
+}
+
+fn json_array_contains(value: Option<&Value>, needle: &str) -> bool {
+    value
+        .and_then(Value::as_array)
+        .map(|items| items.iter().any(|item| item.as_str() == Some(needle)))
+        .unwrap_or(false)
 }
 
 pub fn collect_codex_config_status(root: &Path) -> CodexConfigStatus {

@@ -108,6 +108,27 @@ button {
   animation: shk-fade-in 180ms ease-out both;
 }
 
+@keyframes shk-indeterminate-progress {
+  from {
+    transform: translateX(-110%);
+  }
+
+  to {
+    transform: translateX(210%);
+  }
+}
+
+.shk-indeterminate-progress {
+  animation: shk-indeterminate-progress 1.25s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shk-indeterminate-progress {
+    animation: none;
+    transform: translateX(50%);
+  }
+}
+
 /* Drag region for Tauri windows (top bar) */
 .shk-drag {
   -webkit-app-region: drag;

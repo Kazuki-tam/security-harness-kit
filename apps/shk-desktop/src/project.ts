@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ActionResult,
+  ApplyAiHookSettingsOptions,
+  ApplyNpmHardeningOptions,
   ApplyRecommendedFixesOptions,
   FixDoctorIgnoreOptions,
   InstallAiHooksOptions,
@@ -28,6 +30,13 @@ export function installAiHooks(
   return invoke<ActionResult>("install_ai_hooks", { path, options });
 }
 
+export function applyAiHookSettings(
+  path: string,
+  options: ApplyAiHookSettingsOptions,
+): Promise<ActionResult> {
+  return invoke<ActionResult>("apply_ai_hook_settings", { path, options });
+}
+
 export function fixDoctorIgnore(
   path: string,
   options: FixDoctorIgnoreOptions,
@@ -42,8 +51,11 @@ export function applyRecommendedFixes(
   return invoke<ActionResult>("apply_recommended_fixes", { path, options });
 }
 
-export function applyNpmHardening(path: string): Promise<ActionResult> {
-  return invoke<ActionResult>("apply_npm_hardening", { path });
+export function applyNpmHardening(
+  path: string,
+  options: ApplyNpmHardeningOptions,
+): Promise<ActionResult> {
+  return invoke<ActionResult>("apply_npm_hardening", { path, options });
 }
 
 export function installSkills(path: string, options: InstallSkillsOptions): Promise<ActionResult> {

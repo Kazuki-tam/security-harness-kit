@@ -5,10 +5,12 @@ use crate::commands::skills::{SkillTool, SkillsInstallArgs};
 use crate::doctor::{
     ClaudePermissionsStatus, CodexConfigStatus, EnvStatus, IgnoreStatus,
     collect_claude_permissions_status, collect_codex_config_status, collect_env_status,
-    collect_ignore_status, fix_ignore_patterns, has_managed_ai_hooks, has_shk_pre_commit,
-    ignore_fix_target_statuses,
+    collect_ignore_status, fix_ignore_patterns, has_shk_pre_commit, ignore_fix_target_statuses,
 };
-use crate::hooks::{InstallAiOptions, install_ai_with_summaries, install_pre_commit};
+use crate::hooks::{
+    ConfigureAiOptions, InstallAiOptions, configure_ai_with_summaries, install_ai_with_summaries,
+    install_pre_commit,
+};
 use crate::npm_hardening;
 use crate::policy_cmd;
 use crate::safety;
@@ -21,12 +23,24 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AiSafetyAppliedStatus {
+    pub scan_hooks_claude_code: bool,
+    pub scan_hooks_cursor: bool,
+    pub scan_hooks_codex: bool,
+    pub claude_deny: bool,
+    pub claude_sandbox: bool,
+    pub codex_sandbox: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectStatus {
     pub path: String,
     pub policy: PolicyStatus,
     pub git: GitStatus,
     pub hooks: HooksStatus,
     pub doctor: DoctorStatus,
+    pub ai_safety_applied: AiSafetyAppliedStatus,
     pub npm_hardening: NpmHardeningStatusDto,
     pub skills: Vec<SkillStatusDto>,
     pub ignore_fix_targets: Vec<IgnoreFixTargetDto>,
@@ -78,6 +92,7 @@ pub struct DoctorStatus {
     pub ignore_ok: bool,
     pub missing_ignore_patterns: Vec<String>,
     pub claude_deny_ok: bool,
+    pub claude_sandbox_ok: bool,
     pub codex_config_ok: bool,
     pub env_ok: bool,
     pub npm_ok: bool,
@@ -97,6 +112,7 @@ pub struct DoctorIssue {
 pub struct NpmHardeningStatusDto {
     pub has_projects: bool,
     pub ok: bool,
+    pub settings_ok: bool,
     pub package_count: usize,
     pub missing_lockfiles: Vec<String>,
     pub ignore_scripts_ok: bool,
@@ -179,9 +195,29 @@ pub struct ApplyRecommendedFixesOptions {
     pub ignore_targets: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyNpmHardeningOptions {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyAiHookSettingsOptions {
+    pub scan_hooks_claude_code: bool,
+    pub scan_hooks_cursor: bool,
+    pub scan_hooks_codex: bool,
+    pub claude_deny: bool,
+    pub claude_sandbox: bool,
+    pub codex_sandbox: bool,
+}
+
 struct ProjectCheckStatus {
     git_pre_commit: bool,
     ai_managed_hooks: bool,
+    scan_hooks_claude_code: bool,
+    scan_hooks_cursor: bool,
+    scan_hooks_codex: bool,
     ignore: IgnoreStatus,
     claude: ClaudePermissionsStatus,
     codex: CodexConfigStatus,
@@ -257,6 +293,78 @@ pub fn install_ai_hooks(path: &str, options: InstallAiHooksOptions) -> Result<Ac
         },
         details: summaries,
     })
+}
+
+pub fn apply_ai_hook_settings(
+    path: &str,
+    options: ApplyAiHookSettingsOptions,
+) -> Result<ActionResult> {
+    let root = resolve_project_root(path)?;
+    ensure_desktop_project_root_allowed(&root)?;
+    safety::require_project_policy(&root, "hooks install-ai")?;
+    let before = ai_safety_applied_from(&collect_project_check_status(&root));
+    let summaries = configure_ai_with_summaries(
+        &root,
+        ConfigureAiOptions {
+            audit: false,
+            dry_run: false,
+            global: false,
+            fail_closed: options.codex_sandbox,
+            scan_hooks_claude_code: options.scan_hooks_claude_code,
+            scan_hooks_cursor: options.scan_hooks_cursor,
+            scan_hooks_codex: options.scan_hooks_codex,
+            claude_deny: options.claude_deny,
+            claude_sandbox: options.claude_sandbox,
+            codex_sandbox: options.codex_sandbox,
+        },
+    )?;
+    let after = ai_safety_applied_from(&collect_project_check_status(&root));
+    let message = if ai_safety_applied_matches(&before, &after) {
+        "No AI editor safety changes were required".to_string()
+    } else if ai_safety_fully_disabled(&after) && ai_safety_any_enabled(&before) {
+        "AI editor safety settings removed".to_string()
+    } else {
+        "AI editor settings applied".to_string()
+    };
+    Ok(ActionResult {
+        success: true,
+        message,
+        details: summaries,
+    })
+}
+
+fn ai_safety_applied_matches(a: &AiSafetyAppliedStatus, b: &AiSafetyAppliedStatus) -> bool {
+    a.scan_hooks_claude_code == b.scan_hooks_claude_code
+        && a.scan_hooks_cursor == b.scan_hooks_cursor
+        && a.scan_hooks_codex == b.scan_hooks_codex
+        && a.claude_deny == b.claude_deny
+        && a.claude_sandbox == b.claude_sandbox
+        && a.codex_sandbox == b.codex_sandbox
+}
+
+fn ai_safety_fully_disabled(status: &AiSafetyAppliedStatus) -> bool {
+    !status.scan_hooks_claude_code
+        && !status.scan_hooks_cursor
+        && !status.scan_hooks_codex
+        && !status.claude_deny
+        && !status.claude_sandbox
+        && !status.codex_sandbox
+}
+
+fn ai_safety_any_enabled(status: &AiSafetyAppliedStatus) -> bool {
+    !ai_safety_fully_disabled(status)
+}
+
+fn current_ai_hook_settings_options(root: &Path) -> ApplyAiHookSettingsOptions {
+    let applied = ai_safety_applied_from(&collect_project_check_status(root));
+    ApplyAiHookSettingsOptions {
+        scan_hooks_claude_code: applied.scan_hooks_claude_code,
+        scan_hooks_cursor: applied.scan_hooks_cursor,
+        scan_hooks_codex: applied.scan_hooks_codex,
+        claude_deny: applied.claude_deny,
+        claude_sandbox: applied.claude_sandbox,
+        codex_sandbox: applied.codex_sandbox,
+    }
 }
 
 pub fn apply_recommended_fixes(
@@ -341,37 +449,30 @@ fn apply_recommended_fix(
             if !policy_exists {
                 anyhow::bail!("Claude deny fix requires shk.toml");
             }
-            install_ai_hooks(
-                &root.display().to_string(),
-                InstallAiHooksOptions {
-                    audit: false,
-                    dry_run: false,
-                    global: false,
-                    tool: Some("claude-code".to_string()),
-                    fail_closed: false,
-                    apply_deny: true,
-                    apply_sandbox: false,
-                },
-            )
+            let mut ai_options = current_ai_hook_settings_options(root);
+            ai_options.claude_deny = true;
+            apply_ai_hook_settings(&root.display().to_string(), ai_options)
+        }
+        "ai_claude_sandbox" => {
+            if !policy_exists {
+                anyhow::bail!("Claude sandbox fix requires shk.toml");
+            }
+            let mut ai_options = current_ai_hook_settings_options(root);
+            ai_options.claude_sandbox = true;
+            apply_ai_hook_settings(&root.display().to_string(), ai_options)
         }
         "ai_codex_sandbox" => {
             if !policy_exists {
                 anyhow::bail!("Codex sandbox fix requires shk.toml");
             }
-            install_ai_hooks(
-                &root.display().to_string(),
-                InstallAiHooksOptions {
-                    audit: false,
-                    dry_run: false,
-                    global: false,
-                    tool: Some("codex".to_string()),
-                    fail_closed: false,
-                    apply_deny: false,
-                    apply_sandbox: true,
-                },
-            )
+            let mut ai_options = current_ai_hook_settings_options(root);
+            ai_options.codex_sandbox = true;
+            apply_ai_hook_settings(&root.display().to_string(), ai_options)
         }
-        "npm_hardening" => apply_npm_hardening(&root.display().to_string()),
+        "npm_hardening" => apply_npm_hardening(
+            &root.display().to_string(),
+            ApplyNpmHardeningOptions { enabled: true },
+        ),
         other => anyhow::bail!("unknown recommended fix id: {other}"),
     }
 }
@@ -412,30 +513,42 @@ pub fn fix_doctor_ignore(path: &str, options: FixDoctorIgnoreOptions) -> Result<
     })
 }
 
-pub fn apply_npm_hardening(path: &str) -> Result<ActionResult> {
+pub fn apply_npm_hardening(path: &str, options: ApplyNpmHardeningOptions) -> Result<ActionResult> {
     let root = resolve_project_root(path)?;
     ensure_desktop_project_root_allowed(&root)?;
     let before = npm_hardening::status(&root);
-    if !before.has_npm_projects() {
+    if !npm_hardening_desktop_applicable(&before) {
         return Ok(ActionResult {
             success: true,
-            message: "No package.json detected".to_string(),
+            message: "No package-manager project detected at the selected folder".to_string(),
             details: vec![],
         });
     }
     for path in before.apply_paths() {
         safety::ensure_writable_path_allowed(path)?;
     }
-    npm_hardening::apply(&root)?;
+    if options.enabled {
+        npm_hardening::apply(&root)?;
+    } else {
+        npm_hardening::unapply(&root)?;
+    }
     let after = npm_hardening::status(&root);
+    let settings_ok = npm_hardening_settings_ok(&after);
+    let remaining = npm_auto_recommendations(&after);
     Ok(ActionResult {
-        success: after.ok(),
-        message: if after.ok() {
+        success: if options.enabled {
+            settings_ok
+        } else {
+            !settings_ok
+        },
+        message: if !options.enabled {
+            "npm supply-chain hardening removed".to_string()
+        } else if settings_ok {
             "npm supply-chain hardening applied".to_string()
         } else {
             "Applied partial npm hardening; review remaining items".to_string()
         },
-        details: npm_recommendations(&after),
+        details: remaining,
     })
 }
 
@@ -518,6 +631,7 @@ fn build_project_status(root: &Path) -> ProjectStatus {
         },
         hooks: build_hooks_status(root, git_root.as_deref()),
         doctor: build_doctor_status_from(&checks),
+        ai_safety_applied: ai_safety_applied_from(&checks),
         npm_hardening: build_npm_status_from(&checks.npm),
         skills: build_skills_status(root),
         ignore_fix_targets: ignore_fix_target_statuses(root)
@@ -532,15 +646,30 @@ fn build_project_status(root: &Path) -> ProjectStatus {
 }
 
 fn collect_project_check_status(root: &Path) -> ProjectCheckStatus {
+    let ai_tools = ai_tool_statuses(root, false);
+    let scan_hooks_for = |tool: &str| {
+        ai_tools
+            .iter()
+            .find(|entry| entry.tool == tool)
+            .is_some_and(|entry| entry.installed)
+    };
     ProjectCheckStatus {
         git_pre_commit: has_shk_pre_commit(root),
-        ai_managed_hooks: has_managed_ai_hooks(root),
+        ai_managed_hooks: has_all_managed_ai_hooks(root),
+        scan_hooks_claude_code: scan_hooks_for("claude-code"),
+        scan_hooks_cursor: scan_hooks_for("cursor"),
+        scan_hooks_codex: scan_hooks_for("codex"),
         ignore: collect_ignore_status(root),
         claude: collect_claude_permissions_status(root),
         codex: collect_codex_config_status(root),
         env: collect_env_status(root),
         npm: npm_hardening::status(root),
     }
+}
+
+fn has_all_managed_ai_hooks(root: &Path) -> bool {
+    let statuses = ai_tool_statuses(root, false);
+    !statuses.is_empty() && statuses.iter().all(|tool| tool.installed)
 }
 
 fn build_hooks_status(root: &Path, git_root: Option<&Path>) -> HooksStatus {
@@ -634,19 +763,28 @@ fn build_recommended_fixes(
             default_selected: true,
         });
     }
-    if policy_exists
-        && checks.codex.config_exists
-        && (!checks.codex.sandbox_ok || !checks.codex.approval_ok || !checks.codex.hooks_enabled)
-    {
+    if policy_exists && checks.claude.settings_exists && !checks.claude.sandbox_ok {
         fixes.push(RecommendedFixDto {
-            id: "ai_codex_sandbox".into(),
+            id: "ai_claude_sandbox".into(),
             severity: "warn".into(),
-            message: "Harden Codex config (hooks, sandbox_mode, approval_policy)".into(),
+            message: "Enable Claude Code project sandbox settings".into(),
             requires_policy: true,
             default_selected: true,
         });
     }
-    if checks.npm.has_npm_projects() && !checks.npm.ok() {
+    if policy_exists
+        && checks.codex.config_exists
+        && (!checks.codex.sandbox_ok || !checks.codex.approval_ok)
+    {
+        fixes.push(RecommendedFixDto {
+            id: "ai_codex_sandbox".into(),
+            severity: "warn".into(),
+            message: "Harden Codex config (sandbox_mode, approval_policy)".into(),
+            requires_policy: true,
+            default_selected: true,
+        });
+    }
+    if npm_hardening_desktop_applicable(&checks.npm) && !npm_hardening_settings_ok(&checks.npm) {
         fixes.push(RecommendedFixDto {
             id: "npm_hardening".into(),
             severity: "info".into(),
@@ -659,8 +797,8 @@ fn build_recommended_fixes(
 }
 
 fn build_doctor_status_from(checks: &ProjectCheckStatus) -> DoctorStatus {
-    let codex_config_ok = !checks.codex.config_exists
-        || (checks.codex.hooks_enabled && checks.codex.sandbox_ok && checks.codex.approval_ok);
+    let codex_config_ok =
+        !checks.codex.config_exists || (checks.codex.sandbox_ok && checks.codex.approval_ok);
 
     let mut issues = Vec::new();
     if !checks.git_pre_commit {
@@ -691,6 +829,13 @@ fn build_doctor_status_from(checks: &ProjectCheckStatus) -> DoctorStatus {
             message: "Claude Code permissions.deny entries are incomplete".into(),
         });
     }
+    if checks.claude.settings_exists && !checks.claude.sandbox_ok {
+        issues.push(DoctorIssue {
+            id: "ai_claude_sandbox".into(),
+            severity: "warn".into(),
+            message: "Claude Code sandbox settings are incomplete".into(),
+        });
+    }
     if checks.codex.config_exists && !codex_config_ok {
         issues.push(DoctorIssue {
             id: "ai_codex_sandbox".into(),
@@ -712,7 +857,14 @@ fn build_doctor_status_from(checks: &ProjectCheckStatus) -> DoctorStatus {
             message: format!("Encrypted env file contains plaintext values: {file}"),
         });
     }
-    for rec in npm_recommendations(&checks.npm) {
+    for rec in npm_auto_recommendations(&checks.npm) {
+        issues.push(DoctorIssue {
+            id: "npm_hardening".into(),
+            severity: "warn".into(),
+            message: rec,
+        });
+    }
+    for rec in npm_manual_recommendations(&checks.npm) {
         issues.push(DoctorIssue {
             id: "npm_hardening".into(),
             severity: "info".into(),
@@ -726,17 +878,33 @@ fn build_doctor_status_from(checks: &ProjectCheckStatus) -> DoctorStatus {
         ignore_ok: checks.ignore.missing_patterns.is_empty(),
         missing_ignore_patterns: checks.ignore.missing_patterns.clone(),
         claude_deny_ok: !checks.claude.settings_exists || checks.claude.deny_ok,
+        claude_sandbox_ok: !checks.claude.settings_exists || checks.claude.sandbox_ok,
         codex_config_ok,
         env_ok: checks.env.plaintext_env_files.is_empty() && checks.env.mixed_env_files.is_empty(),
-        npm_ok: !checks.npm.has_npm_projects() || checks.npm.ok(),
+        npm_ok: npm_doctor_ok(&checks.npm),
         issues,
     }
 }
 
+fn ai_safety_applied_from(checks: &ProjectCheckStatus) -> AiSafetyAppliedStatus {
+    AiSafetyAppliedStatus {
+        scan_hooks_claude_code: checks.scan_hooks_claude_code,
+        scan_hooks_cursor: checks.scan_hooks_cursor,
+        scan_hooks_codex: checks.scan_hooks_codex,
+        claude_deny: checks.claude.settings_exists && checks.claude.deny_ok,
+        claude_sandbox: checks.claude.settings_exists && checks.claude.sandbox_ok,
+        codex_sandbox: checks.codex.config_exists
+            && checks.codex.sandbox_ok
+            && checks.codex.approval_ok,
+    }
+}
+
 fn build_npm_status_from(status: &npm_hardening::NpmHardeningStatus) -> NpmHardeningStatusDto {
+    let applicable = npm_hardening_desktop_applicable(status);
     NpmHardeningStatusDto {
-        has_projects: status.has_npm_projects(),
+        has_projects: applicable,
         ok: status.ok(),
+        settings_ok: npm_hardening_settings_ok(status),
         package_count: status.package_dirs.len(),
         missing_lockfiles: status
             .package_dirs_without_lockfile
@@ -746,11 +914,34 @@ fn build_npm_status_from(status: &npm_hardening::NpmHardeningStatus) -> NpmHarde
         ignore_scripts_ok: status.package_scripts_ok(),
         age_gates_ok: status.age_gates_ok(),
         dependency_bot_cooldown_ok: status.dependency_bot_cooldown_ok(),
-        recommendations: npm_recommendations(status),
+        recommendations: if applicable {
+            npm_auto_recommendations(status)
+        } else {
+            vec![]
+        },
     }
 }
 
-fn npm_recommendations(status: &npm_hardening::NpmHardeningStatus) -> Vec<String> {
+fn npm_hardening_desktop_applicable(status: &npm_hardening::NpmHardeningStatus) -> bool {
+    status.has_npm_projects() && status.root_project
+}
+
+fn npm_hardening_settings_ok(status: &npm_hardening::NpmHardeningStatus) -> bool {
+    !status.has_npm_projects() || (status.package_scripts_ok() && status.age_gates_ok())
+}
+
+fn npm_doctor_ok(status: &npm_hardening::NpmHardeningStatus) -> bool {
+    if !status.has_npm_projects() {
+        return true;
+    }
+    if npm_hardening_desktop_applicable(status) {
+        npm_hardening_settings_ok(status)
+    } else {
+        status.ok()
+    }
+}
+
+fn npm_auto_recommendations(status: &npm_hardening::NpmHardeningStatus) -> Vec<String> {
     if !status.has_npm_projects() {
         return vec![];
     }
@@ -764,6 +955,14 @@ fn npm_recommendations(status: &npm_hardening::NpmHardeningStatus) -> Vec<String
     if !status.age_gates_ok() {
         recs.push("Configure package-manager release age gates".into());
     }
+    recs
+}
+
+fn npm_manual_recommendations(status: &npm_hardening::NpmHardeningStatus) -> Vec<String> {
+    if !status.has_npm_projects() {
+        return vec![];
+    }
+    let mut recs = Vec::new();
     if !status.package_dirs_without_lockfile.is_empty() {
         recs.push("Commit lockfiles for package.json directories".into());
     }
@@ -926,6 +1125,289 @@ mod tests {
         let status = build_project_status(dir.path());
         assert!(status.doctor.ignore_ok);
         assert_eq!(status.ignore_fix_targets.len(), 10);
+    }
+
+    #[test]
+    fn desktop_npm_hardening_marks_auto_settings_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"demo","packageManager":"npm@10.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("package-lock.json"), "{}").unwrap();
+
+        let result = apply_npm_hardening(
+            dir.path().to_str().unwrap(),
+            ApplyNpmHardeningOptions { enabled: true },
+        )
+        .unwrap();
+        assert!(result.success, "{result:?}");
+        assert_eq!(result.message, "npm supply-chain hardening applied");
+        assert!(result.details.is_empty(), "{result:?}");
+
+        let status = build_project_status(dir.path());
+        assert!(status.npm_hardening.settings_ok, "{status:?}");
+        assert!(!status.npm_hardening.ok, "{status:?}");
+        assert!(
+            status.npm_hardening.recommendations.is_empty(),
+            "{status:?}"
+        );
+        assert!(status.doctor.npm_ok, "{status:?}");
+        assert!(
+            status
+                .doctor
+                .issues
+                .iter()
+                .any(|issue| issue.message.contains("Dependabot")
+                    || issue.message.contains("Renovate")),
+            "{status:?}"
+        );
+        assert!(
+            !status
+                .recommended_fixes
+                .iter()
+                .any(|fix| fix.id == "npm_hardening"),
+            "{status:?}"
+        );
+    }
+
+    #[test]
+    fn desktop_npm_hardening_can_be_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"demo","packageManager":"pnpm@11.0.0"}"#,
+        )
+        .unwrap();
+
+        apply_npm_hardening(
+            dir.path().to_str().unwrap(),
+            ApplyNpmHardeningOptions { enabled: true },
+        )
+        .unwrap();
+        let result = apply_npm_hardening(
+            dir.path().to_str().unwrap(),
+            ApplyNpmHardeningOptions { enabled: false },
+        )
+        .unwrap();
+
+        assert!(result.success, "{result:?}");
+        let status = build_project_status(dir.path());
+        assert!(!status.npm_hardening.settings_ok, "{status:?}");
+        assert!(
+            status
+                .recommended_fixes
+                .iter()
+                .any(|fix| fix.id == "npm_hardening"),
+            "{status:?}"
+        );
+    }
+
+    #[test]
+    fn desktop_npm_hardening_hides_nested_pnpm_from_repo_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("apps/web");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("package.json"),
+            r#"{"name":"web","packageManager":"pnpm@11.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            app.join("pnpm-workspace.yaml"),
+            "onlyBuiltDependencies:\n  - esbuild\n",
+        )
+        .unwrap();
+
+        let status = build_project_status(dir.path());
+        assert!(!status.npm_hardening.has_projects, "{status:?}");
+        assert!(!status.npm_hardening.settings_ok, "{status:?}");
+        assert!(!status.npm_hardening.age_gates_ok, "{status:?}");
+        assert!(
+            status.npm_hardening.recommendations.is_empty(),
+            "{status:?}"
+        );
+        assert!(
+            !status
+                .recommended_fixes
+                .iter()
+                .any(|fix| fix.id == "npm_hardening"),
+            "{status:?}"
+        );
+    }
+
+    #[test]
+    fn desktop_claude_sandbox_is_recommended_and_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "").unwrap();
+        fs::create_dir_all(dir.path().join(".claude")).unwrap();
+        fs::write(dir.path().join(".claude/settings.json"), "{}").unwrap();
+
+        let before = build_project_status(dir.path());
+        assert!(!before.doctor.claude_sandbox_ok, "{before:?}");
+        assert!(
+            before
+                .recommended_fixes
+                .iter()
+                .any(|fix| fix.id == "ai_claude_sandbox"),
+            "{before:?}"
+        );
+
+        let result = install_ai_hooks(
+            dir.path().to_str().unwrap(),
+            InstallAiHooksOptions {
+                audit: false,
+                dry_run: false,
+                global: false,
+                tool: Some("claude-code".to_string()),
+                fail_closed: false,
+                apply_deny: false,
+                apply_sandbox: true,
+            },
+        )
+        .unwrap();
+
+        assert!(result.success, "{result:?}");
+        let after = build_project_status(dir.path());
+        assert!(after.doctor.claude_sandbox_ok, "{after:?}");
+    }
+
+    #[test]
+    fn desktop_ai_hooks_are_recommended_when_only_one_tool_is_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "").unwrap();
+        fs::create_dir_all(dir.path().join(".claude")).unwrap();
+        fs::write(
+            dir.path().join(".claude/settings.json"),
+            r#"{"hooks":{"PreToolUse":[{"_shk_managed":true}]}}"#,
+        )
+        .unwrap();
+
+        let status = build_project_status(dir.path());
+        assert!(!status.doctor.ai_managed_hooks, "{status:?}");
+        assert!(
+            status
+                .recommended_fixes
+                .iter()
+                .any(|fix| fix.id == "ai_hooks"),
+            "{status:?}"
+        );
+    }
+
+    #[test]
+    fn desktop_recommended_claude_deny_does_not_install_scan_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "").unwrap();
+        fs::create_dir_all(dir.path().join(".claude")).unwrap();
+        fs::write(dir.path().join(".claude/settings.json"), "{}").unwrap();
+
+        let result = apply_recommended_fixes(
+            dir.path().to_str().unwrap(),
+            ApplyRecommendedFixesOptions {
+                fix_ids: vec!["ai_claude_deny".to_string()],
+                ignore_targets: vec![],
+            },
+        )
+        .unwrap();
+
+        assert!(result.success, "{result:?}");
+        let settings = fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
+        assert!(settings.contains("\"permissions\""), "{settings}");
+        assert!(!settings.contains("_shk_managed"), "{settings}");
+    }
+
+    #[test]
+    fn desktop_recommended_claude_deny_preserves_existing_scan_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "").unwrap();
+        fs::create_dir_all(dir.path().join(".claude")).unwrap();
+        fs::write(
+            dir.path().join(".claude/settings.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "_shk_managed": true,
+                        "matcher": "Read",
+                        "hooks": [{ "type": "command", "command": "shk scan --hook-mode claude-code" }]
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let result = apply_recommended_fixes(
+            dir.path().to_str().unwrap(),
+            ApplyRecommendedFixesOptions {
+                fix_ids: vec!["ai_claude_deny".to_string()],
+                ignore_targets: vec![],
+            },
+        )
+        .unwrap();
+
+        assert!(result.success, "{result:?}");
+        let settings = fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
+        assert!(settings.contains("\"permissions\""), "{settings}");
+        assert!(
+            settings.contains("shk scan --hook-mode claude-code"),
+            "{settings}"
+        );
+    }
+
+    #[test]
+    fn desktop_ai_hook_settings_sync_to_selected_state() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "").unwrap();
+        fs::create_dir_all(dir.path().join(".claude")).unwrap();
+        fs::write(
+            dir.path().join(".claude/settings.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "_shk_managed": true,
+                        "matcher": "Read",
+                        "hooks": [{ "type": "command", "command": "shk scan --hook-mode claude-code" }]
+                    }]
+                },
+                "permissions": {
+                    "deny": ["Bash(rm -rf *)"]
+                },
+                "sandbox": {
+                    "enabled": true,
+                    "failIfUnavailable": true,
+                    "allowUnsandboxedCommands": false,
+                    "filesystem": {
+                        "denyRead": ["~/"],
+                        "allowRead": ["."]
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let result = apply_ai_hook_settings(
+            dir.path().to_str().unwrap(),
+            ApplyAiHookSettingsOptions {
+                scan_hooks_claude_code: false,
+                scan_hooks_cursor: false,
+                scan_hooks_codex: false,
+                claude_deny: false,
+                claude_sandbox: false,
+                codex_sandbox: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.message, "AI editor safety settings removed");
+
+        let settings = fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
+        assert!(
+            !settings.contains("shk scan --hook-mode claude-code"),
+            "{settings}"
+        );
+        assert!(settings.contains("Bash(rm -rf *)"), "{settings}");
+        assert!(!settings.contains("allowUnsandboxedCommands"), "{settings}");
     }
 
     #[cfg(unix)]

@@ -60,3 +60,6 @@ out/
 
 # ===== Claude Code =====
 .claude/memory/
+
+# shk: appended required patterns
+*.mobileprovision

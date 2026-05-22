@@ -27,11 +27,30 @@ export type ScanReport = {
   color_mode: string;
 };
 
+export type ScanResultSnapshot = {
+  report: ScanReport;
+  finishedAt: string;
+};
+
 export type ScanState =
   | { status: "idle" }
-  | { status: "running" }
+  | {
+      status: "running";
+      startedAt: string;
+      previous?: ScanResultSnapshot;
+    }
   | { status: "done"; report: ScanReport; finishedAt: string }
-  | { status: "error"; message: string };
+  | { status: "error"; message: string; previous?: ScanResultSnapshot };
+
+export function visibleScanResult(state: ScanState): ScanResultSnapshot | undefined {
+  if (state.status === "done") {
+    return { report: state.report, finishedAt: state.finishedAt };
+  }
+  if (state.status === "running" || state.status === "error") {
+    return state.previous;
+  }
+  return undefined;
+}
 
 export const severityOrder: Severity[] = ["critical", "high", "medium", "low", "info"];
 

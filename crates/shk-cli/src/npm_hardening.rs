@@ -37,6 +37,7 @@ const RENOVATE_FILES: &[&str] = &[
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NpmHardeningStatus {
     pub package_dirs: Vec<PathBuf>,
+    pub root_project: bool,
     pub package_dirs_without_lockfile: Vec<PathBuf>,
     pub package_managers: Vec<PackageManager>,
     pub npmrc_path: PathBuf,
@@ -141,9 +142,10 @@ impl NpmHardeningStatus {
 
 pub fn status(root: &Path) -> NpmHardeningStatus {
     let package_dirs = find_package_dirs(root);
+    let root_project = is_root_package_project(root, &package_dirs);
     let package_managers = detect_package_managers(root, &package_dirs);
     let npmrc_path = root.join(NPMRC_FILE);
-    let pnpm_workspace_path = root.join(PNPM_WORKSPACE_FILE);
+    let pnpm_workspace_path = resolve_pnpm_workspace_path(root, &package_dirs);
     let yarnrc_path = root.join(YARNRC_FILE);
     let bunfig_path = root.join(BUNFIG_FILE);
     let npmrc = fs::read_to_string(&npmrc_path).unwrap_or_default();
@@ -178,6 +180,7 @@ pub fn status(root: &Path) -> NpmHardeningStatus {
 
     NpmHardeningStatus {
         package_dirs,
+        root_project,
         package_dirs_without_lockfile,
         package_managers,
         npmrc_path,
@@ -196,6 +199,16 @@ pub fn status(root: &Path) -> NpmHardeningStatus {
         dependabot: dependabot_status(root),
         renovate: renovate_status(root),
     }
+}
+
+fn is_root_package_project(root: &Path, package_dirs: &[PathBuf]) -> bool {
+    package_dirs.iter().any(|dir| dir == Path::new("."))
+        || root.join(PNPM_WORKSPACE_FILE).is_file()
+        || root.join(YARNRC_FILE).is_file()
+        || root.join(BUNFIG_FILE).is_file()
+        || PACKAGE_LOCK_FILES
+            .iter()
+            .any(|name| root.join(name).is_file())
 }
 
 pub fn apply(root: &Path) -> Result<Option<NpmHardeningStatus>> {
@@ -249,6 +262,48 @@ pub fn apply(root: &Path) -> Result<Option<NpmHardeningStatus>> {
     Ok(Some(status(root)))
 }
 
+pub fn unapply(root: &Path) -> Result<Option<NpmHardeningStatus>> {
+    let before = status(root);
+    if !before.has_npm_projects() {
+        return Ok(None);
+    }
+
+    if before
+        .package_managers
+        .iter()
+        .any(|manager| matches!(manager, PackageManager::Npm | PackageManager::Pnpm))
+    {
+        let existing = fs::read_to_string(&before.npmrc_path).unwrap_or_default();
+        let updated = remove_npmrc_settings(&existing, &before.package_managers);
+        if updated != existing {
+            fs::write(&before.npmrc_path, updated)?;
+        }
+    }
+    if before.package_managers.contains(&PackageManager::Pnpm) {
+        let existing = fs::read_to_string(&before.pnpm_workspace_path).unwrap_or_default();
+        let updated = remove_yaml_line(&existing, MINIMUM_RELEASE_AGE_KEY);
+        if updated != existing {
+            fs::write(&before.pnpm_workspace_path, updated)?;
+        }
+    }
+    if before.package_managers.contains(&PackageManager::Yarn) {
+        let existing = fs::read_to_string(&before.yarnrc_path).unwrap_or_default();
+        let updated = remove_yaml_line(&existing, YARN_MIN_RELEASE_AGE_KEY);
+        if updated != existing {
+            fs::write(&before.yarnrc_path, updated)?;
+        }
+    }
+    if before.package_managers.contains(&PackageManager::Bun) {
+        let existing = fs::read_to_string(&before.bunfig_path).unwrap_or_default();
+        let updated = remove_toml_table_key(&existing, "install", "minimumReleaseAge");
+        if updated != existing {
+            fs::write(&before.bunfig_path, updated)?;
+        }
+    }
+
+    Ok(Some(status(root)))
+}
+
 fn upsert_npmrc_settings(input: &str, package_managers: &[PackageManager]) -> String {
     let mut lines = input.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
     upsert_npmrc_line(&mut lines, IGNORE_SCRIPTS_KEY, "true");
@@ -264,6 +319,24 @@ fn upsert_npmrc_settings(input: &str, package_managers: &[PackageManager]) -> St
         output.push('\n');
     }
     output
+}
+
+fn remove_npmrc_settings(input: &str, package_managers: &[PackageManager]) -> String {
+    let mut remove_keys = vec![IGNORE_SCRIPTS_KEY];
+    if package_managers.contains(&PackageManager::Npm) {
+        remove_keys.push(MIN_RELEASE_AGE_KEY);
+    }
+    let mut lines = input
+        .lines()
+        .filter(|line| {
+            npmrc_line_key(line)
+                .map(|key| !remove_keys.contains(&key))
+                .unwrap_or(true)
+        })
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    trim_trailing_empty_lines(&mut lines);
+    finish_lines(lines)
 }
 
 fn upsert_npmrc_line(lines: &mut Vec<String>, key: &str, value: &str) {
@@ -334,6 +407,16 @@ fn upsert_yaml_line(input: &str, key: &str, value: &str) -> String {
     output
 }
 
+fn remove_yaml_line(input: &str, key: &str) -> String {
+    let mut lines = input
+        .lines()
+        .filter(|line| yaml_line_key(line) != Some(key))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    trim_trailing_empty_lines(&mut lines);
+    finish_lines(lines)
+}
+
 fn yaml_line_key(line: &str) -> Option<&str> {
     if line_indent(line) > 0 {
         return None;
@@ -390,6 +473,45 @@ fn upsert_toml_table_integer(input: &str, table: &str, key: &str, value: u64) ->
         lines.push(replacement);
     }
 
+    let mut output = lines.join("\n");
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output
+}
+
+fn remove_toml_table_key(input: &str, table: &str, key: &str) -> String {
+    let mut lines = input.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+    let table_header = format!("[{table}]");
+    if let Some(table_start) = lines
+        .iter()
+        .position(|line| line.trim() == table_header.as_str())
+    {
+        let table_end = lines
+            .iter()
+            .enumerate()
+            .skip(table_start + 1)
+            .find(|(_, line)| is_toml_table_header(line))
+            .map(|(idx, _)| idx)
+            .unwrap_or(lines.len());
+        if let Some(offset) = lines[table_start + 1..table_end]
+            .iter()
+            .position(|line| toml_line_key(line) == Some(key))
+        {
+            lines.remove(table_start + 1 + offset);
+        }
+    }
+    trim_trailing_empty_lines(&mut lines);
+    finish_lines(lines)
+}
+
+fn trim_trailing_empty_lines(lines: &mut Vec<String>) {
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+}
+
+fn finish_lines(lines: Vec<String>) -> String {
     let mut output = lines.join("\n");
     if !output.is_empty() {
         output.push('\n');
@@ -469,6 +591,38 @@ fn package_manager_from_package_json(path: &Path) -> Option<PackageManager> {
     }
 }
 
+fn resolve_pnpm_workspace_path(root: &Path, package_dirs: &[PathBuf]) -> PathBuf {
+    let root_workspace = root.join(PNPM_WORKSPACE_FILE);
+    if root_workspace.is_file() || root.join(PACKAGE_JSON).is_file() {
+        return root_workspace;
+    }
+
+    package_dirs
+        .iter()
+        .map(|package_dir| package_dir_to_abs(root, package_dir))
+        .find(|dir| dir.join(PNPM_WORKSPACE_FILE).is_file())
+        .map(|dir| dir.join(PNPM_WORKSPACE_FILE))
+        .or_else(|| {
+            package_dirs
+                .iter()
+                .map(|package_dir| package_dir_to_abs(root, package_dir))
+                .find(|dir| {
+                    package_manager_from_package_json(&dir.join(PACKAGE_JSON))
+                        == Some(PackageManager::Pnpm)
+                })
+                .map(|dir| dir.join(PNPM_WORKSPACE_FILE))
+        })
+        .unwrap_or(root_workspace)
+}
+
+fn package_dir_to_abs(root: &Path, package_dir: &Path) -> PathBuf {
+    if package_dir == Path::new(".") {
+        root.to_path_buf()
+    } else {
+        root.join(package_dir)
+    }
+}
+
 fn bun_min_release_age_seconds(path: &Path) -> Option<u64> {
     let text = fs::read_to_string(path).ok()?;
     let value = toml::from_str::<toml::Value>(&text).ok()?;
@@ -480,11 +634,7 @@ fn bun_min_release_age_seconds(path: &Path) -> Option<u64> {
 }
 
 fn has_lockfile_for_package_dir(root: &Path, package_dir: &Path) -> bool {
-    let dir = if package_dir == Path::new(".") {
-        root.to_path_buf()
-    } else {
-        root.join(package_dir)
-    };
+    let dir = package_dir_to_abs(root, package_dir);
     has_lockfile(&dir) || has_lockfile(root)
 }
 
@@ -855,6 +1005,59 @@ updates:
         apply(dir.path()).unwrap();
         let bunfig = fs::read_to_string(dir.path().join(BUNFIG_FILE)).unwrap();
         assert!(bunfig.contains("minimumReleaseAge = 604800"), "{bunfig}");
+    }
+
+    #[test]
+    fn applies_pnpm_workspace_age_gate_in_nested_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("apps/web");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join(PACKAGE_JSON),
+            r#"{"name":"web","packageManager":"pnpm@11.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            app.join(PNPM_WORKSPACE_FILE),
+            "onlyBuiltDependencies:\n  - esbuild\n",
+        )
+        .unwrap();
+
+        apply(dir.path()).unwrap();
+
+        let root_workspace = dir.path().join(PNPM_WORKSPACE_FILE);
+        assert!(!root_workspace.exists());
+        let pnpm_workspace = fs::read_to_string(app.join(PNPM_WORKSPACE_FILE)).unwrap();
+        assert!(
+            pnpm_workspace.contains("minimumReleaseAge: 10080"),
+            "{pnpm_workspace}"
+        );
+    }
+
+    #[test]
+    fn unapply_removes_supported_hardening_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(PACKAGE_JSON),
+            r#"{"packageManager":"pnpm@11.0.0"}"#,
+        )
+        .unwrap();
+        apply(dir.path()).unwrap();
+        assert!(status(dir.path()).package_scripts_ok());
+        assert!(status(dir.path()).age_gates_ok());
+
+        unapply(dir.path()).unwrap();
+
+        let npmrc = fs::read_to_string(dir.path().join(NPMRC_FILE)).unwrap_or_default();
+        let pnpm_workspace =
+            fs::read_to_string(dir.path().join(PNPM_WORKSPACE_FILE)).unwrap_or_default();
+        assert!(!npmrc.contains("ignore-scripts=true"), "{npmrc}");
+        assert!(
+            !pnpm_workspace.contains("minimumReleaseAge"),
+            "{pnpm_workspace}"
+        );
+        assert!(!status(dir.path()).package_scripts_ok());
+        assert!(!status(dir.path()).age_gates_ok());
     }
 
     #[test]

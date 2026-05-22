@@ -21,6 +21,28 @@ pub struct InstallAiOptions {
     pub apply_sandbox: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct ConfigureAiOptions {
+    pub audit: bool,
+    pub dry_run: bool,
+    pub global: bool,
+    pub fail_closed: bool,
+    pub scan_hooks_claude_code: bool,
+    pub scan_hooks_cursor: bool,
+    pub scan_hooks_codex: bool,
+    pub claude_deny: bool,
+    pub claude_sandbox: bool,
+    pub codex_sandbox: bool,
+}
+
+fn scan_hooks_enabled_for(opts: &ConfigureAiOptions, tool: AiTool) -> bool {
+    match tool {
+        AiTool::ClaudeCode => opts.scan_hooks_claude_code,
+        AiTool::Cursor => opts.scan_hooks_cursor,
+        AiTool::Codex => opts.scan_hooks_codex,
+    }
+}
+
 fn home_or_error() -> Result<PathBuf> {
     dirs::home_dir().ok_or_else(|| anyhow::anyhow!("unable to resolve user home directory"))
 }
@@ -100,6 +122,61 @@ pub fn install_ai_with_summaries(
     Ok(summaries)
 }
 
+pub fn configure_ai_with_summaries(cwd: &Path, opts: ConfigureAiOptions) -> Result<Vec<String>> {
+    let cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let mut summaries = Vec::new();
+    let install_opts = InstallAiOptions {
+        audit: opts.audit,
+        dry_run: opts.dry_run,
+        global: opts.global,
+        fail_closed: opts.fail_closed,
+        apply_deny: false,
+        apply_sandbox: false,
+    };
+
+    for tool in [AiTool::ClaudeCode, AiTool::Codex, AiTool::Cursor] {
+        let path = resolve_ai_config_path(tool, &cwd, opts.global)?;
+        if scan_hooks_enabled_for(&opts, tool) {
+            let summary = apply_tool(&path, tool, install_opts, !opts.global)?;
+            summaries.push(format!("{}: {}", path.display(), summary.trim()));
+        } else if path.is_file() {
+            summaries.push(format!(
+                "{}: {}",
+                path.display(),
+                remove_scan_hooks_for_tool(&path, tool, opts.dry_run)?.trim()
+            ));
+        }
+    }
+
+    let claude_path = resolve_ai_config_path(AiTool::ClaudeCode, &cwd, opts.global)?;
+    if opts.claude_deny || opts.claude_sandbox || claude_path.is_file() {
+        let claude_summary = configure_claude_safety(
+            &claude_path,
+            opts.dry_run,
+            opts.claude_deny,
+            opts.claude_sandbox,
+            !opts.global,
+        )?;
+        summaries.push(format!(
+            "{}: {}",
+            claude_path.display(),
+            claude_summary.trim()
+        ));
+    }
+
+    let codex_path = resolve_ai_config_path(AiTool::Codex, &cwd, opts.global)?;
+    if opts.codex_sandbox || codex_path.is_file() {
+        let codex_summary = configure_codex_sandbox(&codex_path, opts.dry_run, opts.codex_sandbox)?;
+        summaries.push(format!(
+            "{}: {}",
+            codex_path.display(),
+            codex_summary.trim()
+        ));
+    }
+
+    Ok(summaries)
+}
+
 fn apply_tool(
     path: &Path,
     tool: AiTool,
@@ -122,6 +199,14 @@ fn apply_tool(
             opts.fail_closed || opts.apply_sandbox,
         ),
         AiTool::Codex => apply_codex(path, opts.audit, opts.dry_run, opts.apply_sandbox),
+    }
+}
+
+fn remove_scan_hooks_for_tool(path: &Path, tool: AiTool, dry_run: bool) -> Result<String> {
+    match tool {
+        AiTool::ClaudeCode => remove_claude_scan_hooks(path, dry_run),
+        AiTool::Cursor => remove_cursor_scan_hooks(path, dry_run),
+        AiTool::Codex => remove_codex_scan_hooks(path, dry_run),
     }
 }
 
@@ -163,6 +248,18 @@ fn push_managed_claude(root: &mut Value, key: &str, block: Value) -> Result<()> 
     Ok(())
 }
 
+fn remove_managed_claude(root: &mut Value, key: &str) -> Result<usize> {
+    let Some(hooks_obj) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return Ok(0);
+    };
+    let Some(arr) = hooks_obj.get_mut(key).and_then(Value::as_array_mut) else {
+        return Ok(0);
+    };
+    let before = arr.len();
+    arr.retain(|b| !is_managed_claude_block(b));
+    Ok(before - arr.len())
+}
+
 fn merge_claude_permissions_deny(root: &mut Value) -> Result<usize> {
     let obj = root
         .as_object_mut()
@@ -200,6 +297,27 @@ fn merge_claude_permissions_deny(root: &mut Value) -> Result<usize> {
     Ok(added)
 }
 
+fn remove_claude_permissions_deny(root: &mut Value) -> Result<usize> {
+    let Some(deny_arr) = root
+        .pointer_mut("/permissions/deny")
+        .and_then(Value::as_array_mut)
+    else {
+        return Ok(0);
+    };
+    let recommended: HashSet<&'static str> = shk_integrations::claude_recommended_deny_entries()
+        .iter()
+        .copied()
+        .collect();
+    let before = deny_arr.len();
+    deny_arr.retain(|entry| {
+        entry
+            .as_str()
+            .map(|entry| !recommended.contains(entry))
+            .unwrap_or(true)
+    });
+    Ok(before - deny_arr.len())
+}
+
 fn merge_claude_sandbox(root: &mut Value, restrict_reads_to_project: bool) -> Result<()> {
     let obj = root
         .as_object_mut()
@@ -224,6 +342,37 @@ fn merge_claude_sandbox(root: &mut Value, restrict_reads_to_project: bool) -> Re
     Ok(())
 }
 
+fn remove_claude_sandbox(root: &mut Value) -> usize {
+    let Some(obj) = root.as_object_mut() else {
+        return 0;
+    };
+    let Some(sandbox) = obj.get_mut("sandbox").and_then(Value::as_object_mut) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for key in [
+        "enabled",
+        "failIfUnavailable",
+        "autoAllowBashIfSandboxed",
+        "allowUnsandboxedCommands",
+    ] {
+        if sandbox.remove(key).is_some() {
+            removed += 1;
+        }
+    }
+    if let Some(filesystem) = sandbox.get_mut("filesystem").and_then(Value::as_object_mut) {
+        removed += remove_json_string_array_item(filesystem, "denyRead", "~/");
+        removed += remove_json_string_array_item(filesystem, "allowRead", ".");
+        if filesystem.is_empty() {
+            sandbox.remove("filesystem");
+        }
+    }
+    if sandbox.is_empty() {
+        obj.remove("sandbox");
+    }
+    removed
+}
+
 fn merge_json_string_array(
     obj: &mut serde_json::Map<String, Value>,
     key: &str,
@@ -239,6 +388,24 @@ fn merge_json_string_array(
             arr.push(json!(item));
         }
     }
+}
+
+#[allow(dead_code)]
+fn remove_json_string_array_item(
+    obj: &mut serde_json::Map<String, Value>,
+    key: &str,
+    item: &str,
+) -> usize {
+    let Some(arr) = obj.get_mut(key).and_then(Value::as_array_mut) else {
+        return 0;
+    };
+    let before = arr.len();
+    arr.retain(|existing| existing.as_str() != Some(item));
+    let removed = before - arr.len();
+    if arr.is_empty() {
+        obj.remove(key);
+    }
+    removed
 }
 
 fn apply_claude(
@@ -299,6 +466,65 @@ fn apply_claude(
     })
 }
 
+#[allow(dead_code)]
+fn remove_claude_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
+    if !path.is_file() {
+        return Ok("no Claude settings file".to_string());
+    }
+    let mut root = load_json(path)?;
+    let removed = remove_managed_claude(&mut root, "UserPromptSubmit")?
+        + remove_managed_claude(&mut root, "PreToolUse")?
+        + remove_managed_claude(&mut root, "PostToolUse")?;
+    save_json_formatted(path, &root, dry_run)?;
+    Ok(if dry_run {
+        format!("dry-run: would remove {removed} managed Claude hook block(s)")
+    } else {
+        format!("removed {removed} managed Claude hook block(s)")
+    })
+}
+
+fn configure_claude_safety(
+    path: &Path,
+    dry_run: bool,
+    enable_deny: bool,
+    enable_sandbox: bool,
+    restrict_sandbox_reads_to_project: bool,
+) -> Result<String> {
+    if !enable_deny && !enable_sandbox && !path.is_file() {
+        return Ok("no Claude settings file".to_string());
+    }
+    let mut root = if path.is_file() {
+        load_json(path)?
+    } else {
+        json!({})
+    };
+
+    let deny_count = if enable_deny {
+        merge_claude_permissions_deny(&mut root)?
+    } else {
+        remove_claude_permissions_deny(&mut root)?
+    };
+    let sandbox_changed = if enable_sandbox {
+        merge_claude_sandbox(&mut root, restrict_sandbox_reads_to_project)?;
+        1
+    } else {
+        remove_claude_sandbox(&mut root)
+    };
+
+    if path.is_file() || enable_deny || enable_sandbox {
+        save_json_formatted(path, &root, dry_run)?;
+    }
+    Ok(if dry_run {
+        format!(
+            "dry-run: would sync Claude safety (denyEnabled={enable_deny}, sandboxEnabled={enable_sandbox}, denyAdded={deny_count}, sandboxChanged={sandbox_changed})"
+        )
+    } else {
+        format!(
+            "synced Claude safety (denyEnabled={enable_deny}, sandboxEnabled={enable_sandbox}, denyAdded={deny_count}, sandboxChanged={sandbox_changed})"
+        )
+    })
+}
+
 fn is_managed_cursor_entry(entry: &Value) -> bool {
     entry.get("_shk_managed") == Some(&json!(true))
 }
@@ -354,6 +580,38 @@ fn apply_cursor(path: &Path, audit: bool, dry_run: bool, fail_closed: bool) -> R
         )
     } else {
         format!("wrote managed before* hooks (audit={audit}, failClosed={fail_closed})")
+    })
+}
+
+#[allow(dead_code)]
+fn remove_cursor_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
+    const KEYS: &[&str] = &[
+        "beforeReadFile",
+        "beforeShellExecution",
+        "beforeMCPExecution",
+        "beforeSubmitPrompt",
+    ];
+    if !path.is_file() {
+        return Ok("no Cursor hooks file".to_string());
+    }
+    let mut root = load_json(path)?;
+    let hooks = root
+        .get_mut("hooks")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow::anyhow!("hooks must be an object"))?;
+    let mut removed = 0;
+    for key in KEYS {
+        if let Some(arr) = hooks.get_mut(*key).and_then(Value::as_array_mut) {
+            let before = arr.len();
+            arr.retain(|e| !is_managed_cursor_entry(e));
+            removed += before - arr.len();
+        }
+    }
+    save_json_formatted(path, &root, dry_run)?;
+    Ok(if dry_run {
+        format!("dry-run: would remove {removed} managed Cursor hook entry(s)")
+    } else {
+        format!("removed {removed} managed Cursor hook entry(s)")
     })
 }
 
@@ -455,6 +713,51 @@ fn apply_codex(path: &Path, audit: bool, dry_run: bool, apply_sandbox: bool) -> 
     ))
 }
 
+#[allow(dead_code)]
+fn remove_codex_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
+    if !path.is_file() {
+        return Ok("no Codex config file".to_string());
+    }
+    let existing = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let re = codex_managed_block_regex();
+    let updated = re.replace(&existing, "").to_string();
+    if !dry_run && updated != existing {
+        fs::write(path, &updated).with_context(|| format!("write {}", path.display()))?;
+    }
+    Ok(if dry_run {
+        "dry-run: would remove Codex managed hook block".to_string()
+    } else {
+        "removed Codex managed hook block".to_string()
+    })
+}
+
+fn configure_codex_sandbox(path: &Path, dry_run: bool, enabled: bool) -> Result<String> {
+    if !path.is_file() && !enabled {
+        return Ok("no Codex sandbox settings to remove".to_string());
+    }
+    let existing = if path.is_file() {
+        fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?
+    } else {
+        String::new()
+    };
+    let updated = if enabled {
+        ensure_codex_sandbox_settings(&existing)
+    } else {
+        remove_codex_sandbox_settings(&existing)
+    };
+    if !dry_run && updated != existing {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        }
+        fs::write(path, &updated).with_context(|| format!("write {}", path.display()))?;
+    }
+    Ok(if dry_run {
+        format!("dry-run: would configure Codex sandbox (enabled={enabled})")
+    } else {
+        format!("configured Codex sandbox (enabled={enabled})")
+    })
+}
+
 fn ensure_codex_sandbox_settings(content: &str) -> String {
     let content = ensure_top_level_string_setting(
         content,
@@ -463,6 +766,12 @@ fn ensure_codex_sandbox_settings(content: &str) -> String {
         &["danger-full-access"],
     );
     ensure_top_level_string_setting(&content, "approval_policy", "on-request", &["never"])
+}
+
+#[allow(dead_code)]
+fn remove_codex_sandbox_settings(content: &str) -> String {
+    let content = remove_top_level_string_setting(content, "sandbox_mode", &["workspace-write"]);
+    remove_top_level_string_setting(&content, "approval_policy", &["on-request"])
 }
 
 fn ensure_top_level_string_setting(
@@ -492,6 +801,32 @@ fn ensure_top_level_string_setting(
     }
 
     format!(r#"{key} = "{desired}""#) + "\n" + content.trim_start()
+}
+
+fn remove_top_level_string_setting(content: &str, key: &str, removable_values: &[&str]) -> String {
+    let mut lines: Vec<String> = content.lines().map(ToOwned::to_owned).collect();
+    for idx in 0..lines.len() {
+        let trimmed = lines[idx].trim();
+        if trimmed.starts_with('[') {
+            break;
+        }
+        let Some((raw_key, raw_value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if raw_key.trim() != key {
+            continue;
+        }
+        let current = parse_toml_string_value(raw_value).unwrap_or_else(|| raw_value.trim());
+        if removable_values.contains(&current) {
+            lines.remove(idx);
+        }
+        break;
+    }
+    let mut output = lines.join("\n");
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output
 }
 
 fn parse_toml_string_value(raw: &str) -> Option<&str> {
@@ -655,5 +990,58 @@ sandbox_mode = "danger-full-access"
             "{body}"
         );
         assert!(body.contains("[profiles.dev]"), "{body}");
+    }
+
+    #[test]
+    fn configure_ai_selection_syncs_only_selected_claude_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_dir = dir.path().join(".claude");
+        fs::create_dir_all(&settings_dir).unwrap();
+        let settings_path = settings_dir.join("settings.json");
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "_shk_managed": true,
+                        "matcher": "Read",
+                        "hooks": [{ "type": "command", "command": "shk scan --hook-mode claude-code" }]
+                    }],
+                    "PostToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{ "type": "command", "command": "echo keep-me" }]
+                    }]
+                },
+                "permissions": {
+                    "deny": ["Bash(rm -rf *)"]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        configure_ai_with_summaries(
+            dir.path(),
+            ConfigureAiOptions {
+                audit: false,
+                dry_run: false,
+                global: false,
+                fail_closed: false,
+                scan_hooks_claude_code: false,
+                scan_hooks_cursor: false,
+                scan_hooks_codex: false,
+                claude_deny: false,
+                claude_sandbox: true,
+                codex_sandbox: false,
+            },
+        )
+        .unwrap();
+
+        let root: Value =
+            serde_json::from_str(&fs::read_to_string(settings_path).unwrap()).unwrap();
+        assert_eq!(root["hooks"]["PreToolUse"].as_array().unwrap().len(), 0);
+        assert_eq!(root["hooks"]["PostToolUse"].as_array().unwrap().len(), 1);
+        assert_eq!(root["permissions"]["deny"][0], "Bash(rm -rf *)");
+        assert_eq!(root["sandbox"]["enabled"], true);
     }
 }

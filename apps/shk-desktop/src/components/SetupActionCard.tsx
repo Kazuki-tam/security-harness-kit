@@ -14,6 +14,7 @@ type Props = {
   onSecondary?: () => void;
   primaryLoading?: boolean;
   primaryDisabled?: boolean;
+  primaryDisabledReason?: string;
   secondaryDisabled?: boolean;
 };
 
@@ -29,6 +30,7 @@ export function SetupActionCard({
   onSecondary,
   primaryLoading,
   primaryDisabled,
+  primaryDisabledReason,
   secondaryDisabled,
 }: Props) {
   const StatusIcon = statusTone === "ok" ? CheckCircle2 : statusTone === "warn" ? XCircle : Circle;
@@ -81,6 +83,9 @@ export function SetupActionCard({
             </Button>
           )}
         </div>
+      )}
+      {primaryDisabled && primaryDisabledReason && (
+        <p className="mt-2 text-[11px] text-amber-200/90">{primaryDisabledReason}</p>
       )}
     </section>
   );

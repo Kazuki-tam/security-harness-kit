@@ -59,6 +59,7 @@ export function HelpModal({ open, onClose }: Props) {
             <Step number={1}>{m.step1}</Step>
             <Step number={2}>{m.step2}</Step>
             <Step number={3}>{m.step3}</Step>
+            <Step number={4}>{m.step4}</Step>
           </ol>
         </section>
 

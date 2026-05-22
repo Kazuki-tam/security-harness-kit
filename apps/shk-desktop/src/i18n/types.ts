@@ -8,6 +8,7 @@ export type Messages = {
   };
   common: {
     close: string;
+    cancel: string;
     language: string;
   };
   sidebar: {
@@ -59,6 +60,12 @@ export type Messages = {
     lowSeverityHint: string;
     readyTitle: string;
     readyHint: string;
+    progressTitle: string;
+    progressHint: string;
+    progressSlowHint: string;
+    elapsed: string;
+    scanningFiles: string;
+    previousResultsVisible: string;
   };
   findings: {
     listAria: string;
@@ -77,6 +84,7 @@ export type Messages = {
     step1: string;
     step2: string;
     step3: string;
+    step4: string;
     shortcuts: string;
     shortcutOpen: string;
     shortcutRescan: string;
@@ -91,17 +99,55 @@ export type Messages = {
     };
     loadingStatus: string;
     policyRequired: string;
+    openSetup: string;
+    setupTabBadge: string;
   };
   setup: {
     statusReady: string;
     statusMissing: string;
     statusNeedsAttention: string;
+    quickSetup: {
+      title: string;
+      description: string;
+      apply: string;
+      applyWithPolicy: string;
+      reapply: string;
+      badgeComplete: string;
+      badgePending: string;
+      policyWillCreate: string;
+      customizeToggle: string;
+      customizeHint: string;
+      openAdvanced: string;
+      allCompleteHint: string;
+      nothingSelected: string;
+      steps: Record<"policy" | "ignore" | "git" | "ai" | "npm" | "skills", string>;
+    };
+    advanced: {
+      title: string;
+      description: string;
+      pendingHint: string;
+    };
+    hints: {
+      policyFirst: string;
+      notGitRepo: string;
+      gitHookAlreadyOk: string;
+      ignoreAlreadyOk: string;
+      aiAlreadyOk: string;
+      aiNoChanges: string;
+      npmAlreadyOk: string;
+      selectIgnoreTarget: string;
+      selectAiSetting: string;
+    };
     policy: {
       title: string;
       description: string;
       create: string;
       createStrict: string;
       recreate: string;
+      recreateHint: string;
+      strictHint: string;
+      recreateConfirmTitle: string;
+      recreateConfirmBody: string;
     };
     ignore: {
       title: string;
@@ -109,9 +155,11 @@ export type Messages = {
       applySelected: string;
       policyRequired: string;
       targetsLabel: string;
+      missingLabel: string;
       targetExists: string;
       targetNew: string;
       targetNames: Record<string, string>;
+      patternDescriptions: Record<string, string>;
     };
     recommendedFixes: {
       title: string;
@@ -119,6 +167,9 @@ export type Messages = {
       applySelected: string;
       ignoreTargetsLabel: string;
       available: string;
+      selectionHint: string;
+      rowSelected: string;
+      rowSkipped: string;
       fixLabels: Record<string, string>;
     };
     gitHook: {
@@ -131,16 +182,37 @@ export type Messages = {
       title: string;
       description: string;
       install: string;
+      applySelected: string;
+      syncSelected: string;
+      removeSelected: string;
+      selectionHint: string;
+      scanHooksGroup: string;
+      scanHooksHint: string;
+      scanHooksToolHint: string;
       claudeDeny: string;
+      claudeDenyHint: string;
+      claudeSandbox: string;
+      claudeSandboxHint: string;
       codexSandbox: string;
+      codexSandboxHint: string;
+      toolNames: Record<string, string>;
       installClaudeDeny: string;
       installCodexSandbox: string;
+      removeConfirmTitle: string;
+      removeConfirmBody: string;
     };
     npm: {
       title: string;
       description: string;
       apply: string;
+      remove: string;
+      enableLabel: string;
+      enabledHint: string;
+      disabledHint: string;
       notApplicable: string;
+      statusPartial: string;
+      removeConfirmTitle: string;
+      removeConfirmBody: string;
     };
     skills: {
       title: string;
@@ -151,6 +223,7 @@ export type Messages = {
       title: string;
       subtitle: string;
       issues: string;
+      openSetup: string;
       gitHook: string;
       aiHooks: string;
       ignore: string;
@@ -161,6 +234,10 @@ export type Messages = {
     };
     action: {
       failed: string;
+      succeeded: string;
+      partial: string;
+      resultTitles: Record<string, string>;
+      resultDetails: Record<string, string>;
     };
   };
   severity: Record<Severity, string>;

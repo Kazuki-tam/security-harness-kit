@@ -8,17 +8,18 @@ import { ScanWorkspace } from "./components/ScanWorkspace";
 import { useProjects } from "./hooks/useProjects";
 import { useI18n } from "./i18n";
 import {
+  applyAiHookSettings,
   applyNpmHardening,
   applyRecommendedFixes,
   fetchProjectStatus,
   fixDoctorIgnore,
   initPolicy,
-  installAiHooks,
   installPreCommitHook,
   installSkills,
 } from "./project";
+import { defaultRecommendedFixIds } from "./setup/plan";
 import { asSeverity, type ScanReport, type ScanState, type Severity } from "./scan";
-import type { ActionState, ProjectStatusState } from "./types";
+import type { ActionResult, ActionState, AiHookSetupSelection, ProjectStatusState } from "./types";
 
 const APP_VERSION = "0.3.4";
 
@@ -77,6 +78,10 @@ function App() {
     void refreshProjectStatus(selectedProject.id, selectedProject.path);
   }, [selectedProject?.id, selectedProject?.path, refreshProjectStatus]);
 
+  const dismissActionFeedback = useCallback(() => {
+    setActionState({ status: "idle" });
+  }, []);
+
   const runSetupAction = useCallback(
     async (runner: () => Promise<{ success: boolean; message: string; details: string[] }>) => {
       if (!selectedProject) return;
@@ -115,7 +120,17 @@ function App() {
     if (currentScanState.status === "running") return;
 
     const projectId = selectedProject.id;
-    setScanStateFor(projectId, { status: "running" });
+    const previousResult =
+      currentScanState.status === "done"
+        ? { report: currentScanState.report, finishedAt: currentScanState.finishedAt }
+        : currentScanState.status === "error"
+          ? currentScanState.previous
+          : undefined;
+    setScanStateFor(projectId, {
+      status: "running",
+      startedAt: new Date().toISOString(),
+      previous: previousResult,
+    });
     try {
       const report = await invoke<ScanReport>("scan_path", {
         path: selectedProject.path,
@@ -136,9 +151,10 @@ function App() {
       setScanStateFor(projectId, {
         status: "error",
         message: error instanceof Error ? error.message : String(error),
+        previous: previousResult,
       });
     }
-  }, [currentScanState.status, selectedProject, setScanStateFor, updateProjectSummary]);
+  }, [currentScanState, selectedProject, setScanStateFor, updateProjectSummary]);
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
@@ -177,58 +193,42 @@ function App() {
 
   const setupHandlers = selectedProject
     ? {
-        onInitPolicy: (strict: boolean) =>
-          runSetupAction(() =>
-            initPolicy(selectedProject.path, {
-              strict,
-              force:
-                strict ||
-                (currentProjectStatus.status === "done" && currentProjectStatus.data.policy.exists),
-            }),
-          ),
-        onApplyRecommendedFixes: (fixIds: string[], ignoreTargets: string[]) =>
-          runSetupAction(() =>
-            applyRecommendedFixes(selectedProject.path, { fixIds, ignoreTargets }),
-          ),
+        onQuickSetup: (fixIds: string[], ignoreTargets: string[]) =>
+          runSetupAction(async (): Promise<ActionResult> => {
+            const path = selectedProject.path;
+            let status = currentProjectStatus.status === "done" ? currentProjectStatus.data : null;
+            const hadPolicy = Boolean(status?.policy.exists);
+
+            if (!hadPolicy) {
+              const policyResult = await initPolicy(path, { strict: false, force: false });
+              if (!policyResult.success) return policyResult;
+              status = await fetchProjectStatus(path);
+            }
+
+            if (!status) {
+              status = await fetchProjectStatus(path);
+            }
+
+            const ids =
+              hadPolicy && fixIds.length > 0 ? fixIds : defaultRecommendedFixIds(status, true);
+            if (ids.length === 0) {
+              return {
+                success: true,
+                message: "No changes were required for the selected fixes",
+                details: [],
+              };
+            }
+            return applyRecommendedFixes(path, { fixIds: ids, ignoreTargets });
+          }),
+        onInitPolicy: (request: { strict: boolean; force: boolean }) =>
+          runSetupAction(() => initPolicy(selectedProject.path, request)),
         onFixDoctorIgnore: (targets: string[]) =>
           runSetupAction(() => fixDoctorIgnore(selectedProject.path, { targets })),
         onInstallPreCommit: () => runSetupAction(() => installPreCommitHook(selectedProject.path)),
-        onInstallAiHooks: () =>
-          runSetupAction(() =>
-            installAiHooks(selectedProject.path, {
-              audit: false,
-              dryRun: false,
-              global: false,
-              failClosed: false,
-              applyDeny: false,
-              applySandbox: false,
-            }),
-          ),
-        onInstallClaudeDeny: () =>
-          runSetupAction(() =>
-            installAiHooks(selectedProject.path, {
-              audit: false,
-              dryRun: false,
-              global: false,
-              tool: "claude-code",
-              failClosed: false,
-              applyDeny: true,
-              applySandbox: false,
-            }),
-          ),
-        onInstallCodexSandbox: () =>
-          runSetupAction(() =>
-            installAiHooks(selectedProject.path, {
-              audit: false,
-              dryRun: false,
-              global: false,
-              tool: "codex",
-              failClosed: false,
-              applyDeny: false,
-              applySandbox: true,
-            }),
-          ),
-        onApplyNpmHardening: () => runSetupAction(() => applyNpmHardening(selectedProject.path)),
+        onInstallAiHooks: (selection: AiHookSetupSelection) =>
+          runSetupAction(() => applyAiHookSettings(selectedProject.path, selection)),
+        onApplyNpmHardening: (enabled: boolean) =>
+          runSetupAction(() => applyNpmHardening(selectedProject.path, { enabled })),
         onInstallSkills: () =>
           runSetupAction(() =>
             installSkills(selectedProject.path, {
@@ -271,6 +271,7 @@ function App() {
             scanState={currentScanState}
             projectStatus={currentProjectStatus}
             actionState={actionState}
+            onDismissActionFeedback={dismissActionFeedback}
             onScan={runScan}
             setupHandlers={setupHandlers}
           />

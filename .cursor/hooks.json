@@ -4,7 +4,7 @@
       {
         "_shk_managed": true,
         "command": "shk scan --hook-mode cursor",
-        "failClosed": false,
+        "failClosed": true,
         "timeout": 30
       }
     ],
@@ -12,7 +12,7 @@
       {
         "_shk_managed": true,
         "command": "shk scan --hook-mode cursor",
-        "failClosed": false,
+        "failClosed": true,
         "timeout": 30
       }
     ],
@@ -20,7 +20,7 @@
       {
         "_shk_managed": true,
         "command": "shk scan --hook-mode cursor",
-        "failClosed": false,
+        "failClosed": true,
         "timeout": 30
       }
     ],
@@ -28,7 +28,7 @@
       {
         "_shk_managed": true,
         "command": "shk scan --hook-mode cursor",
-        "failClosed": false,
+        "failClosed": true,
         "timeout": 30
       }
     ]
