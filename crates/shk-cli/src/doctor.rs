@@ -58,6 +58,7 @@ pub struct IgnoreFixTargetStatus {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EnvStatus {
+    pub has_env_files: bool,
     pub plaintext_env_files: Vec<String>,
     pub mixed_env_files: Vec<String>,
 }
@@ -109,6 +110,7 @@ pub fn collect_ignore_status(root: &Path) -> IgnoreStatus {
 }
 
 pub fn collect_env_status(root: &Path) -> EnvStatus {
+    let mut has_env_files = false;
     let mut plaintext_env_files = Vec::new();
     let mut mixed_env_files = Vec::new();
     if let Ok(entries) = fs::read_dir(root) {
@@ -117,6 +119,7 @@ pub fn collect_env_status(root: &Path) -> EnvStatus {
             if (name == ".env" || (name.starts_with(".env.") && name != ".env.example"))
                 && e.path().is_file()
             {
+                has_env_files = true;
                 let content = fs::read_to_string(e.path()).unwrap_or_default();
                 match dotenv_encryption_state(&content) {
                     EnvFileEncryptionState::FullyEncrypted => {}
@@ -131,6 +134,7 @@ pub fn collect_env_status(root: &Path) -> EnvStatus {
         }
     }
     EnvStatus {
+        has_env_files,
         plaintext_env_files,
         mixed_env_files,
     }

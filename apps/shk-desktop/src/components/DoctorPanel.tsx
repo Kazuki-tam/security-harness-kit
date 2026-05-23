@@ -19,12 +19,18 @@ export function DoctorPanel({ doctor, npmApplicable, onOpenSetup }: Props) {
     { ok: doctor.ignoreOk, label: m.ignore },
     { ok: doctor.claudeDenyOk, label: m.claudeDeny },
     { ok: doctor.codexConfigOk, label: m.codexConfig },
-    { ok: doctor.envOk, label: m.env },
+    ...(doctor.envApplicable ? [{ ok: doctor.envOk, label: m.env }] : []),
     ...(npmApplicable ? [{ ok: doctor.npmOk, label: m.npm }] : []),
   ];
-  const issues = npmApplicable
-    ? doctor.issues
-    : doctor.issues.filter((issue) => issue.id !== "npm_hardening");
+  const issues = doctor.issues.filter((issue) => {
+    if (!npmApplicable && issue.id === "npm_hardening") {
+      return false;
+    }
+    if (!doctor.envApplicable && (issue.id.startsWith("env:") || issue.id.startsWith("env_mixed:"))) {
+      return false;
+    }
+    return true;
+  });
 
   return (
     <section className="rounded-xl border border-border bg-surface-2 p-4">

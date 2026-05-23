@@ -56,6 +56,7 @@ export type DoctorStatus = {
   claudeDenyOk: boolean;
   claudeSandboxOk: boolean;
   codexConfigOk: boolean;
+  envApplicable: boolean;
   envOk: boolean;
   npmOk: boolean;
   issues: DoctorIssue[];

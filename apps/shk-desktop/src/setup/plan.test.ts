@@ -46,6 +46,7 @@ function status(overrides: Partial<ProjectStatus> = {}): ProjectStatus {
       claudeDenyOk: false,
       claudeSandboxOk: false,
       codexConfigOk: false,
+      envApplicable: false,
       envOk: true,
       npmOk: false,
       issues: [],

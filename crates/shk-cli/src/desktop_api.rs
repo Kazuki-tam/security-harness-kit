@@ -100,6 +100,7 @@ pub struct DoctorStatus {
     pub claude_deny_ok: bool,
     pub claude_sandbox_ok: bool,
     pub codex_config_ok: bool,
+    pub env_applicable: bool,
     pub env_ok: bool,
     pub npm_ok: bool,
     pub issues: Vec<DoctorIssue>,
@@ -984,6 +985,7 @@ fn build_doctor_status_from(checks: &ProjectCheckStatus) -> DoctorStatus {
         claude_deny_ok: !checks.claude.settings_exists || checks.claude.deny_ok,
         claude_sandbox_ok: !checks.claude.settings_exists || checks.claude.sandbox_ok,
         codex_config_ok,
+        env_applicable: checks.env.has_env_files,
         env_ok: checks.env.plaintext_env_files.is_empty() && checks.env.mixed_env_files.is_empty(),
         npm_ok: npm_doctor_ok(&checks.npm),
         issues,
@@ -1133,6 +1135,7 @@ mod tests {
         let status = build_doctor_status_from(&checks);
 
         assert!(!status.env_ok);
+        assert!(status.env_applicable);
         assert!(
             status
                 .issues
@@ -1141,6 +1144,26 @@ mod tests {
                     && issue
                         .message
                         .contains("Encrypted env file contains plaintext values")),
+            "{:?}",
+            status.issues
+        );
+    }
+
+    #[test]
+    fn doctor_status_skips_env_check_when_no_env_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "demo\n").unwrap();
+
+        let checks = collect_project_check_status(dir.path());
+        let status = build_doctor_status_from(&checks);
+
+        assert!(!status.env_applicable);
+        assert!(status.env_ok);
+        assert!(
+            !status
+                .issues
+                .iter()
+                .any(|issue| issue.id.starts_with("env:") || issue.id.starts_with("env_mixed:")),
             "{:?}",
             status.issues
         );
