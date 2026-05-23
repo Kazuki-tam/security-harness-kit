@@ -7,6 +7,7 @@ mod commands;
 pub mod desktop_api;
 mod doctor;
 mod exit;
+mod hook_audit_log;
 mod hook_output;
 mod hooks;
 mod npm_hardening;
@@ -51,6 +52,7 @@ pub fn run() -> Result<()> {
             force,
             yes,
             audit,
+            log_blocked,
             tool,
             no_git_hook,
             no_ai_hooks,
@@ -65,6 +67,7 @@ pub fn run() -> Result<()> {
                 force,
                 yes,
                 audit,
+                log_blocked,
                 tools: tool,
                 no_git_hook,
                 no_ai_hooks,
@@ -90,6 +93,7 @@ pub fn run() -> Result<()> {
             hook_mode,
             post,
             audit,
+            log_blocked,
         } => commands::scan::run(commands::scan::ScanInvocation {
             path,
             staged,
@@ -106,6 +110,7 @@ pub fn run() -> Result<()> {
             hook_mode,
             post,
             audit,
+            log_blocked,
             color_enabled: color,
         })?,
         Commands::Mask {
@@ -150,6 +155,7 @@ pub fn run() -> Result<()> {
             }
             HooksCmd::InstallAi {
                 audit,
+                log_blocked,
                 dry_run,
                 global,
                 tool,
@@ -165,6 +171,7 @@ pub fn run() -> Result<()> {
                     tool,
                     hooks::InstallAiOptions {
                         audit,
+                        log_blocked,
                         dry_run,
                         global,
                         fail_closed,

@@ -32,8 +32,11 @@ pub enum Commands {
         #[arg(short = 'y', long)]
         yes: bool,
         /// Install AI hooks in audit-only mode.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "log_blocked")]
         audit: bool,
+        /// Install blocking AI hooks that append metadata-only block entries to `.shk/audit.log`.
+        #[arg(long, conflicts_with = "audit")]
+        log_blocked: bool,
         /// AI tools to configure: claude-code, codex, cursor. Repeat or use commas.
         #[arg(long, value_enum, value_delimiter = ',')]
         tool: Vec<AiTool>,
@@ -97,8 +100,11 @@ pub enum Commands {
         #[arg(long)]
         post: bool,
         /// Audit-only hooks: append JSON lines to `.shk/audit.log`, always exit 0.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "log_blocked")]
         audit: bool,
+        /// Blocking hook mode: append metadata-only block entries to `.shk/audit.log`.
+        #[arg(long, conflicts_with = "audit")]
+        log_blocked: bool,
     },
     /// Mask stdin or file (streaming-friendly line redaction)
     Mask {
@@ -222,9 +228,16 @@ pub enum HooksCmd {
     InstallAi {
         #[arg(
             long,
-            help = "Append `--audit` to hook commands (non-blocking adoption)."
+            help = "Append `--audit` to hook commands (non-blocking adoption).",
+            conflicts_with = "log_blocked"
         )]
         audit: bool,
+        #[arg(
+            long,
+            help = "Append `--log-blocked` to hook commands (blocking with metadata-only `.shk/audit.log` entries).",
+            conflicts_with = "audit"
+        )]
+        log_blocked: bool,
         #[arg(long)]
         dry_run: bool,
         #[arg(
@@ -710,6 +723,35 @@ mod tests {
             Ok(_) => panic!("--target and --target-prefix should not both be accepted"),
             Err(err) => err,
         };
+
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn scan_rejects_audit_with_log_blocked() {
+        let err = match Cli::try_parse_from([
+            "shk",
+            "scan",
+            ".",
+            "--hook-mode",
+            "cursor",
+            "--audit",
+            "--log-blocked",
+        ]) {
+            Ok(_) => panic!("--audit and --log-blocked should not both be accepted"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn hooks_install_ai_rejects_audit_with_log_blocked() {
+        let err =
+            match Cli::try_parse_from(["shk", "hooks", "install-ai", "--audit", "--log-blocked"]) {
+                Ok(_) => panic!("--audit and --log-blocked should not both be accepted"),
+                Err(err) => err,
+            };
 
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     }

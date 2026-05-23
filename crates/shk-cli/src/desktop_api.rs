@@ -158,6 +158,8 @@ pub struct ActionResult {
 #[serde(rename_all = "camelCase")]
 pub struct InstallAiHooksOptions {
     pub audit: bool,
+    #[serde(default)]
+    pub log_blocked: bool,
     pub dry_run: bool,
     pub global: bool,
     pub tool: Option<String>,
@@ -277,6 +279,7 @@ pub fn install_ai_hooks(path: &str, options: InstallAiHooksOptions) -> Result<Ac
         tool,
         InstallAiOptions {
             audit: options.audit,
+            log_blocked: options.log_blocked,
             dry_run: options.dry_run,
             global: options.global,
             fail_closed: options.fail_closed,
@@ -307,6 +310,7 @@ pub fn apply_ai_hook_settings(
         &root,
         ConfigureAiOptions {
             audit: false,
+            log_blocked: false,
             dry_run: false,
             global: false,
             fail_closed: options.codex_sandbox,
@@ -436,6 +440,7 @@ fn apply_recommended_fix(
                 &root.display().to_string(),
                 InstallAiHooksOptions {
                     audit: false,
+                    log_blocked: false,
                     dry_run: false,
                     global: false,
                     tool: None,
@@ -1042,6 +1047,7 @@ mod tests {
             dir.path().to_str().unwrap(),
             InstallAiHooksOptions {
                 audit: false,
+                log_blocked: false,
                 dry_run: true,
                 global: true,
                 tool: Some("cursor".to_string()),
@@ -1258,6 +1264,7 @@ mod tests {
             dir.path().to_str().unwrap(),
             InstallAiHooksOptions {
                 audit: false,
+                log_blocked: false,
                 dry_run: false,
                 global: false,
                 tool: Some("claude-code".to_string()),

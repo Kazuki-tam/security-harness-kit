@@ -1930,6 +1930,323 @@ fn hook_mode_audit_creates_audit_log_in_isolated_tmp() {
 }
 
 #[test]
+fn hook_mode_log_blocked_writes_metadata_on_block() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    std::fs::write(repo.join("shk.toml"), "").unwrap();
+    let fpath = repo.join("x.txt");
+    let secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+    std::fs::write(
+        &fpath,
+        format!("// not real credential: synthetic detector fixture value only\nconst demo = \"{secret}\";"),
+    )
+    .unwrap();
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "file_path": fpath.to_str().unwrap(),
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "cursor", "--log-blocked"])
+        .current_dir(repo)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("log-blocked hook");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log_path = repo.join(".shk/audit.log");
+    assert!(
+        log_path.is_file(),
+        "missing audit log {:?}",
+        repo.join(".shk")
+    );
+    let log = std::fs::read_to_string(log_path).unwrap();
+    assert!(
+        !log.contains(secret),
+        "audit log must not contain raw secret: {log}"
+    );
+    let entry: serde_json::Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["event"], "blocked");
+    assert_eq!(entry["reason"], "finding_threshold");
+    assert_eq!(entry["tool"], "cursor");
+    assert_eq!(entry["hook"], "pre");
+    assert!(entry["finding_count"].as_u64().unwrap_or(0) >= 1);
+    assert!(!entry["rule_ids"].as_array().unwrap().is_empty());
+    assert!(!entry["kinds"].as_array().unwrap().is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("shk blocked:"), "{stderr}");
+}
+
+#[test]
+fn hook_mode_log_blocked_action_guard_writes_category_only() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    std::fs::write(repo.join("shk.toml"), "").unwrap();
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "hook_event_name": "PermissionRequest",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "psql -c \"DROP TABLE users\""
+        }
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "codex", "--log-blocked"])
+        .current_dir(repo)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("log-blocked action guard");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = std::fs::read_to_string(repo.join(".shk/audit.log")).unwrap();
+    assert!(
+        !log.contains("DROP TABLE"),
+        "audit log must not contain command text: {log}"
+    );
+    let entry: serde_json::Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["event"], "blocked");
+    assert_eq!(entry["reason"], "action_guard");
+    assert_eq!(entry["action_category"], "direct_db_mutation");
+    assert_eq!(entry["tool"], "codex");
+    assert_eq!(entry["hook"], "pre");
+}
+
+#[test]
+fn hooks_install_ai_log_blocked_injects_flag() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir_in(&root).unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let out = Command::new(shk_bin())
+        .args(["hooks", "install-ai", "--tool", "cursor", "--log-blocked"])
+        .current_dir(dir.path())
+        .output()
+        .expect("hooks install-ai log-blocked");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let hooks = std::fs::read_to_string(dir.path().join(".cursor/hooks.json")).unwrap();
+    assert!(hooks.contains("--log-blocked"), "{hooks}");
+    assert!(!hooks.contains("--audit"), "{hooks}");
+}
+
+#[test]
+fn hook_mode_block_without_log_blocked_skips_audit_log() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    std::fs::write(repo.join("shk.toml"), "").unwrap();
+    let fpath = repo.join("x.txt");
+    let secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+    std::fs::write(
+        &fpath,
+        format!("// not real credential: synthetic detector fixture value only\nconst demo = \"{secret}\";"),
+    )
+    .unwrap();
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "file_path": fpath.to_str().unwrap(),
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "cursor"])
+        .current_dir(repo)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("blocking hook without log");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        !repo.join(".shk/audit.log").exists(),
+        "blocking without --log-blocked must not create audit log"
+    );
+}
+
+#[test]
+fn hook_mode_log_blocked_requires_policy() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    let fpath = repo.join("x.txt");
+    std::fs::write(&fpath, "hello\n").unwrap();
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "file_path": fpath.to_str().unwrap(),
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "cursor", "--log-blocked"])
+        .current_dir(repo)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("log-blocked without policy");
+    assert!(
+        !out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("shk.toml"), "{stderr}");
+}
+
+#[test]
+fn hook_mode_log_blocked_user_prompt_writes_log() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    std::fs::write(repo.join("shk.toml"), "").unwrap();
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Please use customer email admin@example.com in the demo"
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args([
+            "scan",
+            ".",
+            "--hook-mode",
+            "claude-code",
+            "--fail-on",
+            "medium",
+            "--log-blocked",
+        ])
+        .current_dir(repo)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("log-blocked user prompt");
+    assert_eq!(out.status.code(), Some(2));
+    let log = std::fs::read_to_string(repo.join(".shk/audit.log")).unwrap();
+    let entry: serde_json::Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["event"], "blocked");
+    assert_eq!(entry["hook"], "user-prompt");
+    assert_eq!(entry["display_path"], "<user-prompt>");
+    assert!(!log.contains("admin@example.com"), "{log}");
+}
+
+#[test]
+fn hook_mode_log_blocked_appends_multiple_entries() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    std::fs::write(repo.join("shk.toml"), "").unwrap();
+    let fpath = repo.join("x.txt");
+    let secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+    std::fs::write(
+        &fpath,
+        format!("// not real credential: synthetic detector fixture value only\nconst demo = \"{secret}\";"),
+    )
+    .unwrap();
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "file_path": fpath.to_str().unwrap(),
+    }))
+    .unwrap();
+
+    for _ in 0..2 {
+        let out = Command::new(shk_bin())
+            .args(["scan", ".", "--hook-mode", "cursor", "--log-blocked"])
+            .current_dir(repo)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut c| {
+                c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+                c.wait_with_output()
+            })
+            .expect("repeat log-blocked hook");
+        assert_eq!(out.status.code(), Some(2));
+    }
+
+    let log = std::fs::read_to_string(repo.join(".shk/audit.log")).unwrap();
+    let lines: Vec<_> = log.lines().collect();
+    assert_eq!(lines.len(), 2);
+}
+
+#[test]
+fn hooks_install_ai_claude_log_blocked_injects_flag() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir_in(&root).unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let out = Command::new(shk_bin())
+        .args([
+            "hooks",
+            "install-ai",
+            "--tool",
+            "claude-code",
+            "--log-blocked",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("hooks install-ai claude log-blocked");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let settings = std::fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
+    assert!(settings.contains("--log-blocked"), "{settings}");
+}
+
+#[test]
+fn hooks_install_ai_codex_log_blocked_injects_flag() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir_in(&root).unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let out = Command::new(shk_bin())
+        .args(["hooks", "install-ai", "--tool", "codex", "--log-blocked"])
+        .current_dir(dir.path())
+        .output()
+        .expect("hooks install-ai codex log-blocked");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let codex = std::fs::read_to_string(dir.path().join(".codex/config.toml")).unwrap();
+    assert!(codex.contains("--log-blocked"), "{codex}");
+}
+
+#[test]
 fn hook_mode_post_warns_but_exits_0() {
     use std::io::Write;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");

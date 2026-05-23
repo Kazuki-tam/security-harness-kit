@@ -12,6 +12,7 @@ pub struct InitArgs {
     pub force: bool,
     pub yes: bool,
     pub audit: bool,
+    pub log_blocked: bool,
     pub tools: Vec<AiTool>,
     pub no_git_hook: bool,
     pub no_ai_hooks: bool,
@@ -164,6 +165,7 @@ pub fn run(cwd: &Path, args: InitArgs) -> Result<()> {
                 Some(*tool),
                 hooks::InstallAiOptions {
                     audit: mode == HookMode::Audit,
+                    log_blocked: args.log_blocked && mode == HookMode::Blocking,
                     dry_run: false,
                     global: args.global,
                     fail_closed: args.apply_sandbox,
