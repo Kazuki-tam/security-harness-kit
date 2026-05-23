@@ -20,7 +20,7 @@ toml.workspace = true
 walkdir.workspace = true
 globset = "0.4"
 hmac.workspace = true
-sha2.workspace = true
+sha2_hmac = { package = "sha2", version = "0.11" }
 chrono.workspace = true
 zeroize.workspace = true
 quick-xml.workspace = true
