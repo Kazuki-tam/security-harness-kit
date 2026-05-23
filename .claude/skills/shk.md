@@ -26,6 +26,8 @@ shk mask file.txt --json             # JSON output with findings + masked conten
 shk mask report.docx --output report.redacted.docx
 shk init                             # interactive first-run setup
 shk init --strict                    # stricter starter policy
+shk init --yes --tool codex --audit  # non-interactive setup with audit hooks
+shk init --yes --no-npm-hardening    # skip package-manager hardening
 shk completions zsh                  # generate shell completions
 shk status                           # concise project health summary
 shk hooks install                    # install Git pre-commit hook
@@ -38,6 +40,13 @@ shk doctor                           # full project diagnostics
 shk doctor ignore --fix              # fix missing .gitignore entries
 shk doctor env --dotenvx             # include dotenvx artifact checks
 shk doctor version                   # check latest release
+shk env encrypt .env --in-place  # native shk dotenv encryption; adds [SHK_NATIVE_ENV] header
+shk env run -- npm test           # decrypt native env values only for the child process
+shk env key import                # register the default local decryption key in the OS store
+shk env key list                  # show native key names for this project, not values
+shk env key delete --env staging  # remove a native decryption key from the OS store
+shk env key export --instructions # show safe handoff instructions; no raw key output
+shk env decrypt .env --output .env.local
 shk env dotenvx import-keys .env.keys # store dotenvx private keys in OS credential store
 shk env dotenvx run -- npm test       # inject stored keys only into child process
 shk env dotenvx delete --all
@@ -82,6 +91,9 @@ Document notes:
 # Mask a prompt before passing to an LLM
 shk mask prompt.txt | claude
 
+# Match-only redaction (default)
+shk mask --redaction match < data.txt
+
 # Partial redaction (preserve 4-char prefix/suffix)
 shk mask --redaction partial < data.txt
 
@@ -100,10 +112,12 @@ shk mask --hook-mode claude-code --post < response_payload.json
 ## Local dotenvx key storage
 
 Use `shk env dotenvx` when a project has `.env.keys` or `DOTENV_PRIVATE_KEY*` values that should not stay in plaintext files.
+After importing dotenvx keys, prefer `shk env run` when the project can use shk's native decryptor and no longer needs the external `dotenvx` binary at runtime.
 
 ```bash
 shk env dotenvx import-keys .env.keys
 shk env dotenvx list
+shk env run -f .env -- npm test
 shk env dotenvx run -- npm test
 shk env dotenvx run -f .env.production -- npm start
 shk env dotenvx run --env production -- npm start
@@ -116,7 +130,7 @@ shk env dotenvx delete --all
 Important behavior:
 - Keys are stored in the OS credential store through the platform keychain/credential backend.
 - `run` injects keys only into the child `dotenvx run -- <command>` environment.
-- There is no export command; do not print raw private keys.
+- There is no raw-key export under `shk env dotenvx`; use `shk env key export --instructions` only for handoff guidance.
 - `delete` requires an explicit target: `--all`, `--key <DOTENV_PRIVATE_KEY*>`, or `--env <name>`.
 
 ## Secret manager push
@@ -178,7 +192,7 @@ shk ci init github                      # write .github/workflows/shk.yml
 shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
-shk ci init github --shk-version v0.3.3
+shk ci init github --shk-version v0.3.5
 shk ci init github --output .github/workflows/security.yml --force
 ```
 
@@ -284,6 +298,13 @@ shk doctor env               # detect plaintext .env secrets
 shk doctor env --dotenvx     # include dotenvx artifact checks
 shk doctor version           # check for shk updates
 ```
+
+`shk doctor ignore` checks `.gitignore` plus AI-oriented ignore files such as
+`.cursorignore`, `.cursorindexingignore`, `.codeiumignore`, `.clineignore`,
+`.aiderignore`, `.continueignore`, `.tabnineignore`, `.ignore`, and `.aiignore` when present.
+It also reports Claude Code read-deny coverage and risky Codex hook/sandbox settings when those
+config files exist. `--fix` appends missing required patterns to `.gitignore`; it does not remove
+existing entries.
 
 ## Configuration (shk.toml)
 
