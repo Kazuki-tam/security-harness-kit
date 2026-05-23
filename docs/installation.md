@@ -95,7 +95,7 @@ are documented in [`desktop-release.md`](desktop-release.md).
 
 ## Build From Source
 
-Building from source requires Rust 1.85 or newer.
+Building from source requires Rust 1.88 or newer.
 
 ```bash
 git clone https://github.com/Kazuki-tam/security-harness-kit.git
