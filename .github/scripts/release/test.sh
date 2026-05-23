@@ -52,20 +52,15 @@ if RELEASE_COMPONENT=desktop RELEASE_VERSION=9.9.9 \
 fi
 echo "ok: desktop version mismatch rejected"
 
-./.github/scripts/release/check-desktop-signing.sh >/dev/null
-echo "ok: empty signing config allowed"
-
-if APPLE_CERTIFICATE=dummy ./.github/scripts/release/check-desktop-signing.sh >/dev/null 2>&1; then
-  echo "FAIL: partial macOS signing config should fail" >&2
-  exit 1
-fi
-echo "ok: partial macOS signing config rejected"
-
-if ./.github/scripts/release/check-desktop-signing.sh --require-updater >/dev/null 2>&1; then
+if ./.github/scripts/release/check-desktop-signing.sh >/dev/null 2>&1; then
   echo "FAIL: missing required updater signing config should fail" >&2
   exit 1
 fi
 echo "ok: missing updater signing config rejected"
+
+TAURI_UPDATER_PUBKEY=public-key TAURI_SIGNING_PRIVATE_KEY=private-key \
+  ./.github/scripts/release/check-desktop-signing.sh >/dev/null
+echo "ok: updater signing config accepted"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
