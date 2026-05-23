@@ -12,8 +12,8 @@ This repository is a **local-first security harness CLI for AI coding agents** (
     - **`src/lib.rs`** (crate `shk_cli`) — `run()` entry (tests and external callers).
     - **`src/main.rs`** — thin wrapper calling `shk_cli::run()`.
     - **`src/args.rs`** — `clap` CLI definitions.
-    - **`src/commands/`** — `scan`, `mask`, etc. (move `doctor` / others here if this layer grows).
-    - Other modules: `color`, `doctor`, `hooks`, `hook_payload`, `hook_output`, `audit_log`, `output`, `policy_cmd`.
+    - **`src/commands/`** — `scan`, `mask`, `audit`, etc. (move `doctor` / others here if this layer grows).
+    - Other modules: `color`, `doctor`, `hooks`, `hook_payload`, `hook_output`, `hook_audit_log`, `audit_log`, `output`, `policy_cmd`.
   - `crates/shk-integrations` — markers/constants for managed AI hooks; parsers may move here over time.
   - `xtask` — development-only generator tasks, including gitleaks rule import.
 
@@ -38,11 +38,12 @@ cargo build --release
 
 | Code | Meaning | Commands |
 |------|---------|----------|
-| `0` | No findings above threshold / success | `shk scan`, `shk scan --staged`, `shk mask`, `shk doctor`, `shk scan --audit` |
+| `0` | No findings above threshold / success | `shk scan`, `shk scan --staged`, `shk mask`, `shk doctor`, `shk audit`, `shk scan --audit` |
 | `1` | Findings at or above the fail threshold | `shk scan`, `shk scan --staged` |
 | `2` | Blocking AI pre-hook triggered / runtime or config error | `shk scan --hook-mode <tool>` (block), `shk scan --staged` outside a Git repo |
 
 - `--audit` mode **always exits 0** (log-only; never blocks).
+- `--log-blocked` keeps blocking behavior and writes metadata-only blocked-event entries to `.shk/audit.log`.
 - Post-execution hooks (`--post`) **always exit 0** — data is already in the AI's context.
 - Exit code 2 from a blocking pre-hook causes the AI tool to abort the pending operation.
 
@@ -60,7 +61,7 @@ Keep **green** on all supported platforms when possible:
 
 - Never commit or print **raw secret material** in logs, tests, or fixtures beyond what already exists in `fixtures/` demos.
 - JSON reports use `redacted_value: "[REDACTED]"` (spec §6).
-- `.shk/audit.log` entries must stay **metadata-only** (counts, tool name, relative path label) — implementation is in `audit_log::append_line`.
+- `.shk/audit.log` entries must stay **metadata-only** (counts, tool name, hook phase, rule IDs, action category, relative path label) — implementation is in `audit_log::append_line`; hook payload shaping lives in `hook_audit_log`.
 
 ## Common dev commands
 
@@ -79,6 +80,10 @@ cargo run -p shk-cli --bin shk -- doctor
 cargo run -p shk-cli --bin shk -- doctor ignore fixtures/project
 cargo run -p shk-cli --bin shk -- doctor env
 
+# Audit log preview
+cargo run -p shk-cli --bin shk -- audit
+cargo run -p shk-cli --bin shk -- audit --reason action-guard --no-paths
+
 # Policy template
 cargo run -p shk-cli --bin shk -- policy init --strict
 
@@ -94,10 +99,12 @@ cargo run -p shk-cli --bin shk -- skills install                   # .claude/ski
 cargo run -p shk-cli --bin shk -- skills install --tool claude-code
 cargo run -p shk-cli --bin shk -- skills install --tool codex
 cargo run -p shk-cli --bin shk -- hooks install-ai --tool cursor --audit
+cargo run -p shk-cli --bin shk -- hooks install-ai --tool cursor --log-blocked
 cargo run -p shk-cli --bin shk -- hooks install-ai --tool claude-code --global --dry-run
 
 # Hook-mode scan (stdin = tool JSON payload; blocking pre hooks → exit 2, stdout = tool-specific JSON)
 cargo run -p shk-cli --bin shk -- scan . --hook-mode cursor < /path/to/payload.json
+cargo run -p shk-cli --bin shk -- scan . --hook-mode cursor --log-blocked < /path/to/payload.json
 
 # Regenerate generated gitleaks-derived rules (pin source ref when updating)
 cargo run -p xtask -- import-gitleaks-rules \

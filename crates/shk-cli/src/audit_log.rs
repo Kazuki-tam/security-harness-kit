@@ -1,6 +1,11 @@
 use anyhow::{Context, Result};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Path to the project metadata-only audit log.
+pub fn log_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(".shk/audit.log")
+}
 
 /// Append NDJSON-compatible line(s) — **no secret values**.
 pub fn append_line(repo_root: &Path, value: serde_json::Value) -> Result<()> {
@@ -28,9 +33,63 @@ pub fn append_line(repo_root: &Path, value: serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadAuditLogResult {
+    pub entries: Vec<serde_json::Value>,
+    pub parse_errors: usize,
+}
+
+/// Read all parseable NDJSON lines from `.shk/audit.log`.
+pub fn read_entries(repo_root: &Path) -> Result<ReadAuditLogResult> {
+    let path = log_path(repo_root);
+    if !path.is_file() {
+        return Ok(ReadAuditLogResult {
+            entries: Vec::new(),
+            parse_errors: 0,
+        });
+    }
+
+    let content =
+        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let mut entries = Vec::new();
+    let mut parse_errors = 0;
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str(line) {
+            Ok(value) => entries.push(value),
+            Err(_) => parse_errors += 1,
+        }
+    }
+    Ok(ReadAuditLogResult {
+        entries,
+        parse_errors,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_entries_returns_empty_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = read_entries(dir.path()).unwrap();
+        assert!(result.entries.is_empty());
+        assert_eq!(result.parse_errors, 0);
+    }
+
+    #[test]
+    fn read_entries_skips_invalid_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".shk")).unwrap();
+        std::fs::write(log_path(dir.path()), "{\"seq\":1}\nnot-json\n{\"seq\":2}\n").unwrap();
+
+        let result = read_entries(dir.path()).unwrap();
+        assert_eq!(result.entries.len(), 2);
+        assert_eq!(result.parse_errors, 1);
+    }
 
     #[test]
     fn append_line_writes_ndjson_with_timestamp() {

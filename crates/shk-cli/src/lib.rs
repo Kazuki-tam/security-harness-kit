@@ -133,6 +133,23 @@ pub fn run() -> Result<()> {
         })?,
         Commands::Completions { shell } => commands::completions::run(shell)?,
         Commands::Status => commands::status::run(&cwd)?,
+        Commands::Audit {
+            path,
+            json,
+            since,
+            tool,
+            reason,
+            limit,
+            no_paths,
+        } => commands::audit::run(commands::audit::AuditInvocation {
+            path,
+            json,
+            since,
+            tool,
+            reason,
+            limit,
+            hide_paths: no_paths,
+        })?,
         Commands::Doctor { cmd, json } => match cmd {
             None => doctor::run_all(&cwd, json)?,
             Some(DoctorCmd::Version) => version_check::run(json)?,

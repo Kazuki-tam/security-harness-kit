@@ -37,6 +37,36 @@ The status command reports whether `shk.toml` exists, whether the Git pre-commit
 
 Update checks are limited to `shk status` and `shk doctor version`; scan and hook commands do not contact the network for version notices.
 
+## `shk audit`
+
+Preview metadata-only entries from `.shk/audit.log`.
+
+```bash
+shk audit
+shk audit --json
+shk audit --since 7d
+shk audit --tool cursor
+shk audit --reason action-guard
+shk audit --limit 20
+shk audit --no-paths
+```
+
+The audit command summarizes local hook and secret-manager audit entries without printing raw matched values, prompt bodies, or command text. Human output includes a summary, rule/tool/reason/action-category counts, and recent events. JSON output emits the same report structure for automation.
+
+Options:
+
+| Option | Behavior |
+|--------|----------|
+| `PATH` | Project path whose `.shk/audit.log` should be read. Defaults to `.`. |
+| `--json` | Print the audit preview as JSON. |
+| `--since <duration>` | Limit entries to a relative duration such as `30m`, `24h`, `7d`, or `1w`. |
+| `--tool <tool>` | Limit entries to `claude-code`, `codex`, or `cursor`. |
+| `--reason <reason>` | Limit entries to `blocked`, `finding-threshold`, or `action-guard`. |
+| `--limit <n>` | Limit the recent event rows. Defaults to `10`. |
+| `--no-paths` | Omit `display_path` from recent event rows. |
+
+`shk audit` is read-only. If the log is missing, it exits successfully and prints setup guidance. Invalid JSON lines are skipped and counted as parse warnings.
+
 ## `shk completions`
 
 Generate shell completion scripts.
@@ -112,6 +142,7 @@ Read an AI tool hook JSON payload from stdin, scan the extracted hook body, and 
 ```bash
 shk scan . --hook-mode cursor < payload.json
 shk scan . --hook-mode claude-code --audit < payload.json
+shk scan . --hook-mode cursor --log-blocked < payload.json
 shk scan . --hook-mode codex --post < payload.json
 ```
 
@@ -121,6 +152,7 @@ Hook mode notes:
 
 - `--hook-mode` cannot be combined with `--staged`.
 - `--audit` appends metadata-only JSON lines to `.shk/audit.log`, always exits `0`, and requires a project `shk.toml`.
+- `--log-blocked` keeps blocking behavior, appends metadata-only block entries to `.shk/audit.log`, and requires a project `shk.toml`.
 - `--post` is non-blocking and always exits `0`. It reports findings in tool output for review.
 - Cursor pre-hook scans use the pre-commit threshold by default.
 
@@ -391,6 +423,7 @@ Install managed AI tool hooks for supported tools.
 shk hooks install-ai
 shk hooks install-ai --dry-run
 shk hooks install-ai --audit
+shk hooks install-ai --log-blocked
 shk hooks install-ai --tool cursor
 shk hooks install-ai --tool claude-code --global
 shk hooks install-ai --tool claude-code --apply-deny
@@ -403,7 +436,8 @@ Options:
 | Option | Behavior |
 |--------|----------|
 | `--dry-run` | Print planned changes without writing config files. |
-| `--audit` | Add `--audit` to installed hook commands. |
+| `--audit` | Add `--audit` to installed hook commands. Hooks log metadata and never block. |
+| `--log-blocked` | Add `--log-blocked` to installed hook commands. Hooks still block and append metadata-only block entries to `.shk/audit.log`. Mutually exclusive with `--audit`. |
 | `--global` | Write user-level config files under the user's home directory. |
 | `--tool <tool>` | Limit installation to one of `claude-code`, `codex`, or `cursor`. |
 | `--fail-closed` | Cursor hooks only. Sets `failClosed` on managed entries. |
@@ -424,7 +458,7 @@ Managed entries are tagged with `"_shk_managed": true` or `# shk-managed-start` 
 
 See [Uninstall](installation.md#uninstall) for removing managed hooks, skills, generated workflows, and stored dotenvx keys.
 
-In pre-hook mode, `shk` also runs an action guard before content scanning. It blocks sensitive file access, environment dump commands, destructive filesystem operations, direct database mutation commands, privilege or system changes, external transfer commands, and package manager operations when they are visible in the hook payload. Tune this with `[action_guard]` in `shk.toml`; `--audit` remains non-blocking.
+In pre-hook mode, `shk` also runs an action guard before content scanning. It blocks sensitive file access, environment dump commands, destructive filesystem operations, direct database mutation commands, privilege or system changes, external transfer commands, and package manager operations when they are visible in the hook payload. Tune this with `[action_guard]` in `shk.toml`; `--audit` remains non-blocking, while `--log-blocked` records only the action category.
 
 ## `shk ci init github`
 

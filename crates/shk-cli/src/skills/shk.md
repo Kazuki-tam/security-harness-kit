@@ -167,6 +167,7 @@ Pre-hooks block on findings (exit 2); post-hooks warn only (exit 0).
 ```bash
 shk hooks install-ai                             # all detected tools
 shk hooks install-ai --audit                     # non-blocking, writes .shk/audit.log
+shk hooks install-ai --log-blocked               # blocking, writes metadata-only block entries
 shk hooks install-ai --tool claude-code
 shk hooks install-ai --tool claude-code --global
 shk hooks install-ai --tool claude-code --apply-deny
@@ -177,6 +178,7 @@ shk hooks install-ai --tool cursor --fail-closed
 Important hook behavior:
 - Without `--tool`, installs managed hooks for Claude Code, Codex, and Cursor.
 - `--audit` makes installed hooks non-blocking and writes metadata-only entries to `.shk/audit.log`.
+- `--log-blocked` keeps installed hooks blocking and writes metadata-only blocked-event entries to `.shk/audit.log`; inspect them with `shk audit`.
 - `--apply-sandbox` hardens supported tool sandbox settings. Cursor has no local sandbox setting in `hooks.json`, so this sets managed hooks fail-closed.
 - Pre-hook mode runs action guard before content scanning. Tune with `[action_guard]` in `shk.toml`.
 
@@ -244,6 +246,12 @@ shk scan . --hook-mode claude-code --post < response_payload.json
 
 # Audit mode: log findings to .shk/audit.log, never block
 shk scan . --hook-mode claude-code --audit < hook_payload.json
+
+# Blocking mode with metadata-only blocked-event logs
+shk scan . --hook-mode claude-code --log-blocked < hook_payload.json
+
+# Preview audit/block logs without printing raw matched values
+shk audit --reason blocked --no-paths
 ```
 
 Add domain-specific rules in `shk.toml` to detect internal identifiers or API response patterns

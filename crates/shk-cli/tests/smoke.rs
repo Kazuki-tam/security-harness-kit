@@ -2247,6 +2247,117 @@ fn hooks_install_ai_codex_log_blocked_injects_flag() {
 }
 
 #[test]
+fn audit_reports_empty_log_helpfully() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(shk_bin())
+        .args(["audit"])
+        .current_dir(dir.path())
+        .output()
+        .expect("audit empty");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("No audit log found"), "{stdout}");
+}
+
+#[test]
+fn audit_json_reports_blocked_metadata() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    std::fs::write(repo.join("shk.toml"), "").unwrap();
+    let fpath = repo.join("x.txt");
+    let secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+    std::fs::write(
+        &fpath,
+        format!("// not real credential: synthetic detector fixture value only\nconst demo = \"{secret}\";"),
+    )
+    .unwrap();
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "file_path": fpath.to_str().unwrap(),
+    }))
+    .unwrap();
+    let block = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "cursor", "--log-blocked"])
+        .current_dir(repo)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("log-blocked hook");
+    assert_eq!(block.status.code(), Some(2));
+
+    let out = Command::new(shk_bin())
+        .args(["audit", "--json", "--reason", "finding-threshold"])
+        .current_dir(repo)
+        .output()
+        .expect("audit json");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["summary"]["blocked_events"], 1);
+    assert!(!report["by_rule"].as_array().unwrap().is_empty());
+    assert!(
+        !out.stdout
+            .windows(secret.len())
+            .any(|w| w == secret.as_bytes())
+    );
+}
+
+#[test]
+fn audit_human_shows_recent_blocked_event() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    std::fs::write(repo.join("shk.toml"), "").unwrap();
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "hook_event_name": "PermissionRequest",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "psql -c \"DROP TABLE users\""
+        }
+    }))
+    .unwrap();
+    Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "codex", "--log-blocked"])
+        .current_dir(repo)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("log-blocked guard");
+
+    let out = Command::new(shk_bin())
+        .args(["audit", "--reason", "action-guard"])
+        .current_dir(repo)
+        .output()
+        .expect("audit human");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Recent events"), "{stdout}");
+    assert!(stdout.contains("direct_db_mutation"), "{stdout}");
+    assert!(!stdout.contains("DROP TABLE"), "{stdout}");
+}
+
+#[test]
 fn hook_mode_post_warns_but_exits_0() {
     use std::io::Write;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");

@@ -133,6 +133,26 @@ pub enum Commands {
     },
     /// Show project health and CLI status
     Status,
+    /// Preview metadata-only `.shk/audit.log` entries
+    Audit {
+        #[arg(value_name = "PATH", default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+        /// Limit to entries newer than this duration, e.g. 7d, 24h, 30m.
+        #[arg(long, value_name = "DURATION")]
+        since: Option<String>,
+        #[arg(long, value_enum)]
+        tool: Option<AiTool>,
+        #[arg(long, value_enum, value_name = "REASON")]
+        reason: Option<AuditReasonArg>,
+        /// Maximum recent events to show in human output and JSON.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Omit display paths from recent event rows.
+        #[arg(long)]
+        no_paths: bool,
+    },
     /// Project diagnostics
     Doctor {
         #[command(subcommand)]
@@ -170,6 +190,17 @@ pub enum Commands {
         #[command(subcommand)]
         cmd: SecretsCmd,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum AuditReasonArg {
+    /// Any entry with `"event": "blocked"`.
+    Blocked,
+    /// Blocked because findings met the fail threshold.
+    FindingThreshold,
+    /// Blocked by action guard.
+    ActionGuard,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
