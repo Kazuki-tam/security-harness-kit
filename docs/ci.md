@@ -1,6 +1,6 @@
 # GitHub Actions Integration
 
-`shk ci init github` generates a ready-to-commit GitHub Actions workflow that installs `shk` from the official cargo-dist installer and scans your repository on every pull request and push to `main`. It is intended as a sane default that you can adopt without authoring YAML by hand, and that you can re-generate later when defaults improve.
+`shk ci init github` generates a ready-to-commit GitHub Actions workflow that installs a **pinned** `shk` release (checksum + GitHub attestation verified) and scans your repository on every pull request and push to `main`. It is intended as a sane default that you can adopt without authoring YAML by hand, and that you can re-generate later when defaults improve.
 
 ## Quick Start
 
@@ -14,7 +14,7 @@ git push
 This writes `.github/workflows/shk.yml`. The workflow:
 
 - Triggers on every `pull_request` and on `push` to `main`.
-- Installs `shk` via the cargo-dist shell installer hosted on the GitHub release page.
+- Installs a pinned `shk` release archive with SHA256 verification and `gh attestation verify`.
 - Runs `shk scan . --json --fail-on high` and fails the job (and the PR check) when findings reach the threshold.
 
 Preview without writing the file:
@@ -49,8 +49,26 @@ jobs:
 
       - name: Install shk
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk-cli-installer.sh | sh
+          set -euo pipefail
+          SHK_VERSION=v0.3.5
+          REPO=Kazuki-tam/security-harness-kit
+          mkdir -p "$HOME/.cargo/bin"
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64) TARGET=x86_64-unknown-linux-gnu ;;
+            Linux-aarch64|Linux-arm64) TARGET=aarch64-unknown-linux-gnu ;;
+            *) echo "unsupported runner" >&2; exit 1 ;;
+          esac
+          ASSET="shk-cli-${TARGET}.tar.xz"
+          gh release download v0.3.5 -R "$REPO" -p "$ASSET" -p "${ASSET}.sha256"
+          sha256sum -c "${ASSET}.sha256"
+          gh attestation verify "$ASSET" -R "$REPO"
+          TMP="$(mktemp -d)"
+          tar -xJf "$ASSET" -C "$TMP"
+          install -m 755 "$TMP/shk-cli-${TARGET}/shk" "$HOME/.cargo/bin/shk"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Run shk
         shell: bash
@@ -64,8 +82,8 @@ jobs:
 |-------|-----------------|
 | `permissions: contents: read` | The workflow only needs to read repository content. Explicitly minimising the `GITHUB_TOKEN` scopes prevents an accidental write at the workflow or organisation default level. |
 | `concurrency: cancel-in-progress: true` | Successive pushes to the same PR cancel the in-flight job. Cuts CI cost on busy branches without losing the result for the latest commit. |
-| `actions/checkout@v6` | Pinned to a major tag that supports the current GitHub Actions Node.js runtime. |
-| Installer over `cargo install` | The cargo-dist installer downloads a prebuilt binary with checksums published next to the release. It avoids a long Rust toolchain build per CI run. |
+| `actions/checkout@v6` | GitHub-owned checkout action pinned to the current major for maintainability. |
+| Pinned release + checksum + attestation | Avoids `curl \| sh` and `latest`. Downloads the release archive, verifies SHA256, and checks GitHub artifact attestation before install. |
 | `--json --fail-on high` | JSON output is greppable / archivable from the run log. `high` matches the default `[thresholds].scan_fail_on` shipped by `shk init`. |
 
 ## Choose A Mode
@@ -98,17 +116,15 @@ shk ci init github --mode audit
 
 ## Pin A Release
 
-Pinning gives reproducible CI runs and protects against unexpected upstream behaviour changes:
+Generated workflows default to the `shk` version that produced them (`v` + crate version). Override when pointing CI at a different tag:
 
 ```bash
 shk ci init github --shk-version v0.3.3
 ```
 
-The workflow installer URL becomes
-`https://github.com/Kazuki-tam/security-harness-kit/releases/download/v0.3.3/shk-cli-installer.sh`.
-Re-run `shk ci init github --shk-version <new tag> --force` to bump the pin.
+Re-run `shk ci init github --shk-version <new tag> --force` after upgrading `shk` locally to refresh the pin.
 
-`--shk-version` accepts either `latest` or a SemVer-ish tag (`v?MAJOR.MINOR.PATCH[-pre]`). Other values are rejected at CLI parse time so they cannot reach the installer URL.
+`--shk-version` accepts either `latest` or a SemVer-ish tag (`v?MAJOR.MINOR.PATCH[-pre]`). Other values are rejected at CLI parse time so they cannot reach the install script.
 
 ## Use A Fork Or Mirror
 
@@ -116,7 +132,7 @@ Re-run `shk ci init github --shk-version <new tag> --force` to bump the pin.
 shk ci init github --repo your-org/security-harness-kit
 ```
 
-`--repo` is validated as `owner/repository` (alphanumerics, `.`, `_`, `-`). Combine with `--shk-version` to point CI at your fork's release tag. `--installer-name` lets you target a custom asset (e.g. `nested/asset.sh`) but rejects path-traversal segments such as `..`.
+`--repo` is validated as `owner/repository` (alphanumerics, `.`, `_`, `-`). Combine with `--shk-version` to point CI at your fork's release tag.
 
 ## Make `shk` A Required PR Check
 
@@ -153,7 +169,7 @@ If you prefer to inline `shk` into an existing job, copy the **Install shk** and
 
 ## Caching The Binary (Optional)
 
-The installer downloads a single prebuilt binary, so a cache is usually unnecessary. If you want to skip the network round-trip on cache hits, wrap the install step with `actions/cache` keyed on `--shk-version`:
+The install step downloads a single release archive, so a cache is usually unnecessary. If you want to skip the network round-trip on cache hits, wrap the install step with `actions/cache` keyed on `--shk-version`:
 
 ```yaml
       - uses: actions/cache@v4
@@ -165,8 +181,10 @@ The installer downloads a single prebuilt binary, so a cache is usually unnecess
       - name: Install shk
         if: steps.shk-cache.outputs.cache-hit != 'true'
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Kazuki-tam/security-harness-kit/releases/download/v0.3.3/shk-cli-installer.sh | sh
+          # copy the Install shk block from `shk ci init github --dry-run`
 ```
 
 Cache only when you have pinned `--shk-version`; caching `latest` defeats the purpose.

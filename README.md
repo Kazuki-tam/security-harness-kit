@@ -29,6 +29,7 @@ With `shk`, you can:
 - Encrypt `.env` files, store private keys in the OS credential store, and run commands with decrypted values injected only at runtime.
 - Install Git pre-commit hooks.
 - Install managed hooks for Claude Code, Cursor, and Codex.
+- Preview metadata-only audit logs to understand blocked hook activity without storing detected values.
 - Generate a GitHub Actions workflow that runs `shk scan` on every pull request.
 - Diagnose ignore file and `.env` safety coverage.
 - Deploy AI agent skills to Claude Code, Codex, and Cursor project directories.
@@ -48,6 +49,8 @@ powershell -c "irm https://github.com/Kazuki-tam/security-harness-kit/releases/l
 ```
 
 See [Installation](docs/installation.md) for release archives, checksums, Homebrew, source builds, and [uninstall](docs/installation.md#uninstall) instructions.
+
+For CI or security-sensitive environments, prefer a pinned release archive with checksum and GitHub artifact attestation verification over installing from `latest`. See [Verified Archive Install](docs/installation.md#verified-archive-install).
 
 ## Quick Start
 
@@ -92,6 +95,13 @@ Install AI tool hooks in audit mode:
 
 ```bash
 shk hooks install-ai --audit
+```
+
+Install AI tool hooks that still block but keep metadata-only block logs:
+
+```bash
+shk hooks install-ai --log-blocked
+shk audit
 ```
 
 Generate a GitHub Actions workflow that scans every pull request:
@@ -142,6 +152,11 @@ shk doctor
 shk doctor ignore --fix
 shk doctor env --dotenvx
 
+shk audit
+shk audit --reason action-guard
+shk audit --since 7d --tool cursor
+shk audit --json
+
 shk env dotenvx import-keys .env.keys
 shk env encrypt .env --in-place
 shk env run -- npm test
@@ -154,11 +169,12 @@ shk env decrypt .env --output .env.local
 shk hooks install
 shk hooks install-ai --dry-run
 shk hooks install-ai --audit
+shk hooks install-ai --log-blocked
 
 shk ci init github
 shk ci init github --dry-run
 shk ci init github --mode audit
-shk ci init github --shk-version v0.3.4
+shk ci init github --shk-version v0.3.5
 
 shk skills install
 shk skills install --tool claude-code --global
@@ -201,7 +217,8 @@ See [Configuration](docs/configuration.md) for the full `shk.toml` reference, cu
 - `shk scan --git-history` scans committed blobs reachable from Git refs. Use `--preview` to inspect candidate counts before a broad history scan, and `--ref`, `--since`, or `--max-commits` to narrow the scope.
 - Built-in detection is pattern-based and includes hand-tuned `shk` rules plus generated gitleaks-derived `secret.gitleaks.*` rules; use it as an AI/local workflow guardrail, not as a complete replacement for dedicated secret scanning platforms.
 - JSON reports use `redacted_value: "[REDACTED]"`.
-- Hook audit logs contain metadata such as counts, tool name, hook phase, and display path.
+- Hook audit logs contain metadata such as counts, tool name, hook phase, rule IDs, action categories, and display path; they do not store raw matched values, prompt bodies, or command text.
+- Use `shk audit` to summarize `.shk/audit.log`; add `--no-paths` when path labels should not be printed.
 - Allowlist `value_hash` entries are deterministic fingerprints for suppression, not cryptographic secret storage.
 - Post-tool hooks are non-blocking.
 - `doctor ignore --fix` appends missing patterns to `.gitignore`; it does not remove existing entries.

@@ -33,6 +33,53 @@ const DOTENV_PRIVATE_KEY_PREFIX: &str = "DOTENV_PRIVATE_KEY";
 const CODEX_RISKY_SANDBOX_MODE: &str = "danger-full-access";
 const CODEX_RISKY_APPROVAL_POLICY: &str = "never";
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IgnoreStatus {
+    pub missing_patterns: Vec<String>,
+    pub load_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IgnoreFileUpdate {
+    pub relative_path: String,
+    pub appended: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IgnoreFixResult {
+    pub updates: Vec<IgnoreFileUpdate>,
+    pub already_ok: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IgnoreFixTargetStatus {
+    pub name: String,
+    pub exists: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EnvStatus {
+    pub has_env_files: bool,
+    pub plaintext_env_files: Vec<String>,
+    pub mixed_env_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ClaudePermissionsStatus {
+    pub settings_exists: bool,
+    pub deny_ok: bool,
+    pub sandbox_ok: bool,
+    pub missing_entries: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CodexConfigStatus {
+    pub config_exists: bool,
+    pub hooks_enabled: bool,
+    pub sandbox_ok: bool,
+    pub approval_ok: bool,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 enum EnvFileEncryptionState {
     Plaintext,
@@ -40,78 +87,236 @@ enum EnvFileEncryptionState {
     MixedPlaintext { keys: Vec<String> },
 }
 
+pub fn ignore_fix_targets() -> &'static [&'static str] {
+    IGNORE_CANDIDATES
+}
+
+pub fn ignore_fix_target_statuses(root: &Path) -> Vec<IgnoreFixTargetStatus> {
+    ignore_fix_targets()
+        .iter()
+        .map(|name| {
+            let path = root.join(name);
+            IgnoreFixTargetStatus {
+                name: (*name).to_string(),
+                exists: path.exists(),
+            }
+        })
+        .collect()
+}
+
+pub fn collect_ignore_status(root: &Path) -> IgnoreStatus {
+    collect_ignore_status_result(root).unwrap_or_else(|err| IgnoreStatus {
+        missing_patterns: Vec::new(),
+        load_error: Some(err.to_string()),
+    })
+}
+
+pub fn collect_env_status(root: &Path) -> EnvStatus {
+    let mut has_env_files = false;
+    let mut plaintext_env_files = Vec::new();
+    let mut mixed_env_files = Vec::new();
+    if let Ok(entries) = fs::read_dir(root) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if (name == ".env" || (name.starts_with(".env.") && name != ".env.example"))
+                && e.path().is_file()
+            {
+                has_env_files = true;
+                let content = fs::read_to_string(e.path()).unwrap_or_default();
+                match dotenv_encryption_state(&content) {
+                    EnvFileEncryptionState::FullyEncrypted => {}
+                    EnvFileEncryptionState::MixedPlaintext { .. } => {
+                        mixed_env_files.push(name);
+                    }
+                    EnvFileEncryptionState::Plaintext => {
+                        plaintext_env_files.push(name);
+                    }
+                }
+            }
+        }
+    }
+    EnvStatus {
+        has_env_files,
+        plaintext_env_files,
+        mixed_env_files,
+    }
+}
+
 pub fn run_ignore(root: &Path, fix: bool) -> Result<()> {
     if fix {
         safety::require_project_policy(root, "doctor ignore --fix")?;
         safety::ensure_writable_path_allowed(&root.join(".gitignore"))?;
     }
-    let (policy, _) = Policy::load_from_dir(root)?;
-    let required = policy.doctor.ignore.effective_required_patterns().to_vec();
-    let gi_path = root.join(".gitignore");
-    let mut combined = String::new();
-    if gi_path.is_file() {
-        combined.push_str(&fs::read_to_string(&gi_path)?);
-    }
-    for p in IGNORE_CANDIDATES {
-        if *p == ".gitignore" {
-            continue;
+    let status = collect_ignore_status_result(root)?;
+    print_ignore_status(&status.missing_patterns);
+    if fix {
+        let result = fix_ignore_patterns(root, &[".gitignore".to_string()])?;
+        for update in &result.updates {
+            println!(
+                "Wrote {} pattern(s) to {}",
+                update.appended.len(),
+                update.relative_path
+            );
         }
-        let fp = root.join(p);
-        if fp.is_file() {
-            combined.push('\n');
-            combined.push_str(&fs::read_to_string(&fp)?);
-        }
-    }
-    let mut missing: Vec<&str> = Vec::new();
-    for pat in &required {
-        if !pattern_present(&combined, pat) {
-            missing.push(pat.as_str());
-        }
-    }
-    if missing.is_empty() {
-        println!("ignore: OK (required patterns present in ignore files)");
-    } else {
-        println!("ignore: missing recommended patterns:");
-        for m in &missing {
-            println!("  - {m}");
-        }
-    }
-    if fix && !missing.is_empty() {
-        let path = root.join(".gitignore");
-        let mut body = if path.is_file() {
-            fs::read_to_string(&path)?
-        } else {
-            String::new()
-        };
-        if !body.is_empty() && !body.ends_with('\n') {
-            body.push('\n');
-        }
-        body.push_str("\n# shk: appended required patterns\n");
-        for m in &missing {
-            body.push_str(m);
-            body.push('\n');
-        }
-        fs::write(&path, body)?;
-        println!("Wrote updates to {}", path.display());
     }
     run_claude_permissions_check(root);
     run_codex_config_check(root);
     Ok(())
 }
 
-fn run_claude_permissions_check(root: &Path) {
+pub fn fix_ignore_patterns(root: &Path, targets: &[String]) -> Result<IgnoreFixResult> {
+    safety::require_project_policy(root, "doctor ignore --fix")?;
+    let normalized = normalize_ignore_fix_targets(targets)?;
+    if normalized.is_empty() {
+        anyhow::bail!("at least one ignore fix target is required");
+    }
+
+    let missing = collect_ignore_status_result(root)?.missing_patterns;
+    if missing.is_empty() {
+        return Ok(IgnoreFixResult {
+            updates: Vec::new(),
+            already_ok: true,
+        });
+    }
+
+    let mut updates = Vec::new();
+    for relative_path in normalized {
+        let path = root.join(&relative_path);
+        safety::ensure_writable_path_allowed(&path)?;
+        let appended = append_patterns_to_ignore_file(&path, &missing)?;
+        if !appended.is_empty() {
+            updates.push(IgnoreFileUpdate {
+                relative_path,
+                appended,
+            });
+        }
+    }
+
+    Ok(IgnoreFixResult {
+        already_ok: updates.is_empty(),
+        updates,
+    })
+}
+
+fn normalize_ignore_fix_targets(targets: &[String]) -> Result<Vec<String>> {
+    let mut normalized = Vec::new();
+    for target in targets {
+        let trimmed = target.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !ignore_fix_targets().contains(&trimmed) {
+            anyhow::bail!("unknown ignore fix target: {trimmed}");
+        }
+        if !normalized.iter().any(|existing| existing == trimmed) {
+            normalized.push(trimmed.to_string());
+        }
+    }
+    Ok(normalized)
+}
+
+fn collect_ignore_status_result(root: &Path) -> Result<IgnoreStatus> {
+    let (policy, _) = Policy::load_from_dir(root)?;
+    let combined = read_ignore_candidate_files(root)?;
+    let missing_patterns = policy
+        .doctor
+        .ignore
+        .effective_required_patterns()
+        .iter()
+        .filter(|pat| !pattern_present(&combined, pat))
+        .cloned()
+        .collect();
+
+    Ok(IgnoreStatus {
+        missing_patterns,
+        load_error: None,
+    })
+}
+
+fn read_ignore_candidate_files(root: &Path) -> Result<String> {
+    let mut combined = String::new();
+    for candidate in IGNORE_CANDIDATES {
+        let path = root.join(candidate);
+        if !path.is_file() {
+            continue;
+        }
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(&fs::read_to_string(&path)?);
+    }
+    Ok(combined)
+}
+
+fn print_ignore_status(missing: &[String]) {
+    if missing.is_empty() {
+        println!("ignore: OK (required patterns present in ignore files)");
+    } else {
+        println!("ignore: missing recommended patterns:");
+        for pat in missing {
+            println!("  - {pat}");
+        }
+    }
+}
+
+fn append_patterns_to_ignore_file(path: &Path, patterns: &[String]) -> Result<Vec<String>> {
+    if path.exists() && !path.is_file() {
+        anyhow::bail!("ignore target is not a file: {}", path.display());
+    }
+    let existing = if path.is_file() {
+        fs::read_to_string(path)?
+    } else {
+        String::new()
+    };
+    let mut appended = Vec::new();
+    for pat in patterns {
+        if !pattern_present(&existing, pat) {
+            appended.push(pat.clone());
+        }
+    }
+    if appended.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut body = existing;
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str("\n# shk: appended required patterns\n");
+    for pat in &appended {
+        body.push_str(pat);
+        body.push('\n');
+    }
+    fs::write(path, body)?;
+    Ok(appended)
+}
+
+pub fn collect_claude_permissions_status(root: &Path) -> ClaudePermissionsStatus {
     let path = root.join(".claude/settings.json");
     if !path.is_file() {
-        return;
+        return ClaudePermissionsStatus {
+            settings_exists: false,
+            deny_ok: true,
+            sandbox_ok: true,
+            missing_entries: Vec::new(),
+        };
     }
 
     let Ok(text) = fs::read_to_string(&path) else {
-        println!("claude permissions: unable to read .claude/settings.json");
-        return;
+        return ClaudePermissionsStatus {
+            settings_exists: true,
+            deny_ok: false,
+            sandbox_ok: false,
+            missing_entries: vec!["unable to read .claude/settings.json".into()],
+        };
     };
     let Ok(value) = serde_json::from_str::<Value>(&text) else {
-        println!("claude permissions: unable to parse .claude/settings.json");
-        return;
+        return ClaudePermissionsStatus {
+            settings_exists: true,
+            deny_ok: false,
+            sandbox_ok: false,
+            missing_entries: vec!["unable to parse .claude/settings.json".into()],
+        };
     };
 
     let denies = value
@@ -125,20 +330,38 @@ fn run_claude_permissions_check(root: &Path) {
         })
         .unwrap_or_default();
 
-    let required = claude_recommended_deny_entries();
-    let missing: Vec<&str> = required
+    let missing_entries = claude_recommended_deny_entries()
         .iter()
         .copied()
         .filter(|entry| !claude_deny_covers(&denies, entry))
-        .collect();
+        .map(str::to_string)
+        .collect::<Vec<_>>();
 
-    if missing.is_empty() {
+    ClaudePermissionsStatus {
+        settings_exists: true,
+        deny_ok: missing_entries.is_empty(),
+        sandbox_ok: claude_sandbox_ok(&value),
+        missing_entries,
+    }
+}
+
+fn run_claude_permissions_check(root: &Path) {
+    let status = collect_claude_permissions_status(root);
+    if !status.settings_exists {
+        return;
+    }
+    if status.deny_ok {
         println!("claude permissions: OK (recommended action deny entries present)");
     } else {
         println!("claude permissions: missing recommended action deny entries:");
-        for pat in missing {
+        for pat in &status.missing_entries {
             println!("  - {pat}");
         }
+    }
+    if status.sandbox_ok {
+        println!("claude sandbox: OK");
+    } else {
+        println!("claude sandbox: recommended project sandbox settings missing");
     }
 }
 
@@ -148,12 +371,100 @@ fn claude_deny_covers(denies: &[&str], required: &str) -> bool {
         .any(|entry| claude_deny_entry_covers(entry, required))
 }
 
-fn run_codex_config_check(root: &Path) {
+fn claude_sandbox_ok(value: &Value) -> bool {
+    let Some(sandbox) = value.get("sandbox") else {
+        return false;
+    };
+    let enabled = sandbox
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let fail_if_unavailable = sandbox
+        .get("failIfUnavailable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let blocks_unsandboxed = sandbox
+        .get("allowUnsandboxedCommands")
+        .and_then(Value::as_bool)
+        .map(|allowed| !allowed)
+        .unwrap_or(false);
+    let filesystem = sandbox.get("filesystem").unwrap_or(&Value::Null);
+    enabled
+        && fail_if_unavailable
+        && blocks_unsandboxed
+        && json_array_contains(filesystem.get("denyRead"), "~/")
+        && json_array_contains(filesystem.get("allowRead"), ".")
+}
+
+fn json_array_contains(value: Option<&Value>, needle: &str) -> bool {
+    value
+        .and_then(Value::as_array)
+        .map(|items| items.iter().any(|item| item.as_str() == Some(needle)))
+        .unwrap_or(false)
+}
+
+pub fn collect_codex_config_status(root: &Path) -> CodexConfigStatus {
     let path = root.join(".codex/config.toml");
     if !path.is_file() {
-        return;
+        return CodexConfigStatus {
+            config_exists: false,
+            hooks_enabled: false,
+            sandbox_ok: true,
+            approval_ok: true,
+        };
     }
 
+    let Ok(text) = fs::read_to_string(&path) else {
+        return CodexConfigStatus {
+            config_exists: true,
+            hooks_enabled: false,
+            sandbox_ok: false,
+            approval_ok: false,
+        };
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&text) else {
+        return CodexConfigStatus {
+            config_exists: true,
+            hooks_enabled: false,
+            sandbox_ok: false,
+            approval_ok: false,
+        };
+    };
+
+    let hooks_enabled = value
+        .get("features")
+        .and_then(|features| features.get("codex_hooks"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
+    let sandbox_ok = !matches!(
+        value.get("sandbox_mode").and_then(toml::Value::as_str),
+        Some(CODEX_RISKY_SANDBOX_MODE)
+    );
+    let approval_ok = !matches!(
+        value.get("approval_policy").and_then(toml::Value::as_str),
+        Some(CODEX_RISKY_APPROVAL_POLICY)
+    );
+
+    CodexConfigStatus {
+        config_exists: true,
+        hooks_enabled,
+        sandbox_ok,
+        approval_ok,
+    }
+}
+
+fn run_codex_config_check(root: &Path) {
+    let status = collect_codex_config_status(root);
+    if !status.config_exists {
+        return;
+    }
+    if status.hooks_enabled {
+        println!("codex config: hooks feature enabled");
+    } else {
+        println!("codex config: hooks feature not enabled (`features.codex_hooks = true`)");
+    }
+
+    let path = root.join(".codex/config.toml");
     let Ok(text) = fs::read_to_string(&path) else {
         println!("codex config: unable to read .codex/config.toml");
         return;
@@ -162,18 +473,6 @@ fn run_codex_config_check(root: &Path) {
         println!("codex config: unable to parse .codex/config.toml");
         return;
     };
-
-    let hooks_enabled = value
-        .get("features")
-        .and_then(|features| features.get("codex_hooks"))
-        .and_then(toml::Value::as_bool)
-        .unwrap_or(false);
-    if hooks_enabled {
-        println!("codex config: hooks feature enabled");
-    } else {
-        println!("codex config: hooks feature not enabled (`features.codex_hooks = true`)");
-    }
-
     print_codex_string_setting(&value, "sandbox_mode", Some(CODEX_RISKY_SANDBOX_MODE));
     print_codex_string_setting(&value, "approval_policy", Some(CODEX_RISKY_APPROVAL_POLICY));
 }
@@ -425,7 +724,7 @@ fn env_scan_options() -> ScanOptions {
     }
 }
 
-pub(crate) fn has_managed_ai_hooks(root: &Path) -> bool {
+pub fn has_managed_ai_hooks(root: &Path) -> bool {
     let paths = [
         root.join(".claude/settings.json"),
         root.join(".cursor/hooks.json"),
@@ -441,7 +740,7 @@ pub(crate) fn has_managed_ai_hooks(root: &Path) -> bool {
     false
 }
 
-pub(crate) fn has_shk_pre_commit(root: &Path) -> bool {
+pub fn has_shk_pre_commit(root: &Path) -> bool {
     git::discover_repo_root(root)
         .as_ref()
         .map(|r| r.join(".git/hooks/pre-commit"))

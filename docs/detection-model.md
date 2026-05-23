@@ -201,4 +201,15 @@ Office document masking supports `.docx`, `.xlsx`, and `.pptx` with `--output`; 
 
 `shk scan --hook-mode <tool> --audit` writes JSON lines to `.shk/audit.log`. Audit entries contain metadata such as tool name, hook phase, display path, finding count, suppressed count, deduplicated count, and maximum severity. They do not contain raw matched values.
 
+`shk scan --hook-mode <tool> --log-blocked` keeps blocking behavior and writes metadata-only `event = "blocked"` entries for blocked pre-hook and user-prompt events. Finding-threshold block entries include rule IDs, finding kinds, counts, and maximum severity for findings at or above the active threshold. Action guard block entries include only the action category, not the command text, file path, prompt body, or guard reason.
+
+Use `shk audit` to preview `.shk/audit.log`:
+
+```bash
+shk audit
+shk audit --reason finding-threshold
+shk audit --reason action-guard --no-paths
+shk audit --since 7d --tool cursor --json
+```
+
 `shk secrets push --audit` also writes metadata-only JSON lines to `.shk/audit.log`. Secret push audit entries include fields such as provider, mode, source label, byte count, payload SHA-256 hash, target label, key counts, operation, and status. They do not contain raw dotenv values or per-key secret payloads.

@@ -1,13 +1,14 @@
-use crate::audit_log;
 use crate::exit::CliExit;
+use crate::hook_audit_log;
 use crate::hook_output;
 use crate::output;
 use crate::safety;
 use anyhow::{Context, Result, bail};
 use shk_core::policy::{ColorMode, Policy, Severity};
 use shk_core::scanner::{
-    GitHistoryPreview, ScanOptions, preview_git_history, scan_path, scan_string,
+    GitHistoryPreview, ScanOptions, ScanResult, preview_git_history, scan_path, scan_string,
 };
+use shk_integrations::ActionGuardMatch;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -34,6 +35,7 @@ pub struct ScanInvocation {
     pub hook_mode: Option<AiTool>,
     pub post: bool,
     pub audit: bool,
+    pub log_blocked: bool,
     pub color_enabled: bool,
 }
 
@@ -45,7 +47,15 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
     }
 
     if let Some(tool) = inv.hook_mode {
-        return run_hook_mode(tool, inv.post, inv.audit, inv.fail_on, &cwd, inv.path);
+        return run_hook_mode(
+            tool,
+            inv.post,
+            inv.audit,
+            inv.log_blocked,
+            inv.fail_on,
+            &cwd,
+            inv.path,
+        );
     }
 
     let fail_on_override = inv.fail_on.map(Severity::from);
@@ -104,7 +114,7 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
             )
         );
     }
-    if res.should_fail() {
+    if !inv.audit && res.should_fail() {
         return Err(CliExit::silent(1).into());
     }
     Ok(())
@@ -162,6 +172,7 @@ fn run_hook_mode(
     tool: AiTool,
     post: bool,
     audit: bool,
+    log_blocked: bool,
     fail_on: Option<SeverityArg>,
     cwd: &Path,
     path_arg: PathBuf,
@@ -176,12 +187,10 @@ fn run_hook_mode(
 
     let hook_event = hook_event_from_stdin(stdin_trim, post);
     let repo_root = resolve_repo_root(cwd, path_arg.as_path());
-    if audit {
-        safety::require_project_policy(&repo_root, "scan --audit")?;
-    }
+    require_hook_log_policy(&repo_root, audit, log_blocked)?;
 
     if hook_event == hook_output::HookEvent::UserPromptSubmit {
-        return run_user_prompt_mode(tool, audit, fail_on, &repo_root, stdin_trim);
+        return run_user_prompt_mode(tool, audit, log_blocked, fail_on, &repo_root, stdin_trim);
     }
 
     let (policy, _) = Policy::load_from_dir(&repo_root)?;
@@ -191,7 +200,15 @@ fn run_hook_mode(
         && let Some(guard_match) =
             shk_integrations::detect_dangerous_action_with_config(stdin_trim, &action_guard_config)?
     {
-        return deny_hook(tool, hook_event, &guard_match.reason);
+        let reason = action_guard_deny_reason(&guard_match);
+        return deny_hook_with_log(
+            &repo_root,
+            log_blocked,
+            tool,
+            hook_event,
+            &reason,
+            BlockLog::ActionGuard(&guard_match),
+        );
     }
 
     let (disp, body) = shk_integrations::stdin_to_hook_body(
@@ -206,7 +223,7 @@ fn run_hook_mode(
     let res = scan_string(&repo_root, &disp, &body, opts).context("hook scan failed")?;
 
     if audit {
-        emit_audit_hook(&repo_root, tool, hook_event, &disp, &res)?;
+        hook_audit_log::append_audit_hook(&repo_root, tool, hook_event, &disp, &res)?;
         println!(
             "{}",
             hook_output::allow_stdout_for_event(
@@ -219,29 +236,22 @@ fn run_hook_mode(
     }
 
     if post {
-        if res.findings.is_empty() {
-            println!(
-                "{}",
-                hook_output::allow_stdout_for_event(tool, hook_event, None)
-            );
-        } else {
-            let hint = format!(
-                "shk: {} finding(s) in tool output — review before using ({} suppressed, {} deduplicated)",
-                res.findings.len(),
-                res.suppressed,
-                res.deduplicated,
-            );
-            eprintln!("{hint}");
-            println!(
-                "{}",
-                hook_output::allow_stdout_for_event(tool, hook_event, Some(&hint))
-            );
-        }
+        emit_post_hook_result(tool, hook_event, &res);
         return Ok(());
     }
 
     if res.should_fail() {
-        return deny_hook(tool, hook_event, HOOK_DENY_REASON_DEFAULT);
+        return deny_hook_with_log(
+            &repo_root,
+            log_blocked,
+            tool,
+            hook_event,
+            HOOK_DENY_REASON_DEFAULT,
+            BlockLog::Scan {
+                display_path: &disp,
+                result: &res,
+            },
+        );
     }
 
     println!(
@@ -249,6 +259,71 @@ fn run_hook_mode(
         hook_output::allow_stdout_for_event(tool, hook_event, None)
     );
     Ok(())
+}
+
+fn require_hook_log_policy(repo_root: &Path, audit: bool, log_blocked: bool) -> Result<()> {
+    if audit {
+        safety::require_project_policy(repo_root, "scan --audit")?;
+    }
+    if log_blocked {
+        safety::require_project_policy(repo_root, "scan --log-blocked")?;
+    }
+    Ok(())
+}
+
+enum BlockLog<'a> {
+    Scan {
+        display_path: &'a str,
+        result: &'a ScanResult,
+    },
+    ActionGuard(&'a ActionGuardMatch),
+}
+
+fn deny_hook_with_log(
+    repo_root: &Path,
+    log_blocked: bool,
+    tool: AiTool,
+    event: hook_output::HookEvent,
+    reason: &str,
+    block_log: BlockLog<'_>,
+) -> Result<()> {
+    if log_blocked {
+        let append_result = match block_log {
+            BlockLog::Scan {
+                display_path,
+                result,
+            } => hook_audit_log::append_blocked_scan(repo_root, tool, event, display_path, result),
+            BlockLog::ActionGuard(guard_match) => {
+                hook_audit_log::append_blocked_action_guard(repo_root, tool, event, guard_match)
+            }
+        };
+        if let Err(err) = append_result {
+            eprintln!("shk blocked: unable to write .shk/audit.log: {err:#}");
+        }
+    }
+    deny_hook(tool, event, reason)
+}
+
+fn emit_post_hook_result(tool: AiTool, hook_event: hook_output::HookEvent, res: &ScanResult) {
+    if res.findings.is_empty() {
+        println!(
+            "{}",
+            hook_output::allow_stdout_for_event(tool, hook_event, None)
+        );
+        return;
+    }
+
+    let hint = format!(
+        "shk: {} finding(s) in tool output — review before using ({} suppressed, {} deduplicated)",
+        res.findings.len(),
+        res.suppressed,
+        res.deduplicated,
+    );
+    eprintln!("{hint}");
+    println!(
+        "{}",
+        hook_output::allow_stdout_for_event(tool, hook_event, Some(&hint))
+    );
 }
 
 fn action_guard_config_from_policy(policy: &Policy) -> shk_integrations::ActionGuardConfig {
@@ -260,6 +335,10 @@ fn action_guard_config_from_policy(policy: &Policy) -> shk_integrations::ActionG
     }
 }
 
+fn action_guard_deny_reason(guard_match: &ActionGuardMatch) -> String {
+    format!("shk action guard: {} blocked", guard_match.category)
+}
+
 fn should_run_action_guard(post: bool, audit: bool) -> bool {
     !post && !audit
 }
@@ -267,6 +346,7 @@ fn should_run_action_guard(post: bool, audit: bool) -> bool {
 fn run_user_prompt_mode(
     tool: AiTool,
     audit: bool,
+    log_blocked: bool,
     fail_on: Option<SeverityArg>,
     repo_root: &Path,
     stdin_trim: &str,
@@ -285,7 +365,7 @@ fn run_user_prompt_mode(
         .context("user-prompt scan failed")?;
 
     if audit {
-        emit_audit_hook(repo_root, tool, event, "<user-prompt>", &res)?;
+        hook_audit_log::append_audit_hook(repo_root, tool, event, "<user-prompt>", &res)?;
         println!(
             "{}",
             hook_output::allow_stdout_for_event(
@@ -298,7 +378,17 @@ fn run_user_prompt_mode(
     }
 
     if res.should_fail() {
-        return deny_hook(tool, event, HOOK_DENY_REASON_DEFAULT);
+        return deny_hook_with_log(
+            repo_root,
+            log_blocked,
+            tool,
+            event,
+            HOOK_DENY_REASON_DEFAULT,
+            BlockLog::Scan {
+                display_path: "<user-prompt>",
+                result: &res,
+            },
+        );
     }
 
     println!("{}", hook_output::allow_stdout_for_event(tool, event, None));
@@ -344,41 +434,6 @@ fn hook_event_from_stdin(stdin: &str, post: bool) -> hook_output::HookEvent {
         Some("PermissionRequest") => hook_output::HookEvent::PermissionRequest,
         Some("UserPromptSubmit") => hook_output::HookEvent::UserPromptSubmit,
         _ => hook_output::HookEvent::PreToolUse,
-    }
-}
-
-fn emit_audit_hook(
-    repo_root: &Path,
-    tool: AiTool,
-    event: hook_output::HookEvent,
-    disp: &str,
-    res: &shk_core::scanner::ScanResult,
-) -> Result<()> {
-    let max_sev = res.max_severity().map(|s| s.as_str());
-    audit_log::append_line(
-        repo_root,
-        serde_json::json!({
-            "tool": tool.kebab_str(),
-            "hook": audit_hook_name(event),
-            "display_path": disp,
-            "finding_count": res.findings.len(),
-            "suppressed": res.suppressed,
-            "deduplicated": res.deduplicated,
-            "max_severity": max_sev,
-        }),
-    )?;
-    eprintln!(
-        "{}",
-        hook_output::audit_note(res.findings.len(), res.suppressed, max_sev),
-    );
-    Ok(())
-}
-
-fn audit_hook_name(event: hook_output::HookEvent) -> &'static str {
-    match event {
-        hook_output::HookEvent::PostToolUse => "post",
-        hook_output::HookEvent::UserPromptSubmit => "user-prompt",
-        hook_output::HookEvent::PreToolUse | hook_output::HookEvent::PermissionRequest => "pre",
     }
 }
 

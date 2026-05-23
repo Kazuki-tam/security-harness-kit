@@ -52,6 +52,27 @@ gh attestation verify shk-cli-x86_64-unknown-linux-gnu.tar.xz \
 
 Release assets are also covered by GitHub artifact attestations.
 
+## Verified Archive Install
+
+For CI or security-sensitive environments, install from a pinned release tag and verify both the checksum and GitHub artifact attestation before placing the binary on `PATH`:
+
+```bash
+version=v0.3.5
+target=x86_64-unknown-linux-gnu
+asset="shk-cli-${target}.tar.xz"
+repo=Kazuki-tam/security-harness-kit
+
+gh release download "$version" -R "$repo" -p "$asset" -p "${asset}.sha256"
+shasum -a 256 -c "${asset}.sha256"
+gh attestation verify "$asset" -R "$repo"
+
+tmp="$(mktemp -d)"
+tar -xJf "$asset" -C "$tmp"
+install -m 755 "$tmp/shk-cli-${target}/shk" "$HOME/.cargo/bin/shk"
+```
+
+Replace `target` with the archive that matches your platform. Avoid `latest` in CI so builds are reproducible and reviewable.
+
 ## Homebrew
 
 macOS and Linux releases include a generated Homebrew formula (`shk-cli.rb`) as a release asset. To install from the latest release asset:
@@ -64,9 +85,17 @@ To install a pinned release, replace `latest/download` with `download/<tag>` (e.
 
 Intel macOS, Apple Silicon macOS, Linux x86_64/aarch64, and Windows x86_64 are supported. Scoop manifests are not published by the current `dist`-based release pipeline.
 
+## Desktop App Releases
+
+Desktop installers are published from `desktop-vX.Y.Z` or `shk-vX.Y.Z` tags as
+`shk-desktop_*` assets. macOS desktop installers are Developer ID signed,
+notarized, stapled, and verified during release. Windows desktop installers are
+Authenticode-signed and verified during release. Maintainer release requirements
+are documented in [`desktop-release.md`](desktop-release.md).
+
 ## Build From Source
 
-Building from source requires Rust 1.85 or newer.
+Building from source requires Rust 1.88 or newer.
 
 ```bash
 git clone https://github.com/Kazuki-tam/security-harness-kit.git

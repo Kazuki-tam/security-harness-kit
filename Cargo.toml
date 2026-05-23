@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "apps/shk-desktop/src-tauri",
     "crates/shk-core",
     "crates/shk-rules",
     "crates/shk-cli",
@@ -9,12 +10,12 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.4"
+version = "0.3.5"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Kazuki-tam/security-harness-kit"
 homepage = "https://github.com/Kazuki-tam/security-harness-kit"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [workspace.dependencies]
 anyhow = "1.0"

@@ -14,11 +14,35 @@ const HOOK_CLI_TIMEOUT_SEC: u64 = 30;
 #[derive(Clone, Copy, Debug)]
 pub struct InstallAiOptions {
     pub audit: bool,
+    pub log_blocked: bool,
     pub dry_run: bool,
     pub global: bool,
     pub fail_closed: bool,
     pub apply_deny: bool,
     pub apply_sandbox: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ConfigureAiOptions {
+    pub audit: bool,
+    pub log_blocked: bool,
+    pub dry_run: bool,
+    pub global: bool,
+    pub fail_closed: bool,
+    pub scan_hooks_claude_code: bool,
+    pub scan_hooks_cursor: bool,
+    pub scan_hooks_codex: bool,
+    pub claude_deny: bool,
+    pub claude_sandbox: bool,
+    pub codex_sandbox: bool,
+}
+
+fn scan_hooks_enabled_for(opts: &ConfigureAiOptions, tool: AiTool) -> bool {
+    match tool {
+        AiTool::ClaudeCode => opts.scan_hooks_claude_code,
+        AiTool::Cursor => opts.scan_hooks_cursor,
+        AiTool::Codex => opts.scan_hooks_codex,
+    }
 }
 
 fn home_or_error() -> Result<PathBuf> {
@@ -42,31 +66,50 @@ fn resolve_ai_config_path(tool: AiTool, cwd: &Path, global: bool) -> Result<Path
     })
 }
 
-fn hook_scan_cli_command(tool: AiTool, audit: bool, post: bool) -> String {
-    hook_scan_cli_command_with_fail_on(tool, audit, post, None)
+fn hook_scan_cli_command(tool: AiTool, audit: bool, log_blocked: bool, post: bool) -> String {
+    hook_scan_cli_command_with_fail_on(tool, audit, log_blocked, post, None)
 }
 
 fn hook_scan_cli_command_with_fail_on(
     tool: AiTool,
     audit: bool,
+    log_blocked: bool,
     post: bool,
     fail_on: Option<&str>,
 ) -> String {
     let suf_audit = if audit { " --audit" } else { "" };
+    let suf_log_blocked = if log_blocked && !audit {
+        " --log-blocked"
+    } else {
+        ""
+    };
     let suf_post = if post { " --post" } else { "" };
     let suf_fail_on = fail_on
         .map(|severity| format!(" --fail-on {severity}"))
         .unwrap_or_default();
     format!(
-        "shk scan --hook-mode {}{}{}{}",
+        "shk scan --hook-mode {}{}{}{}{}",
         tool.kebab_str(),
         suf_audit,
+        suf_log_blocked,
         suf_post,
         suf_fail_on,
     )
 }
 
 pub fn install_ai(cwd: &Path, maybe_tool: Option<AiTool>, opts: InstallAiOptions) -> Result<()> {
+    let summaries = install_ai_with_summaries(cwd, maybe_tool, opts)?;
+    for summary in summaries {
+        println!("{summary}");
+    }
+    Ok(())
+}
+
+pub fn install_ai_with_summaries(
+    cwd: &Path,
+    maybe_tool: Option<AiTool>,
+    opts: InstallAiOptions,
+) -> Result<Vec<String>> {
     let tools = if let Some(t) = maybe_tool {
         vec![t]
     } else {
@@ -74,33 +117,115 @@ pub fn install_ai(cwd: &Path, maybe_tool: Option<AiTool>, opts: InstallAiOptions
     };
 
     println!(
-        "shk hooks install-ai (global={}, audit={}, dry-run={}, apply-sandbox={})",
-        opts.global, opts.audit, opts.dry_run, opts.apply_sandbox
+        "shk hooks install-ai (global={}, audit={}, log-blocked={}, dry-run={}, apply-sandbox={})",
+        opts.global, opts.audit, opts.log_blocked, opts.dry_run, opts.apply_sandbox
     );
     let cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let mut summaries = Vec::new();
 
     for t in tools {
         let path = resolve_ai_config_path(t, &cwd, opts.global)?;
-        let summary = match t {
-            AiTool::ClaudeCode => apply_claude(
-                &path,
-                opts.audit,
-                opts.dry_run,
-                opts.apply_deny,
-                opts.apply_sandbox,
-                !opts.global,
-            )?,
-            AiTool::Cursor => apply_cursor(
-                &path,
-                opts.audit,
-                opts.dry_run,
-                opts.fail_closed || opts.apply_sandbox,
-            )?,
-            AiTool::Codex => apply_codex(&path, opts.audit, opts.dry_run, opts.apply_sandbox)?,
-        };
-        println!("{}: {}", path.display(), summary.trim_end_matches('\n'));
+        let summary = apply_tool(&path, t, opts, !opts.global)?;
+        summaries.push(format!("{}: {}", path.display(), summary.trim()));
     }
-    Ok(())
+    Ok(summaries)
+}
+
+pub fn configure_ai_with_summaries(cwd: &Path, opts: ConfigureAiOptions) -> Result<Vec<String>> {
+    let cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let mut summaries = Vec::new();
+    let install_opts = InstallAiOptions {
+        audit: opts.audit,
+        log_blocked: opts.log_blocked,
+        dry_run: opts.dry_run,
+        global: opts.global,
+        fail_closed: opts.fail_closed,
+        apply_deny: false,
+        apply_sandbox: false,
+    };
+
+    for tool in [AiTool::ClaudeCode, AiTool::Codex, AiTool::Cursor] {
+        let path = resolve_ai_config_path(tool, &cwd, opts.global)?;
+        if scan_hooks_enabled_for(&opts, tool) {
+            let summary = apply_tool(&path, tool, install_opts, !opts.global)?;
+            summaries.push(format!("{}: {}", path.display(), summary.trim()));
+        } else if path.is_file() {
+            summaries.push(format!(
+                "{}: {}",
+                path.display(),
+                remove_scan_hooks_for_tool(&path, tool, opts.dry_run)?.trim()
+            ));
+        }
+    }
+
+    let claude_path = resolve_ai_config_path(AiTool::ClaudeCode, &cwd, opts.global)?;
+    if opts.claude_deny || opts.claude_sandbox || claude_path.is_file() {
+        let claude_summary = configure_claude_safety(
+            &claude_path,
+            opts.dry_run,
+            opts.claude_deny,
+            opts.claude_sandbox,
+            !opts.global,
+        )?;
+        summaries.push(format!(
+            "{}: {}",
+            claude_path.display(),
+            claude_summary.trim()
+        ));
+    }
+
+    let codex_path = resolve_ai_config_path(AiTool::Codex, &cwd, opts.global)?;
+    if opts.codex_sandbox || codex_path.is_file() {
+        let codex_summary = configure_codex_sandbox(&codex_path, opts.dry_run, opts.codex_sandbox)?;
+        summaries.push(format!(
+            "{}: {}",
+            codex_path.display(),
+            codex_summary.trim()
+        ));
+    }
+
+    Ok(summaries)
+}
+
+fn apply_tool(
+    path: &Path,
+    tool: AiTool,
+    opts: InstallAiOptions,
+    restrict_sandbox_reads_to_project: bool,
+) -> Result<String> {
+    match tool {
+        AiTool::ClaudeCode => apply_claude(
+            path,
+            opts.audit,
+            opts.log_blocked,
+            opts.dry_run,
+            opts.apply_deny,
+            opts.apply_sandbox,
+            restrict_sandbox_reads_to_project,
+        ),
+        AiTool::Cursor => apply_cursor(
+            path,
+            opts.audit,
+            opts.log_blocked,
+            opts.dry_run,
+            opts.fail_closed || opts.apply_sandbox,
+        ),
+        AiTool::Codex => apply_codex(
+            path,
+            opts.audit,
+            opts.log_blocked,
+            opts.dry_run,
+            opts.apply_sandbox,
+        ),
+    }
+}
+
+fn remove_scan_hooks_for_tool(path: &Path, tool: AiTool, dry_run: bool) -> Result<String> {
+    match tool {
+        AiTool::ClaudeCode => remove_claude_scan_hooks(path, dry_run),
+        AiTool::Cursor => remove_cursor_scan_hooks(path, dry_run),
+        AiTool::Codex => remove_codex_scan_hooks(path, dry_run),
+    }
 }
 
 fn save_json_formatted(path: &Path, v: &Value, dry_run: bool) -> Result<()> {
@@ -141,6 +266,18 @@ fn push_managed_claude(root: &mut Value, key: &str, block: Value) -> Result<()> 
     Ok(())
 }
 
+fn remove_managed_claude(root: &mut Value, key: &str) -> Result<usize> {
+    let Some(hooks_obj) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return Ok(0);
+    };
+    let Some(arr) = hooks_obj.get_mut(key).and_then(Value::as_array_mut) else {
+        return Ok(0);
+    };
+    let before = arr.len();
+    arr.retain(|b| !is_managed_claude_block(b));
+    Ok(before - arr.len())
+}
+
 fn merge_claude_permissions_deny(root: &mut Value) -> Result<usize> {
     let obj = root
         .as_object_mut()
@@ -178,6 +315,27 @@ fn merge_claude_permissions_deny(root: &mut Value) -> Result<usize> {
     Ok(added)
 }
 
+fn remove_claude_permissions_deny(root: &mut Value) -> Result<usize> {
+    let Some(deny_arr) = root
+        .pointer_mut("/permissions/deny")
+        .and_then(Value::as_array_mut)
+    else {
+        return Ok(0);
+    };
+    let recommended: HashSet<&'static str> = shk_integrations::claude_recommended_deny_entries()
+        .iter()
+        .copied()
+        .collect();
+    let before = deny_arr.len();
+    deny_arr.retain(|entry| {
+        entry
+            .as_str()
+            .map(|entry| !recommended.contains(entry))
+            .unwrap_or(true)
+    });
+    Ok(before - deny_arr.len())
+}
+
 fn merge_claude_sandbox(root: &mut Value, restrict_reads_to_project: bool) -> Result<()> {
     let obj = root
         .as_object_mut()
@@ -202,6 +360,37 @@ fn merge_claude_sandbox(root: &mut Value, restrict_reads_to_project: bool) -> Re
     Ok(())
 }
 
+fn remove_claude_sandbox(root: &mut Value) -> usize {
+    let Some(obj) = root.as_object_mut() else {
+        return 0;
+    };
+    let Some(sandbox) = obj.get_mut("sandbox").and_then(Value::as_object_mut) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for key in [
+        "enabled",
+        "failIfUnavailable",
+        "autoAllowBashIfSandboxed",
+        "allowUnsandboxedCommands",
+    ] {
+        if sandbox.remove(key).is_some() {
+            removed += 1;
+        }
+    }
+    if let Some(filesystem) = sandbox.get_mut("filesystem").and_then(Value::as_object_mut) {
+        removed += remove_json_string_array_item(filesystem, "denyRead", "~/");
+        removed += remove_json_string_array_item(filesystem, "allowRead", ".");
+        if filesystem.is_empty() {
+            sandbox.remove("filesystem");
+        }
+    }
+    if sandbox.is_empty() {
+        obj.remove("sandbox");
+    }
+    removed
+}
+
 fn merge_json_string_array(
     obj: &mut serde_json::Map<String, Value>,
     key: &str,
@@ -219,18 +408,42 @@ fn merge_json_string_array(
     }
 }
 
+#[allow(dead_code)]
+fn remove_json_string_array_item(
+    obj: &mut serde_json::Map<String, Value>,
+    key: &str,
+    item: &str,
+) -> usize {
+    let Some(arr) = obj.get_mut(key).and_then(Value::as_array_mut) else {
+        return 0;
+    };
+    let before = arr.len();
+    arr.retain(|existing| existing.as_str() != Some(item));
+    let removed = before - arr.len();
+    if arr.is_empty() {
+        obj.remove(key);
+    }
+    removed
+}
+
 fn apply_claude(
     path: &Path,
     audit: bool,
+    log_blocked: bool,
     dry_run: bool,
     apply_deny: bool,
     apply_sandbox: bool,
     restrict_sandbox_reads_to_project: bool,
 ) -> Result<String> {
-    let pre = hook_scan_cli_command(AiTool::ClaudeCode, audit, false);
-    let post = hook_scan_cli_command(AiTool::ClaudeCode, audit, true);
-    let user_prompt =
-        hook_scan_cli_command_with_fail_on(AiTool::ClaudeCode, audit, false, Some("medium"));
+    let pre = hook_scan_cli_command(AiTool::ClaudeCode, audit, log_blocked, false);
+    let post = hook_scan_cli_command(AiTool::ClaudeCode, audit, log_blocked, true);
+    let user_prompt = hook_scan_cli_command_with_fail_on(
+        AiTool::ClaudeCode,
+        audit,
+        log_blocked,
+        false,
+        Some("medium"),
+    );
 
     let mut root = if path.is_file() {
         load_json(path)?
@@ -268,11 +481,70 @@ fn apply_claude(
     save_json_formatted(path, &root, dry_run)?;
     Ok(if dry_run {
         format!(
-            "dry-run: would write managed UserPromptSubmit/PreToolUse/PostToolUse blocks (audit={audit}, applyDeny={apply_deny}, applySandbox={apply_sandbox}, denyAdded={deny_added})"
+            "dry-run: would write managed UserPromptSubmit/PreToolUse/PostToolUse blocks (audit={audit}, logBlocked={log_blocked}, applyDeny={apply_deny}, applySandbox={apply_sandbox}, denyAdded={deny_added})"
         )
     } else {
         format!(
-            "wrote managed blocks (audit={audit}, applyDeny={apply_deny}, applySandbox={apply_sandbox}, denyAdded={deny_added})"
+            "wrote managed blocks (audit={audit}, logBlocked={log_blocked}, applyDeny={apply_deny}, applySandbox={apply_sandbox}, denyAdded={deny_added})"
+        )
+    })
+}
+
+#[allow(dead_code)]
+fn remove_claude_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
+    if !path.is_file() {
+        return Ok("no Claude settings file".to_string());
+    }
+    let mut root = load_json(path)?;
+    let removed = remove_managed_claude(&mut root, "UserPromptSubmit")?
+        + remove_managed_claude(&mut root, "PreToolUse")?
+        + remove_managed_claude(&mut root, "PostToolUse")?;
+    save_json_formatted(path, &root, dry_run)?;
+    Ok(if dry_run {
+        format!("dry-run: would remove {removed} managed Claude hook block(s)")
+    } else {
+        format!("removed {removed} managed Claude hook block(s)")
+    })
+}
+
+fn configure_claude_safety(
+    path: &Path,
+    dry_run: bool,
+    enable_deny: bool,
+    enable_sandbox: bool,
+    restrict_sandbox_reads_to_project: bool,
+) -> Result<String> {
+    if !enable_deny && !enable_sandbox && !path.is_file() {
+        return Ok("no Claude settings file".to_string());
+    }
+    let mut root = if path.is_file() {
+        load_json(path)?
+    } else {
+        json!({})
+    };
+
+    let deny_count = if enable_deny {
+        merge_claude_permissions_deny(&mut root)?
+    } else {
+        remove_claude_permissions_deny(&mut root)?
+    };
+    let sandbox_changed = if enable_sandbox {
+        merge_claude_sandbox(&mut root, restrict_sandbox_reads_to_project)?;
+        1
+    } else {
+        remove_claude_sandbox(&mut root)
+    };
+
+    if path.is_file() || enable_deny || enable_sandbox {
+        save_json_formatted(path, &root, dry_run)?;
+    }
+    Ok(if dry_run {
+        format!(
+            "dry-run: would sync Claude safety (denyEnabled={enable_deny}, sandboxEnabled={enable_sandbox}, denyAdded={deny_count}, sandboxChanged={sandbox_changed})"
+        )
+    } else {
+        format!(
+            "synced Claude safety (denyEnabled={enable_deny}, sandboxEnabled={enable_sandbox}, denyAdded={deny_count}, sandboxChanged={sandbox_changed})"
         )
     })
 }
@@ -281,7 +553,13 @@ fn is_managed_cursor_entry(entry: &Value) -> bool {
     entry.get("_shk_managed") == Some(&json!(true))
 }
 
-fn apply_cursor(path: &Path, audit: bool, dry_run: bool, fail_closed: bool) -> Result<String> {
+fn apply_cursor(
+    path: &Path,
+    audit: bool,
+    log_blocked: bool,
+    dry_run: bool,
+    fail_closed: bool,
+) -> Result<String> {
     const KEYS: &[&str] = &[
         "beforeReadFile",
         "beforeShellExecution",
@@ -289,7 +567,7 @@ fn apply_cursor(path: &Path, audit: bool, dry_run: bool, fail_closed: bool) -> R
         "beforeSubmitPrompt",
     ];
 
-    let cmd = hook_scan_cli_command(AiTool::Cursor, audit, false);
+    let cmd = hook_scan_cli_command(AiTool::Cursor, audit, log_blocked, false);
     let entry = json!({
         "command": cmd,
         "timeout": HOOK_CLI_TIMEOUT_SEC,
@@ -328,16 +606,50 @@ fn apply_cursor(path: &Path, audit: bool, dry_run: bool, fail_closed: bool) -> R
     save_json_formatted(path, &root, dry_run)?;
     Ok(if dry_run {
         format!(
-            "dry-run: would write managed before* hooks (audit={audit}, failClosed={fail_closed})"
+            "dry-run: would write managed before* hooks (audit={audit}, logBlocked={log_blocked}, failClosed={fail_closed})"
         )
     } else {
-        format!("wrote managed before* hooks (audit={audit}, failClosed={fail_closed})")
+        format!(
+            "wrote managed before* hooks (audit={audit}, logBlocked={log_blocked}, failClosed={fail_closed})"
+        )
     })
 }
 
-fn codex_managed_block(audit_pre: bool, audit_post: bool) -> String {
-    let pre = hook_scan_cli_command(AiTool::Codex, audit_pre, false);
-    let post = hook_scan_cli_command(AiTool::Codex, audit_post, true);
+#[allow(dead_code)]
+fn remove_cursor_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
+    const KEYS: &[&str] = &[
+        "beforeReadFile",
+        "beforeShellExecution",
+        "beforeMCPExecution",
+        "beforeSubmitPrompt",
+    ];
+    if !path.is_file() {
+        return Ok("no Cursor hooks file".to_string());
+    }
+    let mut root = load_json(path)?;
+    let hooks = root
+        .get_mut("hooks")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow::anyhow!("hooks must be an object"))?;
+    let mut removed = 0;
+    for key in KEYS {
+        if let Some(arr) = hooks.get_mut(*key).and_then(Value::as_array_mut) {
+            let before = arr.len();
+            arr.retain(|e| !is_managed_cursor_entry(e));
+            removed += before - arr.len();
+        }
+    }
+    save_json_formatted(path, &root, dry_run)?;
+    Ok(if dry_run {
+        format!("dry-run: would remove {removed} managed Cursor hook entry(s)")
+    } else {
+        format!("removed {removed} managed Cursor hook entry(s)")
+    })
+}
+
+fn codex_managed_block(audit_pre: bool, log_blocked: bool, audit_post: bool) -> String {
+    let pre = hook_scan_cli_command(AiTool::Codex, audit_pre, log_blocked, false);
+    let post = hook_scan_cli_command(AiTool::Codex, audit_post, log_blocked, true);
     format!(
         "# shk-managed-start
 [[hooks.PreToolUse]]
@@ -380,16 +692,69 @@ fn codex_managed_block_regex() -> &'static Regex {
 }
 
 fn ensure_codex_features_prefix(content: &str) -> String {
-    let trimmed = content.trim_start();
-    if trimmed.contains("codex_hooks") {
-        content.to_string()
-    } else {
-        format!("[features]\ncodex_hooks = true\n\n{}", content.trim_start())
+    let mut lines: Vec<String> = content.lines().map(ToOwned::to_owned).collect();
+
+    if let Some(features_idx) = lines.iter().position(|line| line.trim() == "[features]") {
+        let section_end = lines
+            .iter()
+            .enumerate()
+            .skip(features_idx + 1)
+            .find(|(_, line)| line.trim_start().starts_with('['))
+            .map(|(idx, _)| idx)
+            .unwrap_or(lines.len());
+        if let Some(idx) = (features_idx + 1..section_end).find(|idx| {
+            lines[*idx]
+                .trim()
+                .split_once('=')
+                .map(|(key, _)| key.trim() == "codex_hooks")
+                .unwrap_or(false)
+        }) {
+            lines[idx] = "codex_hooks = true".to_string();
+        } else {
+            lines.insert(section_end, "codex_hooks = true".to_string());
+        }
+        return finish_text_lines(lines, content.ends_with('\n'));
     }
+
+    let insert_at = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with('['))
+        .unwrap_or(lines.len());
+    let block = ["[features]".to_string(), "codex_hooks = true".to_string()];
+    if insert_at == 0 {
+        lines.splice(0..0, block);
+        lines.insert(2, String::new());
+    } else if insert_at == lines.len() {
+        if !lines.is_empty() && !lines.last().is_some_and(|line| line.is_empty()) {
+            lines.push(String::new());
+        }
+        lines.extend(block);
+    } else {
+        if !lines[insert_at - 1].is_empty() {
+            lines.insert(insert_at, String::new());
+        }
+        lines.splice(insert_at..insert_at, block);
+        lines.insert(insert_at + 2, String::new());
+    }
+    finish_text_lines(lines, true)
 }
 
-fn apply_codex(path: &Path, audit: bool, dry_run: bool, apply_sandbox: bool) -> Result<String> {
-    let block = codex_managed_block(audit, audit);
+fn finish_text_lines(lines: Vec<String>, trailing_newline: bool) -> String {
+    let mut output = lines.join("\n");
+    if trailing_newline && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output
+}
+
+fn apply_codex(
+    path: &Path,
+    audit: bool,
+    log_blocked: bool,
+    dry_run: bool,
+    apply_sandbox: bool,
+) -> Result<String> {
+    let block = codex_managed_block(audit, log_blocked, audit);
     let re = codex_managed_block_regex();
 
     let prev = if path.is_file() {
@@ -433,6 +798,51 @@ fn apply_codex(path: &Path, audit: bool, dry_run: bool, apply_sandbox: bool) -> 
     ))
 }
 
+#[allow(dead_code)]
+fn remove_codex_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
+    if !path.is_file() {
+        return Ok("no Codex config file".to_string());
+    }
+    let existing = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let re = codex_managed_block_regex();
+    let updated = re.replace(&existing, "").to_string();
+    if !dry_run && updated != existing {
+        fs::write(path, &updated).with_context(|| format!("write {}", path.display()))?;
+    }
+    Ok(if dry_run {
+        "dry-run: would remove Codex managed hook block".to_string()
+    } else {
+        "removed Codex managed hook block".to_string()
+    })
+}
+
+fn configure_codex_sandbox(path: &Path, dry_run: bool, enabled: bool) -> Result<String> {
+    if !path.is_file() && !enabled {
+        return Ok("no Codex sandbox settings to remove".to_string());
+    }
+    let existing = if path.is_file() {
+        fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?
+    } else {
+        String::new()
+    };
+    let updated = if enabled {
+        ensure_codex_sandbox_settings(&existing)
+    } else {
+        remove_codex_sandbox_settings(&existing)
+    };
+    if !dry_run && updated != existing {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        }
+        fs::write(path, &updated).with_context(|| format!("write {}", path.display()))?;
+    }
+    Ok(if dry_run {
+        format!("dry-run: would configure Codex sandbox (enabled={enabled})")
+    } else {
+        format!("configured Codex sandbox (enabled={enabled})")
+    })
+}
+
 fn ensure_codex_sandbox_settings(content: &str) -> String {
     let content = ensure_top_level_string_setting(
         content,
@@ -441,6 +851,12 @@ fn ensure_codex_sandbox_settings(content: &str) -> String {
         &["danger-full-access"],
     );
     ensure_top_level_string_setting(&content, "approval_policy", "on-request", &["never"])
+}
+
+#[allow(dead_code)]
+fn remove_codex_sandbox_settings(content: &str) -> String {
+    let content = remove_top_level_string_setting(content, "sandbox_mode", &["workspace-write"]);
+    remove_top_level_string_setting(&content, "approval_policy", &["on-request"])
 }
 
 fn ensure_top_level_string_setting(
@@ -472,6 +888,32 @@ fn ensure_top_level_string_setting(
     format!(r#"{key} = "{desired}""#) + "\n" + content.trim_start()
 }
 
+fn remove_top_level_string_setting(content: &str, key: &str, removable_values: &[&str]) -> String {
+    let mut lines: Vec<String> = content.lines().map(ToOwned::to_owned).collect();
+    for idx in 0..lines.len() {
+        let trimmed = lines[idx].trim();
+        if trimmed.starts_with('[') {
+            break;
+        }
+        let Some((raw_key, raw_value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if raw_key.trim() != key {
+            continue;
+        }
+        let current = parse_toml_string_value(raw_value).unwrap_or_else(|| raw_value.trim());
+        if removable_values.contains(&current) {
+            lines.remove(idx);
+        }
+        break;
+    }
+    let mut output = lines.join("\n");
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output
+}
+
 fn parse_toml_string_value(raw: &str) -> Option<&str> {
     let value = raw.trim();
     let rest = value.strip_prefix('"')?;
@@ -493,8 +935,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hooks.json");
 
-        apply_cursor(&path, false, false, false).unwrap();
-        apply_cursor(&path, false, false, true).unwrap();
+        apply_cursor(&path, false, false, false, false).unwrap();
+        apply_cursor(&path, false, false, false, true).unwrap();
 
         let root: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
         for key in [
@@ -510,12 +952,34 @@ mod tests {
     }
 
     #[test]
+    fn hook_scan_cli_command_includes_log_blocked_when_enabled() {
+        let cmd = hook_scan_cli_command(AiTool::Cursor, false, true, false);
+        assert!(cmd.contains("--log-blocked"), "{cmd}");
+        assert!(!cmd.contains("--audit"), "{cmd}");
+    }
+
+    #[test]
+    fn hook_scan_cli_command_omits_log_blocked_in_audit_mode() {
+        let cmd = hook_scan_cli_command(AiTool::Cursor, true, true, false);
+        assert!(cmd.contains("--audit"), "{cmd}");
+        assert!(!cmd.contains("--log-blocked"), "{cmd}");
+    }
+
+    #[test]
+    fn hook_scan_cli_command_includes_log_blocked_for_all_tools() {
+        for tool in [AiTool::ClaudeCode, AiTool::Codex, AiTool::Cursor] {
+            let cmd = hook_scan_cli_command(tool, false, true, false);
+            assert!(cmd.contains("--log-blocked"), "{cmd}");
+        }
+    }
+
+    #[test]
     fn codex_managed_block_is_replaced_on_rerun() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
-        apply_codex(&path, false, false, false).unwrap();
-        apply_codex(&path, true, false, false).unwrap();
+        apply_codex(&path, false, false, false, false).unwrap();
+        apply_codex(&path, true, false, false, false).unwrap();
 
         let body = fs::read_to_string(path).unwrap();
         assert_eq!(body.matches("# shk-managed-start").count(), 1, "{body}");
@@ -616,6 +1080,24 @@ approval_policy = "untrusted"
     }
 
     #[test]
+    fn codex_features_do_not_capture_top_level_settings() {
+        let body = ensure_codex_features_prefix(
+            r#"model = "gpt-5"
+sandbox_mode = "workspace-write"
+
+[profiles.default]
+approval_policy = "on-request"
+"#,
+        );
+
+        assert!(body.starts_with("model = \"gpt-5\"\n"), "{body}");
+        assert!(
+            body.contains("sandbox_mode = \"workspace-write\"\n\n[features]\ncodex_hooks = true\n\n[profiles.default]"),
+            "{body}"
+        );
+    }
+
+    #[test]
     fn codex_sandbox_settings_ignore_profile_scoped_values() {
         let body = ensure_codex_sandbox_settings(
             r#"
@@ -633,5 +1115,59 @@ sandbox_mode = "danger-full-access"
             "{body}"
         );
         assert!(body.contains("[profiles.dev]"), "{body}");
+    }
+
+    #[test]
+    fn configure_ai_selection_syncs_only_selected_claude_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_dir = dir.path().join(".claude");
+        fs::create_dir_all(&settings_dir).unwrap();
+        let settings_path = settings_dir.join("settings.json");
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "_shk_managed": true,
+                        "matcher": "Read",
+                        "hooks": [{ "type": "command", "command": "shk scan --hook-mode claude-code" }]
+                    }],
+                    "PostToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{ "type": "command", "command": "echo keep-me" }]
+                    }]
+                },
+                "permissions": {
+                    "deny": ["Bash(rm -rf *)"]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        configure_ai_with_summaries(
+            dir.path(),
+            ConfigureAiOptions {
+                audit: false,
+                log_blocked: false,
+                dry_run: false,
+                global: false,
+                fail_closed: false,
+                scan_hooks_claude_code: false,
+                scan_hooks_cursor: false,
+                scan_hooks_codex: false,
+                claude_deny: false,
+                claude_sandbox: true,
+                codex_sandbox: false,
+            },
+        )
+        .unwrap();
+
+        let root: Value =
+            serde_json::from_str(&fs::read_to_string(settings_path).unwrap()).unwrap();
+        assert_eq!(root["hooks"]["PreToolUse"].as_array().unwrap().len(), 0);
+        assert_eq!(root["hooks"]["PostToolUse"].as_array().unwrap().len(), 1);
+        assert_eq!(root["permissions"]["deny"][0], "Bash(rm -rf *)");
+        assert_eq!(root["sandbox"]["enabled"], true);
     }
 }
