@@ -6,7 +6,8 @@ use shk_cli::desktop_api::{
 use shk_core::ScanJsonReport;
 use shk_core::policy::ColorMode;
 use shk_core::scanner::{ScanOptions, scan_path as scan_target_path};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use tauri::async_runtime::spawn_blocking;
 
 #[derive(Debug, thiserror::Error)]
@@ -137,6 +138,190 @@ async fn audit_report(
     run_blocking(move || desktop_api::audit_report(&path, options).map_err(map_err)).await
 }
 
+#[derive(Debug, Clone, Copy)]
+enum IdeKind {
+    Cursor,
+    Vscode,
+    Antigravity,
+}
+
+impl IdeKind {
+    fn parse(raw: &str) -> Result<Self, AppError> {
+        match raw {
+            "cursor" => Ok(Self::Cursor),
+            "vscode" => Ok(Self::Vscode),
+            "antigravity" => Ok(Self::Antigravity),
+            other => Err(AppError::Message(format!("unsupported IDE: {other}"))),
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::Cursor => "Cursor",
+            Self::Vscode => "VS Code",
+            Self::Antigravity => "Antigravity",
+        }
+    }
+
+    fn cli_command(self) -> &'static str {
+        match self {
+            Self::Cursor => "cursor",
+            Self::Vscode => "code",
+            Self::Antigravity => "antigravity",
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn mac_app_names(self) -> &'static [&'static str] {
+        match self {
+            Self::Cursor => &["Cursor"],
+            Self::Vscode => &["Visual Studio Code", "Code"],
+            Self::Antigravity => &["Antigravity", "Antigravity IDE", "Google Antigravity"],
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn windows_candidates(self) -> Vec<PathBuf> {
+        let local = std::env::var("LOCALAPPDATA").ok();
+        let program_files = std::env::var("ProgramFiles").ok();
+        match self {
+            Self::Cursor => {
+                let mut paths = Vec::new();
+                if let Some(local) = local {
+                    paths.push(
+                        PathBuf::from(local)
+                            .join("Programs")
+                            .join("cursor")
+                            .join("Cursor.exe"),
+                    );
+                }
+                paths
+            }
+            Self::Vscode => {
+                let mut paths = Vec::new();
+                if let Some(local) = local {
+                    paths.push(
+                        PathBuf::from(local)
+                            .join("Programs")
+                            .join("Microsoft VS Code")
+                            .join("Code.exe"),
+                    );
+                }
+                if let Some(program_files) = program_files {
+                    paths.push(
+                        PathBuf::from(program_files)
+                            .join("Microsoft VS Code")
+                            .join("Code.exe"),
+                    );
+                }
+                paths
+            }
+            Self::Antigravity => {
+                let mut paths = Vec::new();
+                if let Some(local) = local {
+                    paths.push(
+                        PathBuf::from(local)
+                            .join("Programs")
+                            .join("Antigravity")
+                            .join("Antigravity.exe"),
+                    );
+                }
+                if let Some(program_files) = program_files {
+                    paths.push(
+                        PathBuf::from(program_files)
+                            .join("Antigravity")
+                            .join("Antigravity.exe"),
+                    );
+                }
+                paths
+            }
+        }
+    }
+}
+
+fn run_command(mut command: Command) -> Result<(), AppError> {
+    let status = command
+        .status()
+        .map_err(|err| AppError::Message(format!("failed to launch editor: {err}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::Message(format!(
+            "editor process exited with status {status}"
+        )))
+    }
+}
+
+fn editor_command(program: impl AsRef<std::ffi::OsStr>, path: &Path) -> Command {
+    let mut command = Command::new(program);
+    command
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
+}
+
+fn launch_with_cli(path: &Path, ide: IdeKind) -> Result<(), AppError> {
+    run_command(editor_command(ide.cli_command(), path))
+}
+
+fn open_in_ide_path(path: &Path, ide: IdeKind) -> Result<(), AppError> {
+    if !path.exists() {
+        return Err(AppError::Message(format!(
+            "path does not exist: {}",
+            path.display()
+        )));
+    }
+
+    let mut errors = Vec::new();
+
+    #[cfg(target_os = "macos")]
+    for app_name in ide.mac_app_names() {
+        let mut command = Command::new("open");
+        command.arg("-a").arg(app_name).arg(path);
+        match command.status() {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => errors.push(format!("open -a {app_name} exited with {status}")),
+            Err(err) => errors.push(format!("open -a {app_name} failed: {err}")),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    for candidate in ide.windows_candidates() {
+        if !candidate.is_file() {
+            continue;
+        }
+        match run_command(editor_command(&candidate, path)) {
+            Ok(()) => return Ok(()),
+            Err(err) => errors.push(format!("{}: {err}", candidate.display())),
+        }
+    }
+
+    match launch_with_cli(path, ide) {
+        Ok(()) => return Ok(()),
+        Err(err) => errors.push(err.to_string()),
+    }
+
+    Err(AppError::Message(format!(
+        "could not open {} in {}. {}",
+        path.display(),
+        ide.display_name(),
+        errors.join("; ")
+    )))
+}
+
+#[tauri::command]
+async fn open_in_ide(path: String, ide: String) -> Result<(), AppError> {
+    let ide = IdeKind::parse(ide.trim())?;
+    if path.trim().is_empty() {
+        return Err(AppError::Message("path is empty".to_string()));
+    }
+
+    let path = PathBuf::from(path);
+    run_blocking(move || open_in_ide_path(&path, ide)).await
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -152,6 +337,7 @@ pub fn run() {
             apply_npm_hardening,
             install_skills,
             audit_report,
+            open_in_ide,
         ])
         .run(tauri::generate_context!())
         .expect("error while running shk desktop app");

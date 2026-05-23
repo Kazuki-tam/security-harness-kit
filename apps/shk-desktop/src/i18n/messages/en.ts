@@ -3,6 +3,7 @@ import type { Messages } from "../types";
 export const en: Messages = {
   app: {
     selectFolder: "Select folder to scan",
+    selectFolderForIde: "Select a folder to open in your editor",
   },
   common: {
     close: "Close",
@@ -29,6 +30,14 @@ export const en: Messages = {
     projectBreadcrumb: "Project /",
     welcome: "Welcome",
     openFolder: "Open folder",
+    openInIde: "Open in IDE",
+    openInIdeWith: "Open in {{ide}}",
+    preferredIde: "Open with",
+    ideNames: {
+      cursor: "Cursor",
+      vscode: "VS Code",
+      antigravity: "Antigravity",
+    },
   },
   welcome: {
     title: "Security Harness Kit",

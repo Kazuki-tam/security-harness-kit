@@ -1,21 +1,27 @@
-import { FolderOpen } from "lucide-react";
 import { useI18n } from "../i18n";
+import type { PreferredIde } from "../ide";
 import type { Project } from "../types";
-import { Button } from "./Button";
 import { LanguageSwitcher } from "./LanguageSwitcher";
+import { OpenInIdeMenu } from "./OpenInIdeMenu";
 
 type Props = {
   project: Project | null;
   reserveWindowControls?: boolean;
-  onOpenFolder: () => void;
+  preferredIde: PreferredIde;
+  onOpenInIde: (ide: PreferredIde) => void;
 };
 
-export function TopBar({ project, reserveWindowControls = false, onOpenFolder }: Props) {
+export function TopBar({
+  project,
+  reserveWindowControls = false,
+  preferredIde,
+  onOpenInIde,
+}: Props) {
   const { messages } = useI18n();
   const m = messages.topBar;
 
   return (
-    <div className="shk-drag flex h-11 shrink-0 items-center justify-between border-b border-border bg-surface/60 px-4 backdrop-blur">
+    <div className="shk-drag relative z-30 flex h-11 shrink-0 items-center justify-between border-b border-border bg-surface/60 px-4 backdrop-blur">
       <div
         className={`flex min-w-0 items-center gap-2 text-[12px] text-muted ${
           reserveWindowControls ? "pl-16" : ""
@@ -32,14 +38,7 @@ export function TopBar({ project, reserveWindowControls = false, onOpenFolder }:
       </div>
       <div className="shk-no-drag flex items-center gap-1.5">
         <LanguageSwitcher />
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={onOpenFolder}
-          icon={<FolderOpen size={12} aria-hidden="true" className="shrink-0" />}
-        >
-          {m.openFolder}
-        </Button>
+        <OpenInIdeMenu preferredIde={preferredIde} onSelect={onOpenInIde} />
       </div>
     </div>
   );

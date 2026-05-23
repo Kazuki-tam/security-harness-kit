@@ -5,6 +5,7 @@ export type Locale = "en" | "ja";
 export type Messages = {
   app: {
     selectFolder: string;
+    selectFolderForIde: string;
   };
   common: {
     close: string;
@@ -31,6 +32,10 @@ export type Messages = {
     projectBreadcrumb: string;
     welcome: string;
     openFolder: string;
+    openInIde: string;
+    openInIdeWith: string;
+    preferredIde: string;
+    ideNames: Record<"cursor" | "vscode" | "antigravity", string>;
   };
   welcome: {
     title: string;

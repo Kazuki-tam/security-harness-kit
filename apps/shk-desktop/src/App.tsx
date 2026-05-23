@@ -5,7 +5,9 @@ import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ScanWorkspace } from "./components/ScanWorkspace";
+import { usePreferredIde } from "./hooks/usePreferredIde";
 import { useProjects } from "./hooks/useProjects";
+import { openInIde, type PreferredIde } from "./ide";
 import { useI18n } from "./i18n";
 import {
   applyAiHookSettings,
@@ -41,6 +43,7 @@ function App() {
     Record<string, ProjectStatusState>
   >({});
   const [actionState, setActionState] = useState<ActionState>({ status: "idle" });
+  const { preferredIde, setPreferredIde } = usePreferredIde();
 
   const currentScanState: ScanState = selectedId
     ? (scanStates[selectedId] ?? { status: "idle" })
@@ -114,6 +117,29 @@ function App() {
       console.error("failed to open folder:", error);
     }
   }, [addProject, messages.app.selectFolder]);
+
+  const openProjectInIde = useCallback(
+    async (ide: PreferredIde) => {
+      setPreferredIde(ide);
+      try {
+        let path = selectedProject?.path;
+        if (!path) {
+          const picked = await open({
+            directory: true,
+            multiple: false,
+            title: messages.app.selectFolderForIde,
+          });
+          if (typeof picked !== "string" || !picked) return;
+          path = picked;
+          addProject(path);
+        }
+        await openInIde(path, ide);
+      } catch (error) {
+        console.error("failed to open project in IDE:", error);
+      }
+    },
+    [addProject, messages.app.selectFolderForIde, selectedProject?.path, setPreferredIde],
+  );
 
   const runScan = useCallback(async () => {
     if (!selectedProject) return;
@@ -261,7 +287,8 @@ function App() {
         <TopBar
           project={selectedProject}
           reserveWindowControls={!showSidebar}
-          onOpenFolder={openFolder}
+          preferredIde={preferredIde}
+          onOpenInIde={openProjectInIde}
         />
 
         {selectedProject ? (

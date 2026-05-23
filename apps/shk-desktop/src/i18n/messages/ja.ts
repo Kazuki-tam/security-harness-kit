@@ -3,6 +3,7 @@ import type { Messages } from "../types";
 export const ja: Messages = {
   app: {
     selectFolder: "スキャンするフォルダを選択",
+    selectFolderForIde: "エディターで開くフォルダを選択",
   },
   common: {
     close: "閉じる",
@@ -29,6 +30,14 @@ export const ja: Messages = {
     projectBreadcrumb: "プロジェクト /",
     welcome: "ようこそ",
     openFolder: "フォルダを開く",
+    openInIde: "IDEで開く",
+    openInIdeWith: "{{ide}} で開く",
+    preferredIde: "エディターを選択",
+    ideNames: {
+      cursor: "Cursor",
+      vscode: "VS Code",
+      antigravity: "Antigravity",
+    },
   },
   welcome: {
     title: "Security Harness Kit",
