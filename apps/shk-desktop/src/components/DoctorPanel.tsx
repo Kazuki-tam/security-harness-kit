@@ -26,7 +26,10 @@ export function DoctorPanel({ doctor, npmApplicable, onOpenSetup }: Props) {
     if (!npmApplicable && issue.id === "npm_hardening") {
       return false;
     }
-    if (!doctor.envApplicable && (issue.id.startsWith("env:") || issue.id.startsWith("env_mixed:"))) {
+    if (
+      !doctor.envApplicable &&
+      (issue.id.startsWith("env:") || issue.id.startsWith("env_mixed:"))
+    ) {
       return false;
     }
     return true;

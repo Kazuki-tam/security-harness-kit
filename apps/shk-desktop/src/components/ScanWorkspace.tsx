@@ -61,8 +61,7 @@ export function ScanWorkspace({
   const [tab, setTab] = useState<WorkspaceTab>("overview");
   const [filter, setFilter] = useState<Severity | "all">("all");
   const autoOpenedSetupRef = useRef(false);
-  const projectStatusLoadedAt =
-    projectStatus.status === "done" ? projectStatus.loadedAt : null;
+  const projectStatusLoadedAt = projectStatus.status === "done" ? projectStatus.loadedAt : null;
   const { auditState, refreshAudit } = useAuditReport(project.path, projectStatusLoadedAt);
   const isScanning = scanState.status === "running";
   const visibleResult = visibleScanResult(scanState);
@@ -74,8 +73,7 @@ export function ScanWorkspace({
   const setupPendingCount =
     projectStatus.status === "done" ? countPendingQuickSetup(projectStatus.data) : 0;
   const showSetupBadge = setupPendingCount > 0;
-  const blockedCount =
-    auditState.status === "done" ? auditState.data.summary.blocked_events : 0;
+  const blockedCount = auditState.status === "done" ? auditState.data.summary.blocked_events : 0;
   const hasBlocked = auditState.status === "done" && auditHasBlockedEvents(auditState.data);
 
   useEffect(() => {

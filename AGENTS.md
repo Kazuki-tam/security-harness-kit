@@ -57,6 +57,12 @@ Keep **green** on all supported platforms when possible:
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test --all`
 
+When changing the desktop app under `apps/shk-desktop`, also keep the frontend checks green from the repository root:
+
+- `pnpm -C apps/shk-desktop fmt:check`
+- `pnpm -C apps/shk-desktop lint`
+- `pnpm -C apps/shk-desktop test:run`
+
 **Security / context hygiene**
 
 - Never commit or print **raw secret material** in logs, tests, or fixtures beyond what already exists in `fixtures/` demos.
