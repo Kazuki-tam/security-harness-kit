@@ -2,6 +2,7 @@ use crate::finding::Finding;
 use crate::masker;
 use crate::policy::Policy;
 use anyhow::{Context, Result, bail};
+use quick_xml::escape::unescape;
 use quick_xml::events::{BytesCData, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use std::fs::File;
@@ -319,6 +320,13 @@ struct XmlMaskContext<'a> {
     findings: &'a mut Vec<Finding>,
 }
 
+fn decode_xml_text(text: &BytesText<'_>) -> Result<String> {
+    let decoded = text.decode().context("decode XML text")?;
+    Ok(unescape(decoded.as_ref())
+        .context("unescape XML text")?
+        .into_owned())
+}
+
 fn mask_xml_text(
     xml: &[u8],
     policy: &Policy,
@@ -326,7 +334,7 @@ fn mask_xml_text(
     text_group: TextGroupKind,
 ) -> Result<(Vec<u8>, Vec<Finding>)> {
     let mut reader = Reader::from_reader(Cursor::new(xml));
-    reader.trim_text(false);
+    reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
     let mut items = Vec::new();
     let mut findings = Vec::new();
@@ -365,7 +373,7 @@ fn mask_xml_text(
                     items.push(XmlItem::Event(Event::End(end.into_owned())));
                 }
                 Event::Text(text) => {
-                    let decoded = text.unescape().context("decode XML text")?.into_owned();
+                    let decoded = decode_xml_text(&text)?;
                     push_text_item(
                         &mut items,
                         decoded,
@@ -424,7 +432,7 @@ fn mask_xml_text(
 
 fn extract_xml_text(xml: &[u8], text_group: TextGroupKind) -> Result<String> {
     let mut reader = Reader::from_reader(Cursor::new(xml));
-    reader.trim_text(false);
+    reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
     let mut out = String::new();
     let mut group_depth: Option<usize> = None;
@@ -454,7 +462,7 @@ fn extract_xml_text(xml: &[u8], text_group: TextGroupKind) -> Result<String> {
                 }
             }
             Event::Text(text) => {
-                let mut decoded = text.unescape().context("decode XML text")?.into_owned();
+                let mut decoded = decode_xml_text(&text)?;
                 if group_depth.is_some() {
                     group_text.push_str(&decoded);
                 } else {
@@ -814,14 +822,14 @@ mod tests {
 
     fn xml_text_content(xml: &str) -> Result<String> {
         let mut reader = Reader::from_str(xml);
-        reader.trim_text(false);
+        reader.config_mut().trim_text(false);
         let mut buf = Vec::new();
         let mut out = String::new();
 
         loop {
             match reader.read_event_into(&mut buf)? {
                 Event::Eof => break,
-                Event::Text(text) => out.push_str(&text.unescape()?),
+                Event::Text(text) => out.push_str(&decode_xml_text(&text)?),
                 Event::CData(cdata) => out.push_str(&String::from_utf8_lossy(cdata.as_ref())),
                 _ => {}
             }
