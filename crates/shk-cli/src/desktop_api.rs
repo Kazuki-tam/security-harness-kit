@@ -1308,7 +1308,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains("requires a project shk.toml"), "{err}");
+        assert!(
+            err.to_string().contains("requires a project shk.toml"),
+            "{err}"
+        );
         assert!(!dir.path().join(".claude").exists());
         assert!(!dir.path().join(".agents").exists());
     }
