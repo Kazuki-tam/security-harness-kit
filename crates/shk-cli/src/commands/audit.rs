@@ -70,10 +70,14 @@ pub struct AuditRecentRow {
     pub finding_count: Option<usize>,
 }
 
+pub fn build_audit_report(root: &Path, inv: &AuditInvocation) -> Result<AuditReport> {
+    let read = audit_log::read_entries(root)?;
+    build_report(root, read.entries, read.parse_errors, inv)
+}
+
 pub fn run(inv: AuditInvocation) -> Result<()> {
     let root = std::fs::canonicalize(&inv.path).unwrap_or_else(|_| inv.path.clone());
-    let read = audit_log::read_entries(&root)?;
-    let report = build_report(&root, read.entries, read.parse_errors, &inv)?;
+    let report = build_audit_report(&root, &inv)?;
 
     if inv.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -523,6 +527,20 @@ mod tests {
     }
 
     #[test]
+    fn build_audit_report_handles_missing_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = AuditInvocation {
+            path: dir.path().to_path_buf(),
+            ..base_inv()
+        };
+        let report = build_audit_report(dir.path(), &inv).unwrap();
+        assert!(!report.log_exists);
+        assert_eq!(report.summary.total_entries, 0);
+        assert_eq!(report.summary.blocked_events, 0);
+        assert!(report.recent.is_empty());
+    }
+
+    #[test]
     fn build_report_respects_tool_filter() {
         let dir = tempfile::tempdir().unwrap();
         audit_log::append_line(
@@ -541,8 +559,7 @@ mod tests {
             tool: Some(AiTool::Cursor),
             ..base_inv()
         };
-        let read = audit_log::read_entries(dir.path()).unwrap();
-        let report = build_report(dir.path(), read.entries, 0, &inv).unwrap();
+        let report = build_audit_report(dir.path(), &inv).unwrap();
         assert_eq!(report.summary.total_entries, 1);
         assert_eq!(report.by_tool[0].label, "cursor");
     }

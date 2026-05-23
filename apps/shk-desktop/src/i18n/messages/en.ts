@@ -102,6 +102,56 @@ export const en: Messages = {
     openSetup: "Open setup",
     setupTabBadge: "Needs setup",
   },
+  audit: {
+    title: "Blocked AI activity",
+    subtitle: "Metadata only — raw secrets, prompts, and commands are never stored.",
+    loading: "Loading blocked history…",
+    refresh: "Refresh",
+    noLog:
+      "Nothing recorded yet. Apply AI safety hooks in Setup to start logging blocked activity.",
+    openSetup: "Open setup",
+    parseErrors: "Skipped {{count}} invalid line(s) while reading the log.",
+    blockedEvents: "Blocked",
+    hookAuditEvents: "Hook audits",
+    maxSeverity: "Max severity",
+    noBlockedYet: "Nothing has been blocked yet. Setup looks healthy.",
+    recentBlocked: "Recent blocks",
+    updated: "Updated",
+    findingsCount: "{{count}} findings",
+    bannerTitle: "{{count}} AI action(s) were blocked",
+    bannerHint: "Review what was attempted and adjust your project if needed.",
+    overviewTabBadge: "{{count}} blocked",
+    openFindings: "View findings",
+    moreEvents: "+ {{count}} more event(s)",
+    moreEventsHint: "Run `shk audit` in a terminal to see the full history.",
+    reasonLabels: {
+      finding_threshold: "Secret/PII blocked",
+      action_guard: "Risky action blocked",
+    },
+    toolNames: {
+      "claude-code": "Claude Code",
+      cursor: "Cursor",
+      codex: "Codex",
+    },
+    actionCategories: {
+      env_dump: "Environment dump",
+      file_read: "Sensitive file read",
+      file_write: "Sensitive file write",
+      destructive_fs: "Destructive filesystem",
+      privilege: "Privilege change",
+      db_mutation: "Database mutation",
+      external_transfer: "External transfer",
+      package_manager: "Package manager",
+      opaque_exec: "Opaque shell execution",
+    },
+    severityLabels: {
+      critical: "Critical",
+      high: "High",
+      medium: "Medium",
+      low: "Low",
+      info: "Info",
+    },
+  },
   setup: {
     statusReady: "Ready",
     statusMissing: "Missing",
@@ -232,7 +282,8 @@ export const en: Messages = {
       selectionHint:
         "Checked items are enabled. Uncheck and press the button to remove those settings.",
       scanHooksGroup: "Pre-send scan hooks",
-      scanHooksHint: "Scan prompts and tool input before they reach the AI.",
+      scanHooksHint:
+        "Scan prompts and tool input before they reach the AI. Blocked events are logged for review in Overview.",
       scanHooksToolHint: "Enable scan hooks for this editor.",
       claudeDeny: "Claude Code deny rules",
       claudeDenyHint: "Block risky shell and config changes via permissions.deny.",
@@ -250,6 +301,9 @@ export const en: Messages = {
       removeConfirmTitle: "Remove all AI editor safety settings?",
       removeConfirmBody:
         "Removing with all boxes unchecked deletes scan hooks and safety settings added by shk.",
+      cliNotFoundTitle: "shk command not found on this computer",
+      cliNotFoundBody:
+        "Scan hooks work by telling your AI editor to run a security check before each action. For this to work, the shk command must be installed separately on your computer — the desktop app alone cannot perform these checks. Install the shk command line tool to activate real-time protection.",
     },
     npm: {
       title: "npm safety settings",

@@ -1,10 +1,21 @@
-import { AlertTriangle, CheckCircle2, RefreshCcw, Search, ShieldCheck } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  CheckCircle2,
+  RefreshCcw,
+  Search,
+  ShieldAlert,
+  ShieldCheck,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { auditHasBlockedEvents } from "../audit";
+import { useAuditReport } from "../hooks/useAuditReport";
 import { useI18n } from "../i18n";
 import { actionableCount, type ScanState, type Severity, visibleScanResult } from "../scan";
 import { countPendingQuickSetup } from "../setup/plan";
 import type { ActionState, AiHookSetupSelection, Project, ProjectStatusState } from "../types";
 import { formatRelativeTime } from "../utils";
+import { AuditPanel } from "./AuditPanel";
 import { Button } from "./Button";
 import { DoctorPanel } from "./DoctorPanel";
 import { FindingList } from "./FindingList";
@@ -44,12 +55,15 @@ export function ScanWorkspace({
   onScan,
   setupHandlers,
 }: Props) {
-  const { messages } = useI18n();
+  const { messages, t } = useI18n();
   const m = messages.scan;
   const w = messages.workspace;
   const [tab, setTab] = useState<WorkspaceTab>("overview");
   const [filter, setFilter] = useState<Severity | "all">("all");
   const autoOpenedSetupRef = useRef(false);
+  const projectStatusLoadedAt =
+    projectStatus.status === "done" ? projectStatus.loadedAt : null;
+  const { auditState, refreshAudit } = useAuditReport(project.path, projectStatusLoadedAt);
   const isScanning = scanState.status === "running";
   const visibleResult = visibleScanResult(scanState);
   const report = visibleResult?.report;
@@ -60,6 +74,9 @@ export function ScanWorkspace({
   const setupPendingCount =
     projectStatus.status === "done" ? countPendingQuickSetup(projectStatus.data) : 0;
   const showSetupBadge = setupPendingCount > 0;
+  const blockedCount =
+    auditState.status === "done" ? auditState.data.summary.blocked_events : 0;
+  const hasBlocked = auditState.status === "done" && auditHasBlockedEvents(auditState.data);
 
   useEffect(() => {
     if (autoOpenedSetupRef.current) return;
@@ -121,6 +138,11 @@ export function ScanWorkspace({
               }`}
             >
               {w.tabs[key]}
+              {key === "overview" && hasBlocked && (
+                <span className="rounded-full bg-orange-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-orange-100 ring-1 ring-inset ring-orange-400/35">
+                  {t(messages.audit.overviewTabBadge, { count: blockedCount })}
+                </span>
+              )}
               {key === "setup" && showSetupBadge && (
                 <span className="rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-amber-100 ring-1 ring-inset ring-amber-400/35">
                   {w.setupTabBadge}
@@ -159,11 +181,31 @@ export function ScanWorkspace({
             )}
             {projectStatus.status === "done" && (
               <>
+                {hasBlocked && (
+                  <BlockedBanner
+                    count={blockedCount}
+                    onViewDetails={() => {
+                      if (typeof document !== "undefined") {
+                        document
+                          .getElementById("audit-panel")
+                          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                      }
+                    }}
+                  />
+                )}
                 <DoctorPanel
                   doctor={projectStatus.data.doctor}
                   npmApplicable={projectStatus.data.npmHardening.hasProjects}
                   onOpenSetup={() => setTab("setup")}
                 />
+                <div id="audit-panel">
+                  <AuditPanel
+                    auditState={auditState}
+                    onRefresh={() => void refreshAudit()}
+                    onOpenSetup={() => setTab("setup")}
+                    onOpenFindings={report ? () => setTab("findings") : undefined}
+                  />
+                </div>
                 {!projectStatus.data.policy.exists && (
                   <div className="flex flex-col gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[12px] text-amber-100 sm:flex-row sm:items-center sm:justify-between">
                     <p>{w.policyRequired}</p>
@@ -297,6 +339,34 @@ function StatusBanner({
           {t(m.lowSeverityHint, { count: report.summary.total })}
         </p>
       </div>
+    </section>
+  );
+}
+
+function BlockedBanner({ count, onViewDetails }: { count: number; onViewDetails: () => void }) {
+  const { messages, t } = useI18n();
+  const m = messages.audit;
+  return (
+    <section
+      role="alert"
+      className="flex flex-col gap-3 rounded-xl border border-orange-500/30 bg-orange-500/10 px-4 py-3.5 text-sm text-orange-100 sm:flex-row sm:items-start sm:justify-between"
+    >
+      <div className="flex items-start gap-3">
+        <ShieldAlert size={18} className="mt-0.5 shrink-0 text-orange-300" aria-hidden="true" />
+        <div>
+          <strong className="block text-orange-50">{t(m.bannerTitle, { count })}</strong>
+          <p className="mt-0.5 text-orange-100/90">{m.bannerHint}</p>
+        </div>
+      </div>
+      <Button
+        variant="secondary"
+        size="sm"
+        className="shrink-0 self-start"
+        onClick={onViewDetails}
+        icon={<ArrowRight size={12} aria-hidden="true" />}
+      >
+        {m.recentBlocked}
+      </Button>
     </section>
   );
 }

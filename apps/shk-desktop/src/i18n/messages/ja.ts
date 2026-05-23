@@ -100,6 +100,56 @@ export const ja: Messages = {
     openSetup: "セットアップを開く",
     setupTabBadge: "要設定",
   },
+  audit: {
+    title: "AI のブロック履歴",
+    subtitle: "メタデータのみを表示します（秘密値・プロンプト本文・コマンドは保存されません）。",
+    loading: "ブロック履歴を読み込み中…",
+    refresh: "更新",
+    noLog:
+      "履歴はまだありません。セットアップで AI セーフティフックを適用すると記録が始まります。",
+    openSetup: "セットアップを開く",
+    parseErrors: "ログの読み込み中に無効な行を {{count}} 件スキップしました。",
+    blockedEvents: "ブロック",
+    hookAuditEvents: "フック監査",
+    maxSeverity: "最大重要度",
+    noBlockedYet: "ブロックされた操作はまだありません。設定は良好です。",
+    recentBlocked: "最近のブロック",
+    updated: "更新",
+    findingsCount: "検出 {{count}} 件",
+    bannerTitle: "{{count}} 件の AI 操作がブロックされました",
+    bannerHint: "内容を確認し、必要に応じてプロジェクトを調整してください。",
+    overviewTabBadge: "ブロック {{count}}",
+    openFindings: "検出を見る",
+    moreEvents: "ほか {{count}} 件",
+    moreEventsHint: "全件はターミナルで `shk audit` を実行すると確認できます。",
+    reasonLabels: {
+      finding_threshold: "秘密値・個人情報の検出",
+      action_guard: "危険な操作のブロック",
+    },
+    toolNames: {
+      "claude-code": "Claude Code",
+      cursor: "Cursor",
+      codex: "Codex",
+    },
+    actionCategories: {
+      env_dump: "環境変数の取得",
+      file_read: "機密ファイルの読み取り",
+      file_write: "機密ファイルへの書き込み",
+      destructive_fs: "破壊的なファイル操作",
+      privilege: "権限の変更",
+      db_mutation: "データベースの直接更新",
+      external_transfer: "外部への送信",
+      package_manager: "パッケージマネージャー操作",
+      opaque_exec: "不透明なシェル実行",
+    },
+    severityLabels: {
+      critical: "致命的",
+      high: "重大",
+      medium: "中",
+      low: "低",
+      info: "情報",
+    },
+  },
   setup: {
     statusReady: "設定済み",
     statusMissing: "未設定",
@@ -229,7 +279,8 @@ export const ja: Messages = {
       selectionHint:
         "チェックは有効にしたい設定を表します。外してボタンを押すと、その項目を解除します。",
       scanHooksGroup: "AI への送信前スキャン",
-      scanHooksHint: "プロンプトやツール入力を送る前に shk が検査します。",
+      scanHooksHint:
+        "プロンプトやツール入力を送る前に shk が検査します。ブロックされた操作は概要タブで確認できます。",
       scanHooksToolHint: "このエディター向けのスキャンフックを有効にします。",
       claudeDeny: "Claude Code の危険操作ブロック",
       claudeDenyHint: "シェル実行や設定変更などを permissions.deny で制限します。",
@@ -247,6 +298,9 @@ export const ja: Messages = {
       removeConfirmTitle: "AI エディターの安全設定をすべて解除しますか？",
       removeConfirmBody:
         "チェックをすべて外した状態で解除すると、shk が追加したスキャンフックや安全設定を取り除きます。",
+      cliNotFoundTitle: "shk コマンドがパソコンにインストールされていません",
+      cliNotFoundBody:
+        "スキャンフックは「AI エディターが操作を実行する前に shk が自動で検査する」仕組みです。ただし、この機能が動くには shk コマンドをパソコンに別途インストールする必要があります。デスクトップアプリだけでは自動検査は行えません。リアルタイム保護を有効にするには、shk コマンドラインツールをインストールしてください。",
     },
     npm: {
       title: "npm の安全設定",

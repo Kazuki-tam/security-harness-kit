@@ -71,6 +71,7 @@ function status(overrides: Partial<ProjectStatus> = {}): ProjectStatus {
     },
     skills: [],
     ignoreFixTargets: [{ name: ".gitignore", exists: true }],
+    cliInstalled: false,
     recommendedFixes: [
       fix("ignore", { requiresPolicy: true }),
       fix("git_pre_commit", { requiresPolicy: true }),

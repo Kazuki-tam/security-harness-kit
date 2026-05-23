@@ -4,6 +4,8 @@ import type {
   ApplyAiHookSettingsOptions,
   ApplyNpmHardeningOptions,
   ApplyRecommendedFixesOptions,
+  AuditReport,
+  AuditReportOptions,
   FixDoctorIgnoreOptions,
   InstallAiHooksOptions,
   InstallSkillsOptions,
@@ -60,4 +62,11 @@ export function applyNpmHardening(
 
 export function installSkills(path: string, options: InstallSkillsOptions): Promise<ActionResult> {
   return invoke<ActionResult>("install_skills", { path, options });
+}
+
+export function fetchAuditReport(
+  path: string,
+  options: AuditReportOptions = {},
+): Promise<AuditReport> {
+  return invoke<AuditReport>("audit_report", { path, options });
 }

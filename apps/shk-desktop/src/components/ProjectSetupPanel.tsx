@@ -1,3 +1,4 @@
+import { AlertTriangle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import {
@@ -120,6 +121,11 @@ export function ProjectSetupPanel({
   const aiHookHasRemovals = aiHookSelectionHasRemovals(appliedAiHooks, aiHookSelection);
   const aiHookHasAdditions = aiHookSelectionHasAdditions(appliedAiHooks, aiHookSelection);
   const aiHookSettingsRemoved = aiHookSelectionIsFullyDisabled(appliedAiHooks);
+  const scanHooksSelected =
+    aiHookSelection.scanHooksClaudeCode ||
+    aiHookSelection.scanHooksCursor ||
+    aiHookSelection.scanHooksCodex;
+  const showCliNotFoundWarning = !status.cliInstalled && scanHooksSelected;
   const aiHookStatusLabel = !policyExists
     ? m.statusMissing
     : aiHookSelectionChanged
@@ -355,6 +361,19 @@ export function ProjectSetupPanel({
                 onToggle={() => toggleAiHookSelection("scanHooksCodex")}
               />
             </ul>
+            {showCliNotFoundWarning && (
+              <div className="mb-3 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[11px] text-amber-100">
+                <AlertTriangle
+                  size={14}
+                  aria-hidden="true"
+                  className="mt-0.5 shrink-0 text-amber-300"
+                />
+                <div>
+                  <p className="font-semibold text-amber-50">{m.aiHooks.cliNotFoundTitle}</p>
+                  <p className="mt-0.5 text-amber-100/90">{m.aiHooks.cliNotFoundBody}</p>
+                </div>
+              </div>
+            )}
             <ul className="grid gap-1.5">
               <AiHookOption
                 checked={aiHookSelection.claudeDeny}

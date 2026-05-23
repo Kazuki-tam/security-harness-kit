@@ -112,6 +112,7 @@ export type ProjectStatus = {
   skills: SkillStatus[];
   ignoreFixTargets: IgnoreFixTarget[];
   recommendedFixes: RecommendedFix[];
+  cliInstalled: boolean;
 };
 
 export type ActionResult = {
@@ -151,6 +152,7 @@ export type AiHookSetupSelection = ApplyAiHookSettingsOptions;
 
 export type InstallAiHooksOptions = {
   audit: boolean;
+  logBlocked?: boolean;
   dryRun: boolean;
   global: boolean;
   tool?: string;
@@ -158,6 +160,61 @@ export type InstallAiHooksOptions = {
   applyDeny: boolean;
   applySandbox: boolean;
 };
+
+export type AuditReportOptions = {
+  limit?: number;
+  since?: string;
+  tool?: string;
+  reason?: string;
+  hidePaths?: boolean;
+};
+
+export type AuditCountRow = {
+  label: string;
+  count: number;
+};
+
+export type AuditRecentRow = {
+  ts: string;
+  tool?: string;
+  hook?: string;
+  reason?: string;
+  max_severity?: string;
+  action_category?: string;
+  display_path?: string;
+  finding_count?: number;
+};
+
+export type AuditReport = {
+  version: number;
+  log_path: string;
+  log_exists: boolean;
+  parse_errors: number;
+  filters: {
+    since?: string;
+    tool?: string;
+    reason?: string;
+    limit: number;
+  };
+  summary: {
+    total_entries: number;
+    blocked_events: number;
+    hook_audit_events: number;
+    secrets_push_events: number;
+    max_severity?: string;
+  };
+  by_rule: AuditCountRow[];
+  by_tool: AuditCountRow[];
+  by_reason: AuditCountRow[];
+  by_action_category: AuditCountRow[];
+  recent: AuditRecentRow[];
+};
+
+export type AuditState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "done"; data: AuditReport; loadedAt: string }
+  | { status: "error"; message: string };
 
 export type InstallSkillsOptions = {
   tool?: string;

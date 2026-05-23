@@ -102,6 +102,32 @@ export type Messages = {
     openSetup: string;
     setupTabBadge: string;
   };
+  audit: {
+    title: string;
+    subtitle: string;
+    loading: string;
+    refresh: string;
+    noLog: string;
+    openSetup: string;
+    parseErrors: string;
+    blockedEvents: string;
+    hookAuditEvents: string;
+    maxSeverity: string;
+    noBlockedYet: string;
+    recentBlocked: string;
+    updated: string;
+    findingsCount: string;
+    bannerTitle: string;
+    bannerHint: string;
+    overviewTabBadge: string;
+    openFindings: string;
+    moreEvents: string;
+    moreEventsHint: string;
+    reasonLabels: Record<string, string>;
+    toolNames: Record<string, string>;
+    actionCategories: Record<string, string>;
+    severityLabels: Record<string, string>;
+  };
   setup: {
     statusReady: string;
     statusMissing: string;
@@ -204,6 +230,8 @@ export type Messages = {
       installCodexSandbox: string;
       removeConfirmTitle: string;
       removeConfirmBody: string;
+      cliNotFoundTitle: string;
+      cliNotFoundBody: string;
     };
     npm: {
       title: string;

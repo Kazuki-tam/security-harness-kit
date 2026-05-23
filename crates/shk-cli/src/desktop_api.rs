@@ -1,6 +1,8 @@
 //! Structured APIs for the desktop app (no stdout parsing).
 
-use crate::args::AiTool;
+use crate::args::{AiTool, AuditReasonArg};
+pub use crate::commands::audit::AuditReport;
+use crate::commands::audit::{self, AuditInvocation};
 use crate::commands::skills::{SkillTool, SkillsInstallArgs};
 use crate::doctor::{
     ClaudePermissionsStatus, CodexConfigStatus, EnvStatus, IgnoreStatus,
@@ -20,6 +22,9 @@ use shk_core::git;
 use shk_integrations::{MANAGED_MARKER_JSON, MANAGED_MARKER_SH};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Desktop setup installs blocking scan hooks that append metadata-only block entries.
+const DESKTOP_AI_HOOK_LOG_BLOCKED: bool = true;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +50,7 @@ pub struct ProjectStatus {
     pub skills: Vec<SkillStatusDto>,
     pub ignore_fix_targets: Vec<IgnoreFixTargetDto>,
     pub recommended_fixes: Vec<RecommendedFixDto>,
+    pub cli_installed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -158,7 +164,7 @@ pub struct ActionResult {
 #[serde(rename_all = "camelCase")]
 pub struct InstallAiHooksOptions {
     pub audit: bool,
-    #[serde(default)]
+    #[serde(default = "default_desktop_log_blocked")]
     pub log_blocked: bool,
     pub dry_run: bool,
     pub global: bool,
@@ -214,6 +220,72 @@ pub struct ApplyAiHookSettingsOptions {
     pub codex_sandbox: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditReportOptions {
+    #[serde(default = "default_audit_limit")]
+    pub limit: usize,
+    pub since: Option<String>,
+    pub tool: Option<String>,
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub hide_paths: bool,
+}
+
+fn default_audit_limit() -> usize {
+    10
+}
+
+fn default_desktop_log_blocked() -> bool {
+    DESKTOP_AI_HOOK_LOG_BLOCKED
+}
+
+fn desktop_default_install_ai_hooks_options() -> InstallAiHooksOptions {
+    InstallAiHooksOptions {
+        audit: false,
+        log_blocked: DESKTOP_AI_HOOK_LOG_BLOCKED,
+        dry_run: false,
+        global: false,
+        tool: None,
+        fail_closed: false,
+        apply_deny: false,
+        apply_sandbox: false,
+    }
+}
+
+fn desktop_configure_ai_options(options: &ApplyAiHookSettingsOptions) -> ConfigureAiOptions {
+    ConfigureAiOptions {
+        audit: false,
+        log_blocked: DESKTOP_AI_HOOK_LOG_BLOCKED,
+        dry_run: false,
+        global: false,
+        fail_closed: options.codex_sandbox,
+        scan_hooks_claude_code: options.scan_hooks_claude_code,
+        scan_hooks_cursor: options.scan_hooks_cursor,
+        scan_hooks_codex: options.scan_hooks_codex,
+        claude_deny: options.claude_deny,
+        claude_sandbox: options.claude_sandbox,
+        codex_sandbox: options.codex_sandbox,
+    }
+}
+
+fn audit_invocation(
+    root: &Path,
+    options: &AuditReportOptions,
+    tool: Option<AiTool>,
+    reason: Option<AuditReasonArg>,
+) -> AuditInvocation {
+    AuditInvocation {
+        path: root.to_path_buf(),
+        json: true,
+        since: options.since.clone(),
+        tool,
+        reason,
+        limit: options.limit,
+        hide_paths: options.hide_paths,
+    }
+}
+
 struct ProjectCheckStatus {
     git_pre_commit: bool,
     ai_managed_hooks: bool,
@@ -230,6 +302,23 @@ struct ProjectCheckStatus {
 pub fn project_status(path: &str) -> Result<ProjectStatus> {
     let root = resolve_project_root(path)?;
     Ok(build_project_status(&root))
+}
+
+pub fn audit_report(path: &str, options: AuditReportOptions) -> Result<AuditReport> {
+    let root = resolve_project_root(path)?;
+    let tool = options
+        .tool
+        .as_deref()
+        .map(parse_ai_tool)
+        .transpose()
+        .context("invalid audit tool filter")?;
+    let reason = options
+        .reason
+        .as_deref()
+        .map(parse_audit_reason)
+        .transpose()
+        .context("invalid audit reason filter")?;
+    audit::build_audit_report(&root, &audit_invocation(&root, &options, tool, reason))
 }
 
 pub fn init_policy(path: &str, options: InitPolicyOptions) -> Result<ActionResult> {
@@ -306,22 +395,7 @@ pub fn apply_ai_hook_settings(
     ensure_desktop_project_root_allowed(&root)?;
     safety::require_project_policy(&root, "hooks install-ai")?;
     let before = ai_safety_applied_from(&collect_project_check_status(&root));
-    let summaries = configure_ai_with_summaries(
-        &root,
-        ConfigureAiOptions {
-            audit: false,
-            log_blocked: false,
-            dry_run: false,
-            global: false,
-            fail_closed: options.codex_sandbox,
-            scan_hooks_claude_code: options.scan_hooks_claude_code,
-            scan_hooks_cursor: options.scan_hooks_cursor,
-            scan_hooks_codex: options.scan_hooks_codex,
-            claude_deny: options.claude_deny,
-            claude_sandbox: options.claude_sandbox,
-            codex_sandbox: options.codex_sandbox,
-        },
-    )?;
+    let summaries = configure_ai_with_summaries(&root, desktop_configure_ai_options(&options))?;
     let after = ai_safety_applied_from(&collect_project_check_status(&root));
     let message = if ai_safety_applied_matches(&before, &after) {
         "No AI editor safety changes were required".to_string()
@@ -438,16 +512,7 @@ fn apply_recommended_fix(
             }
             install_ai_hooks(
                 &root.display().to_string(),
-                InstallAiHooksOptions {
-                    audit: false,
-                    log_blocked: false,
-                    dry_run: false,
-                    global: false,
-                    tool: None,
-                    fail_closed: false,
-                    apply_deny: false,
-                    apply_sandbox: false,
-                },
+                desktop_default_install_ai_hooks_options(),
             )
         }
         "ai_claude_deny" => {
@@ -584,6 +649,39 @@ pub fn install_skills(path: &str, options: InstallSkillsOptions) -> Result<Actio
     })
 }
 
+fn is_shk_in_path() -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir_contains_shk_executable(&dir)))
+        .unwrap_or(false)
+}
+
+fn dir_contains_shk_executable(dir: &Path) -> bool {
+    is_executable_file(&dir.join("shk")) || {
+        #[cfg(windows)]
+        {
+            is_executable_file(&dir.join("shk.exe"))
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::metadata(path)
+        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
 fn resolve_project_root(path: &str) -> Result<PathBuf> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
@@ -647,6 +745,7 @@ fn build_project_status(root: &Path) -> ProjectStatus {
             })
             .collect(),
         recommended_fixes,
+        cli_installed: is_shk_in_path(),
     }
 }
 
@@ -994,6 +1093,15 @@ fn parse_ai_tool(value: &str) -> Result<AiTool> {
         "codex" => Ok(AiTool::Codex),
         "cursor" => Ok(AiTool::Cursor),
         other => anyhow::bail!("unknown AI tool: {other}"),
+    }
+}
+
+fn parse_audit_reason(value: &str) -> Result<AuditReasonArg> {
+    match value {
+        "blocked" => Ok(AuditReasonArg::Blocked),
+        "finding-threshold" => Ok(AuditReasonArg::FindingThreshold),
+        "action-guard" => Ok(AuditReasonArg::ActionGuard),
+        other => anyhow::bail!("unknown audit reason filter: {other}"),
     }
 }
 
@@ -1430,5 +1538,269 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("filesystem roots"), "{err}");
+    }
+
+    #[test]
+    fn desktop_apply_ai_hook_settings_installs_log_blocked_scan_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "").unwrap();
+
+        let result = apply_ai_hook_settings(
+            dir.path().to_str().unwrap(),
+            ApplyAiHookSettingsOptions {
+                scan_hooks_claude_code: true,
+                scan_hooks_cursor: false,
+                scan_hooks_codex: false,
+                claude_deny: false,
+                claude_sandbox: false,
+                codex_sandbox: false,
+            },
+        )
+        .unwrap();
+        assert!(result.success, "{result:?}");
+
+        let settings = fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
+        assert!(
+            settings.contains("--log-blocked"),
+            "desktop setup should install log-blocked hooks by default: {settings}"
+        );
+    }
+
+    #[test]
+    fn desktop_apply_ai_hook_settings_upgrades_legacy_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "").unwrap();
+        fs::create_dir_all(dir.path().join(".claude")).unwrap();
+        fs::write(
+            dir.path().join(".claude/settings.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "_shk_managed": true,
+                        "matcher": "Read",
+                        "hooks": [{ "type": "command", "command": "shk scan --hook-mode claude-code" }]
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        apply_ai_hook_settings(
+            dir.path().to_str().unwrap(),
+            ApplyAiHookSettingsOptions {
+                scan_hooks_claude_code: true,
+                scan_hooks_cursor: false,
+                scan_hooks_codex: false,
+                claude_deny: false,
+                claude_sandbox: false,
+                codex_sandbox: false,
+            },
+        )
+        .unwrap();
+
+        let settings = fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
+        assert!(
+            settings.contains("--log-blocked"),
+            "legacy hooks should be upgraded to log-blocked: {settings}"
+        );
+    }
+
+    #[test]
+    fn desktop_default_install_ai_hooks_options_enable_log_blocked() {
+        let opts = desktop_default_install_ai_hooks_options();
+        assert!(opts.log_blocked);
+        assert!(!opts.audit);
+    }
+
+    #[test]
+    fn desktop_configure_ai_options_enable_log_blocked() {
+        let opts = desktop_configure_ai_options(&ApplyAiHookSettingsOptions {
+            scan_hooks_claude_code: true,
+            scan_hooks_cursor: false,
+            scan_hooks_codex: false,
+            claude_deny: false,
+            claude_sandbox: false,
+            codex_sandbox: false,
+        });
+        assert!(opts.log_blocked);
+        assert!(!opts.audit);
+    }
+
+    #[test]
+    fn desktop_install_ai_hooks_options_default_log_blocked() {
+        let opts: InstallAiHooksOptions = serde_json::from_str(
+            r#"{
+                "audit": false,
+                "dryRun": false,
+                "global": false,
+                "failClosed": false,
+                "applyDeny": false,
+                "applySandbox": false
+            }"#,
+        )
+        .unwrap();
+        assert!(opts.log_blocked);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_cli_detection_requires_executable_shk_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let shk = dir.path().join("shk");
+        fs::write(&shk, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&shk, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!dir_contains_shk_executable(dir.path()));
+
+        fs::set_permissions(&shk, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(dir_contains_shk_executable(dir.path()));
+    }
+
+    #[test]
+    fn desktop_audit_report_when_log_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = audit_report(
+            dir.path().to_str().unwrap(),
+            AuditReportOptions {
+                limit: 10,
+                since: None,
+                tool: None,
+                reason: None,
+                hide_paths: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!report.log_exists);
+        assert_eq!(report.summary.total_entries, 0);
+        assert_eq!(report.summary.blocked_events, 0);
+    }
+
+    #[test]
+    fn desktop_audit_report_filters_blocked_reason() {
+        use crate::audit_log;
+
+        let dir = tempfile::tempdir().unwrap();
+        audit_log::append_line(
+            dir.path(),
+            serde_json::json!({"event":"blocked","reason":"finding_threshold","tool":"cursor"}),
+        )
+        .unwrap();
+        audit_log::append_line(
+            dir.path(),
+            serde_json::json!({"tool":"cursor","hook":"pre","finding_count":1}),
+        )
+        .unwrap();
+
+        let report = audit_report(
+            dir.path().to_str().unwrap(),
+            AuditReportOptions {
+                limit: 10,
+                since: None,
+                tool: None,
+                reason: Some("blocked".to_string()),
+                hide_paths: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.summary.total_entries, 1);
+        assert_eq!(report.summary.blocked_events, 1);
+        assert_eq!(report.summary.hook_audit_events, 0);
+    }
+
+    #[test]
+    fn desktop_audit_report_rejects_invalid_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = audit_report(
+            dir.path().to_str().unwrap(),
+            AuditReportOptions {
+                limit: 10,
+                since: None,
+                tool: None,
+                reason: Some("not-a-reason".to_string()),
+                hide_paths: false,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("invalid audit reason filter"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn desktop_audit_report_hides_display_paths() {
+        use crate::audit_log;
+
+        let dir = tempfile::tempdir().unwrap();
+        audit_log::append_line(
+            dir.path(),
+            serde_json::json!({
+                "event":"blocked",
+                "reason":"finding_threshold",
+                "ts":"2026-05-23T02:31:00Z",
+                "tool":"cursor",
+                "display_path":"secret.txt",
+            }),
+        )
+        .unwrap();
+
+        let report = audit_report(
+            dir.path().to_str().unwrap(),
+            AuditReportOptions {
+                limit: 10,
+                since: None,
+                tool: None,
+                reason: None,
+                hide_paths: true,
+            },
+        )
+        .unwrap();
+
+        assert!(report.recent[0].display_path.is_none());
+    }
+
+    #[test]
+    fn desktop_audit_report_summarizes_blocked_events() {
+        use crate::audit_log;
+
+        let dir = tempfile::tempdir().unwrap();
+        audit_log::append_line(
+            dir.path(),
+            serde_json::json!({
+                "event": "blocked",
+                "reason": "finding_threshold",
+                "tool": "cursor",
+                "hook": "pre",
+                "max_severity": "high",
+                "finding_count": 2,
+            }),
+        )
+        .unwrap();
+        audit_log::append_line(
+            dir.path(),
+            serde_json::json!({"tool":"cursor","hook":"pre","finding_count":1}),
+        )
+        .unwrap();
+
+        let report = audit_report(
+            dir.path().to_str().unwrap(),
+            AuditReportOptions {
+                limit: 5,
+                since: None,
+                tool: None,
+                reason: None,
+                hide_paths: false,
+            },
+        )
+        .unwrap();
+
+        assert!(report.log_exists);
+        assert_eq!(report.summary.blocked_events, 1);
+        assert_eq!(report.summary.hook_audit_events, 1);
+        assert!(!report.recent.is_empty());
     }
 }

@@ -1,7 +1,7 @@
 use shk_cli::desktop_api::{
     self, ActionResult, ApplyAiHookSettingsOptions, ApplyNpmHardeningOptions,
-    ApplyRecommendedFixesOptions, FixDoctorIgnoreOptions, InitPolicyOptions, InstallAiHooksOptions,
-    InstallSkillsOptions, ProjectStatus,
+    ApplyRecommendedFixesOptions, AuditReportOptions, FixDoctorIgnoreOptions, InitPolicyOptions,
+    InstallAiHooksOptions, InstallSkillsOptions, ProjectStatus,
 };
 use shk_core::ScanJsonReport;
 use shk_core::policy::ColorMode;
@@ -129,6 +129,14 @@ async fn install_skills(
     run_blocking(move || desktop_api::install_skills(&path, options).map_err(map_err)).await
 }
 
+#[tauri::command]
+async fn audit_report(
+    path: String,
+    options: AuditReportOptions,
+) -> Result<desktop_api::AuditReport, AppError> {
+    run_blocking(move || desktop_api::audit_report(&path, options).map_err(map_err)).await
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -143,6 +151,7 @@ pub fn run() {
             apply_recommended_fixes,
             apply_npm_hardening,
             install_skills,
+            audit_report,
         ])
         .run(tauri::generate_context!())
         .expect("error while running shk desktop app");
