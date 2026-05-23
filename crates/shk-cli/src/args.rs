@@ -347,9 +347,6 @@ pub struct GithubCiArgs {
     /// shk release version to install, or `latest` (e.g. `v0.2.3`).
     #[arg(long = "shk-version", default_value = DEFAULT_SHK_VERSION)]
     pub shk_version: String,
-    /// cargo-dist shell installer asset name.
-    #[arg(long, default_value = "shk-cli-installer.sh")]
-    pub installer_name: String,
     /// Workflow destination path.
     #[arg(long, default_value = ".github/workflows/shk.yml")]
     pub output: PathBuf,

@@ -40,6 +40,7 @@ pub struct AuditFilters {
     pub tool: Option<String>,
     pub reason: Option<String>,
     pub limit: usize,
+    pub time_filter_skipped_entries: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -76,7 +77,7 @@ pub fn build_audit_report(root: &Path, inv: &AuditInvocation) -> Result<AuditRep
 }
 
 pub fn run(inv: AuditInvocation) -> Result<()> {
-    let root = std::fs::canonicalize(&inv.path).unwrap_or_else(|_| inv.path.clone());
+    let root = resolve_audit_root(&inv.path);
     let report = build_audit_report(&root, &inv)?;
 
     if inv.json {
@@ -86,6 +87,13 @@ pub fn run(inv: AuditInvocation) -> Result<()> {
 
     print_human(&report, inv.hide_paths);
     Ok(())
+}
+
+fn resolve_audit_root(path: &Path) -> PathBuf {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    shk_core::git::discover_repo_root(&path)
+        .map(|root| std::fs::canonicalize(&root).unwrap_or(root))
+        .unwrap_or(path)
 }
 
 fn build_report(
@@ -101,9 +109,12 @@ fn build_report(
         .transpose()
         .context("invalid --since value")?;
 
+    let mut time_filter_skipped_entries = 0usize;
     let filtered = entries
         .into_iter()
-        .filter(|entry| entry_matches_filters(entry, inv, since_cutoff))
+        .filter(|entry| {
+            entry_matches_filters(entry, inv, since_cutoff, &mut time_filter_skipped_entries)
+        })
         .collect::<Vec<_>>();
 
     let summary = summarize(&filtered);
@@ -123,6 +134,7 @@ fn build_report(
             tool: inv.tool.map(|t| t.kebab_str().to_string()),
             reason: inv.reason.map(reason_label),
             limit: inv.limit,
+            time_filter_skipped_entries,
         },
         summary,
         by_rule,
@@ -137,6 +149,7 @@ fn entry_matches_filters(
     entry: &serde_json::Value,
     inv: &AuditInvocation,
     since_cutoff: Option<DateTime<Utc>>,
+    time_filter_skipped_entries: &mut usize,
 ) -> bool {
     if let Some(tool) = inv.tool {
         if entry.get("tool").and_then(serde_json::Value::as_str) != Some(tool.kebab_str()) {
@@ -152,9 +165,11 @@ fn entry_matches_filters(
 
     if let Some(cutoff) = since_cutoff {
         let Some(ts) = entry.get("ts").and_then(serde_json::Value::as_str) else {
+            *time_filter_skipped_entries += 1;
             return false;
         };
         let Ok(parsed) = DateTime::parse_from_rfc3339(ts) else {
+            *time_filter_skipped_entries += 1;
             return false;
         };
         if parsed.with_timezone(&Utc) < cutoff {
@@ -381,6 +396,12 @@ fn print_human(report: &AuditReport, hide_paths: bool) {
             report.parse_errors
         );
     }
+    if report.filters.time_filter_skipped_entries > 0 {
+        println!(
+            "[warn] skipped {} entry(s) without a valid timestamp for --since",
+            report.filters.time_filter_skipped_entries
+        );
+    }
 
     if report.summary.total_entries == 0 {
         println!();
@@ -510,8 +531,10 @@ mod tests {
             reason: Some(AuditReasonArg::Blocked),
             ..base_inv()
         };
-        assert!(entry_matches_filters(&blocked, &inv, None));
-        assert!(!entry_matches_filters(&audit, &inv, None));
+        let mut skipped = 0;
+        assert!(entry_matches_filters(&blocked, &inv, None, &mut skipped));
+        assert!(!entry_matches_filters(&audit, &inv, None, &mut skipped));
+        assert_eq!(skipped, 0);
     }
 
     #[test]
@@ -562,6 +585,29 @@ mod tests {
         let report = build_audit_report(dir.path(), &inv).unwrap();
         assert_eq!(report.summary.total_entries, 1);
         assert_eq!(report.by_tool[0].label, "cursor");
+    }
+
+    #[test]
+    fn since_filter_reports_entries_without_valid_timestamp() {
+        let inv = AuditInvocation {
+            path: PathBuf::from("."),
+            since: Some("7d".to_string()),
+            reason: Some(AuditReasonArg::Blocked),
+            ..base_inv()
+        };
+        let report = build_report(
+            Path::new("."),
+            vec![
+                entry(serde_json::json!({"event":"blocked","reason":"finding_threshold"})),
+                entry(serde_json::json!({"event":"blocked","reason":"finding_threshold","ts":"not-a-date"})),
+            ],
+            0,
+            &inv,
+        )
+        .unwrap();
+
+        assert_eq!(report.summary.total_entries, 0);
+        assert_eq!(report.filters.time_filter_skipped_entries, 2);
     }
 
     #[test]

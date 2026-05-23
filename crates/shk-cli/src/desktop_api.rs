@@ -216,6 +216,8 @@ pub struct ApplyAiHookSettingsOptions {
     pub scan_hooks_claude_code: bool,
     pub scan_hooks_cursor: bool,
     pub scan_hooks_codex: bool,
+    #[serde(default = "default_cursor_fail_closed")]
+    pub cursor_fail_closed: bool,
     pub claude_deny: bool,
     pub claude_sandbox: bool,
     pub codex_sandbox: bool,
@@ -241,6 +243,10 @@ fn default_desktop_log_blocked() -> bool {
     DESKTOP_AI_HOOK_LOG_BLOCKED
 }
 
+fn default_cursor_fail_closed() -> bool {
+    true
+}
+
 fn desktop_default_install_ai_hooks_options() -> InstallAiHooksOptions {
     InstallAiHooksOptions {
         audit: false,
@@ -248,7 +254,7 @@ fn desktop_default_install_ai_hooks_options() -> InstallAiHooksOptions {
         dry_run: false,
         global: false,
         tool: None,
-        fail_closed: false,
+        fail_closed: true,
         apply_deny: false,
         apply_sandbox: false,
     }
@@ -260,7 +266,7 @@ fn desktop_configure_ai_options(options: &ApplyAiHookSettingsOptions) -> Configu
         log_blocked: DESKTOP_AI_HOOK_LOG_BLOCKED,
         dry_run: false,
         global: false,
-        fail_closed: options.codex_sandbox,
+        fail_closed: options.cursor_fail_closed,
         scan_hooks_claude_code: options.scan_hooks_claude_code,
         scan_hooks_cursor: options.scan_hooks_cursor,
         scan_hooks_codex: options.scan_hooks_codex,
@@ -440,6 +446,7 @@ fn current_ai_hook_settings_options(root: &Path) -> ApplyAiHookSettingsOptions {
         scan_hooks_claude_code: applied.scan_hooks_claude_code,
         scan_hooks_cursor: applied.scan_hooks_cursor,
         scan_hooks_codex: applied.scan_hooks_codex,
+        cursor_fail_closed: true,
         claude_deny: applied.claude_deny,
         claude_sandbox: applied.claude_sandbox,
         codex_sandbox: applied.codex_sandbox,
@@ -457,13 +464,11 @@ pub fn apply_recommended_fixes(
     }
 
     let policy_exists = root.join("shk.toml").is_file();
+    validate_recommended_fixes(&options, policy_exists)?;
     let mut details = Vec::new();
     let mut applied = 0usize;
 
     for fix_id in &options.fix_ids {
-        if fix_id == "ignore" && options.ignore_targets.is_empty() {
-            anyhow::bail!("ignore fix requires at least one target");
-        }
         let result = apply_recommended_fix(&root, fix_id, policy_exists, &options)?;
         if !result.details.is_empty() || result.success {
             details.push(format!("[{}] {}", fix_id, result.message));
@@ -481,6 +486,52 @@ pub fn apply_recommended_fixes(
         },
         details,
     })
+}
+
+fn validate_recommended_fixes(
+    options: &ApplyRecommendedFixesOptions,
+    policy_exists: bool,
+) -> Result<()> {
+    for fix_id in &options.fix_ids {
+        match fix_id.as_str() {
+            "ignore" => {
+                if !policy_exists {
+                    anyhow::bail!("ignore fix requires shk.toml");
+                }
+                if options.ignore_targets.is_empty() {
+                    anyhow::bail!("ignore fix requires at least one target");
+                }
+            }
+            "git_pre_commit" => {
+                if !policy_exists {
+                    anyhow::bail!("pre-commit fix requires shk.toml");
+                }
+            }
+            "ai_hooks" => {
+                if !policy_exists {
+                    anyhow::bail!("AI hook fix requires shk.toml");
+                }
+            }
+            "ai_claude_deny" => {
+                if !policy_exists {
+                    anyhow::bail!("Claude deny fix requires shk.toml");
+                }
+            }
+            "ai_claude_sandbox" => {
+                if !policy_exists {
+                    anyhow::bail!("Claude sandbox fix requires shk.toml");
+                }
+            }
+            "ai_codex_sandbox" => {
+                if !policy_exists {
+                    anyhow::bail!("Codex sandbox fix requires shk.toml");
+                }
+            }
+            "npm_hardening" => {}
+            other => anyhow::bail!("unknown recommended fix id: {other}"),
+        }
+    }
+    Ok(())
 }
 
 fn apply_recommended_fix(
@@ -829,7 +880,10 @@ fn build_recommended_fixes(
     is_git_repo: bool,
 ) -> Vec<RecommendedFixDto> {
     let mut fixes = Vec::new();
-    if policy_exists && !checks.ignore.missing_patterns.is_empty() {
+    if policy_exists
+        && checks.ignore.load_error.is_none()
+        && !checks.ignore.missing_patterns.is_empty()
+    {
         fixes.push(RecommendedFixDto {
             id: "ignore".into(),
             severity: "warn".into(),
@@ -920,6 +974,13 @@ fn build_doctor_status_from(checks: &ProjectCheckStatus) -> DoctorStatus {
             message: "AI managed hooks not found — install via Setup".into(),
         });
     }
+    if let Some(err) = &checks.ignore.load_error {
+        issues.push(DoctorIssue {
+            id: "ignore_policy".into(),
+            severity: "warn".into(),
+            message: format!("Unable to load policy for ignore check: {err}"),
+        });
+    }
     for pat in &checks.ignore.missing_patterns {
         issues.push(DoctorIssue {
             id: format!("ignore:{pat}"),
@@ -980,7 +1041,7 @@ fn build_doctor_status_from(checks: &ProjectCheckStatus) -> DoctorStatus {
     DoctorStatus {
         git_pre_commit: checks.git_pre_commit,
         ai_managed_hooks: checks.ai_managed_hooks,
-        ignore_ok: checks.ignore.missing_patterns.is_empty(),
+        ignore_ok: checks.ignore.load_error.is_none() && checks.ignore.missing_patterns.is_empty(),
         missing_ignore_patterns: checks.ignore.missing_patterns.clone(),
         claude_deny_ok: !checks.claude.settings_exists || checks.claude.deny_ok,
         claude_sandbox_ok: !checks.claude.settings_exists || checks.claude.sandbox_ok,
@@ -1170,6 +1231,25 @@ mod tests {
     }
 
     #[test]
+    fn doctor_status_reports_ignore_policy_load_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "[scan\nbroken = true\n").unwrap();
+
+        let status = build_project_status(dir.path());
+
+        assert!(!status.doctor.ignore_ok, "{status:?}");
+        assert!(
+            status
+                .doctor
+                .issues
+                .iter()
+                .any(|issue| issue.id == "ignore_policy"),
+            "{:?}",
+            status.doctor.issues
+        );
+    }
+
+    #[test]
     fn desktop_ai_hooks_reject_global_install() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("shk.toml"), "").unwrap();
@@ -1262,6 +1342,33 @@ mod tests {
         let status = build_project_status(dir.path());
         assert!(status.doctor.ignore_ok);
         assert_eq!(status.ignore_fix_targets.len(), 10);
+    }
+
+    #[test]
+    fn desktop_recommended_fixes_validate_before_mutating() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "[doctor.ignore]\n").unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"demo","packageManager":"npm@10.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("package-lock.json"), "{}").unwrap();
+
+        let err = apply_recommended_fixes(
+            dir.path().to_str().unwrap(),
+            ApplyRecommendedFixesOptions {
+                fix_ids: vec!["npm_hardening".to_string(), "ignore".to_string()],
+                ignore_targets: vec![],
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("ignore fix requires"), "{err}");
+        assert!(
+            !dir.path().join(".npmrc").exists(),
+            "prevalidation should prevent partial npm hardening writes"
+        );
     }
 
     #[test]
@@ -1531,6 +1638,7 @@ mod tests {
                 scan_hooks_claude_code: false,
                 scan_hooks_cursor: false,
                 scan_hooks_codex: false,
+                cursor_fail_closed: true,
                 claude_deny: false,
                 claude_sandbox: false,
                 codex_sandbox: false,
@@ -1574,6 +1682,7 @@ mod tests {
                 scan_hooks_claude_code: true,
                 scan_hooks_cursor: false,
                 scan_hooks_codex: false,
+                cursor_fail_closed: true,
                 claude_deny: false,
                 claude_sandbox: false,
                 codex_sandbox: false,
@@ -1615,6 +1724,7 @@ mod tests {
                 scan_hooks_claude_code: true,
                 scan_hooks_cursor: false,
                 scan_hooks_codex: false,
+                cursor_fail_closed: true,
                 claude_deny: false,
                 claude_sandbox: false,
                 codex_sandbox: false,
@@ -1634,6 +1744,7 @@ mod tests {
         let opts = desktop_default_install_ai_hooks_options();
         assert!(opts.log_blocked);
         assert!(!opts.audit);
+        assert!(opts.fail_closed);
     }
 
     #[test]
@@ -1642,12 +1753,31 @@ mod tests {
             scan_hooks_claude_code: true,
             scan_hooks_cursor: false,
             scan_hooks_codex: false,
+            cursor_fail_closed: true,
             claude_deny: false,
             claude_sandbox: false,
             codex_sandbox: false,
         });
         assert!(opts.log_blocked);
         assert!(!opts.audit);
+        assert!(opts.fail_closed);
+    }
+
+    #[test]
+    fn desktop_cursor_fail_closed_is_independent_from_codex_sandbox() {
+        let opts = desktop_configure_ai_options(&ApplyAiHookSettingsOptions {
+            scan_hooks_claude_code: false,
+            scan_hooks_cursor: true,
+            scan_hooks_codex: false,
+            cursor_fail_closed: true,
+            claude_deny: false,
+            claude_sandbox: false,
+            codex_sandbox: false,
+        });
+
+        assert!(opts.scan_hooks_cursor);
+        assert!(!opts.codex_sandbox);
+        assert!(opts.fail_closed);
     }
 
     #[test]

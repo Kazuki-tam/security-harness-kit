@@ -14,10 +14,6 @@ const CHECKOUT_ACTION: &str = "actions/checkout@v6";
 static SHK_VERSION_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(latest|v?\d+\.\d+\.\d+(?:-[A-Za-z0-9.\-]+)?)$").unwrap());
 
-/// Conservative path constraint: forward-slashed relative path, no `..` segments, no spaces.
-static INSTALLER_NAME_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[A-Za-z0-9._\-]+(?:/[A-Za-z0-9._\-]+)*$").unwrap());
-
 /// `owner/repo` GitHub slug. Sufficient for the few characters GitHub allows in either segment.
 static REPO_SLUG_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z0-9._\-]+/[A-Za-z0-9._\-]+$").unwrap());
@@ -65,8 +61,7 @@ pub fn init_github(root: &Path, args: GithubCiArgs) -> Result<()> {
 }
 
 /// Reject `.` / `..` segments in any forward-slash separated path-like input.
-/// Shared by `--repo` and `--installer-name` so neither can synthesise a URL that
-/// escapes the intended GitHub release path.
+/// Reject `.` / `..` segments in forward-slash separated inputs.
 fn has_traversal_segment(value: &str) -> bool {
     value
         .split('/')
@@ -84,14 +79,6 @@ fn validate(args: &GithubCiArgs) -> Result<()> {
         bail!(
             "invalid --shk-version `{}` (expected `latest` or `vMAJOR.MINOR.PATCH`)",
             args.shk_version
-        );
-    }
-    if !INSTALLER_NAME_RE.is_match(&args.installer_name)
-        || has_traversal_segment(&args.installer_name)
-    {
-        bail!(
-            "invalid --installer-name `{}` (expected a relative path under the release assets)",
-            args.installer_name
         );
     }
     // `--path` is embedded into a YAML block scalar (`run: |`). A literal newline
@@ -197,16 +184,6 @@ fn release_tag(version: &str) -> String {
     }
 }
 
-#[cfg(test)]
-fn installer_url(repo: &str, version: &str, installer_name: &str) -> String {
-    let release_path = if version == "latest" {
-        "latest/download".to_string()
-    } else {
-        format!("download/{version}")
-    };
-    format!("https://github.com/{repo}/releases/{release_path}/{installer_name}")
-}
-
 fn shell_quote(s: &str) -> String {
     if !s.is_empty()
         && s.bytes()
@@ -229,7 +206,6 @@ mod tests {
             path: ".".into(),
             repo: "Kazuki-tam/security-harness-kit".into(),
             shk_version: concat!("v", env!("CARGO_PKG_VERSION")).into(),
-            installer_name: "shk-cli-installer.sh".into(),
             output: PathBuf::from(".github/workflows/shk.yml"),
             dry_run: false,
             force: false,
@@ -269,19 +245,6 @@ mod tests {
         assert!(workflow.contains("concurrency:"));
         assert!(workflow.contains("cancel-in-progress: true"));
         assert!(workflow.contains("group: shk-${{ github.workflow }}-${{ github.ref }}"));
-    }
-
-    #[test]
-    fn installer_url_handles_pinned_version() {
-        let url = installer_url(
-            "Kazuki-tam/security-harness-kit",
-            "v0.2.3",
-            "shk-cli-installer.sh",
-        );
-        assert_eq!(
-            url,
-            "https://github.com/Kazuki-tam/security-harness-kit/releases/download/v0.2.3/shk-cli-installer.sh"
-        );
     }
 
     #[test]
@@ -339,17 +302,12 @@ mod tests {
         let mut a = args(CiModeArg::Blocking);
         a.shk_version = "; rm -rf /".into();
         assert!(validate(&a).is_err());
-
-        let mut a = args(CiModeArg::Blocking);
-        a.installer_name = "../etc/passwd".into();
-        assert!(validate(&a).is_err());
     }
 
     #[test]
     fn validate_accepts_canonical_inputs() {
         let mut a = args(CiModeArg::Blocking);
         a.shk_version = "v0.2.3".into();
-        a.installer_name = "nested/asset.sh".into();
         assert!(validate(&a).is_ok());
     }
 }

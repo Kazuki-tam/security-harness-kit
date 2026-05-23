@@ -23,6 +23,7 @@ const PNPM_MIN_RELEASE_AGE_MINUTES: u64 = MIN_RELEASE_AGE_DAYS * 24 * 60;
 const BUN_MIN_RELEASE_AGE_SECONDS: u64 = MIN_RELEASE_AGE_DAYS * 24 * 60 * 60;
 const YARN_MIN_RELEASE_AGE_KEY: &str = "npmMinimalAgeGate";
 const YARN_MIN_RELEASE_AGE_MINUTES: u64 = MIN_RELEASE_AGE_DAYS * 24 * 60;
+const MANAGED_MARKER: &str = "# shk-managed npm-hardening";
 const DEPENDABOT_FILES: &[&str] = &[".github/dependabot.yml", ".github/dependabot.yaml"];
 const RENOVATE_FILES: &[&str] = &[
     "renovate.json",
@@ -322,33 +323,20 @@ fn upsert_npmrc_settings(input: &str, package_managers: &[PackageManager]) -> St
 }
 
 fn remove_npmrc_settings(input: &str, package_managers: &[PackageManager]) -> String {
-    let mut remove_keys = vec![IGNORE_SCRIPTS_KEY];
+    let mut lines = input.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+    remove_managed_key_lines(&mut lines, IGNORE_SCRIPTS_KEY, npmrc_line_key);
     if package_managers.contains(&PackageManager::Npm) {
-        remove_keys.push(MIN_RELEASE_AGE_KEY);
+        remove_managed_key_lines(&mut lines, MIN_RELEASE_AGE_KEY, npmrc_line_key);
     }
-    let mut lines = input
-        .lines()
-        .filter(|line| {
-            npmrc_line_key(line)
-                .map(|key| !remove_keys.contains(&key))
-                .unwrap_or(true)
-        })
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
     trim_trailing_empty_lines(&mut lines);
     finish_lines(lines)
 }
 
 fn upsert_npmrc_line(lines: &mut Vec<String>, key: &str, value: &str) {
     let replacement = format!("{key}={value}");
-    if let Some(line) = lines
-        .iter_mut()
-        .find(|line| npmrc_line_key(line) == Some(key))
-    {
-        *line = replacement;
-    } else {
-        lines.push(replacement);
-    }
+    upsert_managed_key_line(lines, key, &replacement, npmrc_line_key, |line| {
+        npmrc_line_value(line) == Some(value)
+    });
 }
 
 fn npmrc_bool(input: &str, key: &str) -> Option<bool> {
@@ -366,17 +354,20 @@ fn npmrc_u64(input: &str, key: &str) -> Option<u64> {
 fn npmrc_value(input: &str, key: &str) -> Option<String> {
     input.lines().find_map(|line| {
         if npmrc_line_key(line) == Some(key) {
-            line.split_once('=').map(|(_, value)| {
-                value
-                    .split_once('#')
-                    .map(|(before, _)| before)
-                    .unwrap_or(value)
-                    .trim()
-                    .to_string()
-            })
+            npmrc_line_value(line).map(ToOwned::to_owned)
         } else {
             None
         }
+    })
+}
+
+fn npmrc_line_value(line: &str) -> Option<&str> {
+    line.split_once('=').map(|(_, value)| {
+        value
+            .split_once('#')
+            .map(|(before, _)| before)
+            .unwrap_or(value)
+            .trim()
     })
 }
 
@@ -391,14 +382,9 @@ fn npmrc_line_key(line: &str) -> Option<&str> {
 fn upsert_yaml_line(input: &str, key: &str, value: &str) -> String {
     let mut lines = input.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
     let replacement = format!("{key}: {value}");
-    if let Some(line) = lines
-        .iter_mut()
-        .find(|line| yaml_line_key(line) == Some(key))
-    {
-        *line = replacement;
-    } else {
-        lines.push(replacement);
-    }
+    upsert_managed_key_line(&mut lines, key, &replacement, yaml_line_key, |line| {
+        yaml_line_value(line) == Some(value)
+    });
 
     let mut output = lines.join("\n");
     if !output.is_empty() {
@@ -408,11 +394,8 @@ fn upsert_yaml_line(input: &str, key: &str, value: &str) -> String {
 }
 
 fn remove_yaml_line(input: &str, key: &str) -> String {
-    let mut lines = input
-        .lines()
-        .filter(|line| yaml_line_key(line) != Some(key))
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
+    let mut lines = input.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+    remove_managed_key_lines(&mut lines, key, yaml_line_key);
     trim_trailing_empty_lines(&mut lines);
     finish_lines(lines)
 }
@@ -426,6 +409,16 @@ fn yaml_line_key(line: &str) -> Option<&str> {
         return None;
     }
     line.split_once(':').map(|(key, _)| key.trim())
+}
+
+fn yaml_line_value(line: &str) -> Option<&str> {
+    line.split_once(':').map(|(_, value)| {
+        value
+            .split_once('#')
+            .map(|(before, _)| before)
+            .unwrap_or(value)
+            .trim()
+    })
 }
 
 fn upsert_bunfig_min_release_age(input: &str) -> Result<String> {
@@ -457,19 +450,21 @@ fn upsert_toml_table_integer(input: &str, table: &str, key: &str, value: u64) ->
             .map(|(idx, _)| idx)
             .unwrap_or(lines.len());
 
-        if let Some(line) = lines[table_start + 1..table_end]
-            .iter_mut()
-            .find(|line| toml_line_key(line) == Some(key))
-        {
-            *line = replacement;
-        } else {
-            lines.insert(table_end, replacement);
-        }
+        upsert_managed_key_line_in_range(
+            &mut lines,
+            table_start + 1,
+            table_end,
+            key,
+            &replacement,
+            toml_line_key,
+            |line| toml_line_integer_value(line) == Some(value),
+        );
     } else {
         if !lines.is_empty() && lines.last().is_some_and(|line| !line.trim().is_empty()) {
             lines.push(String::new());
         }
         lines.push(table_header);
+        lines.push(MANAGED_MARKER.to_string());
         lines.push(replacement);
     }
 
@@ -494,15 +489,84 @@ fn remove_toml_table_key(input: &str, table: &str, key: &str) -> String {
             .find(|(_, line)| is_toml_table_header(line))
             .map(|(idx, _)| idx)
             .unwrap_or(lines.len());
-        if let Some(offset) = lines[table_start + 1..table_end]
-            .iter()
-            .position(|line| toml_line_key(line) == Some(key))
-        {
-            lines.remove(table_start + 1 + offset);
-        }
+        remove_managed_key_lines_in_range(
+            &mut lines,
+            table_start + 1,
+            table_end,
+            key,
+            toml_line_key,
+        );
     }
     trim_trailing_empty_lines(&mut lines);
     finish_lines(lines)
+}
+
+fn upsert_managed_key_line(
+    lines: &mut Vec<String>,
+    key: &str,
+    replacement: &str,
+    key_fn: fn(&str) -> Option<&str>,
+    desired_fn: impl Fn(&str) -> bool,
+) {
+    let end = lines.len();
+    upsert_managed_key_line_in_range(lines, 0, end, key, replacement, key_fn, desired_fn);
+}
+
+fn upsert_managed_key_line_in_range(
+    lines: &mut Vec<String>,
+    start: usize,
+    end: usize,
+    key: &str,
+    replacement: &str,
+    key_fn: fn(&str) -> Option<&str>,
+    desired_fn: impl Fn(&str) -> bool,
+) {
+    if let Some(offset) = lines[start..end]
+        .iter()
+        .position(|line| key_fn(line) == Some(key))
+    {
+        let idx = start + offset;
+        if desired_fn(&lines[idx]) && !is_managed_previous_line(lines, idx) {
+            return;
+        }
+        lines[idx] = replacement.to_string();
+        if !is_managed_previous_line(lines, idx) {
+            lines.insert(idx, MANAGED_MARKER.to_string());
+        }
+    } else {
+        lines.insert(end, MANAGED_MARKER.to_string());
+        lines.insert(end + 1, replacement.to_string());
+    }
+}
+
+fn remove_managed_key_lines(lines: &mut Vec<String>, key: &str, key_fn: fn(&str) -> Option<&str>) {
+    let end = lines.len();
+    remove_managed_key_lines_in_range(lines, 0, end, key, key_fn);
+}
+
+fn remove_managed_key_lines_in_range(
+    lines: &mut Vec<String>,
+    start: usize,
+    end: usize,
+    key: &str,
+    key_fn: fn(&str) -> Option<&str>,
+) {
+    let mut idx = start;
+    let mut end = end.min(lines.len());
+    while idx < end {
+        if key_fn(&lines[idx]) == Some(key) && is_managed_previous_line(lines, idx) {
+            lines.remove(idx);
+            lines.remove(idx - 1);
+            end = end.saturating_sub(2);
+            idx = idx.saturating_sub(1);
+        } else {
+            idx += 1;
+        }
+    }
+}
+
+fn is_managed_previous_line(lines: &[String], idx: usize) -> bool {
+    idx > 0 && lines[idx - 1].trim() == MANAGED_MARKER
 }
 
 fn trim_trailing_empty_lines(lines: &mut Vec<String>) {
@@ -530,6 +594,17 @@ fn toml_line_key(line: &str) -> Option<&str> {
         return None;
     }
     line.split_once('=').map(|(key, _)| key.trim())
+}
+
+fn toml_line_integer_value(line: &str) -> Option<u64> {
+    line.split_once('=').and_then(|(_, value)| {
+        value
+            .split_once('#')
+            .map_or(value, |(before, _)| before)
+            .trim()
+            .parse()
+            .ok()
+    })
 }
 
 fn find_package_dirs(root: &Path) -> Vec<PathBuf> {
@@ -593,7 +668,7 @@ fn package_manager_from_package_json(path: &Path) -> Option<PackageManager> {
 
 fn resolve_pnpm_workspace_path(root: &Path, package_dirs: &[PathBuf]) -> PathBuf {
     let root_workspace = root.join(PNPM_WORKSPACE_FILE);
-    if root_workspace.is_file() || root.join(PACKAGE_JSON).is_file() {
+    if root_workspace.is_file() {
         return root_workspace;
     }
 
@@ -1035,6 +1110,30 @@ updates:
     }
 
     #[test]
+    fn nested_pnpm_workspace_wins_when_root_has_package_json() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(PACKAGE_JSON),
+            r#"{"name":"root","packageManager":"npm@10.0.0"}"#,
+        )
+        .unwrap();
+        let app = dir.path().join("apps/web");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join(PACKAGE_JSON),
+            r#"{"name":"web","packageManager":"pnpm@11.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(app.join(PNPM_WORKSPACE_FILE), "packages: []\n").unwrap();
+
+        apply(dir.path()).unwrap();
+
+        assert!(!dir.path().join(PNPM_WORKSPACE_FILE).exists());
+        let nested = fs::read_to_string(app.join(PNPM_WORKSPACE_FILE)).unwrap();
+        assert!(nested.contains("minimumReleaseAge: 10080"), "{nested}");
+    }
+
+    #[test]
     fn unapply_removes_supported_hardening_settings() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(
@@ -1058,6 +1157,29 @@ updates:
         );
         assert!(!status(dir.path()).package_scripts_ok());
         assert!(!status(dir.path()).age_gates_ok());
+    }
+
+    #[test]
+    fn unapply_preserves_user_owned_matching_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(PACKAGE_JSON),
+            r#"{"packageManager":"npm@10.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join(NPMRC_FILE),
+            "ignore-scripts=true\nmin-release-age=7\n",
+        )
+        .unwrap();
+
+        apply(dir.path()).unwrap();
+        unapply(dir.path()).unwrap();
+
+        let npmrc = fs::read_to_string(dir.path().join(NPMRC_FILE)).unwrap();
+        assert!(npmrc.contains("ignore-scripts=true"), "{npmrc}");
+        assert!(npmrc.contains("min-release-age=7"), "{npmrc}");
+        assert!(!npmrc.contains(MANAGED_MARKER), "{npmrc}");
     }
 
     #[test]

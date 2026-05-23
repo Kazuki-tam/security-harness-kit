@@ -114,7 +114,7 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
             )
         );
     }
-    if res.should_fail() {
+    if !inv.audit && res.should_fail() {
         return Err(CliExit::silent(1).into());
     }
     Ok(())
@@ -200,12 +200,13 @@ fn run_hook_mode(
         && let Some(guard_match) =
             shk_integrations::detect_dangerous_action_with_config(stdin_trim, &action_guard_config)?
     {
+        let reason = action_guard_deny_reason(&guard_match);
         return deny_hook_with_log(
             &repo_root,
             log_blocked,
             tool,
             hook_event,
-            &guard_match.reason,
+            &reason,
             BlockLog::ActionGuard(&guard_match),
         );
     }
@@ -287,14 +288,17 @@ fn deny_hook_with_log(
     block_log: BlockLog<'_>,
 ) -> Result<()> {
     if log_blocked {
-        match block_log {
+        let append_result = match block_log {
             BlockLog::Scan {
                 display_path,
                 result,
-            } => hook_audit_log::append_blocked_scan(repo_root, tool, event, display_path, result)?,
+            } => hook_audit_log::append_blocked_scan(repo_root, tool, event, display_path, result),
             BlockLog::ActionGuard(guard_match) => {
-                hook_audit_log::append_blocked_action_guard(repo_root, tool, event, guard_match)?
+                hook_audit_log::append_blocked_action_guard(repo_root, tool, event, guard_match)
             }
+        };
+        if let Err(err) = append_result {
+            eprintln!("shk blocked: unable to write .shk/audit.log: {err:#}");
         }
     }
     deny_hook(tool, event, reason)
@@ -329,6 +333,10 @@ fn action_guard_config_from_policy(policy: &Policy) -> shk_integrations::ActionG
         allow: policy.action_guard.allow.clone(),
         deny: policy.action_guard.deny.clone(),
     }
+}
+
+fn action_guard_deny_reason(guard_match: &ActionGuardMatch) -> String {
+    format!("shk action guard: {} blocked", guard_match.category)
 }
 
 fn should_run_action_guard(post: bool, audit: bool) -> bool {

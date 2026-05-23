@@ -482,12 +482,11 @@ Options:
 | `--path <path>` | Path passed to `shk scan`. Defaults to `.`. |
 | `--repo <owner/name>` | GitHub repository hosting `shk` releases. Defaults to `Kazuki-tam/security-harness-kit`. |
 | `--shk-version <version>` | Release version to install. Defaults to the generating `shk` release (`v` + crate version). Also accepts `latest` or a SemVer-ish tag such as `v0.3.0`. |
-| `--installer-name <name>` | cargo-dist shell installer asset name. Defaults to `shk-cli-installer.sh`. |
 | `--output <path>` | Workflow destination path. Defaults to `.github/workflows/shk.yml`. |
 | `--dry-run` | Print the workflow YAML to stdout without writing it. |
 | `--force` | Overwrite an existing workflow file. |
 
-Generated workflows include `permissions: contents: read` and a `concurrency` block with `cancel-in-progress: true` so reruns on the same ref supersede in-flight jobs. The CLI rejects unsafe values for `--repo`, `--shk-version`, and `--installer-name` to keep the generated installer URL well-formed.
+Generated workflows include `permissions: contents: read` and a `concurrency` block with `cancel-in-progress: true` so reruns on the same ref supersede in-flight jobs. The CLI rejects unsafe values for `--repo` and `--shk-version` to keep the generated release download commands well-formed.
 
 See [GitHub Actions integration](ci.md) for a full guide covering the generated YAML, blocking vs audit rollout, pinning a release, and PR Required Check setup.
 

@@ -84,8 +84,8 @@ pub fn blocked_scan_payload(
         "reason": REASON_FINDING_THRESHOLD,
         "display_path": display_path,
         "finding_count": blocking.len(),
-        "suppressed": res.suppressed,
-        "deduplicated": res.deduplicated,
+        "suppressed_total": res.suppressed,
+        "deduplicated_total": res.deduplicated,
         "max_severity": max_sev,
         "rule_ids": rule_ids,
         "kinds": kinds,
@@ -236,8 +236,10 @@ mod tests {
         assert_eq!(payload["hook"], "pre");
         assert_eq!(payload["display_path"], "x.txt");
         assert_eq!(payload["finding_count"], 1);
-        assert_eq!(payload["suppressed"], 2);
-        assert_eq!(payload["deduplicated"], 1);
+        assert_eq!(payload["suppressed_total"], 2);
+        assert_eq!(payload["deduplicated_total"], 1);
+        assert!(payload.get("suppressed").is_none());
+        assert!(payload.get("deduplicated").is_none());
         assert_eq!(
             payload["rule_ids"],
             serde_json::json!(["secret.openai_api_key"])

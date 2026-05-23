@@ -132,7 +132,7 @@ Re-run `shk ci init github --shk-version <new tag> --force` after upgrading `shk
 shk ci init github --repo your-org/security-harness-kit
 ```
 
-`--repo` is validated as `owner/repository` (alphanumerics, `.`, `_`, `-`). Combine with `--shk-version` to point CI at your fork's release tag. `--installer-name` lets you target a custom asset (e.g. `nested/asset.sh`) but rejects path-traversal segments such as `..`.
+`--repo` is validated as `owner/repository` (alphanumerics, `.`, `_`, `-`). Combine with `--shk-version` to point CI at your fork's release tag.
 
 ## Make `shk` A Required PR Check
 

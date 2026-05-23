@@ -23,13 +23,14 @@ pub fn append_line(repo_root: &Path, value: serde_json::Value) -> Result<()> {
             map.insert("payload".into(), other);
         }
     }
-    let line = serde_json::Value::Object(map).to_string();
+    let mut line = serde_json::Value::Object(map).to_string();
+    line.push('\n');
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log)
         .with_context(|| format!("open {}", log.display()))?;
-    writeln!(f, "{line}")?;
+    f.write_all(line.as_bytes())?;
     Ok(())
 }
 

@@ -36,6 +36,7 @@ const CODEX_RISKY_APPROVAL_POLICY: &str = "never";
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct IgnoreStatus {
     pub missing_patterns: Vec<String>,
+    pub load_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,8 +105,9 @@ pub fn ignore_fix_target_statuses(root: &Path) -> Vec<IgnoreFixTargetStatus> {
 }
 
 pub fn collect_ignore_status(root: &Path) -> IgnoreStatus {
-    collect_ignore_status_result(root).unwrap_or_else(|_| IgnoreStatus {
+    collect_ignore_status_result(root).unwrap_or_else(|err| IgnoreStatus {
         missing_patterns: Vec::new(),
+        load_error: Some(err.to_string()),
     })
 }
 
@@ -225,7 +227,10 @@ fn collect_ignore_status_result(root: &Path) -> Result<IgnoreStatus> {
         .cloned()
         .collect();
 
-    Ok(IgnoreStatus { missing_patterns })
+    Ok(IgnoreStatus {
+        missing_patterns,
+        load_error: None,
+    })
 }
 
 fn read_ignore_candidate_files(root: &Path) -> Result<String> {

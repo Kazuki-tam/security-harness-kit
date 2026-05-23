@@ -692,12 +692,59 @@ fn codex_managed_block_regex() -> &'static Regex {
 }
 
 fn ensure_codex_features_prefix(content: &str) -> String {
-    let trimmed = content.trim_start();
-    if trimmed.contains("codex_hooks") {
-        content.to_string()
-    } else {
-        format!("[features]\ncodex_hooks = true\n\n{}", content.trim_start())
+    let mut lines: Vec<String> = content.lines().map(ToOwned::to_owned).collect();
+
+    if let Some(features_idx) = lines.iter().position(|line| line.trim() == "[features]") {
+        let section_end = lines
+            .iter()
+            .enumerate()
+            .skip(features_idx + 1)
+            .find(|(_, line)| line.trim_start().starts_with('['))
+            .map(|(idx, _)| idx)
+            .unwrap_or(lines.len());
+        if let Some(idx) = (features_idx + 1..section_end).find(|idx| {
+            lines[*idx]
+                .trim()
+                .split_once('=')
+                .map(|(key, _)| key.trim() == "codex_hooks")
+                .unwrap_or(false)
+        }) {
+            lines[idx] = "codex_hooks = true".to_string();
+        } else {
+            lines.insert(section_end, "codex_hooks = true".to_string());
+        }
+        return finish_text_lines(lines, content.ends_with('\n'));
     }
+
+    let insert_at = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with('['))
+        .unwrap_or(lines.len());
+    let block = ["[features]".to_string(), "codex_hooks = true".to_string()];
+    if insert_at == 0 {
+        lines.splice(0..0, block);
+        lines.insert(2, String::new());
+    } else if insert_at == lines.len() {
+        if !lines.is_empty() && !lines.last().is_some_and(|line| line.is_empty()) {
+            lines.push(String::new());
+        }
+        lines.extend(block);
+    } else {
+        if !lines[insert_at - 1].is_empty() {
+            lines.insert(insert_at, String::new());
+        }
+        lines.splice(insert_at..insert_at, block);
+        lines.insert(insert_at + 2, String::new());
+    }
+    finish_text_lines(lines, true)
+}
+
+fn finish_text_lines(lines: Vec<String>, trailing_newline: bool) -> String {
+    let mut output = lines.join("\n");
+    if trailing_newline && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output
 }
 
 fn apply_codex(
@@ -1030,6 +1077,24 @@ approval_policy = "untrusted"
 
         assert!(body.contains(r#"sandbox_mode = "read-only""#), "{body}");
         assert!(body.contains(r#"approval_policy = "untrusted""#), "{body}");
+    }
+
+    #[test]
+    fn codex_features_do_not_capture_top_level_settings() {
+        let body = ensure_codex_features_prefix(
+            r#"model = "gpt-5"
+sandbox_mode = "workspace-write"
+
+[profiles.default]
+approval_policy = "on-request"
+"#,
+        );
+
+        assert!(body.starts_with("model = \"gpt-5\"\n"), "{body}");
+        assert!(
+            body.contains("sandbox_mode = \"workspace-write\"\n\n[features]\ncodex_hooks = true\n\n[profiles.default]"),
+            "{body}"
+        );
     }
 
     #[test]
