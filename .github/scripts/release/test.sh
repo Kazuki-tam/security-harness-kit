@@ -3,6 +3,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT"
+source ./.github/scripts/release/common.sh
+
+current_version="$(shk_workspace_version)"
 
 assert_output() {
   local description="$1"
@@ -39,10 +42,10 @@ if resolve_tag vbad >/dev/null 2>&1; then
 fi
 echo "ok: invalid tag rejected"
 
-RELEASE_COMPONENT=cli RELEASE_VERSION=0.3.4 \
+RELEASE_COMPONENT=cli RELEASE_VERSION="$current_version" \
   ./.github/scripts/release/verify-versions.sh
 
-RELEASE_COMPONENT=desktop RELEASE_VERSION=0.3.4 \
+RELEASE_COMPONENT=desktop RELEASE_VERSION="$current_version" \
   ./.github/scripts/release/verify-versions.sh
 
 if RELEASE_COMPONENT=desktop RELEASE_VERSION=9.9.9 \
@@ -177,19 +180,19 @@ case "$(uname -s)" in
   Linux)
     fake_package_target="test-unknown-linux-gnu"
     fake_bundle_dirs=(appimage deb)
-    fake_bundle_files=(appimage/shk.AppImage deb/shk_0.3.4_amd64.deb)
-    fake_packaged_files=(shk.AppImage 0.3.4_amd64.deb)
+    fake_bundle_files=(appimage/shk.AppImage "deb/shk_${current_version}_amd64.deb")
+    fake_packaged_files=(shk.AppImage "${current_version}_amd64.deb")
     ;;
   *)
     fake_package_target=""
     ;;
 esac
 trap 'rm -rf "$tmpdir" ${fake_package_target:+"target/${fake_package_target}"}' EXIT
-printf 'mac dmg\n' > "$tmpdir/shk-desktop_0.3.4_aarch64-apple-darwin_shk.dmg"
-printf 'mac updater\n' > "$tmpdir/shk-desktop_0.3.4_aarch64-apple-darwin_shk.app.tar.gz"
-printf 'mac-signature\n' > "$tmpdir/shk-desktop_0.3.4_aarch64-apple-darwin_shk.app.tar.gz.sig"
-printf 'linux appimage\n' > "$tmpdir/shk-desktop_0.3.4_x86_64-unknown-linux-gnu_shk.AppImage"
-printf 'linux-signature\n' > "$tmpdir/shk-desktop_0.3.4_x86_64-unknown-linux-gnu_shk.AppImage.sig"
+printf 'mac dmg\n' > "$tmpdir/shk-desktop_${current_version}_aarch64-apple-darwin_shk.dmg"
+printf 'mac updater\n' > "$tmpdir/shk-desktop_${current_version}_aarch64-apple-darwin_shk.app.tar.gz"
+printf 'mac-signature\n' > "$tmpdir/shk-desktop_${current_version}_aarch64-apple-darwin_shk.app.tar.gz.sig"
+printf 'linux appimage\n' > "$tmpdir/shk-desktop_${current_version}_x86_64-unknown-linux-gnu_shk.AppImage"
+printf 'linux-signature\n' > "$tmpdir/shk-desktop_${current_version}_x86_64-unknown-linux-gnu_shk.AppImage.sig"
 
 if [[ -n "$fake_package_target" ]]; then
   for dir in "${fake_bundle_dirs[@]}"; do
@@ -198,23 +201,25 @@ if [[ -n "$fake_package_target" ]]; then
   for file in "${fake_bundle_files[@]}"; do
     printf 'artifact\n' > "target/${fake_package_target}/release/bundle/${file}"
   done
-  ./.github/scripts/release/package-desktop-artifacts.sh "$fake_package_target" 0.3.4 "$tmpdir/packaged" >/dev/null
+  ./.github/scripts/release/package-desktop-artifacts.sh "$fake_package_target" "$current_version" "$tmpdir/packaged" >/dev/null
   for file in "${fake_packaged_files[@]}"; do
-    test -f "$tmpdir/packaged/shk-desktop_0.3.4_${fake_package_target}_${file}"
+    test -f "$tmpdir/packaged/shk-desktop_${current_version}_${fake_package_target}_${file}"
   done
   echo "ok: desktop package artifacts are selected by target"
 fi
 
 ./.github/scripts/release/generate-desktop-checksums.sh "$tmpdir" >/dev/null
 GITHUB_REPOSITORY=Kazuki-tam/security-harness-kit \
-  RELEASE_TAG=desktop-v0.3.4 \
-  RELEASE_VERSION=0.3.4 \
+  RELEASE_TAG="desktop-v${current_version}" \
+  RELEASE_VERSION="$current_version" \
   ./.github/scripts/release/generate-desktop-manifest.sh "$tmpdir" >/dev/null
 
 jq -e \
+  --arg version "$current_version" \
+  --arg tag "desktop-v${current_version}" \
   '.product == "shk-desktop"
-    and .version == "0.3.4"
-    and .release_tag == "desktop-v0.3.4"
+    and .version == $version
+    and .release_tag == $tag
     and (.assets | length) == 5
     and ([.assets[].sha256] | all(length == 64))' \
   "$tmpdir/shk-desktop-latest.json" >/dev/null
@@ -255,14 +260,16 @@ jq -e \
 echo "ok: Tauri Windows certificate config generated"
 
 GITHUB_REPOSITORY=Kazuki-tam/security-harness-kit \
-  RELEASE_TAG=desktop-v0.3.4 \
-  RELEASE_VERSION=0.3.4 \
+  RELEASE_TAG="desktop-v${current_version}" \
+  RELEASE_VERSION="$current_version" \
   ./.github/scripts/release/generate-tauri-latest-json.sh "$tmpdir" >/dev/null
 jq -e \
-  '.version == "0.3.4"
+  --arg version "$current_version" \
+  --arg tag "desktop-v${current_version}" \
+  '.version == $version
     and .platforms."linux-x86_64".signature == "linux-signature"
     and .platforms."darwin-aarch64".signature == "mac-signature"
-    and (.platforms."linux-x86_64".url | test("/desktop-v0.3.4/"))' \
+    and (.platforms."linux-x86_64".url | contains("/" + $tag + "/"))' \
   "$tmpdir/latest.json" >/dev/null
 echo "ok: Tauri latest.json generated"
 
