@@ -4,8 +4,8 @@ use crate::finding::Finding;
 use crate::policy::AllowlistEntry;
 use anyhow::{Context, Result};
 use globset::{Glob, GlobMatcher};
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use hmac::{Hmac, KeyInit, Mac};
+use sha2_hmac::Sha256;
 use std::collections::{HashMap, HashSet};
 
 type HmacSha256 = Hmac<Sha256>;

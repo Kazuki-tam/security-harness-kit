@@ -30,7 +30,7 @@ ignore = "0.4"
 rayon = "1.8"
 thiserror = "1.0"
 walkdir = "2.5"
-hmac = "0.12"
+hmac = "0.13"
 sha2 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 dirs = "6"
