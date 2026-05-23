@@ -3,7 +3,7 @@ set -euo pipefail
 
 mode="${1:?usage: install-linux-deps.sh cli|desktop}"
 
-packages=(libdbus-1-dev pkg-config)
+packages=(libdbus-1-dev libgtk-3-dev pkg-config)
 
 if [[ "$mode" == "desktop" ]]; then
   packages+=(
