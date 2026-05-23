@@ -58,70 +58,85 @@ export function useProjects() {
     }
   }, [selectedId]);
 
-  const addProject = useCallback((path: string): Project => {
-    const trimmed = path.trim();
-    const existing = stateRef.current.projects.find((p) => p.path === trimmed);
-    if (existing) {
-      updateState((prev) => ({ projects: prev.projects, selectedId: existing.id }));
-      return existing;
-    }
-
-    const created: Project = {
-      id: generateId(),
-      name: basenameOf(trimmed) || trimmed,
-      path: trimmed,
-      addedAt: new Date().toISOString(),
-    };
-
-    updateState((prev) => {
-      const existing = prev.projects.find((p) => p.path === trimmed);
+  const addProject = useCallback(
+    (path: string): Project => {
+      const trimmed = path.trim();
+      const existing = stateRef.current.projects.find((p) => p.path === trimmed);
       if (existing) {
-        return { projects: prev.projects, selectedId: existing.id };
+        updateState((prev) => ({ projects: prev.projects, selectedId: existing.id }));
+        return existing;
       }
-      return {
-        projects: [created, ...prev.projects],
-        selectedId: created.id,
+
+      const created: Project = {
+        id: generateId(),
+        name: basenameOf(trimmed) || trimmed,
+        path: trimmed,
+        addedAt: new Date().toISOString(),
       };
-    });
 
-    return created;
-  }, [updateState]);
+      updateState((prev) => {
+        const existing = prev.projects.find((p) => p.path === trimmed);
+        if (existing) {
+          return { projects: prev.projects, selectedId: existing.id };
+        }
+        return {
+          projects: [created, ...prev.projects],
+          selectedId: created.id,
+        };
+      });
 
-  const removeProject = useCallback((id: string) => {
-    updateState((prev) => {
-      const projects = prev.projects.filter((p) => p.id !== id);
-      const selectedId = prev.selectedId === id ? (projects[0]?.id ?? null) : prev.selectedId;
-      return { projects, selectedId };
-    });
-  }, [updateState]);
+      return created;
+    },
+    [updateState],
+  );
 
-  const selectProject = useCallback((id: string | null) => {
-    updateState((prev) => ({ ...prev, selectedId: id }));
-  }, [updateState]);
+  const removeProject = useCallback(
+    (id: string) => {
+      updateState((prev) => {
+        const projects = prev.projects.filter((p) => p.id !== id);
+        const selectedId = prev.selectedId === id ? (projects[0]?.id ?? null) : prev.selectedId;
+        return { projects, selectedId };
+      });
+    },
+    [updateState],
+  );
 
-  const updateProjectSummary = useCallback((id: string, summary: ProjectSummary) => {
-    updateState((prev) => ({
-      ...prev,
-      projects: prev.projects.map((p) =>
-        p.id === id
-          ? {
-              ...p,
-              summary,
-              lastScannedAt: summary.scannedAt,
-            }
-          : p,
-      ),
-    }));
-  }, [updateState]);
+  const selectProject = useCallback(
+    (id: string | null) => {
+      updateState((prev) => ({ ...prev, selectedId: id }));
+    },
+    [updateState],
+  );
 
-  const renameProject = useCallback((id: string, name: string) => {
-    const next = name.trim();
-    if (!next) return;
-    updateState((prev) => ({
-      ...prev,
-      projects: prev.projects.map((p) => (p.id === id ? { ...p, name: next } : p)),
-    }));
-  }, [updateState]);
+  const updateProjectSummary = useCallback(
+    (id: string, summary: ProjectSummary) => {
+      updateState((prev) => ({
+        ...prev,
+        projects: prev.projects.map((p) =>
+          p.id === id
+            ? {
+                ...p,
+                summary,
+                lastScannedAt: summary.scannedAt,
+              }
+            : p,
+        ),
+      }));
+    },
+    [updateState],
+  );
+
+  const renameProject = useCallback(
+    (id: string, name: string) => {
+      const next = name.trim();
+      if (!next) return;
+      updateState((prev) => ({
+        ...prev,
+        projects: prev.projects.map((p) => (p.id === id ? { ...p, name: next } : p)),
+      }));
+    },
+    [updateState],
+  );
 
   const selectedProject = useMemo(
     () => projects.find((p) => p.id === selectedId) ?? null,
