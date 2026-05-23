@@ -144,12 +144,23 @@ export type ApplyAiHookSettingsOptions = {
   scanHooksClaudeCode: boolean;
   scanHooksCursor: boolean;
   scanHooksCodex: boolean;
+  cursorFailClosed: boolean;
   claudeDeny: boolean;
   claudeSandbox: boolean;
   codexSandbox: boolean;
 };
 
 export type AiHookSetupSelection = ApplyAiHookSettingsOptions;
+
+export type SetupHandlers = {
+  onQuickSetup: (fixIds: string[], ignoreTargets: string[]) => void;
+  onInitPolicy: (request: InitPolicyOptions) => void;
+  onFixDoctorIgnore: (targets: string[]) => void;
+  onInstallPreCommit: () => void;
+  onInstallAiHooks: (selection: AiHookSetupSelection) => void;
+  onApplyNpmHardening: (enabled: boolean) => void;
+  onInstallSkills: () => void;
+};
 
 export type InstallAiHooksOptions = {
   audit: boolean;

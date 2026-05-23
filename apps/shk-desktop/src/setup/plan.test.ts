@@ -138,8 +138,9 @@ describe("buildQuickSetupSteps", () => {
         ageGatesOk: true,
       },
       skills: [
-        { label: "Claude Code (global)", installed: true },
-        { label: "Claude Code (project)", installed: true },
+        { label: "claude-code (global)", installed: true },
+        { label: "claude-code (project)", installed: true },
+        { label: "codex/cursor (project)", installed: true },
       ],
       recommendedFixes: [],
     });
@@ -150,6 +151,22 @@ describe("buildQuickSetupSteps", () => {
     expect(buildQuickSetupSteps(current).every((step) => step.done || step.id === "skills")).toBe(
       true,
     );
+  });
+
+  it("does not treat partial project skill installation as complete", () => {
+    const current = status({
+      skills: [
+        { label: "claude-code (project)", installed: true },
+        { label: "codex/cursor (project)", installed: false },
+      ],
+    });
+
+    expect(projectSkillsInstalled(current)).toBe(false);
+    expect(buildQuickSetupSteps(current).find((step) => step.id === "skills")).toEqual({
+      id: "skills",
+      done: false,
+      pending: false,
+    });
   });
 
   it("does not treat partial AI hook installation as fully ready", () => {

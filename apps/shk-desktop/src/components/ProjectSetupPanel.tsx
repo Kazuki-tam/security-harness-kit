@@ -12,7 +12,7 @@ import {
   projectSkillsInstalled,
   projectSkillStatuses,
 } from "../setup/plan";
-import type { ActionState, AiHookSetupSelection, ProjectStatus } from "../types";
+import type { ActionState, AiHookSetupSelection, ProjectStatus, SetupHandlers } from "../types";
 import { DEFAULT_IGNORE_TARGETS, IgnoreTargetsPicker } from "./IgnoreTargetsPicker";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { QuickSetupCard } from "./QuickSetupCard";
@@ -20,22 +20,10 @@ import { SetupActionCard } from "./SetupActionCard";
 import { SetupAdvancedSection } from "./SetupAdvancedSection";
 import { SetupFeedback } from "./SetupFeedback";
 
-type InitPolicyRequest = {
-  strict: boolean;
-  force: boolean;
-};
-
-type Props = {
+type Props = SetupHandlers & {
   status: ProjectStatus;
   actionState: ActionState;
   onDismissActionFeedback: () => void;
-  onQuickSetup: (fixIds: string[], ignoreTargets: string[]) => void;
-  onInitPolicy: (request: InitPolicyRequest) => void;
-  onFixDoctorIgnore: (targets: string[]) => void;
-  onInstallPreCommit: () => void;
-  onInstallAiHooks: (selection: AiHookSetupSelection) => void;
-  onApplyNpmHardening: (enabled: boolean) => void;
-  onInstallSkills: () => void;
 };
 
 export function ProjectSetupPanel({

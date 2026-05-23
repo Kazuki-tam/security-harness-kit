@@ -1,5 +1,5 @@
 import { asSeverity, type Severity } from "./scan";
-import type { AuditRecentRow, AuditReport, AuditState } from "./types";
+import type { AuditRecentRow, AuditReport, AuditReportOptions, AuditState } from "./types";
 import { fetchAuditReport } from "./project";
 
 export const DEFAULT_AUDIT_REPORT_LIMIT = 10;
@@ -106,10 +106,11 @@ export function hiddenBlockedCount(report: AuditReport): number {
 
 export async function loadAuditReport(
   projectPath: string,
-  fetcher: (path: string, options: { limit: number }) => Promise<AuditReport> = fetchAuditReport,
+  options: AuditReportOptions = {},
+  fetcher: (path: string, options: AuditReportOptions) => Promise<AuditReport> = fetchAuditReport,
 ): Promise<Extract<AuditState, { status: "done" }> | Extract<AuditState, { status: "error" }>> {
   try {
-    const data = await fetcher(projectPath, { limit: DEFAULT_AUDIT_REPORT_LIMIT });
+    const data = await fetcher(projectPath, { limit: DEFAULT_AUDIT_REPORT_LIMIT, ...options });
     return { status: "done", data, loadedAt: new Date().toISOString() };
   } catch (error) {
     return {

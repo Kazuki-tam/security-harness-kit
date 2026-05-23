@@ -680,6 +680,9 @@ pub fn install_skills(path: &str, options: InstallSkillsOptions) -> Result<Actio
     if options.global {
         anyhow::bail!("desktop setup does not support global skill installation");
     }
+    if !options.dry_run {
+        safety::require_project_policy(&root, "skills install")?;
+    }
     let tool = options.tool.as_deref().map(parse_skill_tool).transpose()?;
     let details = crate::commands::skills::install_for(
         &root,
@@ -1288,6 +1291,26 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("does not support global"), "{err}");
+    }
+
+    #[test]
+    fn desktop_skills_require_project_policy_for_install() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = install_skills(
+            dir.path().to_str().unwrap(),
+            InstallSkillsOptions {
+                tool: None,
+                global: false,
+                dry_run: false,
+                force: true,
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("requires a project shk.toml"), "{err}");
+        assert!(!dir.path().join(".claude").exists());
+        assert!(!dir.path().join(".agents").exists());
     }
 
     #[test]

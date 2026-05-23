@@ -38,7 +38,7 @@ export function aiSafetyReady(status: ProjectStatus): boolean {
 }
 
 export function aiHookSelectionFromStatus(status: ProjectStatus): AiHookSetupSelection {
-  return { ...status.aiSafetyApplied };
+  return { ...status.aiSafetyApplied, cursorFailClosed: true };
 }
 
 export function aiHookSelectionMatches(
@@ -49,6 +49,7 @@ export function aiHookSelectionMatches(
     applied.scanHooksClaudeCode === selection.scanHooksClaudeCode &&
     applied.scanHooksCursor === selection.scanHooksCursor &&
     applied.scanHooksCodex === selection.scanHooksCodex &&
+    applied.cursorFailClosed === selection.cursorFailClosed &&
     applied.claudeDeny === selection.claudeDeny &&
     applied.claudeSandbox === selection.claudeSandbox &&
     applied.codexSandbox === selection.codexSandbox
@@ -82,7 +83,8 @@ export function projectSkillStatuses(status: ProjectStatus) {
 }
 
 export function projectSkillsInstalled(status: ProjectStatus): boolean {
-  return projectSkillStatuses(status).some((skill) => skill.installed);
+  const projectSkills = projectSkillStatuses(status);
+  return projectSkills.length > 0 && projectSkills.every((skill) => skill.installed);
 }
 
 export function buildQuickSetupSteps(status: ProjectStatus): QuickSetupStep[] {

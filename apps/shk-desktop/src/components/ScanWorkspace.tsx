@@ -13,7 +13,7 @@ import { useAuditReport } from "../hooks/useAuditReport";
 import { useI18n } from "../i18n";
 import { actionableCount, type ScanState, type Severity, visibleScanResult } from "../scan";
 import { countPendingQuickSetup } from "../setup/plan";
-import type { ActionState, AiHookSetupSelection, Project, ProjectStatusState } from "../types";
+import type { ActionState, Project, ProjectStatusState, SetupHandlers } from "../types";
 import { formatRelativeTime } from "../utils";
 import { AuditPanel } from "./AuditPanel";
 import { Button } from "./Button";
@@ -25,16 +25,6 @@ import { SetupLoadingCard } from "./SetupActionCard";
 import { SeveritySummary } from "./SeveritySummary";
 
 type WorkspaceTab = "overview" | "findings" | "setup";
-
-type SetupHandlers = {
-  onQuickSetup: (fixIds: string[], ignoreTargets: string[]) => void;
-  onInitPolicy: (request: { strict: boolean; force: boolean }) => void;
-  onFixDoctorIgnore: (targets: string[]) => void;
-  onInstallPreCommit: () => void;
-  onInstallAiHooks: (selection: AiHookSetupSelection) => void;
-  onApplyNpmHardening: (enabled: boolean) => void;
-  onInstallSkills: () => void;
-};
 
 type Props = {
   project: Project;

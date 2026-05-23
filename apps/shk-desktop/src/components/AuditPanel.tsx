@@ -64,6 +64,9 @@ export function AuditPanel({ auditState, onRefresh, onOpenSetup, onOpenFindings 
   const blockedRecent = blockedRecentRows(report);
   const hasBlocked = auditHasBlockedEvents(report);
   const hidden = hiddenBlockedCount(report);
+  const maxSeverity = report.summary.max_severity
+    ? asSeverity(report.summary.max_severity)
+    : undefined;
 
   return (
     <PanelShell
@@ -100,11 +103,7 @@ export function AuditPanel({ auditState, onRefresh, onOpenSetup, onOpenFindings 
             <SummaryStat label={m.hookAuditEvents} value={report.summary.hook_audit_events} />
             <SummaryStat
               label={m.maxSeverity}
-              value={
-                report.summary.max_severity
-                  ? (m.severityLabels[report.summary.max_severity] ?? report.summary.max_severity)
-                  : "—"
-              }
+              value={maxSeverity ? (m.severityLabels[maxSeverity] ?? maxSeverity) : "—"}
               text
             />
           </div>

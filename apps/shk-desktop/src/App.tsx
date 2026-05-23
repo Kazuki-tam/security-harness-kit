@@ -9,6 +9,7 @@ import { usePreferredIde } from "./hooks/usePreferredIde";
 import { useProjects } from "./hooks/useProjects";
 import { openInIde, type PreferredIde } from "./ide";
 import { useI18n } from "./i18n";
+import packageInfo from "../package.json";
 import {
   applyAiHookSettings,
   applyNpmHardening,
@@ -23,7 +24,7 @@ import { defaultRecommendedFixIds } from "./setup/plan";
 import { asSeverity, type ScanReport, type ScanState, type Severity } from "./scan";
 import type { ActionResult, ActionState, AiHookSetupSelection, ProjectStatusState } from "./types";
 
-const APP_VERSION = "0.3.4";
+const APP_VERSION = packageInfo.version;
 
 function App() {
   const { messages } = useI18n();
@@ -222,16 +223,12 @@ function App() {
         onQuickSetup: (fixIds: string[], ignoreTargets: string[]) =>
           runSetupAction(async (): Promise<ActionResult> => {
             const path = selectedProject.path;
-            let status = currentProjectStatus.status === "done" ? currentProjectStatus.data : null;
+            let status = await fetchProjectStatus(path);
             const hadPolicy = Boolean(status?.policy.exists);
 
             if (!hadPolicy) {
               const policyResult = await initPolicy(path, { strict: false, force: false });
               if (!policyResult.success) return policyResult;
-              status = await fetchProjectStatus(path);
-            }
-
-            if (!status) {
               status = await fetchProjectStatus(path);
             }
 

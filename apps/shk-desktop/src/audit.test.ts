@@ -12,7 +12,7 @@ import {
   loadAuditReport,
   rowLinksToFindings,
 } from "./audit";
-import type { AuditReport } from "./types";
+import type { AuditReport, AuditReportOptions } from "./types";
 
 function sampleReport(overrides: Partial<AuditReport> = {}): AuditReport {
   return {
@@ -251,7 +251,7 @@ describe("hiddenBlockedCount", () => {
 describe("loadAuditReport", () => {
   it("returns done state with fetched report", async () => {
     const report = sampleReport();
-    const state = await loadAuditReport("/tmp/project", async () => report);
+    const state = await loadAuditReport("/tmp/project", {}, async () => report);
     expect(state.status).toBe("done");
     if (state.status === "done") {
       expect(state.data).toBe(report);
@@ -259,8 +259,28 @@ describe("loadAuditReport", () => {
     }
   });
 
+  it("passes audit filters to the fetcher", async () => {
+    let receivedOptions: AuditReportOptions | undefined;
+    await loadAuditReport(
+      "/tmp/project",
+      { since: "2026-05-23", reason: "action_guard", tool: "cursor", hidePaths: true },
+      async (_path, options) => {
+        receivedOptions = options;
+        return sampleReport();
+      },
+    );
+
+    expect(receivedOptions).toEqual({
+      limit: 10,
+      since: "2026-05-23",
+      reason: "action_guard",
+      tool: "cursor",
+      hidePaths: true,
+    });
+  });
+
   it("returns error state when fetch fails", async () => {
-    const state = await loadAuditReport("/tmp/project", async () => {
+    const state = await loadAuditReport("/tmp/project", {}, async () => {
       throw new Error("audit failed");
     });
     expect(state).toEqual({ status: "error", message: "audit failed" });
