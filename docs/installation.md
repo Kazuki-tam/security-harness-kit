@@ -52,6 +52,27 @@ gh attestation verify shk-cli-x86_64-unknown-linux-gnu.tar.xz \
 
 Release assets are also covered by GitHub artifact attestations.
 
+## Verified Archive Install
+
+For CI or security-sensitive environments, install from a pinned release tag and verify both the checksum and GitHub artifact attestation before placing the binary on `PATH`:
+
+```bash
+version=v0.3.4
+target=x86_64-unknown-linux-gnu
+asset="shk-cli-${target}.tar.xz"
+repo=Kazuki-tam/security-harness-kit
+
+gh release download "$version" -R "$repo" -p "$asset" -p "${asset}.sha256"
+shasum -a 256 -c "${asset}.sha256"
+gh attestation verify "$asset" -R "$repo"
+
+tmp="$(mktemp -d)"
+tar -xJf "$asset" -C "$tmp"
+install -m 755 "$tmp/shk-cli-${target}/shk" "$HOME/.cargo/bin/shk"
+```
+
+Replace `target` with the archive that matches your platform. Avoid `latest` in CI so builds are reproducible and reviewable.
+
 ## Homebrew
 
 macOS and Linux releases include a generated Homebrew formula (`shk-cli.rb`) as a release asset. To install from the latest release asset:

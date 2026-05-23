@@ -50,6 +50,8 @@ powershell -c "irm https://github.com/Kazuki-tam/security-harness-kit/releases/l
 
 See [Installation](docs/installation.md) for release archives, checksums, Homebrew, source builds, and [uninstall](docs/installation.md#uninstall) instructions.
 
+For CI or security-sensitive environments, prefer a pinned release archive with checksum and GitHub artifact attestation verification over installing from `latest`. See [Verified Archive Install](docs/installation.md#verified-archive-install).
+
 ## Quick Start
 
 Create a project policy file:

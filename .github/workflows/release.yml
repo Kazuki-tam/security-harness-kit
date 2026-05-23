@@ -29,9 +29,7 @@ on:
         type: string
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 env:
   DIST_VERSION: "0.31.0"
@@ -123,7 +121,7 @@ jobs:
         run: ./target/${{ matrix.target }}/dist/shk.exe --version
 
       - name: upload local artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: dist-local-${{ matrix.target }}
           path: |
@@ -161,18 +159,19 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 11.1.3
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 22
           cache: pnpm
           cache-dependency-path: apps/shk-desktop/pnpm-lock.yaml
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
+          toolchain: "1.85"
           targets: ${{ matrix.target }}
 
       - name: install Linux build dependencies
@@ -181,7 +180,7 @@ jobs:
         working-directory: .
         run: ./.github/scripts/ci/install-linux-deps.sh desktop
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: false
 
@@ -217,7 +216,7 @@ jobs:
             "$OUT"
 
       - name: upload desktop artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: desktop-${{ matrix.target }}
           path: target/distrib/desktop/${{ matrix.target }}/shk-desktop_*
@@ -236,7 +235,7 @@ jobs:
         run: curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/axodotdev/cargo-dist/releases/download/v${DIST_VERSION}/cargo-dist-installer.sh" | sh
 
       - name: download local artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           pattern: dist-local-*
           path: target/distrib
@@ -247,7 +246,7 @@ jobs:
         run: dist build --artifacts=global
 
       - name: upload global artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: dist-global
           path: |
@@ -262,6 +261,10 @@ jobs:
   publish:
     name: publish release
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     needs: [prepare, build-global-artifacts, build-desktop-artifacts]
     if: >-
       ${{
@@ -285,7 +288,7 @@ jobs:
         run: curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/axodotdev/cargo-dist/releases/download/v${DIST_VERSION}/cargo-dist-installer.sh" | sh
 
       - name: download release artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: release-assets
           merge-multiple: true
@@ -319,7 +322,7 @@ jobs:
         run: ./.github/scripts/release/generate-tauri-latest-json.sh release-assets
 
       - name: generate SBOM
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@aa0e114b2e19480f157109b9922bda359bd98b90 # v0.20.8
         with:
           path: .
           format: cyclonedx-json
@@ -327,12 +330,12 @@ jobs:
           upload-artifact: false
 
       - name: attest release assets
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: release-assets/*
 
       - name: publish GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ needs.prepare.outputs.release_tag }}
           files: release-assets/*

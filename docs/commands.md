@@ -481,7 +481,7 @@ Options:
 | `--fail-on <severity>` | Severity threshold for blocking mode. Valid values: `info`, `low`, `medium`, `high` (default), `critical`. Ignored under `--mode audit` (a warning is printed). |
 | `--path <path>` | Path passed to `shk scan`. Defaults to `.`. |
 | `--repo <owner/name>` | GitHub repository hosting `shk` releases. Defaults to `Kazuki-tam/security-harness-kit`. |
-| `--shk-version <version>` | Release version to install. Accepts `latest` (default) or a SemVer-ish tag such as `v0.3.0`. |
+| `--shk-version <version>` | Release version to install. Defaults to the generating `shk` release (`v` + crate version). Also accepts `latest` or a SemVer-ish tag such as `v0.3.0`. |
 | `--installer-name <name>` | cargo-dist shell installer asset name. Defaults to `shk-cli-installer.sh`. |
 | `--output <path>` | Workflow destination path. Defaults to `.github/workflows/shk.yml`. |
 | `--dry-run` | Print the workflow YAML to stdout without writing it. |

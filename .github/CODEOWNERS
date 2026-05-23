@@ -1,0 +1,13 @@
+# Default owners for sensitive paths. Adjust @Kazuki-tam to your team handle.
+* @Kazuki-tam
+
+/.github/workflows/ @Kazuki-tam
+/.github/dependabot.yml @Kazuki-tam
+/Cargo.toml @Kazuki-tam
+/Cargo.lock @Kazuki-tam
+/deny.toml @Kazuki-tam
+/dist-workspace.toml @Kazuki-tam
+/xtask/ @Kazuki-tam
+/crates/shk-rules/src/gitleaks_rules.rs @Kazuki-tam
+/apps/shk-desktop/package.json @Kazuki-tam
+/apps/shk-desktop/pnpm-lock.yaml @Kazuki-tam

@@ -319,6 +319,9 @@ pub enum CiInitProvider {
     Github(GithubCiArgs),
 }
 
+/// Default release tag embedded in generated CI workflows (`v` + crate version).
+const DEFAULT_SHK_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+
 #[derive(Args)]
 pub struct GithubCiArgs {
     /// Scan mode: blocking fails CI at or above --fail-on; audit always exits 0.
@@ -342,7 +345,7 @@ pub struct GithubCiArgs {
     #[arg(long, default_value = "Kazuki-tam/security-harness-kit")]
     pub repo: String,
     /// shk release version to install, or `latest` (e.g. `v0.2.3`).
-    #[arg(long = "shk-version", default_value = "latest")]
+    #[arg(long = "shk-version", default_value = DEFAULT_SHK_VERSION)]
     pub shk_version: String,
     /// cargo-dist shell installer asset name.
     #[arg(long, default_value = "shk-cli-installer.sh")]

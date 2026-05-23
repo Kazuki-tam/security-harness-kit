@@ -21,8 +21,28 @@ jobs:
 
       - name: Install shk
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk-cli-installer.sh | sh
+          set -euo pipefail
+          SHK_VERSION=v0.3.4
+          REPO=Kazuki-tam/security-harness-kit
+          mkdir -p "$HOME/.cargo/bin"
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64) TARGET=x86_64-unknown-linux-gnu ;;
+            Linux-aarch64|Linux-arm64) TARGET=aarch64-unknown-linux-gnu ;;
+            Darwin-x86_64) TARGET=x86_64-apple-darwin ;;
+            Darwin-arm64) TARGET=aarch64-apple-darwin ;;
+            *) echo "unsupported runner: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+          esac
+          ASSET="shk-cli-${TARGET}.tar.xz"
+          gh release download v0.3.4 -R Kazuki-tam/security-harness-kit -p "$ASSET" -p "${ASSET}.sha256"
+          sha256sum -c "${ASSET}.sha256"
+          gh attestation verify "$ASSET" -R "$REPO"
+          TMP="$(mktemp -d)"
+          tar -xJf "$ASSET" -C "$TMP"
+          install -m 755 "$TMP/shk-cli-${TARGET}/shk" "$HOME/.cargo/bin/shk"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Run shk
         shell: bash
