@@ -25,4 +25,6 @@ hosting = "github"
 # Keep these in sync with the custom release workflow's Linux setup step.
 [dist.dependencies.apt]
 libdbus-1-dev = { version = "*", targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"] }
+libgtk-3-dev = { version = "*", targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"] }
+libwebkit2gtk-4.1-dev = { version = "*", targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"] }
 pkg-config = { version = "*", targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"] }
