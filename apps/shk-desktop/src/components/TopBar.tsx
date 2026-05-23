@@ -3,6 +3,7 @@ import type { PreferredIde } from "../ide";
 import type { Project } from "../types";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { OpenInIdeMenu } from "./OpenInIdeMenu";
+import { UpdateButton } from "./UpdateButton";
 
 type Props = {
   project: Project | null;
@@ -37,6 +38,7 @@ export function TopBar({
         )}
       </div>
       <div className="shk-no-drag flex items-center gap-1.5">
+        <UpdateButton />
         <LanguageSwitcher />
         <OpenInIdeMenu preferredIde={preferredIde} onSelect={onOpenInIde} />
       </div>

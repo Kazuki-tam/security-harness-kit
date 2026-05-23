@@ -35,6 +35,14 @@ export type Messages = {
     openInIde: string;
     openInIdeWith: string;
     preferredIde: string;
+    updates: {
+      check: string;
+      checking: string;
+      installing: string;
+      upToDate: string;
+      available: string;
+      failed: string;
+    };
     ideNames: Record<"cursor" | "vscode" | "antigravity", string>;
   };
   welcome: {

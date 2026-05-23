@@ -325,6 +325,8 @@ async fn open_in_ide(path: String, ide: String) -> Result<(), AppError> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             scan_path,
             project_status,

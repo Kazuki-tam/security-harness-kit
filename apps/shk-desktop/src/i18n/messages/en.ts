@@ -33,6 +33,14 @@ export const en: Messages = {
     openInIde: "Open in IDE",
     openInIdeWith: "Open in {{ide}}",
     preferredIde: "Open with",
+    updates: {
+      check: "Check updates",
+      checking: "Checking…",
+      installing: "Updating…",
+      upToDate: "You are up to date.",
+      available: "Version {{version}} is available. Download and restart now?",
+      failed: "Update check failed: {{message}}",
+    },
     ideNames: {
       cursor: "Cursor",
       vscode: "VS Code",

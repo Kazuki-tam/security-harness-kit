@@ -33,6 +33,14 @@ export const ja: Messages = {
     openInIde: "IDEで開く",
     openInIdeWith: "{{ide}} で開く",
     preferredIde: "エディターを選択",
+    updates: {
+      check: "更新確認",
+      checking: "確認中…",
+      installing: "更新中…",
+      upToDate: "最新版です。",
+      available: "バージョン {{version}} が利用できます。ダウンロードして再起動しますか？",
+      failed: "更新確認に失敗しました: {{message}}",
+    },
     ideNames: {
       cursor: "Cursor",
       vscode: "VS Code",
@@ -114,8 +122,7 @@ export const ja: Messages = {
     subtitle: "メタデータのみを表示します（秘密値・プロンプト本文・コマンドは保存されません）。",
     loading: "ブロック履歴を読み込み中…",
     refresh: "更新",
-    noLog:
-      "履歴はまだありません。セットアップで AI セーフティフックを適用すると記録が始まります。",
+    noLog: "履歴はまだありません。セットアップで AI セーフティフックを適用すると記録が始まります。",
     openSetup: "セットアップを開く",
     parseErrors: "ログの読み込み中に無効な行を {{count}} 件スキップしました。",
     blockedEvents: "ブロック",

@@ -120,9 +120,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: install Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf pkg-config
+        working-directory: .
+        run: ./.github/scripts/ci/install-linux-deps.sh desktop
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -142,3 +141,11 @@ jobs:
 
       - name: tauri build (no bundle)
         run: pnpm tauri build --no-bundle
+
+  release-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: test release scripts
+        run: ./.github/scripts/release/test.sh

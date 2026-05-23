@@ -1,12 +1,32 @@
-# Release artifacts are built by dist. Keep platform/package settings in
-# dist-workspace.toml and keep this workflow as thin orchestration around it.
+# Release artifacts are built by dist (CLI) and Tauri (desktop).
+# Tag patterns:
+#   vX.Y.Z          CLI only (backward compatible)
+#   cli-vX.Y.Z      CLI only (explicit)
+#   desktop-vX.Y.Z  Desktop app only
+#   shk-vX.Y.Z      CLI + desktop together
 name: Release
 
 on:
   push:
     tags:
       - "v*"
+      - "cli-v*"
+      - "desktop-v*"
+      - "shk-v*"
   workflow_dispatch:
+    inputs:
+      component:
+        description: "Which product to build"
+        required: true
+        type: choice
+        options:
+          - cli
+          - desktop
+          - both
+      version:
+        description: "Version in manifests (e.g. 0.3.4)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -18,20 +38,36 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  verify-release-versions:
-    name: verify versions
+  prepare:
+    name: prepare release
     runs-on: ubuntu-22.04
-    if: startsWith(github.ref, 'refs/tags/')
+    outputs:
+      build_cli: ${{ steps.resolve.outputs.build_cli }}
+      build_desktop: ${{ steps.resolve.outputs.build_desktop }}
+      component: ${{ steps.resolve.outputs.component }}
+      version: ${{ steps.resolve.outputs.version }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      make_latest: ${{ steps.resolve.outputs.make_latest }}
     steps:
       - uses: actions/checkout@v6
 
-      - name: verify release versions
+      - id: resolve
         shell: bash
-        run: ./.github/scripts/verify-release-versions.sh
+        env:
+          RELEASE_COMPONENT: ${{ github.event.inputs.component }}
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+        run: ./.github/scripts/release/resolve-target.sh >> "$GITHUB_OUTPUT"
+
+      - name: verify versions
+        shell: bash
+        env:
+          RELEASE_COMPONENT: ${{ steps.resolve.outputs.component }}
+          RELEASE_VERSION: ${{ steps.resolve.outputs.version }}
+        run: ./.github/scripts/release/verify-versions.sh
 
   build-local-artifacts:
-    needs: verify-release-versions
-    if: ${{ !cancelled() && (needs.verify-release-versions.result == 'success' || needs.verify-release-versions.result == 'skipped') }}
+    needs: prepare
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.prepare.outputs.build_cli == 'true' }}
     name: build ${{ matrix.target }}
     strategy:
       fail-fast: false
@@ -61,14 +97,10 @@ jobs:
         shell: pwsh
         run: irm "https://github.com/axodotdev/cargo-dist/releases/download/v${env:DIST_VERSION}/cargo-dist-installer.ps1" | iex
 
-      # dist.dependencies.apt documents the package requirements, but this
-      # custom workflow invokes dist directly instead of using dist-generated CI.
       - name: install Linux build dependencies
         if: runner.os == 'Linux'
         shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev pkg-config
+        run: ./.github/scripts/ci/install-linux-deps.sh cli
 
       - name: build dist artifacts
         if: runner.os != 'Windows'
@@ -102,8 +134,8 @@ jobs:
 
   build-desktop-artifacts:
     name: build desktop ${{ matrix.target }}
-    needs: verify-release-versions
-    if: ${{ !failure() && !cancelled() }}
+    needs: prepare
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.prepare.outputs.build_desktop == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -129,6 +161,7 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
@@ -152,9 +185,7 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         working-directory: .
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf pkg-config
+        run: ./.github/scripts/ci/install-linux-deps.sh desktop
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -163,16 +194,33 @@ jobs:
       - name: install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: check desktop signing config
+        shell: bash
+        working-directory: .
+        run: ./.github/scripts/release/check-desktop-signing.sh --require-updater
+
+      - name: generate updater config
+        shell: bash
+        working-directory: .
+        run: |
+          ./.github/scripts/release/generate-tauri-updater-config.sh \
+            "target/tauri-updater-${{ matrix.target }}.json"
+
       - name: build desktop bundles
-        run: pnpm tauri build --target ${{ matrix.target }}
+        run: |
+          pnpm tauri build \
+            --target ${{ matrix.target }} \
+            --config "../../target/tauri-updater-${{ matrix.target }}.json"
 
       - name: package desktop artifacts
         shell: bash
         working-directory: .
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
           OUT="target/distrib/desktop/${{ matrix.target }}"
-          ./.github/scripts/package-desktop-artifacts.sh "${{ matrix.target }}" "$VERSION" "$OUT"
+          ./.github/scripts/release/package-desktop-artifacts.sh \
+            "${{ matrix.target }}" \
+            "${{ needs.prepare.outputs.version }}" \
+            "$OUT"
 
       - name: upload desktop artifacts
         uses: actions/upload-artifact@v7
@@ -184,7 +232,8 @@ jobs:
   build-global-artifacts:
     name: build installers
     runs-on: ubuntu-22.04
-    needs: build-local-artifacts
+    needs: [prepare, build-local-artifacts]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.prepare.outputs.build_cli == 'true' && needs.build-local-artifacts.result == 'success' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -219,12 +268,25 @@ jobs:
   publish:
     name: publish release
     runs-on: ubuntu-22.04
-    needs: [build-global-artifacts, build-desktop-artifacts]
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [prepare, build-global-artifacts, build-desktop-artifacts]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        startsWith(github.ref, 'refs/tags/') &&
+        needs.prepare.result == 'success' &&
+        needs.build-global-artifacts.result != 'failure' &&
+        needs.build-desktop-artifacts.result != 'failure' &&
+        (
+          needs.build-global-artifacts.result == 'success' ||
+          needs.build-desktop-artifacts.result == 'success'
+        )
+      }}
     steps:
       - uses: actions/checkout@v6
 
       - name: install dist
+        if: needs.prepare.outputs.build_cli == 'true'
         shell: bash
         run: curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/axodotdev/cargo-dist/releases/download/v${DIST_VERSION}/cargo-dist-installer.sh" | sh
 
@@ -236,28 +298,31 @@ jobs:
 
       - name: generate release body
         shell: bash
-        run: |
-          dist plan --output-format=json --no-local-paths > dist-plan.json
-          jq -r '.announcement_github_body' dist-plan.json > release-body.md
-          {
-            echo ""
-            echo "## Desktop app"
-            echo ""
-            echo "Installers for macOS, Linux, and Windows are attached as \`shk-desktop_*\` assets."
-            echo "Checksums are in \`shk-desktop.sha256sum\`."
-          } >> release-body.md
+        env:
+          RELEASE_COMPONENT: ${{ needs.prepare.outputs.component }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: ./.github/scripts/release/generate-release-body.sh
 
       - name: generate desktop checksums
+        if: needs.prepare.outputs.build_desktop == 'true'
         shell: bash
-        run: |
-          shopt -s nullglob
-          files=(release-assets/shk-desktop_*)
-          if ((${#files[@]} > 0)); then
-            (cd release-assets && sha256sum shk-desktop_*) > release-assets/shk-desktop.sha256sum
-          else
-            echo "no desktop release assets found" >&2
-            exit 1
-          fi
+        run: ./.github/scripts/release/generate-desktop-checksums.sh release-assets
+
+      - name: generate desktop release manifest
+        if: needs.prepare.outputs.build_desktop == 'true'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: ./.github/scripts/release/generate-desktop-manifest.sh release-assets
+
+      - name: generate Tauri updater latest.json
+        if: needs.prepare.outputs.build_desktop == 'true'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: ./.github/scripts/release/generate-tauri-latest-json.sh release-assets
 
       - name: generate SBOM
         uses: anchore/sbom-action@v0
@@ -275,6 +340,22 @@ jobs:
       - name: publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.prepare.outputs.release_tag }}
           files: release-assets/*
           body_path: release-body.md
           generate_release_notes: true
+          make_latest: ${{ needs.prepare.outputs.make_latest == 'true' }}
+
+      - name: publish desktop updater endpoint
+        if: needs.prepare.outputs.build_desktop == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view desktop-latest >/dev/null 2>&1; then
+            gh release create desktop-latest \
+              --title "shk Desktop Latest" \
+              --notes "Mutable endpoint for Tauri desktop updater metadata." \
+              --latest=false
+          fi
+          gh release upload desktop-latest release-assets/latest.json --clobber
