@@ -42,21 +42,38 @@ copy_glob() {
   fi
 }
 
-case "$(uname -s)" in
-  Darwin)
+host="$(uname -s)"
+
+require_host() {
+  local expected="$1"
+  case "$expected:$host" in
+    macos:Darwin | linux:Linux | windows:MINGW* | windows:MSYS* | windows:CYGWIN* | windows:Windows*)
+      ;;
+    *)
+      echo "target ${target} must be packaged on ${expected}; current host is ${host}" >&2
+      exit 1
+      ;;
+  esac
+}
+
+case "$target" in
+  *-apple-darwin)
+    require_host macos
     copy_glob dmg
     copy_glob macos
     ;;
-  Linux)
+  *-unknown-linux-gnu)
+    require_host linux
     copy_glob appimage
     copy_glob deb
     ;;
-  MINGW* | MSYS* | CYGWIN* | Windows*)
+  *-pc-windows-msvc)
+    require_host windows
     copy_glob msi
     copy_glob nsis
     ;;
   *)
-    echo "unsupported platform for packaging: $(uname -s)" >&2
+    echo "unsupported desktop target for packaging: ${target}" >&2
     exit 1
     ;;
 esac

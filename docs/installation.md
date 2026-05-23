@@ -85,6 +85,14 @@ To install a pinned release, replace `latest/download` with `download/<tag>` (e.
 
 Intel macOS, Apple Silicon macOS, Linux x86_64/aarch64, and Windows x86_64 are supported. Scoop manifests are not published by the current `dist`-based release pipeline.
 
+## Desktop App Releases
+
+Desktop installers are published from `desktop-vX.Y.Z` or `shk-vX.Y.Z` tags as
+`shk-desktop_*` assets. macOS desktop installers are Developer ID signed,
+notarized, stapled, and verified during release. Windows desktop installers are
+Authenticode-signed and verified during release. Maintainer release requirements
+are documented in [`desktop-release.md`](desktop-release.md).
+
 ## Build From Source
 
 Building from source requires Rust 1.85 or newer.

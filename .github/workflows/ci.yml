@@ -113,7 +113,11 @@ jobs:
             --source-ref 8863af47d64c3681422523e36837957c74d4af4b
 
   desktop:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: apps/shk-desktop
@@ -135,6 +139,7 @@ jobs:
           toolchain: "1.85"
 
       - name: install Linux build dependencies
+        if: runner.os == 'Linux'
         working-directory: .
         run: ./.github/scripts/ci/install-linux-deps.sh desktop
 

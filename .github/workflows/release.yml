@@ -156,6 +156,18 @@ jobs:
       TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      TAURI_WINDOWS_SIGN_COMMAND: ${{ secrets.TAURI_WINDOWS_SIGN_COMMAND }}
+      TAURI_WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.TAURI_WINDOWS_CERTIFICATE_THUMBPRINT }}
+      TAURI_WINDOWS_DIGEST_ALGORITHM: ${{ secrets.TAURI_WINDOWS_DIGEST_ALGORITHM }}
+      TAURI_WINDOWS_TIMESTAMP_URL: ${{ secrets.TAURI_WINDOWS_TIMESTAMP_URL }}
+      TAURI_WINDOWS_TSP: ${{ secrets.TAURI_WINDOWS_TSP }}
     steps:
       - uses: actions/checkout@v6
 
@@ -214,6 +226,18 @@ jobs:
             "${{ matrix.target }}" \
             "${{ needs.prepare.outputs.version }}" \
             "$OUT"
+
+      - name: verify macOS desktop signatures and notarization
+        if: runner.os == 'macOS'
+        shell: bash
+        working-directory: .
+        run: bash ./.github/scripts/release/verify-macos-desktop-signatures.sh "target/distrib/desktop/${{ matrix.target }}"
+
+      - name: verify Windows desktop signatures
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: .
+        run: ./.github/scripts/release/verify-windows-desktop-signatures.ps1 "target/distrib/desktop/${{ matrix.target }}"
 
       - name: upload desktop artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
