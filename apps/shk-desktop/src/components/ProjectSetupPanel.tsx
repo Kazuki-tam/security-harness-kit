@@ -6,7 +6,6 @@ import {
   aiHookSelectionHasRemovals,
   aiHookSelectionIsFullyDisabled,
   aiHookSelectionMatches,
-  aiSafetyReady,
   countPendingQuickSetup,
   npmSettingsReady,
   projectSkillsInstalled,
@@ -57,7 +56,6 @@ export function ProjectSetupPanel({
   const ignoreMissingPatterns = status.doctor.missingIgnorePatterns;
   const ignoreReady = policyExists && status.doctor.ignoreOk;
   const hasNpmProjects = status.npmHardening.hasProjects;
-  const aiReady = aiSafetyReady(status);
   const npmSettingsOk = npmSettingsReady(status);
   const projectSkills = projectSkillStatuses(status);
   const skillsInstalled = projectSkillsInstalled(status);
@@ -121,6 +119,21 @@ export function ProjectSetupPanel({
   const aiHookSelectionChanged = !aiHookSelectionMatches(appliedAiHooks, aiHookSelection);
   const aiHookHasRemovals = aiHookSelectionHasRemovals(appliedAiHooks, aiHookSelection);
   const aiHookHasAdditions = aiHookSelectionHasAdditions(appliedAiHooks, aiHookSelection);
+  const aiHookSettingsRemoved = aiHookSelectionIsFullyDisabled(appliedAiHooks);
+  const aiHookStatusLabel = !policyExists
+    ? m.statusMissing
+    : aiHookSelectionChanged
+      ? m.statusPending
+      : aiHookSettingsRemoved
+        ? m.statusRemoved
+        : m.statusApplied;
+  const aiHookStatusTone = !policyExists
+    ? "neutral"
+    : aiHookSelectionChanged
+      ? "warn"
+      : aiHookSettingsRemoved
+        ? "neutral"
+        : "ok";
   const aiHookPrimaryLabel =
     aiHookHasRemovals && !aiHookHasAdditions
       ? m.aiHooks.removeSelected
@@ -131,7 +144,14 @@ export function ProjectSetupPanel({
   const gitDisabled = running || !policyExists || !status.hooks.preCommit.isGitRepo || gitReady;
   const ignoreDisabled =
     running || !policyExists || ignoreReady || selectedIgnoreTargets.length === 0;
-  const npmPrimaryDisabled = running || (npmHardeningEnabled && npmSettingsOk);
+  const npmSelectionChanged = npmHardeningEnabled !== npmSettingsOk;
+  const npmPrimaryDisabled = running || !npmSelectionChanged;
+  const npmStatusLabel = npmSelectionChanged
+    ? m.statusPending
+    : npmSettingsOk
+      ? m.statusApplied
+      : m.statusRemoved;
+  const npmStatusTone = npmSelectionChanged ? "warn" : npmSettingsOk ? "ok" : "neutral";
 
   const handleNpmPrimary = () => {
     if (!npmHardeningEnabled) {
@@ -280,8 +300,8 @@ export function ProjectSetupPanel({
           <SetupActionCard
             title={m.aiHooks.title}
             description={m.aiHooks.description}
-            statusLabel={aiReady ? m.statusReady : m.statusNeedsAttention}
-            statusTone={aiReady ? "ok" : "warn"}
+            statusLabel={aiHookStatusLabel}
+            statusTone={aiHookStatusTone}
             primaryLabel={aiHookPrimaryLabel}
             onPrimary={handleAiPrimary}
             primaryLoading={running}
@@ -364,14 +384,18 @@ export function ProjectSetupPanel({
             <SetupActionCard
               title={m.npm.title}
               description={m.npm.description}
-              statusLabel={npmSettingsOk ? m.statusReady : m.statusNeedsAttention}
-              statusTone={npmSettingsOk ? "ok" : "warn"}
+              statusLabel={npmStatusLabel}
+              statusTone={npmStatusTone}
               primaryLabel={npmHardeningEnabled ? m.npm.apply : m.npm.remove}
               onPrimary={handleNpmPrimary}
               primaryLoading={running}
               primaryDisabled={npmPrimaryDisabled}
               primaryDisabledReason={
-                npmHardeningEnabled && npmSettingsOk ? m.hints.npmAlreadyOk : undefined
+                !npmSelectionChanged
+                  ? npmHardeningEnabled
+                    ? m.hints.npmAlreadyOk
+                    : m.hints.npmNoChanges
+                  : undefined
               }
             >
               <label className="mb-3 flex cursor-pointer items-start gap-2 rounded-lg border border-border bg-surface-3/50 px-3 py-2 text-[11px] text-muted">

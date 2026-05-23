@@ -106,6 +106,9 @@ export const en: Messages = {
     statusReady: "Ready",
     statusMissing: "Missing",
     statusNeedsAttention: "Needs attention",
+    statusApplied: "Applied",
+    statusRemoved: "Removed",
+    statusPending: "Pending changes",
     quickSetup: {
       title: "Recommended setup",
       description:
@@ -145,6 +148,7 @@ export const en: Messages = {
       aiAlreadyOk: "AI editor safety settings are already configured.",
       aiNoChanges: "Checkboxes match the current configuration.",
       npmAlreadyOk: "npm safety settings that can be applied automatically are already configured.",
+      npmNoChanges: "Checkbox matches the current configuration.",
       selectIgnoreTarget: "Select at least one target file.",
       selectAiSetting: "Select at least one AI setting to apply.",
     },
@@ -222,9 +226,9 @@ export const en: Messages = {
       title: "AI editor safety",
       description: "Configure scan hooks and safety settings for Cursor, Claude Code, and Codex.",
       install: "Install scan hooks",
-      applySelected: "Apply selected settings",
+      applySelected: "Apply checked settings",
       syncSelected: "Apply changes",
-      removeSelected: "Remove selected settings",
+      removeSelected: "Remove unchecked settings",
       selectionHint:
         "Checked items are enabled. Uncheck and press the button to remove those settings.",
       scanHooksGroup: "Pre-send scan hooks",

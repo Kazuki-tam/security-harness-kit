@@ -104,6 +104,9 @@ export const ja: Messages = {
     statusReady: "設定済み",
     statusMissing: "未設定",
     statusNeedsAttention: "要確認",
+    statusApplied: "適用済み",
+    statusRemoved: "解除済み",
+    statusPending: "未反映",
     quickSetup: {
       title: "おすすめセットアップ",
       description:
@@ -141,6 +144,7 @@ export const ja: Messages = {
       aiAlreadyOk: "AI エディターの安全設定はすでに設定済みです。",
       aiNoChanges: "チェック内容が現在の設定と一致しています。",
       npmAlreadyOk: "自動で適用できる npm の安全設定はすでに設定済みです。",
+      npmNoChanges: "チェック内容が現在の設定と一致しています。",
       selectIgnoreTarget: "適用先を1つ以上選んでください。",
       selectAiSetting: "適用する AI 設定を1つ以上選んでください。",
     },
@@ -219,9 +223,9 @@ export const ja: Messages = {
       description:
         "Cursor / Claude Code / Codex 向けに、スキャンフックと危険操作の制限を設定します。",
       install: "スキャンフックを設定",
-      applySelected: "選択した設定を適用",
+      applySelected: "チェックした設定を適用",
       syncSelected: "変更を反映",
-      removeSelected: "選択した設定を解除",
+      removeSelected: "チェックを外した設定を解除",
       selectionHint:
         "チェックは有効にしたい設定を表します。外してボタンを押すと、その項目を解除します。",
       scanHooksGroup: "AI への送信前スキャン",

@@ -106,6 +106,9 @@ export type Messages = {
     statusReady: string;
     statusMissing: string;
     statusNeedsAttention: string;
+    statusApplied: string;
+    statusRemoved: string;
+    statusPending: string;
     quickSetup: {
       title: string;
       description: string;
@@ -135,6 +138,7 @@ export type Messages = {
       aiAlreadyOk: string;
       aiNoChanges: string;
       npmAlreadyOk: string;
+      npmNoChanges: string;
       selectIgnoreTarget: string;
       selectAiSetting: string;
     };
