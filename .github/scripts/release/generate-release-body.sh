@@ -11,18 +11,33 @@ out="${1:-release-body.md}"
 
 shk_require_semver "$version"
 
+shk_dist_announcement_without_homebrew() {
+  dist plan --output-format=json --no-local-paths > dist-plan.json
+  jq -r '.announcement_github_body' dist-plan.json \
+    | awk '
+      /^#+[[:space:]]*Install prebuilt binaries via Homebrew[[:space:]]*$/ {
+        skip = 1
+        next
+      }
+      skip && /^#+[[:space:]]+/ {
+        skip = 0
+      }
+      !skip {
+        print
+      }
+    '
+}
+
 {
   case "$component" in
     cli)
-      dist plan --output-format=json --no-local-paths > dist-plan.json
-      jq -r '.announcement_github_body' dist-plan.json
+      shk_dist_announcement_without_homebrew
       ;;
     desktop)
       shk_desktop_release_notes "$version"
       ;;
     both)
-      dist plan --output-format=json --no-local-paths > dist-plan.json
-      jq -r '.announcement_github_body' dist-plan.json
+      shk_dist_announcement_without_homebrew
       echo ""
       shk_desktop_release_notes "$version"
       ;;
