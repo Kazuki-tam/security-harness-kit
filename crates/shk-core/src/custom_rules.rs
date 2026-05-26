@@ -183,4 +183,83 @@ mod tests {
         assert!(disabled.is_empty());
         assert_eq!(enabled[0].kind, "internal");
     }
+
+    #[test]
+    fn compile_for_policy_skips_disabled_rules() {
+        let mut disabled = custom_rule("ProjectNebula");
+        disabled.enabled = false;
+
+        let compiled = compile_for_policy(&[disabled], true).unwrap();
+
+        assert!(compiled.is_empty());
+    }
+
+    #[test]
+    fn compile_for_policy_rejects_empty_id_pattern_and_bad_severity() {
+        let mut empty_id = custom_rule("ProjectNebula");
+        empty_id.id = "  ".into();
+        assert!(
+            compile_for_policy(&[empty_id], true)
+                .unwrap_err()
+                .to_string()
+                .contains("id must not be empty")
+        );
+
+        let mut empty_pattern = custom_rule("  ");
+        empty_pattern.id = "internal.empty_pattern".into();
+        assert!(
+            compile_for_policy(&[empty_pattern], true)
+                .unwrap_err()
+                .to_string()
+                .contains("pattern must not be empty")
+        );
+
+        let mut bad_severity = custom_rule("ProjectNebula");
+        bad_severity.id = "internal.bad_severity".into();
+        bad_severity.severity = "urgent".into();
+        assert!(
+            compile_for_policy(&[bad_severity], true)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid severity")
+        );
+    }
+
+    #[test]
+    fn compile_for_policy_applies_case_insensitive_matching_and_default_message() {
+        let mut rule = custom_rule("projectnebula");
+        rule.id = "internal.codename".into();
+        rule.case_insensitive = true;
+        rule.message = Some("  ".into());
+        rule.confidence = Some(f32::NAN);
+
+        let compiled = compile_for_policy(&[rule], true).unwrap();
+        let matches = scan_content("before ProjectNebula after", &compiled);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].rule_id, "internal.codename");
+        assert_eq!(matches[0].message, "Custom sensitive term detected");
+        assert_eq!(matches[0].confidence, 1.0);
+        assert_eq!(matches[0].matched_text, "ProjectNebula");
+    }
+
+    #[test]
+    fn scan_content_reports_line_and_column_for_multiple_matches() {
+        let compiled = compile_for_policy(&[custom_rule("ProjectNebula")], true).unwrap();
+
+        let matches = scan_content("first ProjectNebula\nsecond ProjectNebula", &compiled);
+
+        assert_eq!(matches.len(), 2);
+        assert_eq!((matches[0].line, matches[0].column), (1, 7));
+        assert_eq!((matches[1].line, matches[1].column), (2, 8));
+    }
+
+    #[test]
+    fn redact_line_for_display_redacts_all_custom_rule_matches() {
+        let compiled = compile_for_policy(&[custom_rule("ProjectNebula")], true).unwrap();
+
+        let redacted = redact_line_for_display("ProjectNebula and ProjectNebula", &compiled);
+
+        assert_eq!(redacted, "[REDACTED] and [REDACTED]");
+    }
 }

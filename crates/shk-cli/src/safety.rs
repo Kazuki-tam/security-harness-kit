@@ -126,3 +126,76 @@ fn canonicalize_existing_or_parent(path: &Path) -> Result<PathBuf> {
         .map(|name| parent.join(name))
         .unwrap_or(parent))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn require_project_policy_returns_existing_policy_path() {
+        let root = tempdir().expect("temp dir");
+        std::fs::write(root.path().join(POLICY_FILE), "").expect("write policy");
+
+        let path = require_project_policy(root.path(), "scan").expect("policy exists");
+
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(POLICY_FILE)
+        );
+    }
+
+    #[test]
+    fn require_project_policy_errors_when_missing() {
+        let root = tempdir().expect("temp dir");
+
+        let err =
+            require_project_policy(root.path(), "mask").expect_err("missing policy should fail");
+
+        assert!(err.to_string().contains("mask requires a project shk.toml"));
+    }
+
+    #[test]
+    fn ensure_writable_path_allowed_rejects_env_files() {
+        for path in [Path::new(".env"), Path::new("nested/.env.local")] {
+            let err = ensure_writable_path_allowed(path).expect_err("env files are sensitive");
+
+            assert!(
+                err.to_string()
+                    .contains("refusing to write sensitive env file")
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_writable_path_allowed_accepts_regular_project_file() {
+        ensure_writable_path_allowed(Path::new("src/main.rs")).expect("regular file is allowed");
+    }
+
+    #[test]
+    fn expand_home_handles_bare_and_prefixed_home_paths() {
+        let home = Path::new("/tmp/example-home");
+
+        assert_eq!(expand_home(Path::new("~"), home), home);
+        assert_eq!(
+            expand_home(Path::new("~/project/file.txt"), home),
+            home.join("project/file.txt")
+        );
+        assert_eq!(
+            expand_home(Path::new("relative/file.txt"), home),
+            PathBuf::from("relative/file.txt")
+        );
+    }
+
+    #[test]
+    fn canonicalize_existing_or_parent_preserves_missing_leaf() {
+        let root = tempdir().expect("temp dir");
+        let nested = root.path().join("existing");
+        std::fs::create_dir_all(&nested).expect("create parent");
+
+        let path = canonicalize_existing_or_parent(&nested.join("missing.txt"))
+            .expect("canonicalize missing leaf");
+
+        assert!(path.ends_with("existing/missing.txt"));
+    }
+}

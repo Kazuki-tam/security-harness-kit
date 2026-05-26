@@ -132,3 +132,113 @@ pub fn audit_note(findings_len: usize, suppressed: u64, max_sev: Option<&str>) -
             .unwrap_or_default()
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::args::AiTool;
+
+    fn parse_json(output: &str) -> Value {
+        serde_json::from_str(output).expect("valid hook output JSON")
+    }
+
+    #[test]
+    fn cursor_deny_contains_user_and_agent_messages() {
+        let output = deny_stdout_for_event(AiTool::Cursor, HookEvent::PreToolUse, "blocked");
+        let value = parse_json(&output);
+
+        assert_eq!(value["permission"], "deny");
+        assert_eq!(value["user_message"], "blocked");
+        assert_eq!(value["agent_message"], "blocked");
+    }
+
+    #[test]
+    fn codex_permission_request_uses_decision_shape() {
+        let output =
+            deny_stdout_for_event(AiTool::Codex, HookEvent::PermissionRequest, "needs review");
+        let value = parse_json(&output);
+
+        assert_eq!(
+            value["hookSpecificOutput"]["hookEventName"],
+            "PermissionRequest"
+        );
+        assert_eq!(value["hookSpecificOutput"]["decision"]["behavior"], "deny");
+        assert_eq!(
+            value["hookSpecificOutput"]["decision"]["message"],
+            "needs review"
+        );
+    }
+
+    #[test]
+    fn codex_permission_request_allow_is_empty_object() {
+        let output = allow_stdout_for_event(AiTool::Codex, HookEvent::PermissionRequest, None);
+
+        assert_eq!(parse_json(&output), json!({}));
+    }
+
+    #[test]
+    fn claude_allow_uses_hook_specific_permission_output() {
+        let output = allow_stdout_for_event(
+            AiTool::ClaudeCode,
+            HookEvent::UserPromptSubmit,
+            Some("looks good"),
+        );
+        let value = parse_json(&output);
+
+        assert_eq!(
+            value["hookSpecificOutput"]["hookEventName"],
+            "UserPromptSubmit"
+        );
+        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(
+            value["hookSpecificOutput"]["permissionDecisionReason"],
+            "looks good"
+        );
+    }
+
+    #[test]
+    fn cursor_mask_output_includes_masked_content_when_present() {
+        let output = mask_stdout(AiTool::Cursor, false, 2, Some("[REDACTED]"));
+        let value = parse_json(&output);
+
+        assert_eq!(value["permission"], "allow");
+        assert_eq!(value["masked_content"], "[REDACTED]");
+        assert_eq!(value["user_message"], "shk mask: redacted 2 finding(s)");
+    }
+
+    #[test]
+    fn claude_post_mask_output_uses_post_tool_event_and_replacement_message() {
+        let output = mask_stdout(AiTool::ClaudeCode, true, 1, Some("safe output"));
+        let value = parse_json(&output);
+
+        assert_eq!(value["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert!(
+            value["hookSpecificOutput"]["output"]
+                .as_str()
+                .expect("string output")
+                .contains("safe output")
+        );
+    }
+
+    #[test]
+    fn mask_without_findings_reports_clean_output() {
+        let output = mask_stdout(AiTool::Codex, false, 0, None);
+        let value = parse_json(&output);
+
+        assert_eq!(
+            value["hookSpecificOutput"]["permissionDecisionReason"],
+            "shk mask: no sensitive content detected"
+        );
+        assert!(value["hookSpecificOutput"].get("output").is_none());
+    }
+
+    #[test]
+    fn audit_note_includes_max_severity_only_when_present() {
+        assert_eq!(
+            audit_note(3, 2, Some("high")),
+            "shk audit: findings=3 suppressed=2 max_severity=high"
+        );
+        assert_eq!(audit_note(0, 0, None), "shk audit: findings=0 suppressed=0");
+    }
+}

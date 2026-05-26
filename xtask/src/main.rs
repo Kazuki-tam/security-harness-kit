@@ -5,7 +5,7 @@ use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const DEFAULT_SOURCE_REF: &str = "8863af47d64c3681422523e36837957c74d4af4b";
@@ -26,6 +26,25 @@ const SKIP_RULE_IDS: &[&str] = &[
     // regex's compiled-size limit in the generated static rule set.
     "pypi-upload-token",
     "vault-batch-token",
+];
+
+// Files where the bare version string (e.g. "0.3.7") appears.
+const BARE_VERSION_FILES: &[&str] = &[
+    "Cargo.toml",
+    "crates/shk-cli/Cargo.toml",
+    "crates/shk-core/Cargo.toml",
+    "apps/shk-desktop/package.json",
+    "apps/shk-desktop/src-tauri/tauri.conf.json",
+    "apps/shk-desktop/src-tauri/Cargo.toml",
+];
+
+// Files where the v-prefixed version string (e.g. "v0.3.7") appears.
+const V_VERSION_FILES: &[&str] = &[
+    "README.md",
+    "docs/installation.md",
+    "docs/ci.md",
+    "crates/shk-cli/src/skills/shk.md",
+    ".claude/skills/shk.md",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -67,8 +86,7 @@ struct GitleaksTomlAllowlist {
     stopwords: Vec<String>,
 }
 
-struct Args {
-    command: String,
+struct ImportArgs {
     input: String,
     output: PathBuf,
     source_ref: String,
@@ -76,23 +94,34 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    let args = parse_args()?;
-    match args.command.as_str() {
-        "import-gitleaks-rules" => import_gitleaks_rules(args),
+    let mut raw = env::args().skip(1);
+    let command = match raw.next() {
+        Some(c) => c,
+        None => bail!(
+            "usage: cargo xtask <command> [args...]\ncommands: import-gitleaks-rules, bump-version"
+        ),
+    };
+    match command.as_str() {
+        "import-gitleaks-rules" => {
+            let args = parse_import_args(raw)?;
+            import_gitleaks_rules(args)
+        }
+        "bump-version" => {
+            let version = parse_bump_version_args(raw)?;
+            bump_version(&version)
+        }
+        "--help" | "-h" => {
+            println!(
+                "usage: cargo xtask <command> [args...]\ncommands: import-gitleaks-rules, bump-version"
+            );
+            Ok(())
+        }
         other => bail!("unknown xtask command `{other}`"),
     }
 }
 
-fn parse_args() -> Result<Args> {
-    let mut raw = env::args().skip(1);
-    let Some(command) = raw.next() else {
-        bail!(
-            "usage: cargo run -p xtask -- import-gitleaks-rules [--check] [--input <path-or-url>] [--output <path>] [--source-ref <ref>]"
-        );
-    };
-
-    let mut args = Args {
-        command,
+fn parse_import_args(mut raw: impl Iterator<Item = String>) -> Result<ImportArgs> {
+    let mut args = ImportArgs {
         input: DEFAULT_SOURCE.to_string(),
         output: PathBuf::from(DEFAULT_OUTPUT),
         source_ref: DEFAULT_SOURCE_REF.to_string(),
@@ -113,7 +142,7 @@ fn parse_args() -> Result<Args> {
             }
             "--help" | "-h" => {
                 println!(
-                    "usage: cargo run -p xtask -- import-gitleaks-rules [--check] [--input <path-or-url>] [--output <path>] [--source-ref <ref>]"
+                    "usage: cargo xtask import-gitleaks-rules [--check] [--input <path-or-url>] [--output <path>] [--source-ref <ref>]"
                 );
                 std::process::exit(0);
             }
@@ -124,7 +153,87 @@ fn parse_args() -> Result<Args> {
     Ok(args)
 }
 
-fn import_gitleaks_rules(args: Args) -> Result<()> {
+fn parse_bump_version_args(mut raw: impl Iterator<Item = String>) -> Result<String> {
+    let version = raw
+        .next()
+        .context("usage: cargo xtask bump-version <version>  (e.g. 0.3.7)")?;
+    if let Some(extra) = raw.next() {
+        bail!("unexpected argument `{extra}`");
+    }
+    Ok(version)
+}
+
+fn bump_version(new_version: &str) -> Result<()> {
+    let new_version = new_version.strip_prefix('v').unwrap_or(new_version);
+    let version_re = Regex::new(r"^\d+\.\d+\.\d+$").unwrap();
+    if !version_re.is_match(new_version) {
+        bail!("invalid version: expected X.Y.Z, got `{new_version}`");
+    }
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .context("xtask has no parent directory")?
+        .to_path_buf();
+
+    let old_version = read_workspace_version(&root)?;
+    if old_version == new_version {
+        bail!("new version is the same as current ({old_version})");
+    }
+
+    println!("bumping {old_version} -> {new_version}");
+
+    let mut total = 0usize;
+    for file in BARE_VERSION_FILES {
+        let n = replace_in_file(&root.join(file), &old_version, new_version)?;
+        if n > 0 {
+            println!("  {file} ({n})");
+        }
+        total += n;
+    }
+    for file in V_VERSION_FILES {
+        let n = replace_in_file(
+            &root.join(file),
+            &format!("v{old_version}"),
+            &format!("v{new_version}"),
+        )?;
+        if n > 0 {
+            println!("  {file} ({n})");
+        }
+        total += n;
+    }
+
+    println!(
+        "done - {total} replacement(s) across {} file(s)",
+        BARE_VERSION_FILES.len() + V_VERSION_FILES.len()
+    );
+    Ok(())
+}
+
+fn read_workspace_version(root: &Path) -> Result<String> {
+    let manifest =
+        fs::read_to_string(root.join("Cargo.toml")).context("read workspace Cargo.toml")?;
+    let manifest: toml::Value = toml::from_str(&manifest).context("parse workspace Cargo.toml")?;
+    let version = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("package"))
+        .and_then(|package| package.get("version"))
+        .and_then(|version| version.as_str())
+        .context("version not found in workspace Cargo.toml")?
+        .to_string();
+    Ok(version)
+}
+
+fn replace_in_file(path: &Path, old: &str, new: &str) -> Result<usize> {
+    let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let count = content.matches(old).count();
+    if count > 0 {
+        fs::write(path, content.replace(old, new))
+            .with_context(|| format!("write {}", path.display()))?;
+    }
+    Ok(count)
+}
+
+fn import_gitleaks_rules(args: ImportArgs) -> Result<()> {
     let input = read_input(&args.input)?;
     let (generated, skipped) = generate(&input, &args.input, &args.source_ref)?;
     let generated = rustfmt_generated(&generated)?;
@@ -204,7 +313,7 @@ fn chrono_like_counter() -> u128 {
         .unwrap_or_default()
 }
 
-fn count_generated_rules(path: &PathBuf) -> Result<usize> {
+fn count_generated_rules(path: &Path) -> Result<usize> {
     let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     Ok(text.matches("GitleaksRule {").count())
 }
@@ -523,4 +632,64 @@ fn rust_str(value: &str) -> String {
         hashes.push('#');
     }
     format!("r{hashes}\"{value}\"{hashes}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn parse_bump_version_args_accepts_single_version() {
+        let args = vec!["v1.2.3".to_string()].into_iter();
+
+        let version = parse_bump_version_args(args).expect("valid version argument");
+
+        assert_eq!(version, "v1.2.3");
+    }
+
+    #[test]
+    fn parse_bump_version_args_rejects_extra_arguments() {
+        let args = vec!["1.2.3".to_string(), "--extra".to_string()].into_iter();
+
+        let err = parse_bump_version_args(args).expect_err("extra arguments should fail");
+
+        assert!(err.to_string().contains("unexpected argument"));
+    }
+
+    #[test]
+    fn read_workspace_version_uses_workspace_package_version() {
+        let root = tempdir().expect("temp dir");
+        fs::write(
+            root.path().join("Cargo.toml"),
+            r#"
+[package]
+version = "9.9.9"
+
+[workspace]
+
+[workspace.package]
+version = "1.2.3"
+"#,
+        )
+        .expect("write manifest");
+
+        let version = read_workspace_version(root.path()).expect("read version");
+
+        assert_eq!(version, "1.2.3");
+    }
+
+    #[test]
+    fn generate_outputs_valid_super_import() {
+        let input = r#"
+[[rules]]
+id = "demo-token"
+regex = '''demo-[a-z]+'''
+"#;
+
+        let (generated, skipped) = generate(input, "test", "test-ref").expect("generate rules");
+
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert!(generated.contains("use super::{"));
+    }
 }
