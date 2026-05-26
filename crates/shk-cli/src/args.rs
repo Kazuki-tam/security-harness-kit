@@ -97,13 +97,13 @@ pub enum Commands {
         #[arg(long, value_enum)]
         hook_mode: Option<AiTool>,
         /// Post-tool hook inbound scan — never blocks (spec §7.9).
-        #[arg(long)]
+        #[arg(long, requires = "hook_mode")]
         post: bool,
         /// Audit-only hooks: append JSON lines to `.shk/audit.log`, always exit 0.
-        #[arg(long, conflicts_with = "log_blocked")]
+        #[arg(long, conflicts_with = "log_blocked", requires = "hook_mode")]
         audit: bool,
         /// Blocking hook mode: append metadata-only block entries to `.shk/audit.log`.
-        #[arg(long, conflicts_with = "audit")]
+        #[arg(long, conflicts_with = "audit", requires = "hook_mode")]
         log_blocked: bool,
     },
     /// Mask stdin or file (streaming-friendly line redaction)
@@ -785,6 +785,36 @@ mod tests {
             };
 
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn scan_rejects_log_blocked_without_hook_mode() {
+        let err = match Cli::try_parse_from(["shk", "scan", ".", "--log-blocked"]) {
+            Ok(_) => panic!("--log-blocked should require --hook-mode"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn scan_rejects_audit_without_hook_mode() {
+        let err = match Cli::try_parse_from(["shk", "scan", ".", "--audit"]) {
+            Ok(_) => panic!("--audit should require --hook-mode"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn scan_rejects_post_without_hook_mode() {
+        let err = match Cli::try_parse_from(["shk", "scan", ".", "--post"]) {
+            Ok(_) => panic!("--post should require --hook-mode"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
     }
 }
 

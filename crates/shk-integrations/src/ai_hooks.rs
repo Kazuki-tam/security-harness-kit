@@ -273,6 +273,28 @@ fn acc_chars_len(acc: &[String]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn ai_hook_tool_labels_are_stable() {
+        assert_eq!(AiHookTool::ClaudeCode.kebab_str(), "claude-code");
+        assert_eq!(AiHookTool::Codex.kebab_str(), "codex");
+        assert_eq!(AiHookTool::Cursor.kebab_str(), "cursor");
+
+        assert_eq!(AiHookTool::ClaudeCode.virtual_path_label(), "<claude-hook>");
+        assert_eq!(AiHookTool::Codex.virtual_path_label(), "<codex-hook>");
+        assert_eq!(AiHookTool::Cursor.virtual_path_label(), "<cursor-hook>");
+    }
+
+    #[test]
+    fn extract_user_prompt_returns_prompt_only_for_valid_payloads() {
+        assert_eq!(
+            extract_user_prompt(r#"{"prompt":"scan this"}"#).as_deref(),
+            Some("scan this")
+        );
+        assert!(extract_user_prompt(r#"{"text":"scan this"}"#).is_none());
+        assert!(extract_user_prompt("not json").is_none());
+    }
 
     #[test]
     fn claude_post_extracts_short_value_fields() {
@@ -346,5 +368,150 @@ mod tests {
         .unwrap();
 
         assert_eq!(body.matches("same text").count(), 1, "{body}");
+    }
+
+    #[test]
+    fn pre_hooks_prefer_prompt_like_text_fields() {
+        let stdin = serde_json::json!({
+            "prompt": "primary prompt",
+            "tool_input": {
+                "command": "secondary command"
+            }
+        })
+        .to_string();
+
+        let (display, body) = stdin_to_hook_body(
+            AiHookTool::Cursor,
+            false,
+            &stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert_eq!(display, "<cursor-hook>");
+        assert!(body.contains("primary prompt"), "{body}");
+        assert!(body.contains("secondary command"), "{body}");
+    }
+
+    #[test]
+    fn post_hook_text_keys_are_tool_specific() {
+        let stdin = serde_json::json!({
+            "stdout": "codex output",
+            "shell_command": "cursor command"
+        })
+        .to_string();
+
+        let (_display, codex_body) = stdin_to_hook_body(
+            AiHookTool::Codex,
+            true,
+            &stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+        let (_display, cursor_body) = stdin_to_hook_body(
+            AiHookTool::Cursor,
+            true,
+            &stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert!(codex_body.contains("codex output"), "{codex_body}");
+        assert!(!codex_body.contains("cursor command"), "{codex_body}");
+        assert!(cursor_body.contains("cursor command"), "{cursor_body}");
+        assert!(!cursor_body.contains("codex output"), "{cursor_body}");
+    }
+
+    #[test]
+    fn falls_back_to_large_strings_when_priority_keys_are_absent() {
+        let large = "x".repeat(96);
+        let stdin = serde_json::json!({
+            "nested": {
+                "unrecognized": large
+            }
+        })
+        .to_string();
+
+        let (_display, body) = stdin_to_hook_body(
+            AiHookTool::Codex,
+            false,
+            &stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert!(body.contains(&"x".repeat(96)), "{body}");
+    }
+
+    #[test]
+    fn empty_payload_body_defaults_to_empty_json_object() {
+        let (_display, body) = stdin_to_hook_body(
+            AiHookTool::Codex,
+            false,
+            "{}",
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert_eq!(body, "{}");
+    }
+
+    #[test]
+    fn reads_candidate_files_inside_repo_and_uses_first_relative_label() {
+        let repo = tempdir().expect("temp repo");
+        std::fs::create_dir_all(repo.path().join("nested")).expect("create temp repo");
+        std::fs::write(repo.path().join("nested/secret.txt"), "file body")
+            .expect("write temp file");
+        let stdin = serde_json::json!({
+            "tool_input": {
+                "file_path": "nested/secret.txt"
+            }
+        })
+        .to_string();
+
+        let (display, body) = stdin_to_hook_body(
+            AiHookTool::ClaudeCode,
+            false,
+            &stdin,
+            repo.path(),
+            repo.path(),
+        )
+        .unwrap();
+
+        assert_eq!(display, "nested/secret.txt");
+        assert!(body.contains("// ---- nested/secret.txt"), "{body}");
+        assert!(body.contains("file body"), "{body}");
+    }
+
+    #[test]
+    fn ignores_candidate_files_outside_repo() {
+        let repo = tempdir().expect("temp repo");
+        let outside = tempdir().expect("outside temp dir");
+        std::fs::write(outside.path().join("secret.txt"), "outside body")
+            .expect("write outside file");
+        let stdin = serde_json::json!({
+            "tool_input": {
+                "file_path": outside.path().join("secret.txt")
+            },
+            "prompt": "fallback prompt"
+        })
+        .to_string();
+
+        let (display, body) = stdin_to_hook_body(
+            AiHookTool::ClaudeCode,
+            false,
+            &stdin,
+            repo.path(),
+            repo.path(),
+        )
+        .unwrap();
+
+        assert_eq!(display, "<claude-hook>");
+        assert_eq!(body, "fallback prompt");
     }
 }

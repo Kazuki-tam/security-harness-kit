@@ -124,19 +124,34 @@ fn scan_json_reports_ai_context_findings() {
 }
 
 #[test]
-fn scan_audit_mode_reports_findings_but_exits_zero() {
+fn hook_audit_mode_logs_findings_but_exits_zero() {
+    use std::io::Write;
+
     let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(tmp.path().join("shk.toml"), "").expect("write policy");
     let secret = synthetic_openai_key('z');
+    let secret_path = tmp.path().join("secret.txt");
     std::fs::write(
-        tmp.path().join("secret.txt"),
+        &secret_path,
         format!("// not real credential: synthetic detector fixture value only\ntoken={secret}\n"),
     )
     .expect("write secret");
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "file_path": secret_path.to_str().unwrap(),
+    }))
+    .expect("hook payload");
 
     let out = Command::new(shk_bin())
-        .args(["scan", ".", "--json", "--audit"])
+        .args(["scan", ".", "--hook-mode", "cursor", "--audit"])
         .current_dir(tmp.path())
-        .output()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            child.wait_with_output()
+        })
         .expect("run shk audit scan");
     assert!(
         out.status.success(),
@@ -144,8 +159,14 @@ fn scan_audit_mode_reports_findings_but_exits_zero() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
-    assert!(!v["findings"].as_array().unwrap().is_empty(), "{v}");
+
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).expect("hook json");
+    assert_eq!(stdout["permission"], "allow");
+
+    let audit_log = std::fs::read_to_string(tmp.path().join(".shk/audit.log")).expect("audit log");
+    let entry: serde_json::Value =
+        serde_json::from_str(audit_log.lines().next().expect("audit entry")).expect("audit json");
+    assert!(entry["finding_count"].as_u64().unwrap_or(0) > 0, "{entry}");
 }
 
 #[test]
@@ -880,6 +901,26 @@ fn scan_rejects_invalid_fail_on() {
         stderr.contains("[possible values: info, low, medium, high, critical]"),
         "{stderr}"
     );
+}
+
+#[test]
+fn scan_missing_target_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("does-not-exist.txt");
+    let out = Command::new(shk_bin())
+        .args(["scan", missing.to_str().unwrap(), "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan missing target");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("scan target does not exist"), "{stderr}");
 }
 
 #[test]

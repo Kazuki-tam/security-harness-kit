@@ -129,6 +129,7 @@ fn default_excludes() -> Vec<String> {
         "**/*.gif".into(),
         "**/*.webp".into(),
         "**/*.ico".into(),
+        "**/*.icns".into(),
         "**/*.avif".into(),
         "**/*.bmp".into(),
         "**/*.tif".into(),
@@ -520,6 +521,7 @@ exclude = [
   "**/*.gif",
   "**/*.webp",
   "**/*.ico",
+  "**/*.icns",
   "**/*.avif",
   "**/*.bmp",
   "**/*.tif",
@@ -622,6 +624,7 @@ exclude = [
   "**/*.gif",
   "**/*.webp",
   "**/*.ico",
+  "**/*.icns",
   "**/*.avif",
   "**/*.bmp",
   "**/*.tif",
@@ -713,6 +716,50 @@ required_patterns = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn severity_parse_string_and_threshold_order_are_stable() {
+        assert_eq!(Severity::parse("INFO"), Some(Severity::Info));
+        assert_eq!(Severity::parse("low"), Some(Severity::Low));
+        assert_eq!(Severity::parse("Medium"), Some(Severity::Medium));
+        assert_eq!(Severity::parse("high"), Some(Severity::High));
+        assert_eq!(Severity::parse("critical"), Some(Severity::Critical));
+        assert_eq!(Severity::parse("urgent"), None);
+
+        assert_eq!(Severity::High.as_str(), "high");
+        assert!(Severity::Critical.meets_threshold(Severity::High));
+        assert!(Severity::High.meets_threshold(Severity::High));
+        assert!(!Severity::Medium.meets_threshold(Severity::High));
+    }
+
+    #[test]
+    fn rules_section_defaults_true_for_security_rule_groups() {
+        let policy: Policy = toml::from_str("").unwrap();
+
+        assert!(policy.rules.secrets);
+        assert!(policy.rules.pii);
+        assert!(policy.rules.env);
+        assert!(policy.rules.ai_context);
+        assert_eq!(policy.rules.pii_languages, ["en", "ja"]);
+    }
+
+    #[test]
+    fn custom_rule_defaults_are_applied_during_deserialization() {
+        let policy: Policy = toml::from_str(
+            r#"
+[[custom_rules]]
+id = "internal.codename"
+pattern = "ProjectNebula"
+"#,
+        )
+        .unwrap();
+
+        let rule = &policy.custom_rules[0];
+        assert_eq!(rule.severity, "medium");
+        assert_eq!(rule.kind, "internal");
+        assert_eq!(rule.confidence, Some(1.0));
+        assert!(rule.enabled);
+    }
 
     #[test]
     fn scan_patterns_distinguish_missing_from_explicit_empty() {

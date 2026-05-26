@@ -771,6 +771,10 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
         return scan_git_history(target, opts);
     }
 
+    if !target.exists() {
+        bail!("scan target does not exist: {}", target.display());
+    }
+
     let scan_root = canonical_or_same(&scan_root_for_target(target));
     let policy_root = policy_root_for_scan(&scan_root);
     let (mut policy, policy_path) = Policy::load_from_dir(&policy_root)?;
@@ -1063,5 +1067,31 @@ mod tests {
 
         assert!(chunk.findings.is_empty(), "{:?}", chunk.findings);
         assert_eq!(chunk.suppressed, 1);
+    }
+
+    #[test]
+    fn scan_path_rejects_missing_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.txt");
+        let result = scan_path(
+            &missing,
+            ScanOptions {
+                staged: false,
+                git_history: false,
+                git_history_ref: None,
+                git_history_since: None,
+                git_history_max_commits: None,
+                json: false,
+                fail_on_override: None,
+                use_pre_commit_threshold: false,
+                include_context: false,
+                include_binary: false,
+                follow_symlinks: false,
+            },
+        );
+        match result {
+            Err(err) => assert!(err.to_string().contains("scan target does not exist")),
+            Ok(_) => panic!("missing target should fail"),
+        }
     }
 }

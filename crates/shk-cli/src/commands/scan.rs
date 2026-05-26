@@ -78,6 +78,13 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
     if inv.git_history && shk_core::git::discover_repo_root(&inv.path).is_none() {
         return Err(CliExit::message(2, "shk scan --git-history requires a Git repository").into());
     }
+    if !inv.staged && !inv.git_history && !inv.path.exists() {
+        return Err(CliExit::message(
+            2,
+            format!("scan target does not exist: {}", inv.path.display()),
+        )
+        .into());
+    }
 
     if inv.preview {
         let preview = preview_git_history(&inv.path, opts).context("git history preview failed")?;

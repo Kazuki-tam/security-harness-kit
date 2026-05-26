@@ -52,7 +52,7 @@ export function formatToolName(toolId: string | undefined, names: Record<string,
   return names[toolId] ?? toolId;
 }
 
-/** Localize action-guard categories such as `env_dump`. Falls back to the raw id. */
+/** Localize action-guard categories such as `environment_dump`. Falls back to the raw id. */
 export function formatActionCategory(
   category: string | undefined,
   labels: Record<string, string>,

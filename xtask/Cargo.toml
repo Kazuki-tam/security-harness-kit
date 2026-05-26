@@ -12,3 +12,6 @@ regex.workspace = true
 serde = { workspace = true, features = ["derive"] }
 toml.workspace = true
 ureq.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

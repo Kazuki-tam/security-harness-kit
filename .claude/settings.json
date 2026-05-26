@@ -5,7 +5,7 @@
         "_shk_managed": true,
         "hooks": [
           {
-            "command": "shk scan --hook-mode claude-code --post",
+            "command": "shk scan --hook-mode claude-code --log-blocked --post",
             "type": "command"
           }
         ],
@@ -17,7 +17,7 @@
         "_shk_managed": true,
         "hooks": [
           {
-            "command": "shk scan --hook-mode claude-code",
+            "command": "shk scan --hook-mode claude-code --log-blocked",
             "type": "command"
           }
         ],
@@ -29,7 +29,7 @@
         "_shk_managed": true,
         "hooks": [
           {
-            "command": "shk scan --hook-mode claude-code --fail-on medium",
+            "command": "shk scan --hook-mode claude-code --log-blocked --fail-on medium",
             "type": "command"
           }
         ]
