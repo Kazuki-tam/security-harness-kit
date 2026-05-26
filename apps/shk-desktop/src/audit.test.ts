@@ -12,6 +12,8 @@ import {
   loadAuditReport,
   rowLinksToFindings,
 } from "./audit";
+import { en } from "./i18n/messages/en";
+import { ja } from "./i18n/messages/ja";
 import type { AuditReport, AuditReportOptions } from "./types";
 
 function sampleReport(overrides: Partial<AuditReport> = {}): AuditReport {
@@ -87,9 +89,9 @@ describe("auditEventDetail", () => {
       auditEventDetail({
         ts: "2026-05-23T02:31:00Z",
         reason: "action_guard",
-        action_category: "env_dump",
+        action_category: "environment_dump",
       }),
-    ).toBe("env_dump");
+    ).toBe("environment_dump");
   });
 
   it("falls back to display path and dash", () => {
@@ -145,7 +147,28 @@ describe("formatToolName", () => {
 
 describe("formatActionCategory", () => {
   it("localizes known categories", () => {
-    expect(formatActionCategory("env_dump", { env_dump: "Env dump" })).toBe("Env dump");
+    expect(formatActionCategory("environment_dump", { environment_dump: "Environment dump" })).toBe(
+      "Environment dump",
+    );
+  });
+  it("covers action-guard categories emitted by the backend", () => {
+    const backendCategories = [
+      "secret_file_access",
+      "secret_dump_command",
+      "environment_dump",
+      "destructive_filesystem",
+      "direct_db_mutation",
+      "privilege_system_change",
+      "external_transfer",
+      "system_install",
+      "opaque_execution",
+      "custom_policy",
+    ];
+
+    for (const category of backendCategories) {
+      expect(en.audit.actionCategories[category]).toBeTruthy();
+      expect(ja.audit.actionCategories[category]).toBeTruthy();
+    }
   });
   it("falls back to raw id", () => {
     expect(formatActionCategory("unknown_thing", {})).toBe("unknown_thing");

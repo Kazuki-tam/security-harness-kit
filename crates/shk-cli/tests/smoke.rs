@@ -883,6 +883,26 @@ fn scan_rejects_invalid_fail_on() {
 }
 
 #[test]
+fn scan_missing_target_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("does-not-exist.txt");
+    let out = Command::new(shk_bin())
+        .args(["scan", missing.to_str().unwrap(), "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan missing target");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("scan target does not exist"), "{stderr}");
+}
+
+#[test]
 fn scan_staged_outside_git_exits_2() {
     let dir = tempfile::tempdir().unwrap();
     let out = Command::new(shk_bin())
