@@ -163,6 +163,8 @@ Safe operating rules:
 
 Each hook runs `shk scan --hook-mode <tool>` on the payload before AI tool execution.
 Pre-hooks and user-prompt hooks block on findings (exit 2); post-hooks warn only (exit 0).
+Managed user-prompt hooks use `--fail-on medium` so PII is blocked before it enters
+the agent context.
 
 Codex project hooks also ensure `features.hooks = true`, install `PreToolUse`,
 `PermissionRequest`, `UserPromptSubmit`, and `PostToolUse`, and scan

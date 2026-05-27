@@ -27,7 +27,7 @@ timeout = 30
 
 [[hooks.UserPromptSubmit.hooks]]
 type = "command"
-command = 'shk scan "$(git rev-parse --show-toplevel)" --hook-mode codex --log-blocked'
+command = 'shk scan "$(git rev-parse --show-toplevel)" --hook-mode codex --log-blocked --fail-on medium'
 statusMessage = "shk: scanning submitted prompt..."
 
 [[hooks.PostToolUse]]

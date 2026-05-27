@@ -8,6 +8,9 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Fail threshold embedded in managed user-prompt hook install commands.
+pub const USER_PROMPT_HOOK_FAIL_ON: &str = "medium";
+
 const PATH_KEYS: &[&str] = &[
     "path",
     "file_path",

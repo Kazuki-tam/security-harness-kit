@@ -2,6 +2,17 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use shk_integrations::USER_PROMPT_HOOK_FAIL_ON;
+
+fn codex_managed_hook_section<'a>(body: &'a str, event: &str, next_event: &str) -> &'a str {
+    let start = format!("[[hooks.{event}]]");
+    let end = format!("[[hooks.{next_event}]]");
+    body.split(&start)
+        .nth(1)
+        .and_then(|section| section.split(&end).next())
+        .unwrap_or("")
+}
+
 fn shk_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_shk"))
 }
@@ -1500,7 +1511,7 @@ fn hooks_install_ai_claude_apply_deny_merges_without_duplicates() {
         prompt_hooks[0]["hooks"][0]["command"]
             .as_str()
             .unwrap_or_default()
-            .contains("--fail-on medium"),
+            .contains(&format!("--fail-on {USER_PROMPT_HOOK_FAIL_ON}")),
         "prompt hook should use medium threshold: {prompt_hooks:?}"
     );
     let pre_hooks = settings["hooks"]["PreToolUse"].as_array().unwrap();
@@ -1661,6 +1672,16 @@ fn hooks_install_ai_codex_includes_permission_request() {
     assert!(
         body.contains(r#"shk scan "$(git rev-parse --show-toplevel)" --hook-mode codex"#),
         "{body}"
+    );
+    let prompt_section = codex_managed_hook_section(&body, "UserPromptSubmit", "PostToolUse");
+    assert!(
+        prompt_section.contains(&format!("--fail-on {USER_PROMPT_HOOK_FAIL_ON}")),
+        "UserPromptSubmit hook should use medium threshold: {prompt_section}"
+    );
+    let pre_section = codex_managed_hook_section(&body, "PreToolUse", "PermissionRequest");
+    assert!(
+        !pre_section.contains(&format!("--fail-on {USER_PROMPT_HOOK_FAIL_ON}")),
+        "PreToolUse hook should keep default high threshold: {pre_section}"
     );
 }
 
@@ -2220,6 +2241,21 @@ fn hooks_install_ai_log_blocked_injects_flag() {
     let hooks = std::fs::read_to_string(dir.path().join(".cursor/hooks.json")).unwrap();
     assert!(hooks.contains("--log-blocked"), "{hooks}");
     assert!(!hooks.contains("--audit"), "{hooks}");
+    let hooks_json: serde_json::Value = serde_json::from_str(&hooks).unwrap();
+    let prompt_cmd = hooks_json["hooks"]["beforeSubmitPrompt"][0]["command"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        prompt_cmd.contains(&format!("--fail-on {USER_PROMPT_HOOK_FAIL_ON}")),
+        "beforeSubmitPrompt should use medium threshold: {prompt_cmd}"
+    );
+    let read_cmd = hooks_json["hooks"]["beforeReadFile"][0]["command"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        !read_cmd.contains(&format!("--fail-on {USER_PROMPT_HOOK_FAIL_ON}")),
+        "beforeReadFile should keep default high threshold: {read_cmd}"
+    );
 }
 
 #[test]

@@ -4,7 +4,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 use shk_integrations::{
     CONFIG_REL_PATH, HOOKS_FEATURE_KEY, LEGACY_HOOKS_FEATURE_KEY, RECOMMENDED_APPROVAL_POLICY,
-    RECOMMENDED_SANDBOX_MODE, RISKY_APPROVAL_POLICY, RISKY_SANDBOX_MODE,
+    RECOMMENDED_SANDBOX_MODE, RISKY_APPROVAL_POLICY, RISKY_SANDBOX_MODE, USER_PROMPT_HOOK_FAIL_ON,
     normalize_claude_deny_entry,
 };
 use std::collections::HashSet;
@@ -14,6 +14,7 @@ use std::sync::OnceLock;
 
 /// Timeout (seconds) embedded in Cursor / Codex hook command payloads (CLI JSON / TOML).
 const HOOK_CLI_TIMEOUT_SEC: u64 = 30;
+const CODEX_GIT_ROOT_ARG: &str = r#""$(git rev-parse --show-toplevel)""#;
 
 #[derive(Clone, Copy, Debug)]
 pub struct InstallAiOptions {
@@ -74,14 +75,20 @@ fn hook_scan_cli_command(tool: AiTool, audit: bool, log_blocked: bool, post: boo
     hook_scan_cli_command_with_root_arg(tool, audit, log_blocked, post, None, None)
 }
 
-fn hook_scan_cli_command_with_fail_on(
+fn user_prompt_hook_scan_command(
     tool: AiTool,
     audit: bool,
     log_blocked: bool,
-    post: bool,
-    fail_on: Option<&str>,
+    root_arg: Option<&str>,
 ) -> String {
-    hook_scan_cli_command_with_root_arg(tool, audit, log_blocked, post, fail_on, None)
+    hook_scan_cli_command_with_root_arg(
+        tool,
+        audit,
+        log_blocked,
+        false,
+        Some(USER_PROMPT_HOOK_FAIL_ON),
+        root_arg,
+    )
 }
 
 fn hook_scan_cli_command_with_root_arg(
@@ -455,13 +462,7 @@ fn apply_claude(
 ) -> Result<String> {
     let pre = hook_scan_cli_command(AiTool::ClaudeCode, audit, log_blocked, false);
     let post = hook_scan_cli_command(AiTool::ClaudeCode, audit, log_blocked, true);
-    let user_prompt = hook_scan_cli_command_with_fail_on(
-        AiTool::ClaudeCode,
-        audit,
-        log_blocked,
-        false,
-        Some("medium"),
-    );
+    let user_prompt = user_prompt_hook_scan_command(AiTool::ClaudeCode, audit, log_blocked, None);
 
     let mut root = if path.is_file() {
         load_json(path)?
@@ -578,16 +579,22 @@ fn apply_cursor(
     dry_run: bool,
     fail_closed: bool,
 ) -> Result<String> {
-    const KEYS: &[&str] = &[
+    const PRE_KEYS: &[&str] = &[
         "beforeReadFile",
         "beforeShellExecution",
         "beforeMCPExecution",
-        "beforeSubmitPrompt",
     ];
 
     let cmd = hook_scan_cli_command(AiTool::Cursor, audit, log_blocked, false);
+    let prompt_cmd = user_prompt_hook_scan_command(AiTool::Cursor, audit, log_blocked, None);
     let entry = json!({
         "command": cmd,
+        "timeout": HOOK_CLI_TIMEOUT_SEC,
+        "failClosed": fail_closed,
+        "_shk_managed": true
+    });
+    let prompt_entry = json!({
+        "command": prompt_cmd,
         "timeout": HOOK_CLI_TIMEOUT_SEC,
         "failClosed": fail_closed,
         "_shk_managed": true
@@ -612,7 +619,7 @@ fn apply_cursor(
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("hooks must be an object"))?;
 
-    for k in KEYS {
+    for k in PRE_KEYS {
         let arr_val = hooks.entry((*k).to_string()).or_insert_with(|| json!([]));
         let arr = arr_val
             .as_array_mut()
@@ -620,6 +627,14 @@ fn apply_cursor(
         arr.retain(|e| !is_managed_cursor_entry(e));
         arr.push(entry.clone());
     }
+    let prompt_arr_val = hooks
+        .entry("beforeSubmitPrompt".to_string())
+        .or_insert_with(|| json!([]));
+    let prompt_arr = prompt_arr_val
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("beforeSubmitPrompt hook list must be an array"))?;
+    prompt_arr.retain(|e| !is_managed_cursor_entry(e));
+    prompt_arr.push(prompt_entry);
 
     save_json_formatted(path, &root, dry_run)?;
     Ok(if dry_run {
@@ -665,14 +680,25 @@ fn remove_cursor_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
     })
 }
 
+fn codex_root_arg(use_git_root_path: bool) -> Option<&'static str> {
+    use_git_root_path.then_some(CODEX_GIT_ROOT_ARG)
+}
+
 fn codex_hook_command(
     audit: bool,
     log_blocked: bool,
     post: bool,
     use_git_root_path: bool,
+    fail_on: Option<&str>,
 ) -> String {
-    let root_arg = use_git_root_path.then_some(r#""$(git rev-parse --show-toplevel)""#);
-    hook_scan_cli_command_with_root_arg(AiTool::Codex, audit, log_blocked, post, None, root_arg)
+    hook_scan_cli_command_with_root_arg(
+        AiTool::Codex,
+        audit,
+        log_blocked,
+        post,
+        fail_on,
+        codex_root_arg(use_git_root_path),
+    )
 }
 
 fn codex_inline_hook(
@@ -705,25 +731,44 @@ fn codex_managed_block(
     audit_post: bool,
     use_git_root_path: bool,
 ) -> String {
-    let pre = codex_hook_command(audit_pre, log_blocked, false, use_git_root_path);
-    let post = codex_hook_command(audit_post, log_blocked, true, use_git_root_path);
-    format!(
-        "# shk-managed-start\n{}\n{}\n{}\n{}\n# shk-managed-end\n",
-        codex_inline_hook("PreToolUse", &pre, "shk: scanning for secrets...", true),
-        codex_inline_hook(
+    let root_arg = codex_root_arg(use_git_root_path);
+    let pre = codex_hook_command(audit_pre, log_blocked, false, use_git_root_path, None);
+    let user_prompt =
+        user_prompt_hook_scan_command(AiTool::Codex, audit_pre, log_blocked, root_arg);
+    let post = codex_hook_command(audit_post, log_blocked, true, use_git_root_path, None);
+    let hooks = [
+        (
+            "PreToolUse",
+            pre.as_str(),
+            "shk: scanning for secrets...",
+            true,
+        ),
+        (
             "PermissionRequest",
-            &pre,
+            pre.as_str(),
             "shk: checking approval request...",
             true,
         ),
-        codex_inline_hook(
+        (
             "UserPromptSubmit",
-            &pre,
+            user_prompt.as_str(),
             "shk: scanning submitted prompt...",
             false,
         ),
-        codex_inline_hook("PostToolUse", &post, "shk: scanning tool output...", true),
-    )
+        (
+            "PostToolUse",
+            post.as_str(),
+            "shk: scanning tool output...",
+            true,
+        ),
+    ];
+    let body = hooks
+        .into_iter()
+        .map(|(event, command, status_message, include_matcher)| {
+            codex_inline_hook(event, command, status_message, include_matcher)
+        })
+        .collect::<String>();
+    format!("# shk-managed-start\n{body}# shk-managed-end\n")
 }
 
 fn codex_managed_block_regex() -> &'static Regex {
@@ -1025,6 +1070,20 @@ mod tests {
             assert_eq!(hooks.len(), 1, "{key} should not duplicate: {hooks:?}");
             assert_eq!(hooks[0]["failClosed"], true);
         }
+        let prompt_cmd = root["hooks"]["beforeSubmitPrompt"][0]["command"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            prompt_cmd.contains(&format!("--fail-on {USER_PROMPT_HOOK_FAIL_ON}")),
+            "beforeSubmitPrompt should block medium PII: {prompt_cmd}"
+        );
+        let read_cmd = root["hooks"]["beforeReadFile"][0]["command"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            !read_cmd.contains(&format!("--fail-on {USER_PROMPT_HOOK_FAIL_ON}")),
+            "beforeReadFile should keep default high threshold: {read_cmd}"
+        );
     }
 
     #[test]
@@ -1051,7 +1110,7 @@ mod tests {
 
     #[test]
     fn codex_project_hook_command_uses_git_root_path() {
-        let cmd = codex_hook_command(false, false, false, true);
+        let cmd = codex_hook_command(false, false, false, true, None);
 
         assert!(
             cmd.contains(r#"shk scan "$(git rev-parse --show-toplevel)" --hook-mode codex"#),
@@ -1061,9 +1120,30 @@ mod tests {
 
     #[test]
     fn codex_global_hook_command_uses_session_cwd() {
-        let cmd = codex_hook_command(false, false, false, false);
+        let cmd = codex_hook_command(false, false, false, false, None);
 
         assert_eq!(cmd, "shk scan --hook-mode codex");
+    }
+
+    #[test]
+    fn codex_user_prompt_hook_command_uses_medium_threshold() {
+        let cmd =
+            user_prompt_hook_scan_command(AiTool::Codex, false, false, Some(CODEX_GIT_ROOT_ARG));
+
+        assert!(
+            cmd.contains(&format!("--fail-on {USER_PROMPT_HOOK_FAIL_ON}")),
+            "UserPromptSubmit should block medium PII: {cmd}"
+        );
+    }
+
+    #[test]
+    fn claude_user_prompt_hook_command_uses_medium_threshold() {
+        let cmd = user_prompt_hook_scan_command(AiTool::ClaudeCode, false, false, None);
+
+        assert!(
+            cmd.contains(&format!("--fail-on {USER_PROMPT_HOOK_FAIL_ON}")),
+            "UserPromptSubmit should block medium PII: {cmd}"
+        );
     }
 
     #[test]
@@ -1095,6 +1175,25 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("command = '"), "{body}");
+        let prompt_section = codex_managed_hook_section(&body, "UserPromptSubmit", "PostToolUse");
+        assert!(
+            prompt_section.contains(&format!("--fail-on {USER_PROMPT_HOOK_FAIL_ON}")),
+            "UserPromptSubmit should use medium threshold: {prompt_section}"
+        );
+        let pre_section = codex_managed_hook_section(&body, "PreToolUse", "PermissionRequest");
+        assert!(
+            !pre_section.contains(&format!("--fail-on {USER_PROMPT_HOOK_FAIL_ON}")),
+            "PreToolUse should keep default high threshold: {pre_section}"
+        );
+    }
+
+    fn codex_managed_hook_section<'a>(body: &'a str, event: &str, next_event: &str) -> &'a str {
+        let start = format!("[[hooks.{event}]]");
+        let end = format!("[[hooks.{next_event}]]");
+        body.split(&start)
+            .nth(1)
+            .and_then(|section| section.split(&end).next())
+            .unwrap_or("")
     }
 
     #[test]

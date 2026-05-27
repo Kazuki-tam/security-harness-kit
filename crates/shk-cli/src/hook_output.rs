@@ -83,14 +83,6 @@ fn codex_deny_stdout(event: HookEvent, reason: &str) -> String {
     }
 }
 
-fn codex_allow_stdout(event: HookEvent, info: Option<&str>) -> String {
-    match event {
-        HookEvent::PermissionRequest => "{}".to_string(),
-        HookEvent::PreToolUse => codex_pre_tool_output("allow", info.unwrap_or("shk: OK")),
-        HookEvent::PostToolUse | HookEvent::UserPromptSubmit => codex_message_allow(info),
-    }
-}
-
 fn mask_replacement_message(finding_count: usize, content: &str) -> String {
     format!(
         "shk security: {finding_count} sensitive value(s) detected and sanitized. \
@@ -122,7 +114,7 @@ pub fn allow_stdout_for_event(tool: AiTool, event: HookEvent, info: Option<&str>
             })
             .to_string()
         }
-        AiTool::Codex => codex_allow_stdout(event, info),
+        AiTool::Codex => codex_message_allow(info),
         AiTool::ClaudeCode => {
             let reason = info.unwrap_or("shk: OK");
             permission_output(event, "allow", reason).to_string()
@@ -165,7 +157,7 @@ pub fn mask_stdout(
                 codex_message_allow(Some(&msg))
             }
         }
-        AiTool::Codex => codex_pre_tool_output("allow", &msg),
+        AiTool::Codex => codex_message_allow(Some(&msg)),
         AiTool::ClaudeCode => {
             let mut out = permission_output(event, "allow", &msg);
             if let Some(content) = masked_content {
@@ -250,12 +242,19 @@ mod tests {
     }
 
     #[test]
-    fn codex_pre_tool_allow_uses_permission_decision() {
+    fn codex_pre_tool_allow_is_empty_object_without_message() {
+        let output = allow_stdout_for_event(AiTool::Codex, HookEvent::PreToolUse, None);
+
+        assert_eq!(parse_json(&output), json!({}));
+    }
+
+    #[test]
+    fn codex_pre_tool_allow_uses_system_message_when_present() {
         let output = allow_stdout_for_event(AiTool::Codex, HookEvent::PreToolUse, Some("ok"));
         let value = parse_json(&output);
 
-        assert_eq!(value["hookSpecificOutput"]["hookEventName"], "PreToolUse");
-        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(value["systemMessage"], "ok");
+        assert!(value.get("hookSpecificOutput").is_none());
     }
 
     #[test]
@@ -318,11 +317,7 @@ mod tests {
         let output = mask_stdout(AiTool::Codex, false, 0, None);
         let value = parse_json(&output);
 
-        assert_eq!(
-            value["hookSpecificOutput"]["permissionDecisionReason"],
-            "shk mask: no sensitive content detected"
-        );
-        assert!(value["hookSpecificOutput"].get("output").is_none());
+        assert_eq!(value, json!({}));
     }
 
     #[test]

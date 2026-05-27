@@ -27,7 +27,7 @@
     "beforeSubmitPrompt": [
       {
         "_shk_managed": true,
-        "command": "shk scan --hook-mode cursor --log-blocked",
+        "command": "shk scan --hook-mode cursor --log-blocked --fail-on medium",
         "failClosed": false,
         "timeout": 30
       }
