@@ -2,6 +2,17 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use shk_integrations::USER_PROMPT_HOOK_FAIL_ON;
+
+fn codex_managed_hook_section<'a>(body: &'a str, event: &str, next_event: &str) -> &'a str {
+    let start = format!("[[hooks.{event}]]");
+    let end = format!("[[hooks.{next_event}]]");
+    body.split(&start)
+        .nth(1)
+        .and_then(|section| section.split(&end).next())
+        .unwrap_or("")
+}
+
 fn shk_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_shk"))
 }
@@ -1500,7 +1511,7 @@ fn hooks_install_ai_claude_apply_deny_merges_without_duplicates() {
         prompt_hooks[0]["hooks"][0]["command"]
             .as_str()
             .unwrap_or_default()
-            .contains("--fail-on medium"),
+            .contains(&format!("--fail-on {USER_PROMPT_HOOK_FAIL_ON}")),
         "prompt hook should use medium threshold: {prompt_hooks:?}"
     );
     let pre_hooks = settings["hooks"]["PreToolUse"].as_array().unwrap();
@@ -1589,6 +1600,11 @@ fn hooks_install_ai_codex_is_idempotent() {
         1,
         "{codex}"
     );
+    assert_eq!(
+        codex.matches("[[hooks.UserPromptSubmit]]").count(),
+        1,
+        "{codex}"
+    );
     assert_eq!(codex.matches("[[hooks.PostToolUse]]").count(), 1, "{codex}");
 }
 
@@ -1647,10 +1663,26 @@ fn hooks_install_ai_codex_includes_permission_request() {
     );
 
     let body = std::fs::read_to_string(dir.path().join(".codex/config.toml")).unwrap();
-    assert!(body.contains("codex_hooks = true"), "{body}");
+    assert!(body.contains("hooks = true"), "{body}");
+    assert!(!body.contains("codex_hooks = true"), "{body}");
     assert!(body.contains("[[hooks.PreToolUse]]"), "{body}");
     assert!(body.contains("[[hooks.PermissionRequest]]"), "{body}");
+    assert!(body.contains("[[hooks.UserPromptSubmit]]"), "{body}");
     assert!(body.contains("[[hooks.PostToolUse]]"), "{body}");
+    assert!(
+        body.contains(r#"shk scan "$(git rev-parse --show-toplevel)" --hook-mode codex"#),
+        "{body}"
+    );
+    let prompt_section = codex_managed_hook_section(&body, "UserPromptSubmit", "PostToolUse");
+    assert!(
+        prompt_section.contains(&format!("--fail-on {USER_PROMPT_HOOK_FAIL_ON}")),
+        "UserPromptSubmit hook should use medium threshold: {prompt_section}"
+    );
+    let pre_section = codex_managed_hook_section(&body, "PreToolUse", "PermissionRequest");
+    assert!(
+        !pre_section.contains(&format!("--fail-on {USER_PROMPT_HOOK_FAIL_ON}")),
+        "PreToolUse hook should keep default high threshold: {pre_section}"
+    );
 }
 
 #[test]
@@ -1867,6 +1899,45 @@ fn hook_mode_claude_user_prompt_blocks_medium_pii() {
         "UserPromptSubmit"
     );
     assert_eq!(stdout["hookSpecificOutput"]["permissionDecision"], "deny");
+}
+
+#[test]
+fn hook_mode_codex_user_prompt_blocks_medium_pii() {
+    use std::io::Write;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Please use customer email admin@example.com in the demo"
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "codex", "--fail-on", "medium"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("prompt hook scan");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(stdout["decision"], "block");
+    assert!(
+        stdout["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("secrets detected"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -2170,6 +2241,21 @@ fn hooks_install_ai_log_blocked_injects_flag() {
     let hooks = std::fs::read_to_string(dir.path().join(".cursor/hooks.json")).unwrap();
     assert!(hooks.contains("--log-blocked"), "{hooks}");
     assert!(!hooks.contains("--audit"), "{hooks}");
+    let hooks_json: serde_json::Value = serde_json::from_str(&hooks).unwrap();
+    let prompt_cmd = hooks_json["hooks"]["beforeSubmitPrompt"][0]["command"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        prompt_cmd.contains(&format!("--fail-on {USER_PROMPT_HOOK_FAIL_ON}")),
+        "beforeSubmitPrompt should use medium threshold: {prompt_cmd}"
+    );
+    let read_cmd = hooks_json["hooks"]["beforeReadFile"][0]["command"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        !read_cmd.contains(&format!("--fail-on {USER_PROMPT_HOOK_FAIL_ON}")),
+        "beforeReadFile should keep default high threshold: {read_cmd}"
+    );
 }
 
 #[test]
@@ -2663,12 +2749,14 @@ fn init_yes_sets_up_selected_ai_tool_and_skill() {
 
     assert!(dir.path().join("shk.toml").is_file());
     let codex_config = std::fs::read_to_string(dir.path().join(".codex/config.toml")).unwrap();
+    assert!(codex_config.contains("hooks = true"), "{codex_config}");
     assert!(
-        codex_config.contains("codex_hooks = true"),
+        !codex_config.contains("codex_hooks = true"),
         "{codex_config}"
     );
     assert!(
-        codex_config.contains("shk scan --hook-mode codex --audit"),
+        codex_config
+            .contains(r#"shk scan "$(git rev-parse --show-toplevel)" --hook-mode codex --audit"#),
         "{codex_config}"
     );
     assert!(dir.path().join(".agents/skills/shk/SKILL.md").is_file());
@@ -3612,7 +3700,7 @@ approval_policy = "never"
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("codex config: hooks feature not enabled"),
+        stdout.contains("codex config: hooks feature enabled"),
         "{stdout}"
     );
     assert!(
@@ -3621,6 +3709,61 @@ approval_policy = "never"
     );
     assert!(
         stdout.contains("codex config: warning approval_policy=never"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn doctor_ignore_reports_codex_risky_default_permissions() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".codex")).unwrap();
+    std::fs::write(
+        dir.path().join(".codex/config.toml"),
+        r#"
+default_permissions = ":danger-full-access"
+approval_policy = "on-request"
+"#,
+    )
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["doctor", "ignore", dir.path().to_str().unwrap()])
+        .output()
+        .expect("doctor ignore");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("codex config: warning default_permissions=:danger-full-access"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn doctor_ignore_reports_codex_hooks_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".codex")).unwrap();
+    std::fs::write(
+        dir.path().join(".codex/config.toml"),
+        r#"[features]
+hooks = false
+"#,
+    )
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["doctor", "ignore", dir.path().to_str().unwrap()])
+        .output()
+        .expect("doctor ignore");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("codex config: hooks feature disabled (`features.hooks = false`)"),
         "{stdout}"
     );
 }
@@ -3636,7 +3779,7 @@ sandbox_mode = "workspace-write"
 approval_policy = "on-request"
 
 [features]
-codex_hooks = true
+hooks = true
 "#,
     )
     .unwrap();

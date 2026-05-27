@@ -8,6 +8,9 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Fail threshold embedded in managed user-prompt hook install commands.
+pub const USER_PROMPT_HOOK_FAIL_ON: &str = "medium";
+
 const PATH_KEYS: &[&str] = &[
     "path",
     "file_path",
@@ -22,7 +25,14 @@ const PRE_TEXT_KEYS: &[&str] = &[
     "prompt", "text", "content", "command", "stdin", "args", "url",
 ];
 const CODEX_POST_TEXT_KEYS: &[&str] = &[
-    "stdout", "stderr", "output", "result", "content", "text", "body",
+    "stdout",
+    "stderr",
+    "output",
+    "result",
+    "content",
+    "text",
+    "body",
+    "tool_response",
 ];
 const CLAUDE_POST_TEXT_KEYS: &[&str] = &[
     "stdout", "stderr", "content", "response", "text", "body", "data", "result", "message",
@@ -392,6 +402,28 @@ mod tests {
         assert_eq!(display, "<cursor-hook>");
         assert!(body.contains("primary prompt"), "{body}");
         assert!(body.contains("secondary command"), "{body}");
+    }
+
+    #[test]
+    fn codex_post_extracts_tool_response_payload() {
+        let stdin = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_response": {
+                "stdout": "hello from bash output"
+            }
+        })
+        .to_string();
+
+        let (_display, body) = stdin_to_hook_body(
+            AiHookTool::Codex,
+            true,
+            &stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert!(body.contains("hello from bash output"), "{body}");
     }
 
     #[test]

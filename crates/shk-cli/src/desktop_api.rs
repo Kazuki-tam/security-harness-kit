@@ -19,6 +19,7 @@ use crate::safety;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use shk_core::git;
+use shk_integrations::CONFIG_REL_PATH;
 use shk_integrations::{MANAGED_MARKER_JSON, MANAGED_MARKER_SH};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -866,7 +867,7 @@ fn resolve_ai_config_path(tool: AiTool, root: &Path, global: bool) -> Result<Pat
     let rel = match tool {
         AiTool::ClaudeCode => ".claude/settings.json",
         AiTool::Cursor => ".cursor/hooks.json",
-        AiTool::Codex => ".codex/config.toml",
+        AiTool::Codex => CONFIG_REL_PATH,
     };
     Ok(if global {
         dirs::home_dir()

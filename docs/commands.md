@@ -143,6 +143,7 @@ Read an AI tool hook JSON payload from stdin, scan the extracted hook body, and 
 shk scan . --hook-mode cursor < payload.json
 shk scan . --hook-mode claude-code --audit < payload.json
 shk scan . --hook-mode cursor --log-blocked < payload.json
+shk scan . --hook-mode codex < payload.json
 shk scan . --hook-mode codex --post < payload.json
 ```
 
@@ -155,6 +156,8 @@ Hook mode notes:
 - `--log-blocked` keeps blocking behavior, appends metadata-only block entries to `.shk/audit.log`, and requires a project `shk.toml`.
 - `--post` is non-blocking and always exits `0`. It reports findings in tool output for review.
 - Cursor pre-hook scans use the pre-commit threshold by default.
+- Codex `UserPromptSubmit` payloads are scanned when `hook_event_name` is `UserPromptSubmit`; blocks return `{"decision":"block","reason":...}`.
+- Project-local Codex hooks installed by `shk hooks install-ai --tool codex` scan `$(git rev-parse --show-toplevel)` instead of `.` so subdirectory starts still resolve the repo root.
 
 ## `shk mask`
 
@@ -451,8 +454,8 @@ Installed entries:
 | Tool | Config file | Managed entries |
 |------|-------------|-----------------|
 | Claude Code | `.claude/settings.json` | `UserPromptSubmit`; `PreToolUse` for `Read|Write|Bash|WebFetch|mcp__.*`; `PostToolUse` for `WebFetch|WebSearch|Bash|mcp__.*|Skill|Agent`. |
-| Cursor | `.cursor/hooks.json` | `beforeReadFile`, `beforeShellExecution`, `beforeMCPExecution`, `beforeSubmitPrompt`. |
-| Codex | `.codex/config.toml` | `PreToolUse`, `PermissionRequest`, and `PostToolUse` blocks; also ensures `features.codex_hooks = true`. |
+| Cursor | `.cursor/hooks.json` | `beforeReadFile`, `beforeShellExecution`, `beforeMCPExecution`, `beforeSubmitPrompt`. Prompt hooks use `--fail-on medium`. |
+| Codex | `.codex/config.toml` | `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, and `PostToolUse` blocks; also ensures `features.hooks = true`. Project-local commands scan `$(git rev-parse --show-toplevel)` so Codex can start from a subdirectory. |
 
 Managed entries are tagged with `"_shk_managed": true` or `# shk-managed-start` / `# shk-managed-end`. Re-running replaces managed entries and leaves non-managed entries in place.
 

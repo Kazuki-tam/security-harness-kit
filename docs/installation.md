@@ -57,7 +57,7 @@ Release assets are also covered by GitHub artifact attestations.
 For CI or security-sensitive environments, install from a pinned release tag and verify both the checksum and GitHub artifact attestation before placing the binary on `PATH`:
 
 ```bash
-version=v0.3.7
+version=v0.3.8
 target=x86_64-unknown-linux-gnu
 asset="shk-cli-${target}.tar.xz"
 repo=Kazuki-tam/security-harness-kit
@@ -152,7 +152,7 @@ Source build: run `cargo clean` in the cloned repository to remove build output,
 | `shk hooks install` | `.git/hooks/pre-commit` | Managed block delimited by `# shk-managed-start` / `# shk-managed-end`. Delete the file if `shk` is the only owner, or remove just the managed block to keep other pre-commit logic. |
 | `shk hooks install-ai` (Claude Code) | `.claude/settings.json` | Remove entries tagged with `"_shk_managed": true`. Delete the file if it has no remaining entries. If you used `--apply-deny` or `--apply-sandbox`, also review the `permissions.deny` and `sandbox` settings that were merged into the same file. |
 | `shk hooks install-ai` (Cursor) | `.cursor/hooks.json` | Remove entries tagged with `"_shk_managed": true`. |
-| `shk hooks install-ai` (Codex) | `.codex/config.toml` | Remove the block delimited by `# shk-managed-start` / `# shk-managed-end`, and `features.codex_hooks = true` if no longer needed. If you used `--apply-sandbox`, also review the top-level `sandbox_mode` and `approval_policy` values. |
+| `shk hooks install-ai` (Codex) | `.codex/config.toml` | Remove the block delimited by `# shk-managed-start` / `# shk-managed-end`, and `features.hooks = true` if no longer needed. The managed block covers `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, and `PostToolUse`. If you used `--apply-sandbox`, also review the top-level `sandbox_mode` and `approval_policy` values. |
 | `shk skills install` (Claude Code) | `.claude/skills/shk.md` | Bundled skill file. |
 | `shk skills install` (Codex / Cursor) | `.agents/skills/shk/SKILL.md` | Bundled skill file. |
 | `shk ci init github` | `.github/workflows/shk.yml` by default | Generated GitHub Actions workflow. If you passed `--output`, remove that custom path instead. |
