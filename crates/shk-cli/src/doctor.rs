@@ -5,8 +5,9 @@ use shk_core::git;
 use shk_core::policy::Policy;
 use shk_core::scanner::{ScanOptions, scan_string};
 use shk_integrations::{
-    MANAGED_MARKER_JSON, MANAGED_MARKER_SH, claude_deny_entry_covers,
-    claude_recommended_deny_entries,
+    CONFIG_REL_PATH, HOOKS_FEATURE_KEY, LEGACY_HOOKS_FEATURE_KEY, MANAGED_MARKER_JSON,
+    MANAGED_MARKER_SH, RISKY_APPROVAL_POLICY, RISKY_DEFAULT_PERMISSIONS, RISKY_SANDBOX_MODE,
+    claude_deny_entry_covers, claude_recommended_deny_entries,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,8 +31,6 @@ const DOTENVX_HINT_FILES: &[&str] = &[DOTENVX_PRIVATE_KEY_FILE, DOTENVX_VAULT_FI
 const DOTENV_ENCRYPTED_VALUE_PREFIX: &str = "encrypted:";
 const DOTENV_PUBLIC_KEY_PREFIX: &str = "DOTENV_PUBLIC_KEY";
 const DOTENV_PRIVATE_KEY_PREFIX: &str = "DOTENV_PRIVATE_KEY";
-const CODEX_RISKY_SANDBOX_MODE: &str = "danger-full-access";
-const CODEX_RISKY_APPROVAL_POLICY: &str = "never";
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct IgnoreStatus {
@@ -404,77 +403,115 @@ fn json_array_contains(value: Option<&Value>, needle: &str) -> bool {
 }
 
 pub fn collect_codex_config_status(root: &Path) -> CodexConfigStatus {
-    let path = root.join(".codex/config.toml");
+    snapshot_codex_config(root).status
+}
+
+#[derive(Debug)]
+struct CodexConfigSnapshot {
+    status: CodexConfigStatus,
+    value: Option<toml::Value>,
+}
+
+fn snapshot_codex_config(root: &Path) -> CodexConfigSnapshot {
+    let path = root.join(CONFIG_REL_PATH);
     if !path.is_file() {
-        return CodexConfigStatus {
-            config_exists: false,
-            hooks_enabled: false,
-            sandbox_ok: true,
-            approval_ok: true,
+        return CodexConfigSnapshot {
+            status: CodexConfigStatus {
+                config_exists: false,
+                hooks_enabled: false,
+                sandbox_ok: true,
+                approval_ok: true,
+            },
+            value: None,
         };
     }
 
     let Ok(text) = fs::read_to_string(&path) else {
-        return CodexConfigStatus {
-            config_exists: true,
-            hooks_enabled: false,
-            sandbox_ok: false,
-            approval_ok: false,
+        return CodexConfigSnapshot {
+            status: CodexConfigStatus {
+                config_exists: true,
+                hooks_enabled: false,
+                sandbox_ok: false,
+                approval_ok: false,
+            },
+            value: None,
         };
     };
     let Ok(value) = toml::from_str::<toml::Value>(&text) else {
-        return CodexConfigStatus {
-            config_exists: true,
-            hooks_enabled: false,
-            sandbox_ok: false,
-            approval_ok: false,
+        return CodexConfigSnapshot {
+            status: CodexConfigStatus {
+                config_exists: true,
+                hooks_enabled: false,
+                sandbox_ok: false,
+                approval_ok: false,
+            },
+            value: None,
         };
     };
 
-    let hooks_enabled = value
-        .get("features")
-        .and_then(|features| features.get("codex_hooks"))
-        .and_then(toml::Value::as_bool)
-        .unwrap_or(false);
-    let sandbox_ok = !matches!(
-        value.get("sandbox_mode").and_then(toml::Value::as_str),
-        Some(CODEX_RISKY_SANDBOX_MODE)
-    );
-    let approval_ok = !matches!(
-        value.get("approval_policy").and_then(toml::Value::as_str),
-        Some(CODEX_RISKY_APPROVAL_POLICY)
-    );
-
-    CodexConfigStatus {
-        config_exists: true,
-        hooks_enabled,
-        sandbox_ok,
-        approval_ok,
+    CodexConfigSnapshot {
+        status: codex_config_status_from_value(&value),
+        value: Some(value),
     }
 }
 
+fn codex_config_status_from_value(value: &toml::Value) -> CodexConfigStatus {
+    CodexConfigStatus {
+        config_exists: true,
+        hooks_enabled: codex_hooks_feature_enabled(value.get("features")),
+        sandbox_ok: !matches!(
+            value.get("sandbox_mode").and_then(toml::Value::as_str),
+            Some(RISKY_SANDBOX_MODE)
+        ) && !matches!(
+            value
+                .get("default_permissions")
+                .and_then(toml::Value::as_str),
+            Some(RISKY_DEFAULT_PERMISSIONS)
+        ),
+        approval_ok: !matches!(
+            value.get("approval_policy").and_then(toml::Value::as_str),
+            Some(RISKY_APPROVAL_POLICY)
+        ),
+    }
+}
+
+fn codex_hooks_feature_enabled(features: Option<&toml::Value>) -> bool {
+    let Some(features) = features else {
+        return true;
+    };
+    features
+        .get(HOOKS_FEATURE_KEY)
+        .and_then(toml::Value::as_bool)
+        .or_else(|| {
+            features
+                .get(LEGACY_HOOKS_FEATURE_KEY)
+                .and_then(toml::Value::as_bool)
+        })
+        .unwrap_or(true)
+}
+
 fn run_codex_config_check(root: &Path) {
-    let status = collect_codex_config_status(root);
-    if !status.config_exists {
+    let snapshot = snapshot_codex_config(root);
+    if !snapshot.status.config_exists {
         return;
     }
-    if status.hooks_enabled {
+    if snapshot.status.hooks_enabled {
         println!("codex config: hooks feature enabled");
     } else {
-        println!("codex config: hooks feature not enabled (`features.codex_hooks = true`)");
+        println!("codex config: hooks feature disabled (`features.hooks = false`)");
     }
 
-    let path = root.join(".codex/config.toml");
-    let Ok(text) = fs::read_to_string(&path) else {
-        println!("codex config: unable to read .codex/config.toml");
+    let Some(value) = snapshot.value else {
+        println!("codex config: unable to read or parse {CONFIG_REL_PATH}");
         return;
     };
-    let Ok(value) = toml::from_str::<toml::Value>(&text) else {
-        println!("codex config: unable to parse .codex/config.toml");
-        return;
-    };
-    print_codex_string_setting(&value, "sandbox_mode", Some(CODEX_RISKY_SANDBOX_MODE));
-    print_codex_string_setting(&value, "approval_policy", Some(CODEX_RISKY_APPROVAL_POLICY));
+    print_codex_string_setting(&value, "sandbox_mode", Some(RISKY_SANDBOX_MODE));
+    print_codex_string_setting(
+        &value,
+        "default_permissions",
+        Some(RISKY_DEFAULT_PERMISSIONS),
+    );
+    print_codex_string_setting(&value, "approval_policy", Some(RISKY_APPROVAL_POLICY));
 }
 
 fn print_codex_string_setting(value: &toml::Value, key: &str, risky_value: Option<&str>) {
@@ -728,7 +765,7 @@ pub fn has_managed_ai_hooks(root: &Path) -> bool {
     let paths = [
         root.join(".claude/settings.json"),
         root.join(".cursor/hooks.json"),
-        root.join(".codex/config.toml"),
+        root.join(CONFIG_REL_PATH),
     ];
     for p in paths {
         if let Ok(s) = fs::read_to_string(&p)

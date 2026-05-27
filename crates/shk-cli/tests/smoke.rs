@@ -1589,6 +1589,11 @@ fn hooks_install_ai_codex_is_idempotent() {
         1,
         "{codex}"
     );
+    assert_eq!(
+        codex.matches("[[hooks.UserPromptSubmit]]").count(),
+        1,
+        "{codex}"
+    );
     assert_eq!(codex.matches("[[hooks.PostToolUse]]").count(), 1, "{codex}");
 }
 
@@ -1647,10 +1652,16 @@ fn hooks_install_ai_codex_includes_permission_request() {
     );
 
     let body = std::fs::read_to_string(dir.path().join(".codex/config.toml")).unwrap();
-    assert!(body.contains("codex_hooks = true"), "{body}");
+    assert!(body.contains("hooks = true"), "{body}");
+    assert!(!body.contains("codex_hooks = true"), "{body}");
     assert!(body.contains("[[hooks.PreToolUse]]"), "{body}");
     assert!(body.contains("[[hooks.PermissionRequest]]"), "{body}");
+    assert!(body.contains("[[hooks.UserPromptSubmit]]"), "{body}");
     assert!(body.contains("[[hooks.PostToolUse]]"), "{body}");
+    assert!(
+        body.contains(r#"shk scan "$(git rev-parse --show-toplevel)" --hook-mode codex"#),
+        "{body}"
+    );
 }
 
 #[test]
@@ -1867,6 +1878,45 @@ fn hook_mode_claude_user_prompt_blocks_medium_pii() {
         "UserPromptSubmit"
     );
     assert_eq!(stdout["hookSpecificOutput"]["permissionDecision"], "deny");
+}
+
+#[test]
+fn hook_mode_codex_user_prompt_blocks_medium_pii() {
+    use std::io::Write;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Please use customer email admin@example.com in the demo"
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "codex", "--fail-on", "medium"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("prompt hook scan");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(stdout["decision"], "block");
+    assert!(
+        stdout["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("secrets detected"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -2663,12 +2713,14 @@ fn init_yes_sets_up_selected_ai_tool_and_skill() {
 
     assert!(dir.path().join("shk.toml").is_file());
     let codex_config = std::fs::read_to_string(dir.path().join(".codex/config.toml")).unwrap();
+    assert!(codex_config.contains("hooks = true"), "{codex_config}");
     assert!(
-        codex_config.contains("codex_hooks = true"),
+        !codex_config.contains("codex_hooks = true"),
         "{codex_config}"
     );
     assert!(
-        codex_config.contains("shk scan --hook-mode codex --audit"),
+        codex_config
+            .contains(r#"shk scan "$(git rev-parse --show-toplevel)" --hook-mode codex --audit"#),
         "{codex_config}"
     );
     assert!(dir.path().join(".agents/skills/shk/SKILL.md").is_file());
@@ -3612,7 +3664,7 @@ approval_policy = "never"
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("codex config: hooks feature not enabled"),
+        stdout.contains("codex config: hooks feature enabled"),
         "{stdout}"
     );
     assert!(
@@ -3621,6 +3673,61 @@ approval_policy = "never"
     );
     assert!(
         stdout.contains("codex config: warning approval_policy=never"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn doctor_ignore_reports_codex_risky_default_permissions() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".codex")).unwrap();
+    std::fs::write(
+        dir.path().join(".codex/config.toml"),
+        r#"
+default_permissions = ":danger-full-access"
+approval_policy = "on-request"
+"#,
+    )
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["doctor", "ignore", dir.path().to_str().unwrap()])
+        .output()
+        .expect("doctor ignore");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("codex config: warning default_permissions=:danger-full-access"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn doctor_ignore_reports_codex_hooks_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".codex")).unwrap();
+    std::fs::write(
+        dir.path().join(".codex/config.toml"),
+        r#"[features]
+hooks = false
+"#,
+    )
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["doctor", "ignore", dir.path().to_str().unwrap()])
+        .output()
+        .expect("doctor ignore");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("codex config: hooks feature disabled (`features.hooks = false`)"),
         "{stdout}"
     );
 }
@@ -3636,7 +3743,7 @@ sandbox_mode = "workspace-write"
 approval_policy = "on-request"
 
 [features]
-codex_hooks = true
+hooks = true
 "#,
     )
     .unwrap();

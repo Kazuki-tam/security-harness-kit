@@ -1,7 +1,7 @@
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"
 [features]
-codex_hooks = true
+hooks = true
 
 # shk-managed-start
 [[hooks.PreToolUse]]
@@ -10,7 +10,7 @@ timeout = 30
 
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = "shk scan --hook-mode codex --log-blocked"
+command = 'shk scan "$(git rev-parse --show-toplevel)" --hook-mode codex --log-blocked'
 statusMessage = "shk: scanning for secrets..."
 
 [[hooks.PermissionRequest]]
@@ -19,8 +19,16 @@ timeout = 30
 
 [[hooks.PermissionRequest.hooks]]
 type = "command"
-command = "shk scan --hook-mode codex --log-blocked"
+command = 'shk scan "$(git rev-parse --show-toplevel)" --hook-mode codex --log-blocked'
 statusMessage = "shk: checking approval request..."
+
+[[hooks.UserPromptSubmit]]
+timeout = 30
+
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = 'shk scan "$(git rev-parse --show-toplevel)" --hook-mode codex --log-blocked'
+statusMessage = "shk: scanning submitted prompt..."
 
 [[hooks.PostToolUse]]
 matcher = ".*"
@@ -28,6 +36,6 @@ timeout = 30
 
 [[hooks.PostToolUse.hooks]]
 type = "command"
-command = "shk scan --hook-mode codex --log-blocked --post"
+command = 'shk scan "$(git rev-parse --show-toplevel)" --hook-mode codex --log-blocked --post'
 statusMessage = "shk: scanning tool output..."
 # shk-managed-end
