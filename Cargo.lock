@@ -4274,7 +4274,7 @@ dependencies = [
  "sha2 0.11.0",
  "shk-rules",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "toml 0.8.2",
  "walkdir",
  "zeroize",
@@ -4294,7 +4294,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-process",
  "tauri-plugin-updater",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4305,7 +4305,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
