@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use crate::args::{AiTool, SeverityArg};
 
 const HOOK_DENY_REASON_DEFAULT: &str =
-    "shk: secrets detected above threshold — run `shk scan` for details";
+    "shk: sensitive content detected above threshold — run `shk scan` for details";
 
 /// Flat `clap` flags for [`run`], grouped for readability at the CLI boundary.
 #[derive(Clone, Debug)]
@@ -423,7 +423,14 @@ fn deny_hook(tool: AiTool, event: hook_output::HookEvent, reason: &str) -> Resul
         "{}",
         hook_output::deny_stdout_for_event(tool, event, reason)
     );
+    emit_exit2_reason_for_tool(tool, reason);
     Err(CliExit::silent(2).into())
+}
+
+fn emit_exit2_reason_for_tool(tool: AiTool, reason: &str) {
+    if tool == AiTool::Codex {
+        eprintln!("{reason}");
+    }
 }
 
 fn hook_event_from_stdin(stdin: &str, post: bool) -> hook_output::HookEvent {

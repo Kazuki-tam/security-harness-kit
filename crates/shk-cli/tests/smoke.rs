@@ -1935,8 +1935,13 @@ fn hook_mode_codex_user_prompt_blocks_medium_pii() {
         stdout["reason"]
             .as_str()
             .unwrap_or_default()
-            .contains("secrets detected"),
+            .contains("sensitive content detected"),
         "{stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("sensitive content detected"),
+        "Codex exit 2 requires a blocking reason on stderr: {stderr}"
     );
 }
 

@@ -55,6 +55,7 @@ lcov.info
 *.tmp
 *.bak
 *.log
+*.tsbuildinfo
 dist/
 out/
 

@@ -58,6 +58,7 @@ pre_commit_fail_on = "high"
 
 [mask]
 mode = "strict"
+min_severity = "medium"
 redaction = "match"
 # preserve_prefix = 4 # only when redaction = "partial"
 # preserve_suffix = 4
@@ -90,8 +91,9 @@ required_patterns = [
   "*.log"
 ]
 
-# Allowlist / inline suppressions (spec §5.3). Prefer path-scoped rows; use value_hash for value-specific cases.
+# Allowlist / inline suppressions (spec §5.3). Prefer path-scoped rows; use value_hash only as an equality fingerprint.
 # Inline: # shk-ignore-next-line <rule_id>
+# Markdown: <!-- shk-ignore-next-line <rule_id> -->
 
 [[allowlist]]
 path = "fixtures/pii/**"
@@ -106,12 +108,8 @@ path = "fixtures/secrets/**"
 reason = "Intentional secrets detection demo fixtures"
 
 [[allowlist]]
-path = "crates/shk-rules/src/lib.rs"
-reason = "Built-in rule test block contains synthetic values"
-
-[[allowlist]]
-path = "crates/shk-rules/src/gitleaks_rules.rs"
-reason = "Generated detector source contains synthetic regex patterns"
+path = "fixtures/basic/insecure-sample.txt"
+reason = "Intentional insecure sample fixture"
 
 [[allowlist]]
 path = "crates/shk-core/tests/**"
@@ -122,23 +120,42 @@ path = "crates/shk-cli/tests/**"
 reason = "Synthetic values in CLI test assertions"
 
 [[allowlist]]
+path = "crates/shk-rules/src/lib.rs"
+reason = "Built-in rule definitions and tests contain synthetic detector examples"
+
+[[allowlist]]
+path = "crates/shk-rules/src/gitleaks_rules.rs"
+reason = "Generated detector source contains synthetic regex examples"
+
+[[allowlist]]
 rule_id = "pii.email"
 path = "crates/shk-core/src/finding.rs"
-reason = "Example email in doc/test comment"
+reason = "Example email in finding tests"
 
 [[allowlist]]
 rule_id = "pii.email"
 path = "crates/shk-core/src/suppression.rs"
-reason = "Example email in doc/test comment"
-
-[[allowlist]]
-path = "crates/shk-core/src/masker.rs"
-reason = "Synthetic values in masker test helper"
+reason = "Example email in suppression tests"
 
 [[allowlist]]
 rule_id = "secret.openai_api_key"
 path = "crates/shk-core/src/scanner.rs"
-reason = "Synthetic key in scanner test helper"
+reason = "Synthetic OpenAI key in scanner tests"
+
+[[allowlist]]
+rule_id = "secret.openai_api_key"
+path = "crates/shk-core/src/masker.rs"
+reason = "Synthetic OpenAI key in masker tests"
+
+[[allowlist]]
+rule_id = "pii.email"
+path = "crates/shk-core/src/masker.rs"
+reason = "Example email in masker tests"
+
+[[allowlist]]
+rule_id = "pii.en.name"
+path = "crates/shk-cli/src/commands/ci.rs"
+reason = "Synthetic name-like labels in CI command tests"
 
 [[allowlist]]
 rule_id = "secret.dotenvx_private_key"
@@ -153,7 +170,7 @@ reason = "Synthetic dotenvx private keys in secrets command tests"
 [[allowlist]]
 rule_id = "pii.email"
 path = "crates/shk-cli/src/commands/secrets.rs"
-reason = "Example email in secrets command test fixture"
+reason = "Example email in secrets command tests"
 
 [[allowlist]]
 rule_id = "pii.en.name"
@@ -161,6 +178,11 @@ path = "crates/shk-cli/src/skills/shk.md"
 reason = "Documentation text contains a name-like skill heading"
 
 [[allowlist]]
-rule_id = "secret.openai_api_key"
-path = "fixtures/basic/insecure-sample.txt"
-reason = "Intentional insecure sample fixture"
+rule_id = "pii.en.name"
+path = "docs/ci.md"
+reason = "CI documentation includes name-like labels"
+
+[[allowlist]]
+rule_id = "pii.ja.name"
+path = "apps/shk-desktop/src/i18n/messages/ja.ts"
+reason = "Japanese UI copy includes name-like labels"
