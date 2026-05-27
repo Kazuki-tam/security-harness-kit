@@ -162,7 +162,12 @@ Safe operating rules:
 `.cursor/hooks.json`, and `.codex/config.toml`.
 
 Each hook runs `shk scan --hook-mode <tool>` on the payload before AI tool execution.
-Pre-hooks block on findings (exit 2); post-hooks warn only (exit 0).
+Pre-hooks and user-prompt hooks block on findings (exit 2); post-hooks warn only (exit 0).
+
+Codex project hooks also ensure `features.hooks = true`, install `PreToolUse`,
+`PermissionRequest`, `UserPromptSubmit`, and `PostToolUse`, and scan
+`$(git rev-parse --show-toplevel)` so hooks still resolve the repo when Codex starts
+from a subdirectory. Global Codex hooks keep the session cwd and omit the git-root path.
 
 ```bash
 shk hooks install-ai                             # all detected tools
@@ -240,15 +245,22 @@ Hook-mode scanning (used internally by installed hooks):
 ```bash
 # Pre-hook: scan tool payload from stdin, block on findings (exit 2)
 shk scan . --hook-mode claude-code < hook_payload.json
+shk scan . --hook-mode codex < hook_payload.json
+
+# User prompt hook: scan prompt before submission (Codex / Claude Code)
+shk scan . --hook-mode codex --fail-on medium < user_prompt_payload.json
 
 # Post-hook: scan inbound content, always non-blocking
 shk scan . --hook-mode claude-code --post < response_payload.json
+shk scan . --hook-mode codex --post < response_payload.json
 
 # Audit mode: log findings to .shk/audit.log, never block
 shk scan . --hook-mode claude-code --audit < hook_payload.json
+shk scan . --hook-mode codex --audit < hook_payload.json
 
 # Blocking mode with metadata-only blocked-event logs
 shk scan . --hook-mode claude-code --log-blocked < hook_payload.json
+shk scan . --hook-mode codex --log-blocked < hook_payload.json
 
 # Preview audit/block logs without printing raw matched values
 shk audit --reason blocked --no-paths

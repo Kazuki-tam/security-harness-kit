@@ -143,6 +143,7 @@ Read an AI tool hook JSON payload from stdin, scan the extracted hook body, and 
 shk scan . --hook-mode cursor < payload.json
 shk scan . --hook-mode claude-code --audit < payload.json
 shk scan . --hook-mode cursor --log-blocked < payload.json
+shk scan . --hook-mode codex < payload.json
 shk scan . --hook-mode codex --post < payload.json
 ```
 
@@ -155,6 +156,8 @@ Hook mode notes:
 - `--log-blocked` keeps blocking behavior, appends metadata-only block entries to `.shk/audit.log`, and requires a project `shk.toml`.
 - `--post` is non-blocking and always exits `0`. It reports findings in tool output for review.
 - Cursor pre-hook scans use the pre-commit threshold by default.
+- Codex `UserPromptSubmit` payloads are scanned when `hook_event_name` is `UserPromptSubmit`; blocks return `{"decision":"block","reason":...}`.
+- Project-local Codex hooks installed by `shk hooks install-ai --tool codex` scan `$(git rev-parse --show-toplevel)` instead of `.` so subdirectory starts still resolve the repo root.
 
 ## `shk mask`
 
