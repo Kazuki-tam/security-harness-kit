@@ -157,6 +157,9 @@ pub fn mask_stdout(
                 codex_message_allow(Some(&msg))
             }
         }
+        AiTool::Codex if finding_count == 0 && masked_content.is_none() => {
+            codex_message_allow(None)
+        }
         AiTool::Codex => codex_message_allow(Some(&msg)),
         AiTool::ClaudeCode => {
             let mut out = permission_output(event, "allow", &msg);
