@@ -323,7 +323,8 @@ fn read_input(source: &str) -> Result<String> {
         return ureq::get(source)
             .call()
             .with_context(|| format!("fetch {source}"))?
-            .into_string()
+            .body_mut()
+            .read_to_string()
             .context("read response body");
     }
     fs::read_to_string(source).with_context(|| format!("read {source}"))
