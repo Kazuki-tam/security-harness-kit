@@ -91,12 +91,12 @@ jobs:
           cache-bin: false
 
       - name: install cargo-audit
-        uses: taiki-e/install-action@6c1f7cf125e42770ff087ea443901b487cc5471a # v2
+        uses: taiki-e/install-action@60ae4ce63c7aeb6e96d7f572c1ec7fafbb17ca80 # v2
         with:
           tool: cargo-audit@0.22.1
 
       - name: install cargo-deny
-        uses: taiki-e/install-action@6c1f7cf125e42770ff087ea443901b487cc5471a # v2
+        uses: taiki-e/install-action@60ae4ce63c7aeb6e96d7f572c1ec7fafbb17ca80 # v2
         with:
           tool: cargo-deny@0.19.7
 
