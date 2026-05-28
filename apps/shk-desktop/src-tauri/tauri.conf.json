@@ -33,5 +33,13 @@
     "category": "DeveloperTool",
     "shortDescription": "Local-first security scanner",
     "longDescription": "A local-first desktop app for scanning projects for secrets, PII, and risky AI context."
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "",
+      "endpoints": [
+        "https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-latest/latest.json"
+      ]
+    }
   }
 }

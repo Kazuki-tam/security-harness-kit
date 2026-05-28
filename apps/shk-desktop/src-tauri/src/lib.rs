@@ -322,11 +322,25 @@ async fn open_in_ide(path: String, ide: String) -> Result<(), AppError> {
     run_blocking(move || open_in_ide_path(&path, ide)).await
 }
 
+fn compile_time_updater_pubkey() -> Option<&'static str> {
+    option_env!("TAURI_UPDATER_PUBKEY")
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+}
+
+fn updater_builder() -> tauri_plugin_updater::Builder {
+    let builder = tauri_plugin_updater::Builder::new();
+    match compile_time_updater_pubkey() {
+        Some(pubkey) => builder.pubkey(pubkey),
+        None => builder,
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(updater_builder().build())
         .invoke_handler(tauri::generate_handler![
             scan_path,
             project_status,

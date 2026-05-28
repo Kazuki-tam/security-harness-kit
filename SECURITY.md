@@ -18,8 +18,6 @@ Please report security issues privately:
 1. Use [GitHub private vulnerability reporting](https://github.com/Kazuki-tam/security-harness-kit/security/advisories/new) when available, **or**
 2. Email the repository maintainer with a clear description, reproduction steps, and impact assessment.
 
-We aim to acknowledge reports within **5 business days** and will coordinate disclosure timing with you.
-
 ## Supply Chain Expectations
 
 Release assets are published with:
