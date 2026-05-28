@@ -21,6 +21,7 @@ allow = [
 
 exceptions = [
   { allow = ["Zlib"], crate = "foldhash" },
+  { allow = ["Zlib"], crate = "zlib-rs" },
   { allow = ["CC0-1.0"], crate = "secp256k1" },
   { allow = ["CC0-1.0"], crate = "secp256k1-sys" },
 ]
