@@ -2913,6 +2913,10 @@ fn init_yes_applies_package_manager_specific_age_gates() {
     assert!(!npmrc.contains("min-release-age=7"), "{npmrc}");
     let pnpm_workspace = std::fs::read_to_string(dir.path().join("pnpm-workspace.yaml")).unwrap();
     assert!(
+        pnpm_workspace.contains("packages:\n  - \".\""),
+        "{pnpm_workspace}"
+    );
+    assert!(
         pnpm_workspace.contains("minimumReleaseAge: 10080"),
         "{pnpm_workspace}"
     );

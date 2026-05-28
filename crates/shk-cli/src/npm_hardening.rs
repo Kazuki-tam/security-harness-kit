@@ -24,6 +24,7 @@ const BUN_MIN_RELEASE_AGE_SECONDS: u64 = MIN_RELEASE_AGE_DAYS * 24 * 60 * 60;
 const YARN_MIN_RELEASE_AGE_KEY: &str = "npmMinimalAgeGate";
 const YARN_MIN_RELEASE_AGE_MINUTES: u64 = MIN_RELEASE_AGE_DAYS * 24 * 60;
 const MANAGED_MARKER: &str = "# shk-managed npm-hardening";
+const PNPM_SINGLE_PACKAGE_ENTRY: &str = "  - \".\"";
 const DEPENDABOT_FILES: &[&str] = &[".github/dependabot.yml", ".github/dependabot.yaml"];
 const RENOVATE_FILES: &[&str] = &[
     "renovate.json",
@@ -231,11 +232,7 @@ pub fn apply(root: &Path) -> Result<Option<NpmHardeningStatus>> {
     }
     if before.package_managers.contains(&PackageManager::Pnpm) {
         let existing = fs::read_to_string(&before.pnpm_workspace_path).unwrap_or_default();
-        let updated = upsert_yaml_line(
-            &existing,
-            MINIMUM_RELEASE_AGE_KEY,
-            &PNPM_MIN_RELEASE_AGE_MINUTES.to_string(),
-        );
+        let updated = upsert_pnpm_workspace_settings(&existing);
         if updated != existing {
             fs::write(&before.pnpm_workspace_path, updated)?;
         }
@@ -282,9 +279,13 @@ pub fn unapply(root: &Path) -> Result<Option<NpmHardeningStatus>> {
     }
     if before.package_managers.contains(&PackageManager::Pnpm) {
         let existing = fs::read_to_string(&before.pnpm_workspace_path).unwrap_or_default();
-        let updated = remove_yaml_line(&existing, MINIMUM_RELEASE_AGE_KEY);
+        let updated = remove_pnpm_workspace_settings(&existing);
         if updated != existing {
-            fs::write(&before.pnpm_workspace_path, updated)?;
+            if updated.trim().is_empty() {
+                fs::remove_file(&before.pnpm_workspace_path)?;
+            } else {
+                fs::write(&before.pnpm_workspace_path, updated)?;
+            }
         }
     }
     if before.package_managers.contains(&PackageManager::Yarn) {
@@ -391,6 +392,33 @@ fn upsert_yaml_line(input: &str, key: &str, value: &str) -> String {
         output.push('\n');
     }
     output
+}
+
+fn upsert_pnpm_workspace_settings(input: &str) -> String {
+    let mut lines = input.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+    if !has_top_level_yaml_key(input, "packages") {
+        lines.insert(0, MANAGED_MARKER.to_string());
+        lines.insert(1, "packages:".to_string());
+        lines.insert(2, PNPM_SINGLE_PACKAGE_ENTRY.to_string());
+    }
+    let workspace = finish_lines(lines);
+    upsert_yaml_line(
+        &workspace,
+        MINIMUM_RELEASE_AGE_KEY,
+        &PNPM_MIN_RELEASE_AGE_MINUTES.to_string(),
+    )
+}
+
+fn has_top_level_yaml_key(input: &str, key: &str) -> bool {
+    input.lines().any(|line| yaml_line_key(line) == Some(key))
+}
+
+fn remove_pnpm_workspace_settings(input: &str) -> String {
+    let mut lines = input.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+    remove_managed_yaml_blocks(&mut lines, "packages");
+    remove_managed_key_lines(&mut lines, MINIMUM_RELEASE_AGE_KEY, yaml_line_key);
+    trim_trailing_empty_lines(&mut lines);
+    finish_lines(lines)
 }
 
 fn remove_yaml_line(input: &str, key: &str) -> String {
@@ -542,6 +570,22 @@ fn upsert_managed_key_line_in_range(
 fn remove_managed_key_lines(lines: &mut Vec<String>, key: &str, key_fn: fn(&str) -> Option<&str>) {
     let end = lines.len();
     remove_managed_key_lines_in_range(lines, 0, end, key, key_fn);
+}
+
+fn remove_managed_yaml_blocks(lines: &mut Vec<String>, key: &str) {
+    let mut idx = 0;
+    while idx < lines.len() {
+        if yaml_line_key(&lines[idx]) == Some(key) && is_managed_previous_line(lines, idx) {
+            let mut block_end = idx + 1;
+            while block_end < lines.len() && line_indent(&lines[block_end]) > 0 {
+                block_end += 1;
+            }
+            lines.drain((idx - 1)..block_end);
+            idx = idx.saturating_sub(1);
+        } else {
+            idx += 1;
+        }
+    }
 }
 
 fn remove_managed_key_lines_in_range(
@@ -1055,6 +1099,10 @@ updates:
         assert!(!npmrc.contains("min-release-age=7"), "{npmrc}");
         let pnpm_workspace = fs::read_to_string(dir.path().join(PNPM_WORKSPACE_FILE)).unwrap();
         assert!(
+            pnpm_workspace.contains("packages:\n  - \".\"\n"),
+            "{pnpm_workspace}"
+        );
+        assert!(
             pnpm_workspace.contains("minimumReleaseAge: 10080"),
             "{pnpm_workspace}"
         );
@@ -1148,13 +1196,8 @@ updates:
         unapply(dir.path()).unwrap();
 
         let npmrc = fs::read_to_string(dir.path().join(NPMRC_FILE)).unwrap_or_default();
-        let pnpm_workspace =
-            fs::read_to_string(dir.path().join(PNPM_WORKSPACE_FILE)).unwrap_or_default();
         assert!(!npmrc.contains("ignore-scripts=true"), "{npmrc}");
-        assert!(
-            !pnpm_workspace.contains("minimumReleaseAge"),
-            "{pnpm_workspace}"
-        );
+        assert!(!dir.path().join(PNPM_WORKSPACE_FILE).exists());
         assert!(!status(dir.path()).package_scripts_ok());
         assert!(!status(dir.path()).age_gates_ok());
     }
@@ -1210,5 +1253,68 @@ updates:
         );
         assert!(out.contains("  minimumReleaseAge: 1\n"), "{out}");
         assert!(out.contains("minimumReleaseAge: 10080\n"), "{out}");
+    }
+
+    #[test]
+    fn pnpm_workspace_upsert_adds_single_package_for_new_file() {
+        let out = upsert_pnpm_workspace_settings("");
+        assert_eq!(
+            out,
+            "# shk-managed npm-hardening\npackages:\n  - \".\"\n# shk-managed npm-hardening\nminimumReleaseAge: 10080\n"
+        );
+    }
+
+    #[test]
+    fn pnpm_workspace_upsert_preserves_existing_packages() {
+        let out = upsert_pnpm_workspace_settings("packages:\n  - \"apps/*\"\n");
+        assert!(out.contains("  - \"apps/*\"\n"), "{out}");
+        assert!(!out.contains("  - \".\"\n"), "{out}");
+        assert!(out.contains("minimumReleaseAge: 10080\n"), "{out}");
+    }
+
+    #[test]
+    fn pnpm_workspace_upsert_updates_existing_age_gate_without_touching_packages() {
+        let out = upsert_pnpm_workspace_settings(
+            "packages:\n  - \"apps/*\"\n# shk-managed npm-hardening\nminimumReleaseAge: 1\n",
+        );
+        assert_eq!(
+            out,
+            "packages:\n  - \"apps/*\"\n# shk-managed npm-hardening\nminimumReleaseAge: 10080\n"
+        );
+    }
+
+    #[test]
+    fn pnpm_workspace_upsert_repairs_existing_file_without_packages() {
+        let out =
+            upsert_pnpm_workspace_settings("# shk-managed npm-hardening\nminimumReleaseAge: 1\n");
+        assert_eq!(
+            out,
+            "# shk-managed npm-hardening\npackages:\n  - \".\"\n# shk-managed npm-hardening\nminimumReleaseAge: 10080\n"
+        );
+    }
+
+    #[test]
+    fn pnpm_workspace_upsert_handles_comment_only_file() {
+        let out = upsert_pnpm_workspace_settings("# keep this comment\n");
+        assert_eq!(
+            out,
+            "# shk-managed npm-hardening\npackages:\n  - \".\"\n# keep this comment\n# shk-managed npm-hardening\nminimumReleaseAge: 10080\n"
+        );
+    }
+
+    #[test]
+    fn pnpm_workspace_unapply_removes_managed_single_package_block() {
+        let out = remove_pnpm_workspace_settings(
+            "# shk-managed npm-hardening\npackages:\n  - \".\"\n# shk-managed npm-hardening\nminimumReleaseAge: 10080\n",
+        );
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn pnpm_workspace_unapply_preserves_user_owned_packages() {
+        let out = remove_pnpm_workspace_settings(
+            "packages:\n  - \".\"\n# shk-managed npm-hardening\nminimumReleaseAge: 10080\n",
+        );
+        assert_eq!(out, "packages:\n  - \".\"\n");
     }
 }
