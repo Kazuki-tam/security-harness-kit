@@ -4250,7 +4250,7 @@ dependencies = [
  "shk-integrations",
  "shk-rules",
  "tempfile",
- "toml 0.8.2",
+ "toml 1.1.2+spec-1.1.0",
  "ureq",
  "zeroize",
  "zip 0.6.6",
@@ -4275,7 +4275,7 @@ dependencies = [
  "shk-rules",
  "tempfile",
  "thiserror 2.0.18",
- "toml 0.8.2",
+ "toml 1.1.2+spec-1.1.0",
  "walkdir",
  "zeroize",
  "zip 0.6.6",
@@ -6624,7 +6624,7 @@ dependencies = [
  "regex",
  "serde",
  "tempfile",
- "toml 0.8.2",
+ "toml 1.1.2+spec-1.1.0",
  "ureq",
 ]
 
