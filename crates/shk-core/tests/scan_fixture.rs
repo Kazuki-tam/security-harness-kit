@@ -443,19 +443,23 @@ fn synthetic_openai_key(seed: char) -> String {
     format!("sk-proj-{seed}bcdefghijklmnopqrstuvwxyz0123456789")
 }
 
+fn deflated_zip_options() -> zip::write::FileOptions<'static, ()> {
+    zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated)
+}
+
 fn create_minimal_docx(path: &Path, text: &str) {
     let file = fs::File::create(path).unwrap();
     let mut zip = zip::ZipWriter::new(file);
-    let options =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    zip.start_file("[Content_Types].xml", options).unwrap();
+    zip.start_file("[Content_Types].xml", deflated_zip_options())
+        .unwrap();
     zip.write_all(
         br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
     )
     .unwrap();
 
-    zip.start_file("word/document.xml", options).unwrap();
+    zip.start_file("word/document.xml", deflated_zip_options())
+        .unwrap();
     write!(
         zip,
         r#"<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>"#
@@ -467,23 +471,25 @@ fn create_minimal_docx(path: &Path, text: &str) {
 fn create_minimal_xlsx(path: &Path, shared_text: &str, inline_text: &str) {
     let file = fs::File::create(path).unwrap();
     let mut zip = zip::ZipWriter::new(file);
-    let options =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    zip.start_file("[Content_Types].xml", options).unwrap();
+    zip.start_file("[Content_Types].xml", deflated_zip_options())
+        .unwrap();
     zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#).unwrap();
 
-    zip.start_file("xl/workbook.xml", options).unwrap();
+    zip.start_file("xl/workbook.xml", deflated_zip_options())
+        .unwrap();
     zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/></sheets></workbook>"#).unwrap();
 
-    zip.start_file("xl/sharedStrings.xml", options).unwrap();
+    zip.start_file("xl/sharedStrings.xml", deflated_zip_options())
+        .unwrap();
     write!(
         zip,
         r#"<?xml version="1.0" encoding="UTF-8"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>{shared_text}</t></si></sst>"#
     )
     .unwrap();
 
-    zip.start_file("xl/worksheets/sheet1.xml", options).unwrap();
+    zip.start_file("xl/worksheets/sheet1.xml", deflated_zip_options())
+        .unwrap();
     write!(
         zip,
         r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{inline_text}</t></is></c></row></sheetData></worksheet>"#
@@ -495,16 +501,17 @@ fn create_minimal_xlsx(path: &Path, shared_text: &str, inline_text: &str) {
 fn create_minimal_pptx(path: &Path, text: &str) {
     let file = fs::File::create(path).unwrap();
     let mut zip = zip::ZipWriter::new(file);
-    let options =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    zip.start_file("[Content_Types].xml", options).unwrap();
+    zip.start_file("[Content_Types].xml", deflated_zip_options())
+        .unwrap();
     zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#).unwrap();
 
-    zip.start_file("ppt/presentation.xml", options).unwrap();
+    zip.start_file("ppt/presentation.xml", deflated_zip_options())
+        .unwrap();
     zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldIdLst/></p:presentation>"#).unwrap();
 
-    zip.start_file("ppt/slides/slide1.xml", options).unwrap();
+    zip.start_file("ppt/slides/slide1.xml", deflated_zip_options())
+        .unwrap();
     write!(
         zip,
         r#"<?xml version="1.0" encoding="UTF-8"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#

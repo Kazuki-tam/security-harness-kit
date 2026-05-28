@@ -149,17 +149,18 @@ fn fetch_latest_release_tag() -> Result<String> {
 
     let url =
         env::var(LATEST_RELEASE_URL_ENV).unwrap_or_else(|_| LATEST_RELEASE_API_URL.to_string());
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(5))
-        .build();
-    let response = agent
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(5)))
+        .build()
+        .into();
+    let body = agent
         .get(&url)
-        .set("Accept", "application/vnd.github+json")
-        .set("User-Agent", concat!("shk/", env!("CARGO_PKG_VERSION")))
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", concat!("shk/", env!("CARGO_PKG_VERSION")))
         .call()
-        .with_context(|| format!("fetch {url}"))?;
-    let body = response
-        .into_string()
+        .with_context(|| format!("fetch {url}"))?
+        .body_mut()
+        .read_to_string()
         .context("read latest release response")?;
     let value: Value = serde_json::from_str(&body).context("parse latest release response")?;
     value
