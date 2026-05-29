@@ -206,7 +206,7 @@ shk doctor
 shk doctor --json
 ```
 
-`shk doctor` runs the available diagnostics for the current directory. The full check includes Git hooks, managed AI hooks, ignore coverage, plaintext env files, and npm/package-manager supply-chain hardening when `package.json` is present.
+`shk doctor` runs the available diagnostics for the current directory. The full check includes Git hooks, managed AI hooks, ignore coverage, plaintext env files, GitHub Actions checkout hardening, and npm/package-manager supply-chain hardening when `package.json` is present.
 
 ### `shk doctor ignore`
 
@@ -235,6 +235,20 @@ shk doctor env ./path
 ```
 
 `.env.example`, dotenvx-encrypted env files, and `shk env encrypt` output files are excluded from the plaintext env file warning. If an encrypted env file contains newly added or edited plaintext values, `doctor env` reports the plaintext key names and recommends re-running `shk env encrypt <file> --in-place`. With `--dotenvx`, the diagnostic also reports known dotenvx artifact files such as `.env.keys` and `.env.vault`.
+
+### `shk doctor workflows`
+
+Check GitHub Actions workflows for credential persistence on checkout steps.
+
+```bash
+shk doctor workflows
+shk doctor workflows ./path
+shk doctor workflows --fix
+```
+
+The diagnostic scans `.github/workflows/*.yml` and `*.yaml` and reports any `actions/checkout` step that does not set `persist-credentials: false`. Without it, `actions/checkout` leaves the workflow's GitHub token in a Git credential file that later steps can read, so a compromised or injected later step can exfiltrate the token.
+
+`--fix` requires `shk.toml` and adds `persist-credentials: false` to flagged checkout steps (creating a `with:` block when needed, or flipping an explicit `true`), preserving existing formatting, comments, and line endings. Other line endings are left untouched. It is a project-only hardening aid, not a full GitHub Actions linter.
 
 ### `shk doctor version`
 

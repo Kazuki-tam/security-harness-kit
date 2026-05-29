@@ -123,6 +123,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: {CHECKOUT_ACTION} # v6
+        with:
+          persist-credentials: false
 
       - name: Install shk
         shell: bash
@@ -227,6 +229,16 @@ mod tests {
         );
         assert!(workflow.contains(CHECKOUT_ACTION), "{workflow}");
         assert!(!workflow.contains("curl --proto"), "{workflow}");
+    }
+
+    #[test]
+    fn github_workflow_disables_checkout_credential_persistence() {
+        let workflow = github_workflow(&args(CiModeArg::Blocking));
+
+        assert!(
+            workflow.contains("persist-credentials: false"),
+            "{workflow}"
+        );
     }
 
     #[test]

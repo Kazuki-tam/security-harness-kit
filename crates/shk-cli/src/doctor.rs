@@ -1,4 +1,4 @@
-use crate::{npm_hardening, safety};
+use crate::{npm_hardening, safety, workflow_hardening};
 use anyhow::Result;
 use serde_json::Value;
 use shk_core::git;
@@ -790,14 +790,89 @@ pub fn has_shk_pre_commit(root: &Path) -> bool {
         .unwrap_or(false)
 }
 
+pub fn run_workflows(root: &Path, fix: bool, json: bool) -> Result<()> {
+    if fix {
+        safety::require_project_policy(root, "doctor workflows --fix")?;
+    }
+
+    let statuses = workflow_hardening::scan_workflows(root);
+
+    let mut fixes = Vec::new();
+    if fix {
+        for status in &statuses {
+            if status.ok() {
+                continue;
+            }
+            let path = root.join(&status.relative_path);
+            safety::ensure_writable_path_allowed(&path)?;
+            let fixed_steps = workflow_hardening::fix_file(&path)?;
+            if fixed_steps > 0 {
+                fixes.push(workflow_hardening::WorkflowFixResult {
+                    relative_path: status.relative_path.clone(),
+                    fixed_steps,
+                });
+            }
+        }
+    }
+
+    // Re-scan after a fix so reported state reflects the result.
+    let statuses = if fix {
+        workflow_hardening::scan_workflows(root)
+    } else {
+        statuses
+    };
+
+    if json {
+        let v = serde_json::json!({
+            "workflows": statuses,
+            "fixes": fixes,
+            "ok": statuses.iter().all(|s| s.ok()),
+        });
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+
+    print_workflow_status(&statuses);
+    for fix_result in &fixes {
+        println!(
+            "Hardened {} checkout step(s) in {}",
+            fix_result.fixed_steps, fix_result.relative_path
+        );
+    }
+    Ok(())
+}
+
+fn print_workflow_status(statuses: &[workflow_hardening::WorkflowFileStatus]) {
+    if statuses.is_empty() {
+        println!("workflows: no GitHub Actions checkout steps found under .github/workflows");
+        return;
+    }
+    if statuses.iter().all(|s| s.ok()) {
+        println!("workflows: OK (all actions/checkout steps set persist-credentials: false)");
+        return;
+    }
+    println!("workflows: actions/checkout steps missing persist-credentials: false:");
+    for status in statuses {
+        for step in status.findings() {
+            println!("  - {}:{}", status.relative_path, step.line);
+        }
+    }
+    println!("  fix with `shk doctor workflows --fix`");
+}
+
 pub fn run_all(root: &Path, json: bool) -> Result<()> {
     let hook_ok = has_shk_pre_commit(root);
     let ai_managed = has_managed_ai_hooks(root);
     let npm = npm_hardening::status(root);
+    let workflows = workflow_hardening::scan_workflows(root);
     if json {
         let v = serde_json::json!({
             "git_pre_commit_shk": hook_ok,
             "ai_managed_hooks": ai_managed,
+            "workflows": {
+                "files": workflows,
+                "ok": workflows.iter().all(|s| s.ok()),
+            },
             "npm_supply_chain_hardening": {
                 "package_json_detected": npm.has_npm_projects(),
                 "package_dirs": npm.package_dirs,
@@ -854,6 +929,8 @@ pub fn run_all(root: &Path, json: bool) -> Result<()> {
     run_ignore(root, false)?;
     println!();
     run_env(root, false)?;
+    println!();
+    print_workflow_status(&workflows);
     println!();
     run_npm_hardening_check(root);
     Ok(())

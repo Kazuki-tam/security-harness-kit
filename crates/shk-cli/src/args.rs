@@ -246,6 +246,14 @@ pub enum DoctorCmd {
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
     },
+    /// Check GitHub Actions workflows for `persist-credentials: false` on checkout
+    Workflows {
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+        /// Add `persist-credentials: false` to checkout steps that are missing it.
+        #[arg(long)]
+        fix: bool,
+    },
 }
 
 #[derive(Subcommand)]

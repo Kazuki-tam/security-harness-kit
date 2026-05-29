@@ -48,6 +48,8 @@ jobs:
       make_latest: ${{ steps.resolve.outputs.make_latest }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - id: resolve
         shell: bash
@@ -84,6 +86,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: install dist
         if: runner.os != 'Windows'
@@ -170,6 +174,8 @@ jobs:
       TAURI_WINDOWS_TSP: ${{ secrets.TAURI_WINDOWS_TSP }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
         with:
@@ -253,6 +259,8 @@ jobs:
     if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.prepare.outputs.build_cli == 'true' && needs.build-local-artifacts.result == 'success' }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: install dist
         shell: bash
@@ -305,6 +313,8 @@ jobs:
       }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: install dist
         if: needs.prepare.outputs.build_cli == 'true'

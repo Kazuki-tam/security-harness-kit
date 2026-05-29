@@ -151,6 +151,7 @@ shk mask report.docx --output report.redacted.docx
 shk doctor
 shk doctor ignore --fix
 shk doctor env --dotenvx
+shk doctor workflows --fix
 
 shk audit
 shk audit --reason action-guard
@@ -222,6 +223,7 @@ See [Configuration](docs/configuration.md) for the full `shk.toml` reference, cu
 - Allowlist `value_hash` entries are deterministic fingerprints for suppression, not cryptographic secret storage.
 - Post-tool hooks are non-blocking.
 - `doctor ignore --fix` appends missing patterns to `.gitignore`; it does not remove existing entries.
+- `doctor workflows` flags `actions/checkout` steps missing `persist-credentials: false`; `--fix` requires `shk.toml` and edits flagged workflows in place.
 - `mask --output` requires `shk.toml` and refuses sensitive env files and protected home configuration files.
 
 ## Development
