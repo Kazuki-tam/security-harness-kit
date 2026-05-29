@@ -281,6 +281,7 @@ export const en: Messages = {
         ai_claude_deny: "Claude Code permissions.deny",
         ai_claude_sandbox: "Claude Code sandbox",
         ai_codex_sandbox: "Codex sandbox hardening",
+        workflows: "GitHub Actions checkout hardening",
         npm_hardening: "npm supply-chain hardening",
       },
     },
@@ -354,6 +355,7 @@ export const en: Messages = {
       claudeDeny: "Claude deny",
       codexConfig: "Codex config",
       env: "Env file hygiene",
+      workflows: "Workflow checkout",
       npm: "npm hardening",
     },
     action: {

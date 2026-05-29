@@ -20,6 +20,7 @@ export function DoctorPanel({ doctor, npmApplicable, onOpenSetup }: Props) {
     { ok: doctor.claudeDenyOk, label: m.claudeDeny },
     { ok: doctor.codexConfigOk, label: m.codexConfig },
     ...(doctor.envApplicable ? [{ ok: doctor.envOk, label: m.env }] : []),
+    ...(doctor.workflowsApplicable ? [{ ok: doctor.workflowsOk, label: m.workflows }] : []),
     ...(npmApplicable ? [{ ok: doctor.npmOk, label: m.npm }] : []),
   ];
   const issues = doctor.issues.filter((issue) => {

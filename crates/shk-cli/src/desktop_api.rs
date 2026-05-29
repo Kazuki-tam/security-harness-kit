@@ -16,6 +16,7 @@ use crate::hooks::{
 use crate::npm_hardening;
 use crate::policy_cmd;
 use crate::safety;
+use crate::workflow_hardening;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use shk_core::git;
@@ -104,6 +105,8 @@ pub struct DoctorStatus {
     pub env_applicable: bool,
     pub env_ok: bool,
     pub npm_ok: bool,
+    pub workflows_applicable: bool,
+    pub workflows_ok: bool,
     pub issues: Vec<DoctorIssue>,
 }
 
@@ -305,6 +308,7 @@ struct ProjectCheckStatus {
     codex: CodexConfigStatus,
     env: EnvStatus,
     npm: npm_hardening::NpmHardeningStatus,
+    workflows: Vec<workflow_hardening::WorkflowFileStatus>,
 }
 
 pub fn project_status(path: &str) -> Result<ProjectStatus> {
@@ -528,6 +532,11 @@ fn validate_recommended_fixes(
                     anyhow::bail!("Codex sandbox fix requires shk.toml");
                 }
             }
+            "workflows" => {
+                if !policy_exists {
+                    anyhow::bail!("workflows fix requires shk.toml");
+                }
+            }
             "npm_hardening" => {}
             other => anyhow::bail!("unknown recommended fix id: {other}"),
         }
@@ -592,6 +601,12 @@ fn apply_recommended_fix(
             ai_options.codex_sandbox = true;
             apply_ai_hook_settings(&root.display().to_string(), ai_options)
         }
+        "workflows" => {
+            if !policy_exists {
+                anyhow::bail!("workflows fix requires shk.toml");
+            }
+            fix_doctor_workflows(&root.display().to_string())
+        }
         "npm_hardening" => apply_npm_hardening(
             &root.display().to_string(),
             ApplyNpmHardeningOptions { enabled: true },
@@ -632,6 +647,34 @@ pub fn fix_doctor_ignore(path: &str, options: FixDoctorIgnoreOptions) -> Result<
             "Appended {total_patterns} pattern(s) across {} file(s)",
             result.updates.len()
         ),
+        details,
+    })
+}
+
+pub fn fix_doctor_workflows(path: &str) -> Result<ActionResult> {
+    let root = resolve_project_root(path)?;
+    ensure_desktop_project_root_allowed(&root)?;
+    safety::require_project_policy(&root, "doctor workflows --fix")?;
+
+    let fixes = workflow_hardening::fix_all(&root)?;
+    let total: usize = fixes.iter().map(|f| f.fixed_steps).sum();
+    let details = fixes
+        .iter()
+        .map(|f| {
+            format!(
+                "{}: hardened {} checkout step(s)",
+                f.relative_path, f.fixed_steps
+            )
+        })
+        .collect();
+
+    Ok(ActionResult {
+        success: true,
+        message: if total == 0 {
+            "All actions/checkout steps already set persist-credentials: false".to_string()
+        } else {
+            format!("Hardened {total} checkout step(s)")
+        },
         details,
     })
 }
@@ -824,6 +867,7 @@ fn collect_project_check_status(root: &Path) -> ProjectCheckStatus {
         codex: collect_codex_config_status(root),
         env: collect_env_status(root),
         npm: npm_hardening::status(root),
+        workflows: workflow_hardening::scan_workflows(root),
     }
 }
 
@@ -947,6 +991,18 @@ fn build_recommended_fixes(
             default_selected: true,
         });
     }
+    if policy_exists && checks.workflows.iter().any(|s| !s.ok()) {
+        let flagged = checks.workflows.iter().filter(|s| !s.ok()).count();
+        fixes.push(RecommendedFixDto {
+            id: "workflows".into(),
+            severity: "warn".into(),
+            message: format!(
+                "Add persist-credentials: false to actions/checkout in {flagged} workflow file(s)"
+            ),
+            requires_policy: true,
+            default_selected: true,
+        });
+    }
     if npm_hardening_desktop_applicable(&checks.npm) && !npm_hardening_settings_ok(&checks.npm) {
         fixes.push(RecommendedFixDto {
             id: "npm_hardening".into(),
@@ -1034,6 +1090,19 @@ fn build_doctor_status_from(checks: &ProjectCheckStatus) -> DoctorStatus {
             message: rec,
         });
     }
+    for status in &checks.workflows {
+        let flagged = status.findings().count();
+        if flagged > 0 {
+            issues.push(DoctorIssue {
+                id: format!("workflows:{}", status.relative_path),
+                severity: "warn".into(),
+                message: format!(
+                    "{}: {flagged} actions/checkout step(s) missing persist-credentials: false",
+                    status.relative_path
+                ),
+            });
+        }
+    }
     for rec in npm_manual_recommendations(&checks.npm) {
         issues.push(DoctorIssue {
             id: "npm_hardening".into(),
@@ -1053,6 +1122,8 @@ fn build_doctor_status_from(checks: &ProjectCheckStatus) -> DoctorStatus {
         env_applicable: checks.env.has_env_files,
         env_ok: checks.env.plaintext_env_files.is_empty() && checks.env.mixed_env_files.is_empty(),
         npm_ok: npm_doctor_ok(&checks.npm),
+        workflows_applicable: !checks.workflows.is_empty(),
+        workflows_ok: checks.workflows.iter().all(|s| s.ok()),
         issues,
     }
 }
@@ -1315,6 +1386,63 @@ mod tests {
         );
         assert!(!dir.path().join(".claude").exists());
         assert!(!dir.path().join(".agents").exists());
+    }
+
+    #[test]
+    fn doctor_status_reports_and_fixes_workflow_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "").unwrap();
+        let workflows = dir.path().join(".github/workflows");
+        fs::create_dir_all(&workflows).unwrap();
+        fs::write(
+            workflows.join("ci.yml"),
+            "jobs:\n  build:\n    steps:\n      - uses: actions/checkout@v6\n",
+        )
+        .unwrap();
+
+        let before = build_project_status(dir.path());
+        assert!(before.doctor.workflows_applicable, "{before:?}");
+        assert!(!before.doctor.workflows_ok, "{before:?}");
+        assert!(
+            before
+                .doctor
+                .issues
+                .iter()
+                .any(|i| i.id == "workflows:.github/workflows/ci.yml"),
+            "{:?}",
+            before.doctor.issues
+        );
+        assert!(
+            before.recommended_fixes.iter().any(|f| f.id == "workflows"),
+            "{:?}",
+            before.recommended_fixes
+        );
+
+        let result = fix_doctor_workflows(dir.path().to_str().unwrap()).unwrap();
+        assert!(result.success, "{result:?}");
+
+        let after = build_project_status(dir.path());
+        assert!(after.doctor.workflows_ok, "{after:?}");
+        assert!(
+            !after.recommended_fixes.iter().any(|f| f.id == "workflows"),
+            "{:?}",
+            after.recommended_fixes
+        );
+        let contents = fs::read_to_string(workflows.join("ci.yml")).unwrap();
+        assert!(
+            contents.contains("persist-credentials: false"),
+            "{contents}"
+        );
+    }
+
+    #[test]
+    fn doctor_status_skips_workflows_when_no_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "").unwrap();
+
+        let status = build_project_status(dir.path());
+        assert!(!status.doctor.workflows_applicable, "{status:?}");
+        assert!(status.doctor.workflows_ok, "{status:?}");
     }
 
     #[test]

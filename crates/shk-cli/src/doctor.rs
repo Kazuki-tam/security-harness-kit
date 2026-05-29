@@ -791,36 +791,15 @@ pub fn has_shk_pre_commit(root: &Path) -> bool {
 }
 
 pub fn run_workflows(root: &Path, fix: bool, json: bool) -> Result<()> {
-    if fix {
+    let fixes = if fix {
         safety::require_project_policy(root, "doctor workflows --fix")?;
-    }
-
-    let statuses = workflow_hardening::scan_workflows(root);
-
-    let mut fixes = Vec::new();
-    if fix {
-        for status in &statuses {
-            if status.ok() {
-                continue;
-            }
-            let path = root.join(&status.relative_path);
-            safety::ensure_writable_path_allowed(&path)?;
-            let fixed_steps = workflow_hardening::fix_file(&path)?;
-            if fixed_steps > 0 {
-                fixes.push(workflow_hardening::WorkflowFixResult {
-                    relative_path: status.relative_path.clone(),
-                    fixed_steps,
-                });
-            }
-        }
-    }
-
-    // Re-scan after a fix so reported state reflects the result.
-    let statuses = if fix {
-        workflow_hardening::scan_workflows(root)
+        workflow_hardening::fix_all(root)?
     } else {
-        statuses
+        Vec::new()
     };
+
+    // Scan after any fix so the reported state reflects the result.
+    let statuses = workflow_hardening::scan_workflows(root);
 
     if json {
         let v = serde_json::json!({

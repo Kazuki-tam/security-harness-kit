@@ -100,6 +100,33 @@ pub fn fix_file(path: &Path) -> std::io::Result<usize> {
     Ok(count)
 }
 
+/// Harden every flagged workflow file under `root`, enforcing the workspace
+/// write-safety policy (`safety::ensure_writable_path_allowed`) before each
+/// write. Returns one entry per file that changed.
+///
+/// This is the single place that mutates workflow files, so callers (CLI and
+/// desktop) share identical safety behaviour. Callers remain responsible for
+/// any higher-level preconditions such as `safety::require_project_policy` or
+/// desktop project-root allow-listing.
+pub fn fix_all(root: &Path) -> anyhow::Result<Vec<WorkflowFixResult>> {
+    let mut fixes = Vec::new();
+    for status in scan_workflows(root) {
+        if status.ok() {
+            continue;
+        }
+        let file_path = root.join(&status.relative_path);
+        crate::safety::ensure_writable_path_allowed(&file_path)?;
+        let fixed_steps = fix_file(&file_path)?;
+        if fixed_steps > 0 {
+            fixes.push(WorkflowFixResult {
+                relative_path: status.relative_path,
+                fixed_steps,
+            });
+        }
+    }
+    Ok(fixes)
+}
+
 fn workflow_files(root: &Path) -> Vec<PathBuf> {
     let dir = root.join(WORKFLOWS_DIR);
     let Ok(entries) = fs::read_dir(&dir) else {
@@ -203,6 +230,19 @@ fn persist_state(line: &str) -> Option<PersistState> {
     }
 }
 
+fn disabled_persist_credentials_line(line: &str) -> String {
+    let indent = leading_spaces(line);
+    let replacement = format!("{}persist-credentials: false", &line[..indent]);
+    let Some(comment_start) = line.find('#') else {
+        return replacement;
+    };
+
+    let before_comment = &line[..comment_start];
+    let spacing_start = before_comment.trim_end_matches(char::is_whitespace).len();
+    let spacing = &before_comment[spacing_start..];
+    format!("{replacement}{spacing}{}", &line[comment_start..])
+}
+
 /// Half-open `[start, end)` line ranges for each top-level step in a block
 /// sequence (`- ...` items), including each step's indented continuation lines.
 fn step_ranges(lines: &[&str]) -> Vec<std::ops::Range<usize>> {
@@ -299,8 +339,7 @@ fn harden_checkout_step(block: &[&str], dash_indent: usize) -> (Vec<String>, boo
         .position(|l| persist_state(l) == Some(PersistState::ExplicitTrue))
     {
         let mut lines = owned();
-        let indent = leading_spaces(block[offset]);
-        lines[offset] = format!("{}persist-credentials: false", &block[offset][..indent]);
+        lines[offset] = disabled_persist_credentials_line(block[offset]);
         return (lines, true);
     }
 
@@ -504,6 +543,27 @@ jobs:
         let (fixed, count) = fix_content(yaml);
         assert_eq!(count, 1);
         assert!(fixed.contains("persist-credentials: false"), "{fixed}");
+        assert!(!fixed.contains("persist-credentials: true"), "{fixed}");
+    }
+
+    #[test]
+    fn fix_preserves_inline_comment_when_flipping_explicit_true() {
+        let yaml = "\
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: true  # needed before release automation was split
+";
+        let (fixed, count) = fix_content(yaml);
+        assert_eq!(count, 1);
+        assert!(
+            fixed.contains(
+                "          persist-credentials: false  # needed before release automation was split"
+            ),
+            "{fixed}"
+        );
         assert!(!fixed.contains("persist-credentials: true"), "{fixed}");
     }
 

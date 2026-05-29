@@ -59,6 +59,8 @@ export type DoctorStatus = {
   envApplicable: boolean;
   envOk: boolean;
   npmOk: boolean;
+  workflowsApplicable: boolean;
+  workflowsOk: boolean;
   issues: DoctorIssue[];
 };
 
