@@ -1057,7 +1057,8 @@ fn env_account(project_root: &Path, key: &str) -> String {
 
 fn encrypt_dotenv_body(body: &str, public_key_name: &str, public_key: &str) -> Result<String> {
     let mut out = Vec::new();
-    let mut inserted_public_key = false;
+    // Keep the managed marker at the top, before preserving original comments or blank lines.
+    push_shk_public_key_header(&mut out, public_key_name, public_key);
 
     for raw_line in body.lines() {
         let line = raw_line.trim_start();
@@ -1081,10 +1082,6 @@ fn encrypt_dotenv_body(body: &str, public_key_name: &str, public_key: &str) -> R
         if is_dotenvx_public_key_name(key) {
             continue;
         }
-        if !inserted_public_key {
-            push_shk_public_key_header(&mut out, public_key_name, public_key);
-            inserted_public_key = true;
-        }
         let value = parse_env_value(raw_value)
             .with_context(|| format!("parse {key} while encrypting dotenv"))?;
         if value.starts_with(DOTENV_ENCRYPTED_PREFIX) {
@@ -1099,9 +1096,6 @@ fn encrypt_dotenv_body(body: &str, public_key_name: &str, public_key: &str) -> R
             format!("{DOTENV_ENCRYPTED_PREFIX}{encrypted}")
         };
         out.push(format!("{key}=\"{encrypted_value}\""));
-    }
-    if !inserted_public_key {
-        push_shk_public_key_header(&mut out, public_key_name, public_key);
     }
     Ok(format!("{}\n", out.join("\n")))
 }
@@ -1721,6 +1715,29 @@ mod tests {
 
         assert!(plaintext.contains(commented), "{plaintext}");
         assert!(plaintext.contains("ACTIVE=\"secret\""), "{plaintext}");
+    }
+
+    #[test]
+    fn encrypt_places_native_header_before_leading_comments() {
+        let keypair = Keypair::generate();
+        let public_key = keypair.public_key();
+        let encrypted = encrypt_dotenv_body(
+            "# leading comment\n\nAPI_KEY=secret\n",
+            "DOTENV_PUBLIC_KEY",
+            &public_key,
+        )
+        .unwrap();
+
+        assert!(
+            encrypted.starts_with(SHK_NATIVE_ENV_HEADER_START),
+            "{encrypted}"
+        );
+        assert!(
+            encrypted.contains(&format!(
+                "DOTENV_PUBLIC_KEY=\"{public_key}\"\n# leading comment\n\nAPI_KEY=\"encrypted:"
+            )),
+            "{encrypted}"
+        );
     }
 
     #[test]
