@@ -39,6 +39,7 @@ shk ci init github --dry-run         # preview GitHub Actions workflow
 shk doctor                           # full project diagnostics
 shk doctor ignore --fix              # fix missing .gitignore entries
 shk doctor env --dotenvx             # include dotenvx artifact checks
+shk doctor workflows --fix           # add persist-credentials: false to checkout
 shk doctor version                   # check latest release
 shk env encrypt .env --in-place  # native shk dotenv encryption; adds [SHK_NATIVE_ENV] header
 shk env run -- npm test           # decrypt native env values only for the child process
@@ -199,7 +200,7 @@ shk ci init github                      # write .github/workflows/shk.yml
 shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
-shk ci init github --shk-version v0.3.11
+shk ci init github --shk-version v0.3.12
 shk ci init github --output .github/workflows/security.yml --force
 ```
 
@@ -310,6 +311,8 @@ shk doctor ignore            # check .gitignore / AI tool ignore coverage
 shk doctor ignore --fix      # append missing patterns to .gitignore
 shk doctor env               # detect plaintext .env secrets
 shk doctor env --dotenvx     # include dotenvx artifact checks
+shk doctor workflows         # check actions/checkout persist-credentials
+shk doctor workflows --fix   # add persist-credentials: false (needs shk.toml)
 shk doctor version           # check for shk updates
 ```
 

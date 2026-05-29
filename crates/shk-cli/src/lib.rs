@@ -15,6 +15,7 @@ mod output;
 mod policy_cmd;
 mod safety;
 mod version_check;
+mod workflow_hardening;
 
 use anyhow::{Context, Result};
 use args::{
@@ -160,6 +161,10 @@ pub fn run() -> Result<()> {
             Some(DoctorCmd::Env { dotenvx, path }) => {
                 let p = path.unwrap_or_else(|| cwd.clone());
                 doctor::run_env(&p, dotenvx)?
+            }
+            Some(DoctorCmd::Workflows { path, fix }) => {
+                let p = path.unwrap_or_else(|| cwd.clone());
+                doctor::run_workflows(&p, fix, json)?
             }
         },
         Commands::Hooks { cmd } => match cmd {

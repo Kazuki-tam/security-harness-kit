@@ -638,6 +638,83 @@ fn ci_init_github_writes_workflow_and_refuses_overwrite() {
 }
 
 #[test]
+fn doctor_workflows_reports_and_fixes_missing_persist_credentials() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(tmp.path().join("shk.toml"), "").expect("write policy");
+    let workflows_dir = tmp.path().join(".github/workflows");
+    std::fs::create_dir_all(&workflows_dir).expect("create workflows dir");
+    let workflow_path = workflows_dir.join("ci.yml");
+    std::fs::write(
+        &workflow_path,
+        "name: ci\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v6\n        with:\n          fetch-depth: 0\n",
+    )
+    .expect("write workflow");
+
+    let report = Command::new(shk_bin())
+        .args(["doctor", "workflows"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("doctor workflows");
+    assert!(report.status.success(), "doctor workflows should exit 0");
+    let stdout = String::from_utf8_lossy(&report.stdout);
+    assert!(stdout.contains(".github/workflows/ci.yml:7"), "{stdout}");
+
+    let fixed = Command::new(shk_bin())
+        .args(["doctor", "workflows", "--fix"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("doctor workflows --fix");
+    assert!(
+        fixed.status.success(),
+        "doctor workflows --fix should exit 0"
+    );
+
+    let contents = std::fs::read_to_string(&workflow_path).expect("read workflow");
+    assert!(
+        contents.contains(
+            "        with:\n          persist-credentials: false\n          fetch-depth: 0"
+        ),
+        "{contents}"
+    );
+
+    let recheck = Command::new(shk_bin())
+        .args(["doctor", "workflows"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("doctor workflows recheck");
+    assert!(
+        String::from_utf8_lossy(&recheck.stdout).contains("workflows: OK"),
+        "stdout={}",
+        String::from_utf8_lossy(&recheck.stdout)
+    );
+}
+
+#[test]
+fn doctor_workflows_fix_requires_project_policy() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let workflows_dir = tmp.path().join(".github/workflows");
+    std::fs::create_dir_all(&workflows_dir).expect("create workflows dir");
+    std::fs::write(
+        workflows_dir.join("ci.yml"),
+        "jobs:\n  build:\n    steps:\n      - uses: actions/checkout@v6\n",
+    )
+    .expect("write workflow");
+
+    let out = Command::new(shk_bin())
+        .args(["doctor", "workflows", "--fix"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("doctor workflows --fix without policy");
+
+    assert!(!out.status.success(), "should fail without shk.toml");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("requires a project shk.toml"),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn ci_init_github_rejects_invalid_fail_on_at_clap_layer() {
     let out = Command::new(shk_bin())
         .args(["ci", "init", "github", "--dry-run", "--fail-on", "bogus"])

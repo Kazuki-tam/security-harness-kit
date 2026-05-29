@@ -282,6 +282,7 @@ export const ja: Messages = {
         ai_claude_deny: "Claude Code permissions.deny",
         ai_claude_sandbox: "Claude Code sandbox",
         ai_codex_sandbox: "Codex サンドボックス設定",
+        workflows: "GitHub Actions checkout の堅牢化",
         npm_hardening: "npm サプライチェーン対策",
       },
     },
@@ -350,6 +351,7 @@ export const ja: Messages = {
       claudeDeny: "Claude deny",
       codexConfig: "Codex 設定",
       env: "env ファイル",
+      workflows: "ワークフロー checkout",
       npm: "npm 対策",
     },
     action: {

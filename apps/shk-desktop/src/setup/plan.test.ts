@@ -49,6 +49,8 @@ function status(overrides: Partial<ProjectStatus> = {}): ProjectStatus {
       envApplicable: false,
       envOk: true,
       npmOk: false,
+      workflowsApplicable: false,
+      workflowsOk: true,
       issues: [],
     },
     aiSafetyApplied: {

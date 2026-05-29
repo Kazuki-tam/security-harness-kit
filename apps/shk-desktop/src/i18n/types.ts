@@ -275,6 +275,7 @@ export type Messages = {
       claudeDeny: string;
       codexConfig: string;
       env: string;
+      workflows: string;
       npm: string;
     };
     action: {

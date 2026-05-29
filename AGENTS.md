@@ -13,7 +13,7 @@ This repository is a **local-first security harness CLI for AI coding agents** (
     - **`src/main.rs`** — thin wrapper calling `shk_cli::run()`.
     - **`src/args.rs`** — `clap` CLI definitions.
     - **`src/commands/`** — `scan`, `mask`, `audit`, etc. (move `doctor` / others here if this layer grows).
-    - Other modules: `color`, `doctor`, `hooks`, `hook_payload`, `hook_output`, `hook_audit_log`, `audit_log`, `output`, `policy_cmd`.
+    - Other modules: `color`, `doctor`, `hooks`, `hook_payload`, `hook_output`, `hook_audit_log`, `audit_log`, `output`, `policy_cmd`, `workflow_hardening` (GitHub Actions `persist-credentials` checks).
   - `crates/shk-integrations` — markers/constants for managed AI hooks; parsers may move here over time.
   - `xtask` — development-only generator tasks, including gitleaks rule import.
 
@@ -85,6 +85,8 @@ cargo run -p shk-cli --bin shk -- mask --json < fixtures/pii.txt
 cargo run -p shk-cli --bin shk -- doctor
 cargo run -p shk-cli --bin shk -- doctor ignore fixtures/project
 cargo run -p shk-cli --bin shk -- doctor env
+cargo run -p shk-cli --bin shk -- doctor workflows # actions/checkout persist-credentials: false
+cargo run -p shk-cli --bin shk -- doctor workflows --fix
 
 # Audit log preview
 cargo run -p shk-cli --bin shk -- audit
