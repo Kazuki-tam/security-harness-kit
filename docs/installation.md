@@ -30,7 +30,7 @@ shk-cli-x86_64-pc-windows-msvc.zip
 shk-cli-x86_64-unknown-linux-gnu.tar.xz
 shk-cli-installer.sh
 shk-cli-installer.ps1
-shk-cli.rb
+shk.rb
 *.sha256
 shk-sbom.cdx.json
 ```
@@ -75,13 +75,27 @@ Replace `target` with the archive that matches your platform. Avoid `latest` in 
 
 ## Homebrew
 
-macOS and Linux releases include a generated Homebrew formula (`shk-cli.rb`) as a release asset. To install from the latest release asset:
+Each tagged CLI release publishes the generated Homebrew formula to the public tap [`Kazuki-tam/homebrew-tap`](https://github.com/Kazuki-tam/homebrew-tap). Install with:
 
 ```bash
-brew install --formula https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk-cli.rb
+brew install Kazuki-tam/homebrew-tap/shk
 ```
 
-To install a pinned release, replace `latest/download` with `download/<tag>` (e.g. `download/v0.3.3`).
+Homebrew drops the `homebrew-` prefix, so the short form also works:
+
+```bash
+brew install kazuki-tam/tap/shk
+```
+
+The formula always tracks the latest release. To upgrade later, run `brew upgrade shk`.
+
+Alternatively, the formula (`shk.rb`) is attached to each release as an asset and can be installed directly without the tap:
+
+```bash
+brew install --formula https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk.rb
+```
+
+To install a pinned release this way, replace `latest/download` with `download/<tag>` (e.g. `download/v0.3.3`).
 
 Intel macOS, Apple Silicon macOS, Linux x86_64/aarch64, and Windows x86_64 are supported. Scoop manifests are not published by the current `dist`-based release pipeline.
 
@@ -133,7 +147,9 @@ Remove-Item (Join-Path $BinDir "shk.exe") -ErrorAction SilentlyContinue
 Homebrew formula:
 
 ```bash
-brew uninstall shk-cli
+brew uninstall shk
+# If installed from a tap, you can also remove it:
+# brew untap Kazuki-tam/homebrew-tap
 ```
 
 Release archive: remove `shk` from the directory where you unpacked or copied it.

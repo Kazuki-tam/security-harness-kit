@@ -15,6 +15,11 @@ path = "src/lib.rs"
 name = "shk"
 path = "src/main.rs"
 
+# Match the Homebrew formula name to the binary (`shk`) instead of the crate
+# name (`shk-cli`), so users install with `brew install <tap>/shk`.
+[package.metadata.dist]
+formula = "shk"
+
 [dependencies]
 shk-core = { version = "0.3.13", path = "../shk-core" }
 shk-rules = { version = "0.3.13", path = "../shk-rules" }

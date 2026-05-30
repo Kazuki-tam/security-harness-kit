@@ -48,6 +48,12 @@ Windows releases can be installed from PowerShell:
 powershell -c "irm https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk-cli-installer.ps1 | iex"
 ```
 
+macOS and Linux users can also install via Homebrew:
+
+```bash
+brew install Kazuki-tam/homebrew-tap/shk
+```
+
 See [Installation](docs/installation.md) for release archives, checksums, Homebrew, source builds, and [uninstall](docs/installation.md#uninstall) instructions.
 
 For CI or security-sensitive environments, prefer a pinned release archive with checksum and GitHub artifact attestation verification over installing from `latest`. See [Verified Archive Install](docs/installation.md#verified-archive-install).
