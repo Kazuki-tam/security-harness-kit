@@ -416,7 +416,6 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: Kazuki-tam/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           persist-credentials: false
 
       - name: download global artifacts
