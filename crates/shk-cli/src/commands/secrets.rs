@@ -854,7 +854,11 @@ fn payload_sha256(payload: &SecretPayload) -> String {
             }
         }
     }
-    format!("{:x}", hasher.finalize())
+    hasher
+        .finalize()
+        .into_iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
 }
 
 fn payload_bytes_len(payload: &SecretPayload) -> usize {
