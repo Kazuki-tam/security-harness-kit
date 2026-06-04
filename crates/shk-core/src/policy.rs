@@ -868,4 +868,21 @@ format = "dotenv"
         let policy = Policy::default();
         assert_eq!(policy.mask_min_severity().unwrap(), Severity::Medium);
     }
+
+    #[test]
+    fn load_from_dir_rejects_invalid_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("shk.toml"), "not = [valid").unwrap();
+        let err = Policy::load_from_dir(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("parse"), "{err}");
+    }
+
+    #[test]
+    fn load_from_dir_uses_defaults_when_policy_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (policy, path) = Policy::load_from_dir(dir.path()).unwrap();
+        assert!(path.is_none());
+        assert!(policy.rules.secrets);
+        assert_eq!(policy.thresholds.scan_fail_on, "high");
+    }
 }

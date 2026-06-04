@@ -78,6 +78,33 @@ jobs:
         if: runner.os == 'Windows'
         run: ./target/release/shk.exe doctor ignore fixtures/project
 
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: "1.88"
+          components: llvm-tools-preview, rustfmt
+
+      - name: install Linux native dependencies
+        run: ./.github/scripts/ci/install-linux-deps.sh desktop
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+
+      - name: install cargo-llvm-cov
+        uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09 # v2
+        with:
+          tool: cargo-llvm-cov@0.6.21
+
+      - name: cargo llvm-cov (line coverage >= 90%)
+        run: bash ./.github/scripts/ci/rust-coverage.sh
+
   security:
     runs-on: ubuntu-latest
     steps:

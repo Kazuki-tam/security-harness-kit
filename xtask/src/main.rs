@@ -300,7 +300,7 @@ fn strip_rustfmt_stdout_header(formatted: &str) -> &str {
     let Some((first, rest)) = formatted.split_once('\n') else {
         return formatted;
     };
-    if first.starts_with('/') && first.ends_with(".rs:") {
+    if first.ends_with(".rs:") {
         return rest.strip_prefix('\n').unwrap_or(rest);
     }
     formatted
@@ -692,5 +692,90 @@ regex = '''demo-[a-z]+'''
 
         assert!(skipped.is_empty(), "{skipped:?}");
         assert!(generated.contains("use super::{"));
+    }
+
+    #[test]
+    fn strip_rustfmt_stdout_header_removes_path_prefix() {
+        let formatted = "/tmp/foo.rs:\n\n// code\n";
+        assert_eq!(strip_rustfmt_stdout_header(formatted), "// code\n");
+        let windows_formatted = r"C:\Users\runner\AppData\Local\Temp\foo.rs:
+
+// code
+";
+        assert_eq!(strip_rustfmt_stdout_header(windows_formatted), "// code\n");
+        assert_eq!(
+            strip_rustfmt_stdout_header("// no header\n"),
+            "// no header\n"
+        );
+    }
+
+    #[test]
+    fn parse_import_args_defaults_and_check_flag() {
+        let args = parse_import_args(["--check".to_string()].into_iter()).unwrap();
+        assert!(args.check);
+        assert_eq!(args.source_ref, DEFAULT_SOURCE_REF);
+        assert_eq!(args.output, PathBuf::from(DEFAULT_OUTPUT));
+    }
+
+    #[test]
+    fn generate_skips_policy_blocked_rules() {
+        let input = r#"
+[[rules]]
+id = "generic-api-key"
+regex = '''x+'''
+[[rules]]
+id = "demo-token"
+regex = '''demo-[a-z]+'''
+"#;
+        let (_, skipped) = generate(input, "test", "ref").unwrap();
+        assert!(
+            skipped.iter().any(|line| line.contains("generic-api-key")),
+            "{skipped:?}"
+        );
+    }
+
+    #[test]
+    fn import_gitleaks_rules_check_passes_when_output_matches() {
+        let dir = tempdir().expect("tempdir");
+        let input_path = dir.path().join("gitleaks.toml");
+        let output = dir.path().join("gitleaks_rules.rs");
+        fs::write(
+            &input_path,
+            r#"
+[[rules]]
+id = "demo-token"
+regex = '''demo-[a-z]+'''
+"#,
+        )
+        .unwrap();
+        let args = ImportArgs {
+            input: input_path.to_string_lossy().into_owned(),
+            output: output.clone(),
+            source_ref: "test-ref".into(),
+            check: false,
+        };
+        import_gitleaks_rules(args).expect("write generated output");
+        import_gitleaks_rules(ImportArgs {
+            input: input_path.to_string_lossy().into_owned(),
+            output,
+            source_ref: "test-ref".into(),
+            check: true,
+        })
+        .expect("check should pass for matching output");
+    }
+
+    #[test]
+    fn bump_version_rejects_invalid_version_format() {
+        let err = bump_version("not-semver").expect_err("invalid version");
+        assert!(err.to_string().contains("invalid version"));
+    }
+
+    #[test]
+    fn read_input_reads_local_file() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("rules.toml");
+        fs::write(&path, "[[rules]]\nid = \"x\"\n").unwrap();
+        let body = read_input(path.to_str().unwrap()).unwrap();
+        assert!(body.contains("[[rules]]"));
     }
 }

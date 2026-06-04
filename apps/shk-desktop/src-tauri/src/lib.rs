@@ -138,7 +138,7 @@ async fn audit_report(
     run_blocking(move || desktop_api::audit_report(&path, options).map_err(map_err)).await
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IdeKind {
     Cursor,
     Vscode,
@@ -357,4 +357,46 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running shk desktop app");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ide_kind_parse_and_display() {
+        assert_eq!(IdeKind::parse("cursor").unwrap(), IdeKind::Cursor);
+        assert_eq!(IdeKind::parse("vscode").unwrap(), IdeKind::Vscode);
+        assert_eq!(IdeKind::parse("antigravity").unwrap(), IdeKind::Antigravity);
+        assert!(IdeKind::parse("emacs").is_err());
+        assert_eq!(IdeKind::Cursor.display_name(), "Cursor");
+        assert_eq!(IdeKind::Vscode.cli_command(), "code");
+    }
+
+    #[test]
+    fn app_error_serializes_to_string() {
+        let err = AppError::Message("scan path is empty".into());
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(json.contains("scan path is empty"));
+    }
+
+    #[test]
+    fn open_in_ide_path_requires_existing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.txt");
+        let err = open_in_ide_path(&missing, IdeKind::Cursor).unwrap_err();
+        assert!(err.to_string().contains("path does not exist"));
+    }
+
+    #[test]
+    fn editor_command_passes_path_to_program() {
+        let path = Path::new("/tmp/example-project");
+        let command = editor_command("cursor", path);
+
+        assert_eq!(command.get_program(), "cursor");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![path.as_os_str()]
+        );
+    }
 }

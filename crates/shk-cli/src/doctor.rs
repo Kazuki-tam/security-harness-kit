@@ -1037,3 +1037,79 @@ fn print_dependency_bot_status(name: &str, status: &npm_hardening::DependencyBot
         (None, _) => println!("    {name}: config not found"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn doctor_ignore_path_defaults_to_dot() {
+        assert_eq!(doctor_ignore_path(None), PathBuf::from("."));
+        assert_eq!(
+            doctor_ignore_path(Some(PathBuf::from("/tmp/proj"))),
+            PathBuf::from("/tmp/proj")
+        );
+    }
+
+    #[test]
+    fn normalize_ignore_pattern_skips_comments_and_blanks() {
+        assert_eq!(normalize_ignore_pattern("  "), None);
+        assert_eq!(normalize_ignore_pattern("# comment"), None);
+        assert_eq!(normalize_ignore_pattern("  .env  "), Some(".env"));
+    }
+
+    #[test]
+    fn ignore_pattern_covers_directory_and_env_aliases() {
+        assert!(ignore_pattern_covers("secrets/**", "secrets/**"));
+        assert!(ignore_pattern_covers(".env*", ".env"));
+        assert!(directory_pattern_covers("secrets", "secrets/**"));
+        assert!(!directory_pattern_covers(".env", "secrets/**"));
+    }
+
+    #[test]
+    fn normalize_ignore_fix_targets_rejects_unknown() {
+        let err = normalize_ignore_fix_targets(&["not-a-real-ignore".into()]).unwrap_err();
+        assert!(err.to_string().contains("unknown ignore fix target"));
+    }
+
+    #[test]
+    fn collect_env_status_detects_plaintext_and_mixed_env() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join(".env"), "API_KEY=plain\n").unwrap();
+        fs::write(
+            dir.path().join(".env.production"),
+            "DOTENV_PUBLIC_KEY=pk\nSECRET=encrypted:abc\nPLAIN=value\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join(".env.example"), "DEMO=ok\n").unwrap();
+
+        let status = collect_env_status(dir.path());
+        assert!(status.has_env_files);
+        assert!(status.plaintext_env_files.iter().any(|f| f == ".env"));
+        assert!(
+            status
+                .mixed_env_files
+                .iter()
+                .any(|f| f == ".env.production")
+        );
+    }
+
+    #[test]
+    fn ignore_fix_target_statuses_reflect_existing_files() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join(".gitignore"), "node_modules/\n").unwrap();
+        let statuses = ignore_fix_target_statuses(dir.path());
+        let gitignore = statuses
+            .iter()
+            .find(|s| s.name == ".gitignore")
+            .expect(".gitignore status");
+        assert!(gitignore.exists);
+        let cursor = statuses
+            .iter()
+            .find(|s| s.name == ".cursorignore")
+            .expect(".cursorignore status");
+        assert!(!cursor.exists);
+    }
+}

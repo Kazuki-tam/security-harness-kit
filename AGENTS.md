@@ -25,6 +25,9 @@ cargo build
 cargo test --all
 cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
+
+# Line coverage (requires cargo-llvm-cov + llvm-tools-preview; same gate as CI)
+bash ./.github/scripts/ci/rust-coverage.sh
 ```
 
 Release build:

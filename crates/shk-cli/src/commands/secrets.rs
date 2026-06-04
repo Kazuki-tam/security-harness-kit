@@ -1076,4 +1076,115 @@ mod tests {
         assert_eq!(calls[1].0, "app/prod/DOTENV_PRIVATE_KEY_PROD");
         assert_eq!(calls[1].1, b"prod");
     }
+
+    #[test]
+    fn parse_provider_and_mode_reject_unknown_values() {
+        assert_eq!(parse_provider("aws").unwrap(), Provider::Aws);
+        assert_eq!(parse_provider("gcp").unwrap(), Provider::Gcp);
+        assert!(parse_provider("azure").is_err());
+        assert_eq!(parse_mode("blob").unwrap(), PushMode::Blob);
+        assert_eq!(parse_mode("per-key").unwrap(), PushMode::PerKey);
+        assert_eq!(parse_mode("per_key").unwrap(), PushMode::PerKey);
+        assert!(parse_mode("json").is_err());
+    }
+
+    #[test]
+    fn parse_env_value_supports_quotes_comments_and_escapes() {
+        assert_eq!(parse_env_value("plain").unwrap(), "plain");
+        assert_eq!(
+            parse_env_value("with-comment # note").unwrap(),
+            "with-comment"
+        );
+        assert_eq!(
+            parse_env_value("\"hello\\nworld\"").unwrap(),
+            "hello\nworld"
+        );
+        assert_eq!(parse_env_value("'single'").unwrap(), "single");
+        assert!(parse_quoted_env_value("\"bad\" trailing", '"').is_err());
+    }
+
+    #[test]
+    fn validate_env_key_enforces_charset() {
+        assert!(validate_env_key("API_KEY").is_ok());
+        assert!(validate_env_key("_PRIVATE").is_ok());
+        assert!(validate_env_key("bad-key").is_err());
+        assert!(validate_env_key("").is_err());
+    }
+
+    #[test]
+    fn validate_targets_enforces_mode_constraints() {
+        let blob_cfg = base_cfg(PushMode::Blob);
+        let blob = SecretPayload::Blob {
+            bytes: Zeroizing::new(b"x".to_vec()),
+        };
+        assert!(validate_targets(&blob_cfg, &blob).is_ok());
+
+        let mut bad_blob = blob_cfg;
+        bad_blob.target_prefix = Some("prefix/".into());
+        assert!(validate_targets(&bad_blob, &blob).is_err());
+
+        let per_key_cfg = base_cfg(PushMode::PerKey);
+        let per_key = SecretPayload::PerKey {
+            entries: parse_dotenv_entries("FOO=bar\n").unwrap(),
+        };
+        assert!(validate_targets(&per_key_cfg, &per_key).is_ok());
+        assert!(validate_provider_target(Provider::Gcp, "valid_name").is_ok());
+        assert!(validate_provider_target(Provider::Gcp, "bad/name").is_err());
+    }
+
+    #[test]
+    fn lint_payload_warns_on_local_and_debug_keys() {
+        let payload = SecretPayload::PerKey {
+            entries: parse_dotenv_entries("DEBUG=true\nLOCAL_ONLY=1\nNODE_ENV=development\n")
+                .unwrap(),
+        };
+        let report = lint_payload(&payload, None);
+        assert!(report.warnings.iter().any(|w| w.contains("DEBUG")));
+        assert!(report.warnings.iter().any(|w| w.contains("LOCAL_ONLY")));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("NODE_ENV=development"))
+        );
+    }
+
+    #[test]
+    fn payload_scan_text_and_sizes_cover_blob_and_per_key() {
+        let blob = SecretPayload::Blob {
+            bytes: Zeroizing::new(b"abc".to_vec()),
+        };
+        assert_eq!(payload_bytes_len(&blob), 3);
+        assert_eq!(payload_scan_text(&blob), "abc");
+
+        let per_key = SecretPayload::PerKey {
+            entries: parse_dotenv_entries("A=1\nB=2\n").unwrap(),
+        };
+        assert_eq!(payload_bytes_len(&per_key), 2);
+        assert!(payload_scan_text(&per_key).contains("A=1"));
+    }
+
+    #[test]
+    fn provider_and_mode_str_are_stable() {
+        assert_eq!(provider_str(Provider::Aws), "aws");
+        assert_eq!(provider_str(Provider::Gcp), "gcp");
+        assert_eq!(mode_str(PushMode::Blob), "blob");
+        assert_eq!(mode_str(PushMode::PerKey), "per-key");
+    }
+
+    #[test]
+    fn pre_push_pii_scan_allows_clean_payload() {
+        let payload = SecretPayload::PerKey {
+            entries: parse_dotenv_entries("PUBLIC_FLAG=true\n").unwrap(),
+        };
+        assert!(run_pii_scan("fixture.env", &payload).is_ok());
+    }
+
+    #[test]
+    fn add_gcp_project_flag_is_noop_without_project() {
+        let cfg = base_cfg(PushMode::Blob);
+        let mut cmd = Command::new("gcloud");
+        add_gcp_project_flag(&mut cmd, &cfg);
+        assert!(command_args(&cmd).is_empty());
+    }
 }

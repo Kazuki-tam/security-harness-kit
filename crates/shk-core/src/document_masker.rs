@@ -840,4 +840,36 @@ mod tests {
 
         Ok(out)
     }
+
+    #[test]
+    fn rejects_invalid_zip_archive() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("broken.docx");
+        std::fs::write(&input, b"not-a-zip").unwrap();
+        let output = dir.path().join("out.docx");
+        let policy = Policy::default();
+        let err = mask_docx(&input, &output, &policy).unwrap_err();
+        assert!(
+            err.to_string().contains("zip") || err.to_string().contains("archive"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn rejects_docx_missing_required_entry() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("empty.docx");
+        let output = dir.path().join("out.docx");
+        {
+            let file = File::create(&input).unwrap();
+            let mut zip = ZipWriter::new(file);
+            zip.start_file("[Content_Types].xml", deflated_zip_options())
+                .unwrap();
+            zip.write_all(b"<Types/>").unwrap();
+            zip.finish().unwrap();
+        }
+        let policy = Policy::default();
+        let err = mask_docx(&input, &output, &policy).unwrap_err();
+        assert!(err.to_string().contains("word/document.xml"), "{err}");
+    }
 }
