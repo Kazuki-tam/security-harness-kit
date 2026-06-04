@@ -13,10 +13,9 @@ Security fixes are applied to the latest release on the default branch. Older re
 
 **Do not open a public GitHub issue for undisclosed security vulnerabilities.**
 
-Please report security issues privately:
-
-1. Use [GitHub private vulnerability reporting](https://github.com/Kazuki-tam/security-harness-kit/security/advisories/new) when available, **or**
-2. Email the repository maintainer with a clear description, reproduction steps, and impact assessment.
+Please report security issues only through
+[GitHub private vulnerability reporting](https://github.com/Kazuki-tam/security-harness-kit/security/advisories/new).
+Include a clear description, reproduction steps, and impact assessment.
 
 ## Supply Chain Expectations
 
