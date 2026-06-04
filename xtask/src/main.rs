@@ -300,7 +300,7 @@ fn strip_rustfmt_stdout_header(formatted: &str) -> &str {
     let Some((first, rest)) = formatted.split_once('\n') else {
         return formatted;
     };
-    if first.starts_with('/') && first.ends_with(".rs:") {
+    if first.ends_with(".rs:") {
         return rest.strip_prefix('\n').unwrap_or(rest);
     }
     formatted
@@ -698,6 +698,11 @@ regex = '''demo-[a-z]+'''
     fn strip_rustfmt_stdout_header_removes_path_prefix() {
         let formatted = "/tmp/foo.rs:\n\n// code\n";
         assert_eq!(strip_rustfmt_stdout_header(formatted), "// code\n");
+        let windows_formatted = r"C:\Users\runner\AppData\Local\Temp\foo.rs:
+
+// code
+";
+        assert_eq!(strip_rustfmt_stdout_header(windows_formatted), "// code\n");
         assert_eq!(
             strip_rustfmt_stdout_header("// no header\n"),
             "// no header\n"
