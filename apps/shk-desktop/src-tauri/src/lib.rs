@@ -389,8 +389,14 @@ mod tests {
     }
 
     #[test]
-    fn compile_time_updater_pubkey_is_trimmed_or_none() {
-        let key = compile_time_updater_pubkey();
-        assert!(key.is_none() || !key.unwrap().is_empty());
+    fn editor_command_passes_path_to_program() {
+        let path = Path::new("/tmp/example-project");
+        let command = editor_command("cursor", path);
+
+        assert_eq!(command.get_program(), "cursor");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![path.as_os_str()]
+        );
     }
 }

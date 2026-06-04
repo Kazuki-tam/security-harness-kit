@@ -103,10 +103,7 @@ jobs:
           tool: cargo-llvm-cov@0.6.21
 
       - name: cargo llvm-cov (line coverage >= 90%)
-        run: |
-          cargo llvm-cov --workspace --all-features \
-            --ignore-filename-regex '(crates/shk-rules/src/gitleaks_rules\.rs|apps/shk-desktop/src-tauri/src/(lib|main)\.rs|xtask/src/main\.rs|crates/shk-cli/src/(desktop_api\.rs|hooks/(ai|git)\.rs|commands/(env|secrets)\.rs))' \
-            --fail-under-lines 90
+        run: bash ./.github/scripts/ci/rust-coverage.sh
 
   security:
     runs-on: ubuntu-latest

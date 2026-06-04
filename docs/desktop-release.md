@@ -1,5 +1,8 @@
 # Desktop Release
 
+> Note: The desktop app is not publicly released yet. This document describes the
+> planned release process and required production signing setup.
+
 The desktop app is released from tags matching `desktop-vX.Y.Z` or `shk-vX.Y.Z`.
 macOS production releases require Developer ID signing and notarization. Windows
 production releases require Authenticode code signing. All desktop releases also
