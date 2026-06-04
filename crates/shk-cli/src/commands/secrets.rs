@@ -841,6 +841,10 @@ fn print_result(cfg: &PushConfig, result: &PushResult) {
     );
 }
 
+fn hex_lower(bytes: impl IntoIterator<Item = u8>) -> String {
+    bytes.into_iter().map(|b| format!("{b:02x}")).collect()
+}
+
 fn payload_sha256(payload: &SecretPayload) -> String {
     let mut hasher = Sha256::new();
     match payload {
@@ -854,7 +858,7 @@ fn payload_sha256(payload: &SecretPayload) -> String {
             }
         }
     }
-    format!("{:x}", hasher.finalize())
+    hex_lower(hasher.finalize())
 }
 
 fn payload_bytes_len(payload: &SecretPayload) -> usize {
@@ -917,6 +921,18 @@ mod tests {
             entries: parse_dotenv_entries("A=one\nC=two\n").unwrap(),
         };
         assert_ne!(payload_sha256(&payload), payload_sha256(&other));
+    }
+
+    #[test]
+    fn blob_payload_hash_is_lowercase_sha256_hex() {
+        let payload = SecretPayload::Blob {
+            bytes: Zeroizing::new(b"hello".to_vec()),
+        };
+
+        assert_eq!(
+            payload_sha256(&payload),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
     }
 
     #[test]
