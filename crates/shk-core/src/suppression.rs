@@ -298,4 +298,124 @@ mod tests {
         assert!(!ig.is_suppressed(2, "pii.email"));
         assert!(!ig.is_suppressed(3, "secret.openai_api_key"));
     }
+
+    #[test]
+    fn compute_value_hmac_is_stable_and_rule_scoped() {
+        let h1 = compute_value_hmac("pii.email", "user@example.com");
+        assert!(h1.starts_with("sha256-hmac:"));
+        assert_eq!(h1, compute_value_hmac("pii.email", "user@example.com"));
+        assert_ne!(h1, compute_value_hmac("pii.email", "other@example.com"));
+        assert_ne!(h1, compute_value_hmac("pii.phone", "user@example.com"));
+    }
+
+    #[test]
+    fn allowlist_suppresses_by_path_and_rule() {
+        use crate::policy::AllowlistEntry;
+
+        let entries = vec![AllowlistEntry {
+            rule_id: Some("secret.generic_api_key".into()),
+            path: "fixtures/**".into(),
+            value_hash: None,
+            reason: None,
+            expires: None,
+        }];
+        let compiled = compile_allowlist(&entries).unwrap();
+        assert!(suppressed_by_allowlist(
+            "fixtures/demo.txt",
+            "secret.generic_api_key",
+            "any",
+            &entries,
+            &compiled,
+        ));
+        assert!(!suppressed_by_allowlist(
+            "src/demo.txt",
+            "secret.generic_api_key",
+            "any",
+            &entries,
+            &compiled,
+        ));
+        assert!(!suppressed_by_allowlist(
+            "fixtures/demo.txt",
+            "pii.email",
+            "any",
+            &entries,
+            &compiled,
+        ));
+    }
+
+    #[test]
+    fn allowlist_value_hash_must_match() {
+        use crate::policy::AllowlistEntry;
+
+        let rule = "pii.email";
+        let value = "user@example.com";
+        let hash = compute_value_hmac(rule, value);
+        let entries = vec![AllowlistEntry {
+            rule_id: Some(rule.into()),
+            path: "**".into(),
+            value_hash: Some(hash),
+            reason: None,
+            expires: None,
+        }];
+        let compiled = compile_allowlist(&entries).unwrap();
+        assert!(suppressed_by_allowlist(
+            "a.txt", rule, value, &entries, &compiled
+        ));
+        assert!(!suppressed_by_allowlist(
+            "a.txt",
+            rule,
+            "wrong@example.com",
+            &entries,
+            &compiled
+        ));
+    }
+
+    #[test]
+    fn expired_allowlist_entries_are_ignored_and_warn() {
+        use crate::policy::AllowlistEntry;
+
+        let entries = vec![AllowlistEntry {
+            rule_id: Some("pii.email".into()),
+            path: "**".into(),
+            value_hash: None,
+            reason: None,
+            expires: Some("2000-01-01".into()),
+        }];
+        let compiled = compile_allowlist(&entries).unwrap();
+        assert!(!suppressed_by_allowlist(
+            "a.txt",
+            "pii.email",
+            "user@example.com",
+            &entries,
+            &compiled,
+        ));
+        let warnings = expired_allowlist_warnings(&entries);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].rule_id, "policy.allowlist_expired");
+    }
+
+    #[test]
+    fn compile_allowlist_rejects_invalid_glob() {
+        use crate::policy::AllowlistEntry;
+
+        let entries = vec![AllowlistEntry {
+            rule_id: None,
+            path: "[invalid".into(),
+            value_hash: None,
+            reason: None,
+            expires: None,
+        }];
+        assert!(compile_allowlist(&entries).is_err());
+    }
+
+    #[test]
+    fn inline_trailing_hash_and_slash_ignore() {
+        let hash_line = "x = 1 # shk-ignore secret.foo\n";
+        let slash_line = "// shk-ignore-next-line pii.email\nnext\n";
+        let ig_hash = parse_inline_suppressions(hash_line);
+        let ig_slash = parse_inline_suppressions(slash_line);
+        assert!(ig_hash.is_suppressed(1, "secret.foo"));
+        assert!(ig_slash.is_suppressed(2, "pii.email"));
+        assert!(!ig_slash.is_suppressed(1, "pii.email"));
+    }
 }

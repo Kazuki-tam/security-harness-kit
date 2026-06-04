@@ -125,6 +125,10 @@ fn print_human(check: &VersionCheck) {
 pub(crate) fn check_latest_version() -> Result<VersionCheck> {
     let current = current_version();
     let latest_tag = fetch_latest_release_tag()?;
+    Ok(build_version_check(current, latest_tag))
+}
+
+fn build_version_check(current: &'static str, latest_tag: String) -> VersionCheck {
     let status = compare_versions(current, &latest_tag)
         .map(|ordering| match ordering {
             Ordering::Less => VersionStatus::UpdateAvailable,
@@ -133,18 +137,16 @@ pub(crate) fn check_latest_version() -> Result<VersionCheck> {
         })
         .unwrap_or(VersionStatus::Unknown);
 
-    Ok(VersionCheck {
+    VersionCheck {
         current,
         latest_tag,
         status,
-    })
+    }
 }
 
 fn fetch_latest_release_tag() -> Result<String> {
-    if let Ok(tag) = env::var(LATEST_RELEASE_TAG_ENV)
-        && !tag.trim().is_empty()
-    {
-        return Ok(tag.trim().to_string());
+    if let Some(tag) = env_latest_release_tag(env::var(LATEST_RELEASE_TAG_ENV).ok().as_deref()) {
+        return Ok(tag);
     }
 
     let url =
@@ -170,6 +172,12 @@ fn fetch_latest_release_tag() -> Result<String> {
         .filter(|tag| !tag.is_empty())
         .map(ToOwned::to_owned)
         .context("latest release response did not include tag_name")
+}
+
+fn env_latest_release_tag(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn compare_versions(current: &str, latest_tag: &str) -> Option<Ordering> {
@@ -204,4 +212,88 @@ fn current_version() -> &'static str {
 
 fn release_url(tag: &str) -> String {
     format!("https://github.com/Kazuki-tam/security-harness-kit/releases/tag/{tag}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_version_normalizes_prerelease_and_short_forms() {
+        assert_eq!(parse_version("v1.2.3"), Some(vec![1, 2, 3]));
+        assert_eq!(parse_version("1.2"), Some(vec![1, 2, 0]));
+        assert_eq!(parse_version("1.2.3-beta"), Some(vec![1, 2, 3]));
+        assert_eq!(parse_version("not-a-version"), None);
+    }
+
+    #[test]
+    fn compare_versions_orders_semver_parts() {
+        assert_eq!(compare_versions("0.3.14", "v0.3.15"), Some(Ordering::Less));
+        assert_eq!(compare_versions("1.0.0", "1.0.0"), Some(Ordering::Equal));
+        assert_eq!(compare_versions("2.0.0", "1.9.9"), Some(Ordering::Greater));
+    }
+
+    #[test]
+    fn version_status_maps_to_api_fields() {
+        assert_eq!(VersionStatus::Current.as_str(), "current");
+        assert_eq!(VersionStatus::LocalNewer.as_str(), "local_newer");
+        assert_eq!(
+            VersionStatus::UpdateAvailable.update_available(),
+            Some(true)
+        );
+        assert_eq!(VersionStatus::Current.update_available(), Some(false));
+        assert_eq!(VersionStatus::LocalNewer.update_available(), Some(false));
+        assert_eq!(VersionStatus::Unknown.update_available(), None);
+    }
+
+    #[test]
+    fn version_check_accessors_expose_expected_fields() {
+        let check = build_version_check("1.2.3", "v1.2.4".into());
+
+        assert_eq!(check.current(), "1.2.3");
+        assert_eq!(check.latest_tag(), "v1.2.4");
+        assert_eq!(check.status().as_str(), "update_available");
+        assert_eq!(
+            check.release_url(),
+            "https://github.com/Kazuki-tam/security-harness-kit/releases/tag/v1.2.4"
+        );
+    }
+
+    #[test]
+    fn build_version_check_reports_current_status() {
+        let check = build_version_check(current_version(), current_version().into());
+        assert_eq!(check.status().as_str(), "current");
+    }
+
+    #[test]
+    fn build_version_check_reports_update_available() {
+        let check = build_version_check(current_version(), "v999.0.0".into());
+        assert_eq!(check.status().as_str(), "update_available");
+        assert_eq!(check.status().update_available(), Some(true));
+    }
+
+    #[test]
+    fn build_version_check_detects_local_newer() {
+        let check = build_version_check(current_version(), "v0.0.1".into());
+        assert_eq!(check.status().as_str(), "local_newer");
+        assert_eq!(check.status().update_available(), Some(false));
+    }
+
+    #[test]
+    fn env_latest_release_tag_trims_non_empty_override() {
+        assert_eq!(
+            env_latest_release_tag(Some("  v9.9.9  ")).as_deref(),
+            Some("v9.9.9")
+        );
+        assert_eq!(env_latest_release_tag(Some("   ")), None);
+        assert_eq!(env_latest_release_tag(None), None);
+    }
+
+    #[test]
+    fn release_url_uses_tag_path() {
+        assert_eq!(
+            release_url("v0.3.14"),
+            "https://github.com/Kazuki-tam/security-harness-kit/releases/tag/v0.3.14"
+        );
+    }
 }

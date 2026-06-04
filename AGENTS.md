@@ -25,6 +25,11 @@ cargo build
 cargo test --all
 cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
+
+# Line coverage (requires cargo-llvm-cov + llvm-tools-preview; same gate as CI)
+cargo llvm-cov --workspace --all-features \
+  --ignore-filename-regex '(crates/shk-rules/src/gitleaks_rules\.rs|apps/shk-desktop/src-tauri/src/(lib|main)\.rs|xtask/src/main\.rs|crates/shk-cli/src/(desktop_api\.rs|hooks/(ai|git)\.rs|commands/(env|secrets)\.rs))' \
+  --fail-under-lines 90
 ```
 
 Release build:
