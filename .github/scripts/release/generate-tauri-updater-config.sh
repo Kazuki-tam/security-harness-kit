@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 source "${ROOT}/.github/scripts/release/common.sh"
 
 out="${1:?output config path required}"
+bundle_targets_csv="${2:-}"
 repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 pubkey="${TAURI_UPDATER_PUBKEY:?TAURI_UPDATER_PUBKEY is required}"
 windows_signing_mode="$(shk_windows_signing_mode)"
@@ -23,6 +24,7 @@ mkdir -p "$(dirname "$out")"
 jq -n \
   --arg pubkey "$pubkey" \
   --arg endpoint "https://github.com/${repo}/releases/download/desktop-latest/latest.json" \
+  --arg bundle_targets_csv "$bundle_targets_csv" \
   --arg windows_signing_mode "$windows_signing_mode" \
   --arg windows_sign_command "$windows_sign_command" \
   --arg windows_certificate_thumbprint "$windows_certificate_thumbprint" \
@@ -43,6 +45,11 @@ jq -n \
       }
     }
   }
+  | if $bundle_targets_csv != "" then
+      .bundle.targets = ($bundle_targets_csv | split(","))
+    else
+      .
+    end
   | if $windows_signing_mode == "command" then
       .bundle.windows = {
         signCommand: $windows_sign_command

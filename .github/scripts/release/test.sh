@@ -263,6 +263,16 @@ jq -e \
 echo "ok: Tauri updater config generated"
 
 TAURI_UPDATER_PUBKEY=public-key \
+  GITHUB_REPOSITORY=Kazuki-tam/security-harness-kit \
+  ./.github/scripts/release/generate-tauri-updater-config.sh \
+    "$tmpdir/tauri-updater-bundles.json" appimage,deb >/dev/null
+jq -e \
+  '.bundle.createUpdaterArtifacts == true
+    and .bundle.targets == ["appimage", "deb"]' \
+  "$tmpdir/tauri-updater-bundles.json" >/dev/null
+echo "ok: Tauri updater bundle targets generated"
+
+TAURI_UPDATER_PUBKEY=public-key \
   TAURI_WINDOWS_SIGN_COMMAND="trusted-signing-cli sign %1" \
   GITHUB_REPOSITORY=Kazuki-tam/security-harness-kit \
   ./.github/scripts/release/generate-tauri-updater-config.sh "$tmpdir/tauri-updater-windows-sign-command.json" >/dev/null
