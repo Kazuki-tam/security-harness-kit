@@ -196,13 +196,9 @@ shk_winget_release_notes() {
 
 ## Windows Package Manager
 
-WinGet manifests for the CLI are attached as \`shk-winget-manifests.zip\`.
-Maintainers can submit the included \`winget/manifests/...\` files to
-\`microsoft/winget-pkgs\`. After the package is accepted, Windows users can run:
-
-\`\`\`powershell
-winget install Kazuki-tam.shk
-\`\`\`
+Generated WinGet manifests for the CLI are attached as \`shk-winget-manifests.zip\`.
+These files are for maintainers to validate and submit to \`microsoft/winget-pkgs\`;
+WinGet is not an official install method until that submission is accepted.
 EOF
 }
 

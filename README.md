@@ -51,19 +51,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/K
 The `ExecutionPolicy Bypass` flag applies only to that PowerShell process and does not change the user's system policy.
 If downloaded PowerShell scripts are managed by your organization and still blocked, use the manual `.zip` install in [Installation](docs/installation.md#manual-windows-zip-install).
 
-After the package is accepted into the Windows Package Manager community repository, Windows users can also install with:
-
-```powershell
-winget install Kazuki-tam.shk
-```
-
 macOS and Linux users can also install via Homebrew:
 
 ```bash
 brew install Kazuki-tam/homebrew-tap/shk
 ```
 
-See [Installation](docs/installation.md) for release archives, checksums, WinGet manifests, Homebrew, source builds, and [uninstall](docs/installation.md#uninstall) instructions.
+See [Installation](docs/installation.md) for release archives, checksums, Homebrew, source builds, maintainer notes for WinGet manifest submission, and [uninstall](docs/installation.md#uninstall) instructions.
 
 For CI or security-sensitive environments, prefer a pinned release archive with checksum and GitHub artifact attestation verification over installing from `latest`. See [Verified Archive Install](docs/installation.md#verified-archive-install).
 
