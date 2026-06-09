@@ -356,6 +356,14 @@ jobs:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: ./.github/scripts/release/generate-tauri-latest-json.sh release-assets
 
+      - name: generate winget manifests
+        if: needs.prepare.outputs.build_cli == 'true'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: ./.github/scripts/release/generate-winget-manifests.sh release-assets
+
       - name: generate SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:

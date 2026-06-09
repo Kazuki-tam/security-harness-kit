@@ -22,6 +22,17 @@ assert_output() {
   echo "ok: ${description}"
 }
 
+assert_contains() {
+  local description="$1"
+  local actual="$2"
+  local expected="$3"
+  if [[ "$actual" != *"$expected"* ]]; then
+    echo "FAIL: ${description}" >&2
+    echo "missing: ${expected}" >&2
+    exit 1
+  fi
+}
+
 resolve_tag() {
   env GITHUB_EVENT_NAME=push GITHUB_REF="refs/tags/$1" GITHUB_REF_NAME="$1" \
     ./.github/scripts/release/resolve-target.sh
@@ -214,7 +225,20 @@ case "$(uname -s)" in
     fake_package_target=""
     ;;
 esac
-trap 'rm -rf "$tmpdir" ${fake_package_target:+"target/${fake_package_target}"}' EXIT
+target_existed=false
+[[ -d target ]] && target_existed=true
+mkdir -p target
+relative_winget_dir="$(mktemp -d target/winget-release-test.XXXXXX)"
+cleanup_release_test() {
+  rm -rf "$tmpdir" "$relative_winget_dir"
+  if [[ -n "$fake_package_target" ]]; then
+    rm -rf "target/${fake_package_target}"
+  fi
+  if [[ "$target_existed" == false ]]; then
+    rmdir target 2>/dev/null || true
+  fi
+}
+trap cleanup_release_test EXIT
 printf 'mac dmg\n' > "$tmpdir/shk-desktop_${current_version}_aarch64-apple-darwin_shk.dmg"
 printf 'mac updater\n' > "$tmpdir/shk-desktop_${current_version}_aarch64-apple-darwin_shk.app.tar.gz"
 printf 'mac-signature\n' > "$tmpdir/shk-desktop_${current_version}_aarch64-apple-darwin_shk.app.tar.gz.sig"
@@ -251,6 +275,66 @@ jq -e \
     and ([.assets[].sha256] | all(length == 64))' \
   "$tmpdir/shk-desktop-latest.json" >/dev/null
 echo "ok: desktop release manifest generated"
+
+printf 'windows exe\n' > "$tmpdir/shk.exe"
+(
+  cd "$tmpdir"
+  zip -q shk-cli-x86_64-pc-windows-msvc.zip shk.exe
+  rm -f shk.exe
+)
+printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  shk-cli-x86_64-pc-windows-msvc.zip\n' \
+  > "$tmpdir/shk-cli-x86_64-pc-windows-msvc.zip.sha256"
+printf 'stale\n' > "$tmpdir/stale.txt"
+(
+  cd "$tmpdir"
+  zip -q shk-winget-manifests.zip stale.txt
+  rm -f stale.txt
+)
+GITHUB_REPOSITORY=Kazuki-tam/security-harness-kit \
+  RELEASE_TAG="v${current_version}" \
+  RELEASE_VERSION="$current_version" \
+  ./.github/scripts/release/generate-winget-manifests.sh "$tmpdir" >/dev/null
+test -s "$tmpdir/shk-winget-manifests.zip"
+if command -v unzip >/dev/null 2>&1; then
+  winget_version_manifest="$(unzip -p "$tmpdir/shk-winget-manifests.zip" \
+    "winget/manifests/k/Kazuki-tam/shk/${current_version}/Kazuki-tam.shk.yaml")"
+  winget_locale_manifest="$(unzip -p "$tmpdir/shk-winget-manifests.zip" \
+    "winget/manifests/k/Kazuki-tam/shk/${current_version}/Kazuki-tam.shk.locale.en-US.yaml")"
+  winget_installer_manifest="$(unzip -p "$tmpdir/shk-winget-manifests.zip" \
+    "winget/manifests/k/Kazuki-tam/shk/${current_version}/Kazuki-tam.shk.installer.yaml")"
+
+  assert_contains "winget version manifest package id" "$winget_version_manifest" "PackageIdentifier: Kazuki-tam.shk"
+  assert_contains "winget version manifest version" "$winget_version_manifest" "PackageVersion: ${current_version}"
+  assert_contains "winget locale manifest description" "$winget_locale_manifest" "ShortDescription: Local-first security harness CLI for AI coding agents"
+  assert_contains "winget installer manifest type" "$winget_installer_manifest" "InstallerType: zip"
+  assert_contains "winget installer nested type" "$winget_installer_manifest" "NestedInstallerType: portable"
+  assert_contains "winget installer command alias" "$winget_installer_manifest" "PortableCommandAlias: shk"
+  assert_contains "winget installer URL" "$winget_installer_manifest" "InstallerUrl: https://github.com/Kazuki-tam/security-harness-kit/releases/download/v${current_version}/shk-cli-x86_64-pc-windows-msvc.zip"
+  assert_contains "winget installer SHA256" "$winget_installer_manifest" "InstallerSha256: 0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
+  if unzip -Z1 "$tmpdir/shk-winget-manifests.zip" | awk '$0 == "stale.txt" { found = 1 } END { exit found ? 0 : 1 }'; then
+    echo "FAIL: winget manifest archive retained stale entries" >&2
+    exit 1
+  fi
+fi
+echo "ok: winget manifests generated"
+
+printf 'windows exe\n' > "$relative_winget_dir/shk.exe"
+(
+  cd "$relative_winget_dir"
+  zip -q shk-cli-x86_64-pc-windows-msvc.zip shk.exe
+  rm -f shk.exe
+)
+printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  shk-cli-x86_64-pc-windows-msvc.zip\n' \
+  > "$relative_winget_dir/shk-cli-x86_64-pc-windows-msvc.zip.sha256"
+winget_output="$(
+  GITHUB_REPOSITORY=Kazuki-tam/security-harness-kit \
+    RELEASE_TAG="v${current_version}" \
+    RELEASE_VERSION="$current_version" \
+    ./.github/scripts/release/generate-winget-manifests.sh "$relative_winget_dir"
+)"
+assert_output "winget reports resolved output path" \
+  "wrote ${ROOT}/${relative_winget_dir}/shk-winget-manifests.zip" \
+  printf '%s' "$winget_output"
 
 TAURI_UPDATER_PUBKEY=public-key \
   GITHUB_REPOSITORY=Kazuki-tam/security-harness-kit \
