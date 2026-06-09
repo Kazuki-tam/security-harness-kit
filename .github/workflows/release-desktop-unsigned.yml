@@ -130,6 +130,7 @@ jobs:
             "target/tauri-updater-${{ matrix.target }}.json"
 
       - name: build desktop bundles
+        shell: bash
         run: |
           pnpm tauri build \
             --target ${{ matrix.target }} \
