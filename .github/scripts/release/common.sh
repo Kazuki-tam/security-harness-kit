@@ -191,6 +191,21 @@ Tauri updater metadata is published as \`latest.json\` and mirrored to the \`des
 EOF
 }
 
+shk_winget_release_notes() {
+  cat <<EOF
+
+## Windows Package Manager
+
+WinGet manifests for the CLI are attached as \`shk-winget-manifests.zip\`.
+Maintainers can submit the included \`winget/manifests/...\` files to
+\`microsoft/winget-pkgs\`. After the package is accepted, Windows users can run:
+
+\`\`\`powershell
+winget install Kazuki-tam.shk
+\`\`\`
+EOF
+}
+
 shk_desktop_unsigned_release_notes() {
   local version="$1"
   cat <<EOF

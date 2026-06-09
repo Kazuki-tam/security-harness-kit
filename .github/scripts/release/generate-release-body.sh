@@ -20,6 +20,7 @@ shk_dist_announcement() {
   case "$component" in
     cli)
       shk_dist_announcement
+      shk_winget_release_notes
       ;;
     desktop)
       shk_desktop_release_notes "$version"
@@ -29,6 +30,7 @@ shk_dist_announcement() {
       ;;
     both)
       shk_dist_announcement
+      shk_winget_release_notes
       echo ""
       shk_desktop_release_notes "$version"
       ;;
