@@ -45,8 +45,11 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Kazuki-tam/security-har
 Windows releases can be installed from PowerShell:
 
 ```powershell
-powershell -c "irm https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk-cli-installer.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk-cli-installer.ps1 | iex"
 ```
+
+The `ExecutionPolicy Bypass` flag applies only to that PowerShell process and does not change the user's system policy.
+If downloaded PowerShell scripts are managed by your organization and still blocked, use the manual `.zip` install in [Installation](docs/installation.md#manual-windows-zip-install).
 
 macOS and Linux users can also install via Homebrew:
 
