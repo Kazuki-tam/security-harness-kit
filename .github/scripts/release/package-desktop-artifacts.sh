@@ -4,12 +4,22 @@ set -euo pipefail
 target="${1:?target triple required}"
 version="${2:?version required}"
 out="${3:?output directory required}"
+profile="${4:-full}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 # shellcheck source=.github/scripts/release/common.sh
 source "${ROOT}/.github/scripts/release/common.sh"
 
 shk_require_semver "$version"
+
+case "$profile" in
+  full | updater)
+    ;;
+  *)
+    echo "unsupported desktop packaging profile: ${profile}" >&2
+    exit 1
+    ;;
+esac
 
 bundle="target/${target}/release/bundle"
 
@@ -59,7 +69,9 @@ require_host() {
 case "$target" in
   *-apple-darwin)
     require_host macos
-    copy_glob dmg
+    if [[ "$profile" == "full" ]]; then
+      copy_glob dmg
+    fi
     copy_glob macos
     ;;
   *-unknown-linux-gnu)
@@ -69,7 +81,9 @@ case "$target" in
     ;;
   *-pc-windows-msvc)
     require_host windows
-    copy_glob msi
+    if [[ "$profile" == "full" ]]; then
+      copy_glob msi
+    fi
     copy_glob nsis
     ;;
   *)

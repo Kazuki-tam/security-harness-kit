@@ -67,14 +67,19 @@ jobs:
         include:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
+            bundles: appimage,deb
           - os: macos-15-intel
             target: x86_64-apple-darwin
+            bundles: app
           - os: macos-14
             target: aarch64-apple-darwin
+            bundles: app
           - os: windows-2022
             target: x86_64-pc-windows-msvc
+            bundles: nsis
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -127,7 +132,8 @@ jobs:
         working-directory: .
         run: |
           ./.github/scripts/release/generate-tauri-updater-config.sh \
-            "target/tauri-updater-${{ matrix.target }}.json"
+            "target/tauri-updater-${{ matrix.target }}.json" \
+            "${{ matrix.bundles }}"
 
       - name: build desktop bundles
         shell: bash
@@ -144,7 +150,8 @@ jobs:
           ./.github/scripts/release/package-desktop-artifacts.sh \
             "${{ matrix.target }}" \
             "${{ needs.prepare.outputs.version }}" \
-            "$OUT"
+            "$OUT" \
+            updater
 
       - name: upload desktop artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
