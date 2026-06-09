@@ -5,15 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 # shellcheck source=.github/scripts/release/common.sh
 source "${ROOT}/.github/scripts/release/common.sh"
 
-shk_require_env \
-  "Tauri updater signing" \
-  TAURI_UPDATER_PUBKEY \
-  TAURI_SIGNING_PRIVATE_KEY
-
-if [[ -n "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" && -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
-  shk_error "TAURI_SIGNING_PRIVATE_KEY_PASSWORD is set without TAURI_SIGNING_PRIVATE_KEY"
-  exit 1
-fi
+shk_require_tauri_updater_signing
 
 is_windows_release_runner() {
   [[ "${RUNNER_OS:-}" == "Windows" ]] || [[ "${SHK_REQUIRE_WINDOWS_CODESIGN:-}" == "true" ]]

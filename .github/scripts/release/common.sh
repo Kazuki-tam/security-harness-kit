@@ -52,6 +52,18 @@ shk_require_bool_env() {
   esac
 }
 
+shk_require_tauri_updater_signing() {
+  shk_require_env \
+    "Tauri updater signing" \
+    TAURI_UPDATER_PUBKEY \
+    TAURI_SIGNING_PRIVATE_KEY
+
+  if [[ -n "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" && -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+    shk_error "TAURI_SIGNING_PRIVATE_KEY_PASSWORD is set without TAURI_SIGNING_PRIVATE_KEY"
+    exit 1
+  fi
+}
+
 shk_normalize_windows_thumbprint() {
   local raw="$1"
   local normalized
@@ -173,6 +185,29 @@ shk_desktop_release_notes() {
 Installers for macOS, Linux, and Windows are attached as \`shk-desktop_*\` assets.
 macOS installers are Developer ID signed, notarized, stapled, and verified during release.
 Windows installers are Authenticode-signed and verified during release.
+Checksums are in \`shk-desktop.sha256sum\`.
+Machine-readable desktop release metadata is in \`shk-desktop-latest.json\`.
+Tauri updater metadata is published as \`latest.json\` and mirrored to the \`desktop-latest\` release.
+EOF
+}
+
+shk_desktop_unsigned_release_notes() {
+  local version="$1"
+  cat <<EOF
+## shk Desktop v${version} (unsigned)
+
+Installers for macOS, Linux, and Windows are attached as \`shk-desktop_*\` assets.
+These builds are **not** Developer ID signed, notarized, or Authenticode-signed.
+The in-app updater is enabled; keep the same Tauri updater signing keys across all
+desktop releases so existing installs can update in place.
+
+### First launch
+
+- **macOS**: Gatekeeper may block the app. Open via right-click, then Open, or remove
+  quarantine after install:
+  \`xattr -dr com.apple.quarantine /Applications/shk.app\`
+- **Windows**: SmartScreen may warn on first run. Choose "More info", then "Run anyway".
+
 Checksums are in \`shk-desktop.sha256sum\`.
 Machine-readable desktop release metadata is in \`shk-desktop-latest.json\`.
 Tauri updater metadata is published as \`latest.json\` and mirrored to the \`desktop-latest\` release.
