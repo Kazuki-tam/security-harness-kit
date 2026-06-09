@@ -24,6 +24,9 @@ shk_dist_announcement() {
     desktop)
       shk_desktop_release_notes "$version"
       ;;
+    desktop-unsigned)
+      shk_desktop_unsigned_release_notes "$version"
+      ;;
     both)
       shk_dist_announcement
       echo ""

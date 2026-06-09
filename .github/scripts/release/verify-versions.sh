@@ -36,7 +36,7 @@ case "$component" in
   cli)
     verify_cli
     ;;
-  desktop)
+  desktop | desktop-unsigned)
     verify_desktop
     ;;
   both)

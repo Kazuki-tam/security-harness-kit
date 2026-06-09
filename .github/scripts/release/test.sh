@@ -36,6 +36,20 @@ assert_output "desktop tag" $'component=desktop\nversion=0.4.0\nrelease_tag=desk
 assert_output "combined tag" $'component=both\nversion=1.2.3\nrelease_tag=shk-v1.2.3\nbuild_cli=true\nbuild_desktop=true\nmake_latest=true' \
   resolve_tag shk-v1.2.3
 
+resolve_unsigned_tag() {
+  env GITHUB_EVENT_NAME=push GITHUB_REF="refs/tags/$1" GITHUB_REF_NAME="$1" \
+    ./.github/scripts/release/resolve-unsigned-target.sh
+}
+
+assert_output "unsigned desktop tag" $'component=desktop-unsigned\nversion=0.4.0\nrelease_tag=desktop-unsigned-v0.4.0' \
+  resolve_unsigned_tag desktop-unsigned-v0.4.0
+
+if resolve_unsigned_tag desktop-v0.4.0 >/dev/null 2>&1; then
+  echo "FAIL: signed desktop tag should not resolve as unsigned" >&2
+  exit 1
+fi
+echo "ok: signed desktop tag rejected by unsigned resolver"
+
 if resolve_tag vbad >/dev/null 2>&1; then
   echo "FAIL: invalid tag should fail" >&2
   exit 1
@@ -46,6 +60,9 @@ RELEASE_COMPONENT=cli RELEASE_VERSION="$current_version" \
   ./.github/scripts/release/verify-versions.sh
 
 RELEASE_COMPONENT=desktop RELEASE_VERSION="$current_version" \
+  ./.github/scripts/release/verify-versions.sh
+
+RELEASE_COMPONENT=desktop-unsigned RELEASE_VERSION="$current_version" \
   ./.github/scripts/release/verify-versions.sh
 
 if RELEASE_COMPONENT=desktop RELEASE_VERSION=9.9.9 \
@@ -64,6 +81,16 @@ echo "ok: missing updater signing config rejected"
 TAURI_UPDATER_PUBKEY=public-key TAURI_SIGNING_PRIVATE_KEY=private-key \
   ./.github/scripts/release/check-desktop-signing.sh >/dev/null
 echo "ok: updater signing config accepted"
+
+if ./.github/scripts/release/check-desktop-updater-signing.sh >/dev/null 2>&1; then
+  echo "FAIL: missing updater-only signing config should fail" >&2
+  exit 1
+fi
+echo "ok: missing updater-only signing config rejected"
+
+TAURI_UPDATER_PUBKEY=public-key TAURI_SIGNING_PRIVATE_KEY=private-key \
+  ./.github/scripts/release/check-desktop-updater-signing.sh >/dev/null
+echo "ok: updater-only signing config accepted"
 
 if SHK_REQUIRE_MACOS_CODESIGN=true \
   TAURI_UPDATER_PUBKEY=public-key \

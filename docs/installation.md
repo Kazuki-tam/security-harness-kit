@@ -107,6 +107,11 @@ notarized, stapled, and verified during release. Windows desktop installers are
 Authenticode-signed and verified during release. Maintainer release requirements
 are documented in [`desktop-release.md`](desktop-release.md).
 
+Early unsigned desktop builds are published from `desktop-unsigned-vX.Y.Z` tags.
+They include the in-app updater but are not OS code-signed; macOS and Windows
+users may need to bypass Gatekeeper or SmartScreen on first launch. Use the same
+updater signing keys for unsigned and signed releases so updates keep working.
+
 ## Build From Source
 
 Building from source requires Rust 1.88 or newer.
