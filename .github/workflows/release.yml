@@ -464,9 +464,11 @@ jobs:
           fi
 
   # Publish the dist-generated npm package so users can run
-  # `npm install -g security-harness-kit`. Requires an npm access token with
-  # publish rights on the package, exposed as NPM_TOKEN. `id-token: write` is
-  # needed for `npm publish --provenance`.
+  # `npm install -g security-harness-kit`. Authenticates with npm trusted
+  # publishing (GitHub Actions OIDC via `id-token: write`), which also signs
+  # provenance — no npm token secret is used. The trusted publisher must be
+  # configured on npmjs.com for the package: repository
+  # Kazuki-tam/security-harness-kit, workflow release.yml.
   publish-npm-package:
     name: publish npm package
     runs-on: ubuntu-22.04
@@ -494,22 +496,19 @@ jobs:
       - name: set up Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version: 22
+          # Node 24 bundles npm >= 11.5.1, required for OIDC trusted publishing.
+          node-version: 24
           registry-url: "https://registry.npmjs.org"
 
       - name: publish to npm
         shell: bash
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           EXPECTED_NPM_PACKAGE: security-harness-kit
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           shopt -s nullglob
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "::error::NPM_TOKEN secret is required to publish the npm package" >&2
-            exit 1
-          fi
+          npm --version
           # The leading ./ is required: without it npm treats the path as a
           # GitHub "user/repo" shortcut and fails with a git error (exit 128).
           pkgs=(./dist-global/*-npm-package.tar.gz)
