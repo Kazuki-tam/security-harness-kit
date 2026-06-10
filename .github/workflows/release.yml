@@ -286,6 +286,7 @@ jobs:
             target/distrib/*-installer.sh
             target/distrib/*-installer.ps1
             target/distrib/*.rb
+            target/distrib/*-npm-package.tar.gz
             target/distrib/source.tar.gz
             target/distrib/source.tar.gz.sha256
             target/distrib/sha256.sum
@@ -461,3 +462,80 @@ jobs:
             gh auth setup-git
             git push
           fi
+
+  # Publish the dist-generated npm package so users can run
+  # `npm install -g security-harness-kit`. Requires an npm access token with
+  # publish rights on the package, exposed as NPM_TOKEN. `id-token: write` is
+  # needed for `npm publish --provenance`.
+  publish-npm-package:
+    name: publish npm package
+    runs-on: ubuntu-22.04
+    needs: [prepare, publish]
+    if: >-
+      ${{
+        !cancelled() &&
+        startsWith(github.ref, 'refs/tags/') &&
+        needs.prepare.result == 'success' &&
+        needs.publish.result == 'success' &&
+        needs.prepare.outputs.build_cli == 'true' &&
+        needs.prepare.outputs.make_latest == 'true'
+      }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: download global artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: dist-global
+          path: dist-global
+          merge-multiple: true
+
+      - name: set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+
+      - name: publish to npm
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          EXPECTED_NPM_PACKAGE: security-harness-kit
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN secret is required to publish the npm package" >&2
+            exit 1
+          fi
+          pkgs=(dist-global/*-npm-package.tar.gz)
+          if [ "${#pkgs[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one *-npm-package.tar.gz in dist-global artifact, found ${#pkgs[@]}" >&2
+            exit 1
+          fi
+
+          pkg="${pkgs[0]}"
+          pkg_json_path="$(tar -tzf "${pkg}" | awk -F/ 'NF == 2 && $2 == "package.json" && path == "" { path = $0 } END { print path }')"
+          if [ -z "${pkg_json_path}" ]; then
+            echo "::error::npm package tarball does not contain a top-level package.json" >&2
+            exit 1
+          fi
+          pkg_json="$(tar -xzOf "${pkg}" "${pkg_json_path}")"
+          name="$(jq -r .name <<<"${pkg_json}")"
+          version="$(jq -r .version <<<"${pkg_json}")"
+          if [ "${name}" != "${EXPECTED_NPM_PACKAGE}" ]; then
+            echo "::error::expected npm package ${EXPECTED_NPM_PACKAGE}, found ${name}" >&2
+            exit 1
+          fi
+          if [ "${version}" != "${RELEASE_VERSION}" ]; then
+            echo "::error::expected npm package version ${RELEASE_VERSION}, found ${version}" >&2
+            exit 1
+          fi
+
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} already published; nothing to do"
+            exit 0
+          fi
+          npm publish "${pkg}" --provenance --access public

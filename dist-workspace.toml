@@ -12,16 +12,21 @@ packages = ["shk-cli"]
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
-installers = ["shell", "powershell", "homebrew"]
+installers = ["shell", "powershell", "homebrew", "npm"]
+# npm package name. `shk` and `shk-cli` are already taken on the npm registry,
+# so the CLI is published unscoped as `security-harness-kit`; the installed
+# command is still `shk`. Users install with `npm install -g security-harness-kit`.
+npm-package = "security-harness-kit"
 # GitHub repo (owner/name) to publish the generated Homebrew formula to.
 # Users install with `brew install Kazuki-tam/homebrew-tap/shk`
 # (Homebrew drops the `homebrew-` prefix, so the short form is
 # `brew install kazuki-tam/tap/shk`).
 tap = "Kazuki-tam/homebrew-tap"
-# Publish jobs to run in CI. The Homebrew push itself is wired into the
-# hand-maintained release workflow (publish-homebrew-formula job); this entry
-# keeps the dist config canonical for `dist plan` / `dist generate`.
-publish-jobs = ["homebrew"]
+# Publish jobs to run in CI. The Homebrew push and npm publish themselves are
+# wired into the hand-maintained release workflow (publish-homebrew-formula and
+# publish-npm-package jobs); this entry keeps the dist config canonical for
+# `dist plan` / `dist generate`.
+publish-jobs = ["homebrew", "npm"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # Path that installers should place binaries in

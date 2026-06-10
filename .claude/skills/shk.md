@@ -200,7 +200,7 @@ shk ci init github                      # write .github/workflows/shk.yml
 shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
-shk ci init github --shk-version v0.3.16
+shk ci init github --shk-version v0.3.17
 shk ci init github --output .github/workflows/security.yml --force
 ```
 
