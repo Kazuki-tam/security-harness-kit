@@ -491,7 +491,8 @@ jobs:
           path: dist-global
           merge-multiple: true
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+      - name: set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 22
           registry-url: "https://registry.npmjs.org"
@@ -500,20 +501,41 @@ jobs:
         shell: bash
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          EXPECTED_NPM_PACKAGE: security-harness-kit
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           shopt -s nullglob
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN secret is required to publish the npm package" >&2
+            exit 1
+          fi
           pkgs=(dist-global/*-npm-package.tar.gz)
           if [ "${#pkgs[@]}" -ne 1 ]; then
             echo "::error::expected exactly one *-npm-package.tar.gz in dist-global artifact, found ${#pkgs[@]}" >&2
             exit 1
           fi
-          pkg_json_path="$(tar -tzf "${pkgs[0]}" | grep -E '^[^/]+/package\.json$' | head -1)"
-          pkg_json="$(tar -xzOf "${pkgs[0]}" "${pkg_json_path}")"
+
+          pkg="${pkgs[0]}"
+          pkg_json_path="$(tar -tzf "${pkg}" | awk -F/ 'NF == 2 && $2 == "package.json" && path == "" { path = $0 } END { print path }')"
+          if [ -z "${pkg_json_path}" ]; then
+            echo "::error::npm package tarball does not contain a top-level package.json" >&2
+            exit 1
+          fi
+          pkg_json="$(tar -xzOf "${pkg}" "${pkg_json_path}")"
           name="$(jq -r .name <<<"${pkg_json}")"
           version="$(jq -r .version <<<"${pkg_json}")"
+          if [ "${name}" != "${EXPECTED_NPM_PACKAGE}" ]; then
+            echo "::error::expected npm package ${EXPECTED_NPM_PACKAGE}, found ${name}" >&2
+            exit 1
+          fi
+          if [ "${version}" != "${RELEASE_VERSION}" ]; then
+            echo "::error::expected npm package version ${RELEASE_VERSION}, found ${version}" >&2
+            exit 1
+          fi
+
           if npm view "${name}@${version}" version >/dev/null 2>&1; then
             echo "${name}@${version} already published; nothing to do"
             exit 0
           fi
-          npm publish "${pkgs[0]}" --provenance --access public
+          npm publish "${pkg}" --provenance --access public
