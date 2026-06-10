@@ -190,7 +190,7 @@ shk hooks install-ai --log-blocked
 shk ci init github
 shk ci init github --dry-run
 shk ci init github --mode audit
-shk ci init github --shk-version v0.3.16
+shk ci init github --shk-version v0.3.17
 
 shk skills install
 shk skills install --tool claude-code --global
