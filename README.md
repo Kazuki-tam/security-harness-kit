@@ -57,7 +57,13 @@ macOS and Linux users can also install via Homebrew:
 brew install Kazuki-tam/homebrew-tap/shk
 ```
 
-See [Installation](docs/installation.md) for release archives, checksums, Homebrew, source builds, and [uninstall](docs/installation.md#uninstall) instructions.
+Node.js users can install via npm (the installed command is still `shk`):
+
+```bash
+npm install -g security-harness-kit
+```
+
+See [Installation](docs/installation.md) for release archives, checksums, Homebrew, npm, source builds, and [uninstall](docs/installation.md#uninstall) instructions.
 
 For CI or security-sensitive environments, prefer a pinned release archive with checksum and GitHub artifact attestation verification over installing from `latest`. See [Verified Archive Install](docs/installation.md#verified-archive-install).
 
