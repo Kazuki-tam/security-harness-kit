@@ -36,6 +36,12 @@ With `shk`, you can:
 
 ## Installation
 
+Node.js users can install via npm (the installed command is still `shk`):
+
+```bash
+npm install -g security-harness-kit
+```
+
 macOS and Linux releases can be installed with the bundled installer:
 
 ```bash
@@ -57,13 +63,7 @@ macOS and Linux users can also install via Homebrew:
 brew install Kazuki-tam/homebrew-tap/shk
 ```
 
-Node.js users can install via npm (the installed command is still `shk`):
-
-```bash
-npm install -g security-harness-kit
-```
-
-See [Installation](docs/installation.md) for release archives, checksums, Homebrew, npm, source builds, and [uninstall](docs/installation.md#uninstall) instructions.
+See [Installation](docs/installation.md) for npm, release archives, checksums, Homebrew, source builds, and [uninstall](docs/installation.md#uninstall) instructions.
 
 For CI or security-sensitive environments, prefer a pinned release archive with checksum and GitHub artifact attestation verification over installing from `latest`. See [Verified Archive Install](docs/installation.md#verified-archive-install).
 
@@ -190,7 +190,7 @@ shk hooks install-ai --log-blocked
 shk ci init github
 shk ci init github --dry-run
 shk ci init github --mode audit
-shk ci init github --shk-version v0.3.17
+shk ci init github --shk-version v0.3.18
 
 shk skills install
 shk skills install --tool claude-code --global
