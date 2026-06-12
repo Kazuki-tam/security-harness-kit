@@ -8,3 +8,7 @@ Standalone English name-like text: Ada Lovelace
 Book attribution by Ada Lovelace
 Unlabeled passport-like number: 123456789
 Unlabeled street-like text: 123 Main Street
+CI structural key: - name: build
+Another CI structural key: - name: checkout repository
+Retina asset path: icons/128x128@2x.png
+Another asset path: assets/logo@3x.jpeg
