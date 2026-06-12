@@ -149,6 +149,7 @@ export const en: Messages = {
       "claude-code": "Claude Code",
       cursor: "Cursor",
       codex: "Codex",
+      antigravity: "Antigravity",
     },
     actionCategories: {
       secret_file_access: "Sensitive file read",
@@ -314,6 +315,7 @@ export const en: Messages = {
         "claude-code": "Claude Code",
         cursor: "Cursor",
         codex: "Codex",
+        antigravity: "Antigravity",
       },
       installClaudeDeny: "Apply deny",
       installCodexSandbox: "Apply sandbox",

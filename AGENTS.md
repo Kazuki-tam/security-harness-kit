@@ -108,12 +108,14 @@ cargo run -p shk-cli --bin shk -- hooks install
 
 # AI tool hooks (writes project or `~/.cursor` / etc. with `--global`; use `--dry-run` first)
 cargo run -p shk-cli --bin shk -- hooks install-ai --dry-run
+cargo run -p shk-cli --bin shk -- hooks install-ai --tool antigravity --dry-run # .agents/hooks.json (global: ~/.gemini/config/hooks.json)
 
-# Skills (deploy embedded Claude Code / Codex / Cursor skill to project)
+# Skills (deploy embedded Claude Code / Codex / Cursor / Antigravity skill to project)
 cargo run -p shk-cli --bin shk -- skills install --dry-run
-cargo run -p shk-cli --bin shk -- skills install                   # .claude/skills/ + .agents/skills/
+cargo run -p shk-cli --bin shk -- skills install                   # .claude/skills/ + .agents/skills/ (Antigravity reads .agents/skills/ too)
 cargo run -p shk-cli --bin shk -- skills install --tool claude-code
 cargo run -p shk-cli --bin shk -- skills install --tool codex
+cargo run -p shk-cli --bin shk -- skills install --tool antigravity --global # ~/.gemini/config/skills/
 cargo run -p shk-cli --bin shk -- hooks install-ai --tool cursor --audit
 cargo run -p shk-cli --bin shk -- hooks install-ai --tool cursor --log-blocked
 cargo run -p shk-cli --bin shk -- hooks install-ai --tool claude-code --global --dry-run

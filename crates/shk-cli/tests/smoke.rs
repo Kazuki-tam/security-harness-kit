@@ -2017,6 +2017,179 @@ fn hook_mode_cursor_blocks_with_exit_2() {
 }
 
 #[test]
+fn hooks_install_ai_antigravity_writes_managed_pre_hook() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::create_dir_all(dir.path().join(".agents")).unwrap();
+    std::fs::write(
+        dir.path().join(".agents/hooks.json"),
+        r#"{"my-linter":{"PostToolUse":[{"matcher":"run_command","hooks":[{"command":"./lint.sh"}]}]}}"#,
+    )
+    .unwrap();
+
+    for _ in 0..2 {
+        let out = Command::new(shk_bin())
+            .args(["hooks", "install-ai", "--tool", "antigravity"])
+            .current_dir(dir.path())
+            .output()
+            .expect("install-ai antigravity");
+        assert!(
+            out.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let hooks: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".agents/hooks.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        hooks.get("my-linter").is_some(),
+        "user hooks must be preserved: {hooks}"
+    );
+    let pre = hooks["shk-security"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(pre.len(), 1, "managed hook should not duplicate: {pre:?}");
+    assert_eq!(pre[0]["_shk_managed"], true);
+    assert!(
+        pre[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("shk scan --hook-mode antigravity"),
+        "{pre:?}"
+    );
+}
+
+#[test]
+fn hooks_install_ai_antigravity_apply_deny_prints_permission_guidance() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+
+    let out = Command::new(shk_bin())
+        .args([
+            "hooks",
+            "install-ai",
+            "--tool",
+            "antigravity",
+            "--apply-deny",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("install-ai antigravity apply-deny");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Recommended Deny list entries"), "{stdout}");
+    assert!(stdout.contains("command(rm -rf)"), "{stdout}");
+    assert!(stdout.contains("read_file(**/.env)"), "{stdout}");
+
+    let hooks =
+        std::fs::read_to_string(dir.path().join(".agents/hooks.json")).expect("hooks written");
+    assert!(
+        !hooks.contains("command(rm -rf)"),
+        "deny guidance must not be written into hooks.json: {hooks}"
+    );
+}
+
+#[test]
+fn hook_mode_antigravity_blocks_dangerous_command_line() {
+    use std::io::Write;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "toolCall": {
+            "name": "run_command",
+            "args": { "CommandLine": "rm -rf /", "Cwd": "/workspace" }
+        },
+        "stepIdx": 1
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "antigravity"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("hook scan");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(stdout["decision"], "deny", "{stdout}");
+    assert!(
+        stdout["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("destructive_filesystem"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn hook_mode_antigravity_allows_clean_command() {
+    use std::io::Write;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "toolCall": {
+            "name": "run_command",
+            "args": { "CommandLine": "echo ok", "Cwd": "/workspace" }
+        },
+        "stepIdx": 1
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "antigravity"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("hook scan");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(stdout["decision"], "allow", "{stdout}");
+}
+
+#[test]
+fn skills_install_antigravity_project_uses_agents_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(shk_bin())
+        .args(["skills", "install", "--tool", "antigravity"])
+        .current_dir(dir.path())
+        .output()
+        .expect("skills install antigravity");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.path().join(".agents/skills/shk/SKILL.md").is_file());
+}
+
+#[test]
 fn hook_mode_codex_permission_request_uses_decision_shape() {
     use std::io::Write;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");

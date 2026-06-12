@@ -53,6 +53,10 @@ const AI_TOOL_CHOICES: &[PromptChoice<AiTool>] = &[
         value: AiTool::Cursor,
         label: "Cursor",
     },
+    PromptChoice {
+        value: AiTool::Antigravity,
+        label: "Antigravity",
+    },
 ];
 
 const PROFILE_CHOICES: &[PromptChoice<Profile>] = &[
@@ -214,11 +218,21 @@ fn resolve_tools(prompt: &mut Prompt, args: &InitArgs) -> Result<Vec<AiTool>> {
         return Ok(dedupe_tools(&args.tools));
     }
     if args.yes {
-        return Ok(vec![AiTool::ClaudeCode, AiTool::Codex, AiTool::Cursor]);
+        return Ok(vec![
+            AiTool::ClaudeCode,
+            AiTool::Codex,
+            AiTool::Cursor,
+            AiTool::Antigravity,
+        ]);
     }
     prompt.tools(
         "AI tools",
-        &[AiTool::ClaudeCode, AiTool::Codex, AiTool::Cursor],
+        &[
+            AiTool::ClaudeCode,
+            AiTool::Codex,
+            AiTool::Cursor,
+            AiTool::Antigravity,
+        ],
     )
 }
 
@@ -230,13 +244,18 @@ fn skill_tool_for(tools: &[AiTool]) -> SkillTool {
     let has_claude = tools.contains(&AiTool::ClaudeCode);
     let has_agent_skill = tools
         .iter()
-        .any(|tool| matches!(tool, AiTool::Codex | AiTool::Cursor));
+        .any(|tool| matches!(tool, AiTool::Codex | AiTool::Cursor | AiTool::Antigravity));
 
     match (has_claude, has_agent_skill) {
         (true, true) => SkillTool::All,
         (true, false) => SkillTool::ClaudeCode,
         (false, true) => {
-            if tools.contains(&AiTool::Cursor) && !tools.contains(&AiTool::Codex) {
+            let has_codex_or_cursor = tools
+                .iter()
+                .any(|tool| matches!(tool, AiTool::Codex | AiTool::Cursor));
+            if tools.contains(&AiTool::Antigravity) && !has_codex_or_cursor {
+                SkillTool::Antigravity
+            } else if tools.contains(&AiTool::Cursor) && !tools.contains(&AiTool::Codex) {
                 SkillTool::Cursor
             } else {
                 SkillTool::Codex

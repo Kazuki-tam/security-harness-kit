@@ -146,6 +146,7 @@ export const ja: Messages = {
       "claude-code": "Claude Code",
       cursor: "Cursor",
       codex: "Codex",
+      antigravity: "Antigravity",
     },
     actionCategories: {
       secret_file_access: "機密ファイルの読み取り",
@@ -310,6 +311,7 @@ export const ja: Messages = {
         "claude-code": "Claude Code",
         cursor: "Cursor",
         codex: "Codex",
+        antigravity: "Antigravity",
       },
       installClaudeDeny: "deny を適用",
       installCodexSandbox: "sandbox を適用",

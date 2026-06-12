@@ -37,6 +37,7 @@ pub struct ConfigureAiOptions {
     pub scan_hooks_claude_code: bool,
     pub scan_hooks_cursor: bool,
     pub scan_hooks_codex: bool,
+    pub scan_hooks_antigravity: bool,
     pub claude_deny: bool,
     pub claude_sandbox: bool,
     pub codex_sandbox: bool,
@@ -47,6 +48,7 @@ fn scan_hooks_enabled_for(opts: &ConfigureAiOptions, tool: AiTool) -> bool {
         AiTool::ClaudeCode => opts.scan_hooks_claude_code,
         AiTool::Cursor => opts.scan_hooks_cursor,
         AiTool::Codex => opts.scan_hooks_codex,
+        AiTool::Antigravity => opts.scan_hooks_antigravity,
     }
 }
 
@@ -59,15 +61,25 @@ fn ai_config_relative_path(tool: AiTool) -> &'static str {
         AiTool::ClaudeCode => ".claude/settings.json",
         AiTool::Cursor => ".cursor/hooks.json",
         AiTool::Codex => CONFIG_REL_PATH,
+        AiTool::Antigravity => ".agents/hooks.json",
     }
 }
 
-fn resolve_ai_config_path(tool: AiTool, cwd: &Path, global: bool) -> Result<PathBuf> {
-    let rel = ai_config_relative_path(tool);
+/// Home-relative config path for `--global` installs. Antigravity's
+/// user-level customization directory is `~/.gemini/config/`, not a
+/// dot-directory mirroring the project layout.
+fn ai_config_global_relative_path(tool: AiTool) -> &'static str {
+    match tool {
+        AiTool::Antigravity => ".gemini/config/hooks.json",
+        _ => ai_config_relative_path(tool),
+    }
+}
+
+pub(crate) fn resolve_ai_config_path(tool: AiTool, cwd: &Path, global: bool) -> Result<PathBuf> {
     Ok(if global {
-        home_or_error()?.join(rel)
+        home_or_error()?.join(ai_config_global_relative_path(tool))
     } else {
-        cwd.join(rel)
+        cwd.join(ai_config_relative_path(tool))
     })
 }
 
@@ -137,7 +149,12 @@ pub fn install_ai_with_summaries(
     let tools = if let Some(t) = maybe_tool {
         vec![t]
     } else {
-        vec![AiTool::ClaudeCode, AiTool::Codex, AiTool::Cursor]
+        vec![
+            AiTool::ClaudeCode,
+            AiTool::Codex,
+            AiTool::Cursor,
+            AiTool::Antigravity,
+        ]
     };
 
     println!(
@@ -168,7 +185,12 @@ pub fn configure_ai_with_summaries(cwd: &Path, opts: ConfigureAiOptions) -> Resu
         apply_sandbox: false,
     };
 
-    for tool in [AiTool::ClaudeCode, AiTool::Codex, AiTool::Cursor] {
+    for tool in [
+        AiTool::ClaudeCode,
+        AiTool::Codex,
+        AiTool::Cursor,
+        AiTool::Antigravity,
+    ] {
         let path = resolve_ai_config_path(tool, &cwd, opts.global)?;
         if scan_hooks_enabled_for(&opts, tool) {
             let summary = apply_tool(&path, tool, install_opts, !opts.global)?;
@@ -242,6 +264,13 @@ fn apply_tool(
             opts.apply_sandbox,
             !opts.global,
         ),
+        AiTool::Antigravity => apply_antigravity(
+            path,
+            opts.audit,
+            opts.log_blocked,
+            opts.dry_run,
+            opts.apply_deny,
+        ),
     }
 }
 
@@ -250,6 +279,7 @@ fn remove_scan_hooks_for_tool(path: &Path, tool: AiTool, dry_run: bool) -> Resul
         AiTool::ClaudeCode => remove_claude_scan_hooks(path, dry_run),
         AiTool::Cursor => remove_cursor_scan_hooks(path, dry_run),
         AiTool::Codex => remove_codex_scan_hooks(path, dry_run),
+        AiTool::Antigravity => remove_antigravity_scan_hooks(path, dry_run),
     }
 }
 
@@ -690,6 +720,97 @@ fn remove_cursor_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
     })
 }
 
+/// Top-level key shk owns inside Antigravity's `hooks.json`
+/// (the file maps hook names to event configurations).
+const ANTIGRAVITY_HOOK_NAME: &str = "shk-security";
+/// Tools whose proposed calls carry scannable content or run commands.
+const ANTIGRAVITY_PRE_MATCHER: &str = "run_command|view_file|write_to_file|replace_file_content|multi_replace_file_content|read_url_content|search_web";
+
+fn apply_antigravity(
+    path: &Path,
+    audit: bool,
+    log_blocked: bool,
+    dry_run: bool,
+    apply_deny: bool,
+) -> Result<String> {
+    let pre = hook_scan_cli_command(AiTool::Antigravity, audit, log_blocked, false);
+
+    let mut root = if path.is_file() {
+        load_json(path)?
+    } else {
+        json!({})
+    };
+    let root_obj = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("Antigravity hooks.json root must be a JSON object"))?;
+
+    // Antigravity PostToolUse payloads carry no tool output (only stepIdx/error),
+    // so only a blocking PreToolUse hook is installed.
+    root_obj.insert(
+        ANTIGRAVITY_HOOK_NAME.to_string(),
+        json!({
+            "PreToolUse": [{
+                "_shk_managed": true,
+                "matcher": ANTIGRAVITY_PRE_MATCHER,
+                "hooks": [{
+                    "type": "command",
+                    "command": pre,
+                    "timeout": HOOK_CLI_TIMEOUT_SEC
+                }]
+            }]
+        }),
+    );
+
+    save_json_formatted(path, &root, dry_run)?;
+
+    if apply_deny {
+        // Antigravity's Allow/Ask/Deny permission lists live in its settings UI
+        // and internal per-project config — there is no documented project file
+        // shk could merge into, so print copy-paste guidance instead.
+        print_antigravity_deny_guidance();
+    }
+
+    Ok(if dry_run {
+        format!(
+            "dry-run: would write managed `{ANTIGRAVITY_HOOK_NAME}` PreToolUse hook (audit={audit}, logBlocked={log_blocked})"
+        )
+    } else {
+        format!(
+            "wrote managed `{ANTIGRAVITY_HOOK_NAME}` PreToolUse hook (audit={audit}, logBlocked={log_blocked})"
+        )
+    })
+}
+
+fn print_antigravity_deny_guidance() {
+    println!(
+        "Antigravity permissions cannot be written programmatically (managed in the Antigravity settings UI)."
+    );
+    println!(
+        "Recommended Deny list entries — add them via Antigravity settings > Permissions (Deny > Ask > Allow precedence):"
+    );
+    for entry in shk_integrations::antigravity_recommended_deny_entries() {
+        println!("  {entry}");
+    }
+}
+
+#[allow(dead_code)]
+fn remove_antigravity_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
+    if !path.is_file() {
+        return Ok("no Antigravity hooks file".to_string());
+    }
+    let mut root = load_json(path)?;
+    let removed = root
+        .as_object_mut()
+        .map(|obj| usize::from(obj.remove(ANTIGRAVITY_HOOK_NAME).is_some()))
+        .unwrap_or(0);
+    save_json_formatted(path, &root, dry_run)?;
+    Ok(if dry_run {
+        format!("dry-run: would remove {removed} managed Antigravity hook entry(s)")
+    } else {
+        format!("removed {removed} managed Antigravity hook entry(s)")
+    })
+}
+
 fn codex_root_arg(use_git_root_path: bool) -> Option<&'static str> {
     use_git_root_path.then_some(CODEX_GIT_ROOT_ARG)
 }
@@ -1122,10 +1243,67 @@ mod tests {
 
     #[test]
     fn hook_scan_cli_command_includes_log_blocked_for_all_tools() {
-        for tool in [AiTool::ClaudeCode, AiTool::Codex, AiTool::Cursor] {
+        for tool in [
+            AiTool::ClaudeCode,
+            AiTool::Codex,
+            AiTool::Cursor,
+            AiTool::Antigravity,
+        ] {
             let cmd = hook_scan_cli_command(tool, false, true, false);
             assert!(cmd.contains("--log-blocked"), "{cmd}");
         }
+    }
+
+    #[test]
+    fn antigravity_managed_hook_is_replaced_on_rerun() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hooks.json");
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "my-linter-hook": {
+                    "PostToolUse": [{ "matcher": "run_command", "hooks": [{ "command": "./lint.sh" }] }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        apply_antigravity(&path, false, false, false, false).unwrap();
+        apply_antigravity(&path, true, false, false, false).unwrap();
+
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            root.get("my-linter-hook").is_some(),
+            "existing user hooks must be preserved: {root}"
+        );
+        let pre = root[ANTIGRAVITY_HOOK_NAME]["PreToolUse"]
+            .as_array()
+            .unwrap();
+        assert_eq!(pre.len(), 1, "{pre:?}");
+        assert_eq!(pre[0]["_shk_managed"], true);
+        assert_eq!(pre[0]["matcher"], ANTIGRAVITY_PRE_MATCHER);
+        let cmd = pre[0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(
+            cmd.contains("shk scan --hook-mode antigravity --audit"),
+            "{cmd}"
+        );
+        assert!(
+            root[ANTIGRAVITY_HOOK_NAME].get("PostToolUse").is_none(),
+            "Antigravity post payloads carry no tool output, so no post hook: {root}"
+        );
+    }
+
+    #[test]
+    fn antigravity_remove_deletes_only_managed_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hooks.json");
+        apply_antigravity(&path, false, false, false, false).unwrap();
+
+        let summary = remove_antigravity_scan_hooks(&path, false).unwrap();
+        assert!(summary.contains("removed 1"), "{summary}");
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(root.get(ANTIGRAVITY_HOOK_NAME).is_none(), "{root}");
     }
 
     #[test]
@@ -1409,6 +1587,7 @@ sandbox_mode = "danger-full-access"
                 scan_hooks_claude_code: false,
                 scan_hooks_cursor: false,
                 scan_hooks_codex: false,
+                scan_hooks_antigravity: false,
                 claude_deny: false,
                 claude_sandbox: true,
                 codex_sandbox: false,

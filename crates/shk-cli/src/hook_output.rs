@@ -93,8 +93,19 @@ fn mask_replacement_message(finding_count: usize, content: &str) -> String {
     )
 }
 
+/// Antigravity PreToolUse contract: `{"decision":"allow"|"deny","reason":...}`.
+/// PostToolUse hooks must return an empty JSON object.
+fn antigravity_decision(decision: &str, reason: Option<&str>) -> String {
+    let mut out = json!({ "decision": decision });
+    if let Some(reason) = reason {
+        out["reason"] = json!(reason);
+    }
+    out.to_string()
+}
+
 pub fn deny_stdout_for_event(tool: AiTool, event: HookEvent, reason: &str) -> String {
     match tool {
+        AiTool::Antigravity => antigravity_decision("deny", Some(reason)),
         AiTool::Cursor => json!({
             "permission":"deny",
             "user_message": reason,
@@ -108,6 +119,8 @@ pub fn deny_stdout_for_event(tool: AiTool, event: HookEvent, reason: &str) -> St
 
 pub fn allow_stdout_for_event(tool: AiTool, event: HookEvent, info: Option<&str>) -> String {
     match tool {
+        AiTool::Antigravity if event == HookEvent::PostToolUse => "{}".to_string(),
+        AiTool::Antigravity => antigravity_decision("allow", info),
         AiTool::Cursor => {
             let msg = info.unwrap_or("shk: OK");
             json!({
@@ -139,6 +152,10 @@ pub fn mask_stdout(
     };
 
     match tool {
+        // Antigravity has no schema field for replacing tool payloads; post
+        // hooks must return `{}` and pre hooks report via decision/reason only.
+        AiTool::Antigravity if post => "{}".to_string(),
+        AiTool::Antigravity => antigravity_decision("allow", Some(&msg)),
         AiTool::Cursor => {
             let mut out = json!({
                 "permission": "allow",
@@ -379,6 +396,49 @@ mod tests {
             value["hookSpecificOutput"]["additionalContext"],
             "shk mask: sanitized sensitive values from tool output"
         );
+    }
+
+    #[test]
+    fn antigravity_deny_uses_decision_reason_shape() {
+        let output = deny_stdout_for_event(AiTool::Antigravity, HookEvent::PreToolUse, "blocked");
+        let value = parse_json(&output);
+
+        assert_eq!(value["decision"], "deny");
+        assert_eq!(value["reason"], "blocked");
+        assert!(value.get("hookSpecificOutput").is_none());
+    }
+
+    #[test]
+    fn antigravity_pre_allow_uses_decision_shape() {
+        let output = allow_stdout_for_event(AiTool::Antigravity, HookEvent::PreToolUse, None);
+        let value = parse_json(&output);
+
+        assert_eq!(value["decision"], "allow");
+        assert!(value.get("reason").is_none());
+    }
+
+    #[test]
+    fn antigravity_post_allow_is_empty_object() {
+        let output =
+            allow_stdout_for_event(AiTool::Antigravity, HookEvent::PostToolUse, Some("hint"));
+
+        assert_eq!(parse_json(&output), json!({}));
+    }
+
+    #[test]
+    fn antigravity_post_mask_is_empty_object() {
+        let output = mask_stdout(AiTool::Antigravity, true, 2, Some("[REDACTED]"));
+
+        assert_eq!(parse_json(&output), json!({}));
+    }
+
+    #[test]
+    fn antigravity_pre_mask_reports_via_decision_allow() {
+        let output = mask_stdout(AiTool::Antigravity, false, 2, Some("[REDACTED]"));
+        let value = parse_json(&output);
+
+        assert_eq!(value["decision"], "allow");
+        assert_eq!(value["reason"], "shk mask: redacted 2 finding(s)");
     }
 
     #[test]
