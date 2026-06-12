@@ -93,6 +93,7 @@ fn pii_detection_fixtures_cover_expected_rules() {
         "pii.ja.bank_account",
         "pii.ja.health_insurance",
         "pii.ja.name",
+        "pii.ja.address",
     ] {
         assert!(
             ids.contains(expected),

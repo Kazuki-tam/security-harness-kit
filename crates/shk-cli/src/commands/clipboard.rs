@@ -178,7 +178,79 @@ fn read_clipboard_text() -> Result<String> {
     }
 }
 
+/// Hidden `shk clipboard hold` entry point: reads text from stdin and keeps
+/// the clipboard contents alive. On X11/Wayland, arboard only retains the
+/// clipboard while the owning process runs, so this blocks (detached from the
+/// caller) until another application takes clipboard ownership.
+pub fn hold() -> Result<()> {
+    use std::io::Read as _;
+    let mut text = String::new();
+    std::io::stdin()
+        .read_to_string(&mut text)
+        .context("read clipboard holder input")?;
+    let result = hold_clipboard_text(&text);
+    text.zeroize();
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn hold_clipboard_text(text: &str) -> Result<()> {
+    use arboard::SetExtLinux;
+    let mut clipboard = open_clipboard()?;
+    clipboard
+        .set()
+        .wait()
+        .text(text)
+        .map_err(|err| CliExit::message(2, format!("unable to write clipboard text: {err}")))?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn hold_clipboard_text(text: &str) -> Result<()> {
+    set_clipboard_text_direct(text)
+}
+
+#[cfg(target_os = "linux")]
 fn write_clipboard_text(text: &str) -> Result<()> {
+    // Without a holder process the X11/Wayland clipboard goes empty as soon
+    // as this CLI exits (unless a clipboard manager is running). Spawn a
+    // detached `shk clipboard hold` that owns the contents until another
+    // application replaces them.
+    let spawned = spawn_clipboard_holder(text);
+    if spawned.is_err() {
+        // Better a process-lifetime write than failing outright.
+        return set_clipboard_text_direct(text);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_clipboard_holder(text: &str) -> Result<()> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    let exe = std::env::current_exe().context("locate shk binary for clipboard holder")?;
+    let mut child = Command::new(exe)
+        .args(["clipboard", "hold"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("spawn clipboard holder process")?;
+    child
+        .stdin
+        .take()
+        .context("clipboard holder stdin unavailable")?
+        .write_all(text.as_bytes())
+        .context("send text to clipboard holder")?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn write_clipboard_text(text: &str) -> Result<()> {
+    set_clipboard_text_direct(text)
+}
+
+fn set_clipboard_text_direct(text: &str) -> Result<()> {
     let mut clipboard = open_clipboard()?;
     clipboard
         .set_text(text)

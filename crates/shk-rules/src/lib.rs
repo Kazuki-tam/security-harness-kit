@@ -401,7 +401,9 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "pii.credit_card",
             severity: Severity::Medium,
             kind: Kind::Pii,
-            re: Regex::new(r"\b(?:\d[ -]?){13,19}\b")
+            // Ends on a digit so the matched text (and thus allowlist value
+            // hashes) never carries a trailing separator.
+            re: Regex::new(r"\b\d(?:[ -]?\d){12,18}\b")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Credit card number pattern detected",
             confidence: 0.9,
@@ -604,11 +606,79 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             confidence: 0.45,
             validator: None,
         },
+        CompiledRule {
+            id: "pii.ja.address",
+            severity: Severity::Low,
+            kind: Kind::Pii,
+            // Requires prefecture + municipality + block number together, so
+            // prose mentions of places (東京都内で開催, 愛知県名古屋市は人口…)
+            // do not match without a 1-2-3 / 2丁目3番5号 style block suffix.
+            // The block-number tail consumes the whole chain so masking does
+            // not leave a partial address behind, and hyphens must be
+            // followed by digits to avoid matching dangling "2023-" tokens.
+            // `ja_address_valid` rejects prose where a particle or 第
+            // directly precedes the number (…区で3番目, …区の条例第5号) and
+            // date-like tails (…区では2024-04-01).
+            re: Regex::new(
+                r"(?:北海道|東京都|京都府|大阪府|[\p{Han}]{2,3}県)[\p{Han}\p{Hiragana}\p{Katakana}]{1,8}[市区町村郡][\p{Han}\p{Hiragana}\p{Katakana}ー]{0,20}(?:[0-9０-９一二三四五六七八九十]{1,4}(?:丁目|番地|番|号)|[0-9０-９]{1,4}(?:[-‐－−][0-9０-９]{1,4}){1,3}){1,4}",
+            )
+            .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Japanese address pattern detected",
+            confidence: 0.55,
+            validator: Some(ja_address_valid),
+        },
     ]
 });
 
+/// Reject `pii.ja.address` regex matches that are prose rather than
+/// addresses: a particle (で/は/に/…) or counter prefix (第) directly before
+/// the block number, or a date-like `YYYY-…` numeric tail.
+fn ja_address_valid(candidate: &str) -> bool {
+    let chars: Vec<char> = candidate.chars().collect();
+    let is_numeral = |c: &char| {
+        c.is_ascii_digit() || ('０'..='９').contains(c) || "一二三四五六七八九十".contains(*c)
+    };
+    let Some(first_digit) = chars.iter().position(is_numeral) else {
+        return false;
+    };
+    if first_digit == 0 {
+        return false;
+    }
+    if matches!(
+        chars[first_digit - 1],
+        'で' | 'は' | 'に' | 'を' | 'と' | 'や' | 'も' | 'へ' | '第'
+    ) {
+        return false;
+    }
+    // A 4-digit group followed by a hyphen is a year (2024-04-01), not a
+    // 丁目-番-号 chain, which starts with 1-2 digit groups.
+    let ascii_run = chars[first_digit..]
+        .iter()
+        .take_while(|c| c.is_ascii_digit())
+        .count();
+    if ascii_run == 4
+        && matches!(
+            chars.get(first_digit + ascii_run),
+            Some('-' | '‐' | '－' | '−')
+        )
+    {
+        return false;
+    }
+    true
+}
+
+/// `char::to_digit` only handles ASCII; the card regex's Unicode `\d` also
+/// matches full-width digits (４１１１…), so normalize those before validating.
+fn decimal_digit_value(c: char) -> Option<u32> {
+    match c {
+        '0'..='9' => c.to_digit(10),
+        '０'..='９' => Some(c as u32 - '０' as u32),
+        _ => None,
+    }
+}
+
 fn luhn_valid(candidate: &str) -> bool {
-    let digits: Vec<u32> = candidate.chars().filter_map(|c| c.to_digit(10)).collect();
+    let digits: Vec<u32> = candidate.chars().filter_map(decimal_digit_value).collect();
     if !(13..=19).contains(&digits.len()) {
         return false;
     }
@@ -2053,6 +2123,29 @@ jobs:
     }
 
     #[test]
+    fn detects_full_width_digit_credit_card() {
+        let cfg = RuleEngineConfig::default();
+        // not real credential or personal data: synthetic detector fixture value only
+        let m = scan_content(
+            "カード番号: ４１１１１１１１１１１１１１１１",
+            "demo.txt",
+            &cfg,
+        );
+        assert!(m.iter().any(|x| x.rule_id == "pii.credit_card"), "{m:?}");
+    }
+
+    #[test]
+    fn credit_card_match_excludes_trailing_separator() {
+        let re = Regex::new(r"\b\d(?:[ -]?\d){12,18}\b").unwrap();
+        // not real credential or personal data: synthetic detector fixture value only
+        let text = "card: 4111 1111 1111 1111 ok";
+        let m = re.find(text).expect("card pattern should match");
+        assert_eq!(m.as_str(), "4111 1111 1111 1111");
+        assert!(!m.as_str().ends_with(' '));
+        assert!(!m.as_str().ends_with('-'));
+    }
+
+    #[test]
     fn applies_language_specific_pii_rules() {
         let cfg = RuleEngineConfig {
             pii_languages: vec!["en".into()],
@@ -2204,5 +2297,60 @@ jobs:
         let cfg = RuleEngineConfig::default();
         let m = scan_content("山田太郎", "demo.txt", &cfg);
         assert!(!m.iter().any(|x| x.rule_id == "pii.ja.name"), "{m:?}");
+    }
+
+    #[test]
+    fn detects_structured_japanese_address() {
+        let cfg = RuleEngineConfig::default();
+        // not real personal data: synthetic detector fixture values only
+        for (text, expected) in [
+            (
+                "住所: 東京都千代田区丸の内1-1-1",
+                "東京都千代田区丸の内1-1-1",
+            ),
+            (
+                "神奈川県横浜市西区みなとみらい2丁目3番5号",
+                "神奈川県横浜市西区みなとみらい2丁目3番5号",
+            ),
+            ("大阪府大阪市北区梅田３−１", "大阪府大阪市北区梅田３−１"),
+            (
+                "北海道河東郡音更町木野西通12番地",
+                "北海道河東郡音更町木野西通12番地",
+            ),
+            ("鹿児島県鹿児島市山下町11-1", "鹿児島県鹿児島市山下町11-1"),
+            (
+                "京都府京都市中京区寺町通1丁目2-3",
+                "京都府京都市中京区寺町通1丁目2-3",
+            ),
+        ] {
+            let m = scan_content(text, "demo.txt", &cfg);
+            let hit = m.iter().find(|x| x.rule_id == "pii.ja.address");
+            assert!(hit.is_some(), "should match {text}: {m:?}");
+            // The whole address must be consumed so masking does not leave a
+            // partial block number (e.g. "1-1") behind.
+            assert_eq!(hit.unwrap().matched_text, expected, "for {text}");
+        }
+    }
+
+    #[test]
+    fn japanese_address_requires_block_number() {
+        let cfg = RuleEngineConfig::default();
+        for text in [
+            "東京都内で開催されたイベント",
+            "東京都渋谷区で開催されたカンファレンス",
+            "愛知県名古屋市は人口230万人の都市です",
+            "千葉県内には54の市町村があります",
+            "京都府に出張します",
+            "東京都新宿区では2023-年度の予算を審議",
+            "東京都新宿区では2024-04-01に審議された",
+            "東京都品川区で3番目に大きい施設",
+            "東京都港区の条例第5号が施行された",
+        ] {
+            let m = scan_content(text, "demo.txt", &cfg);
+            assert!(
+                !m.iter().any(|x| x.rule_id == "pii.ja.address"),
+                "should not match {text}: {m:?}"
+            );
+        }
     }
 }

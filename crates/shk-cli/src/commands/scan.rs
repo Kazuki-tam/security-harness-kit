@@ -185,7 +185,11 @@ fn run_hook_mode(
     path_arg: PathBuf,
 ) -> Result<()> {
     let mut stdin_raw = Vec::new();
-    std::io::stdin().read_to_end(&mut stdin_raw)?;
+    let mut stdin = std::io::stdin();
+    if std::io::IsTerminal::is_terminal(&stdin) {
+        bail!("`scan --hook-mode` requires hook JSON payload on stdin");
+    }
+    stdin.read_to_end(&mut stdin_raw)?;
     let stdin_str = String::from_utf8_lossy(&stdin_raw);
     let stdin_trim = stdin_str.trim();
     if stdin_trim.is_empty() {

@@ -51,7 +51,10 @@ fn codex_message_allow(info: Option<&str>) -> String {
     }
 }
 
-fn codex_post_tool_block(reason: &str, additional_context: Option<&str>) -> String {
+/// Claude-compatible PostToolUse "block" payload (`decision`/`reason` +
+/// `hookSpecificOutput.additionalContext`). Used by both Codex and Claude
+/// Code; `permissionDecision` is PreToolUse-only and must not appear here.
+fn post_tool_block(reason: &str, additional_context: Option<&str>) -> String {
     let mut out = json!({
         "decision": "block",
         "reason": reason,
@@ -78,7 +81,7 @@ fn codex_deny_stdout(event: HookEvent, reason: &str) -> String {
         })
         .to_string(),
         HookEvent::PreToolUse => codex_pre_tool_output("deny", reason),
-        HookEvent::PostToolUse => codex_post_tool_block(reason, None),
+        HookEvent::PostToolUse => post_tool_block(reason, None),
         HookEvent::UserPromptSubmit => json!({ "decision": "block", "reason": reason }).to_string(),
     }
 }
@@ -149,7 +152,7 @@ pub fn mask_stdout(
         }
         AiTool::Codex if post => {
             if let Some(content) = masked_content {
-                codex_post_tool_block(
+                post_tool_block(
                     &mask_replacement_message(finding_count, content),
                     Some("shk mask: sanitized sensitive values from tool output"),
                 )
@@ -161,6 +164,19 @@ pub fn mask_stdout(
             codex_message_allow(None)
         }
         AiTool::Codex => codex_message_allow(Some(&msg)),
+        // PostToolUse has no `permissionDecision`; the only schema-valid way
+        // to replace tool output with the masked version is the
+        // `decision: "block"` shape with the redacted content in `reason`.
+        AiTool::ClaudeCode if post => {
+            if let Some(content) = masked_content {
+                post_tool_block(
+                    &mask_replacement_message(finding_count, content),
+                    Some("shk mask: sanitized sensitive values from tool output"),
+                )
+            } else {
+                json!({ "systemMessage": msg }).to_string()
+            }
+        }
         AiTool::ClaudeCode => {
             let mut out = permission_output(event, "allow", &msg);
             if let Some(content) = masked_content {
@@ -301,18 +317,41 @@ mod tests {
     }
 
     #[test]
-    fn claude_post_mask_output_uses_post_tool_event_and_replacement_message() {
+    fn claude_post_mask_output_uses_block_shape_with_replacement_message() {
         let output = mask_stdout(AiTool::ClaudeCode, true, 1, Some("safe output"));
         let value = parse_json(&output);
 
+        // PostToolUse must not use the PreToolUse-only permissionDecision
+        // field; the masked replacement travels via decision:block + reason.
+        assert_eq!(value["decision"], "block");
         assert_eq!(value["hookSpecificOutput"]["hookEventName"], "PostToolUse");
-        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "allow");
         assert!(
-            value["hookSpecificOutput"]["output"]
+            value["hookSpecificOutput"]
+                .get("permissionDecision")
+                .is_none()
+        );
+        assert!(
+            value["reason"]
                 .as_str()
-                .expect("string output")
+                .expect("string reason")
                 .contains("safe output")
         );
+        assert_eq!(
+            value["hookSpecificOutput"]["additionalContext"],
+            "shk mask: sanitized sensitive values from tool output"
+        );
+    }
+
+    #[test]
+    fn claude_post_mask_without_findings_uses_system_message() {
+        let output = mask_stdout(AiTool::ClaudeCode, true, 0, None);
+        let value = parse_json(&output);
+
+        assert_eq!(
+            value["systemMessage"],
+            "shk mask: no sensitive content detected"
+        );
+        assert!(value.get("hookSpecificOutput").is_none());
     }
 
     #[test]

@@ -213,6 +213,9 @@ pub enum ClipboardCmd {
         #[arg(long, value_enum, value_name = "SEVERITY")]
         fail_on: Option<SeverityArg>,
     },
+    /// Internal: hold clipboard contents alive on Linux (reads text from stdin)
+    #[command(hide = true)]
+    Hold,
     /// Mask clipboard text and print the redacted result
     Mask {
         #[arg(long)]

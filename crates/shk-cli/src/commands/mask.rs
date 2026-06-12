@@ -90,16 +90,18 @@ pub fn run(inv: MaskInvocation) -> Result<()> {
                 Err(e) => Err(e.into()),
             }
         } else {
+            // stdout stays a clean passthrough; warn on stderr so secrets in
+            // non-UTF-8 input (Shift-JIS, UTF-16, …) do not flow out silently.
+            eprintln!(
+                "shk mask: warning: binary or non-UTF-8 input passed through unchanged (not scanned)"
+            );
             match io::stdout().write_all(&bytes) {
                 Ok(()) => Ok(()),
                 Err(e) => Err(e.into()),
             }
         };
         let output_result: Result<()> = if let Some(outp) = inv.output {
-            match fs::write(&outp, &bytes) {
-                Ok(()) => Ok(()),
-                Err(e) => Err(e.into()),
-            }
+            crate::fs_atomic::write_atomic(&outp, &bytes)
         } else {
             Ok(())
         };
@@ -123,7 +125,7 @@ pub fn run(inv: MaskInvocation) -> Result<()> {
         print!("{masked}");
     }
     if let Some(outp) = inv.output {
-        fs::write(&outp, masked)?;
+        crate::fs_atomic::write_atomic(&outp, masked.as_bytes())?;
     }
     Ok(())
 }
@@ -255,5 +257,101 @@ fn binary_passthrough_finding(file: &str) -> Finding {
         confidence: 1.0,
         context_before: vec![],
         context_after: vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn office_format_matches_extensions_case_insensitively() {
+        assert!(matches!(
+            office_format(Path::new("a.docx")),
+            Some(OfficeFormat::Docx)
+        ));
+        assert!(matches!(
+            office_format(Path::new("a.XLSX")),
+            Some(OfficeFormat::Xlsx)
+        ));
+        assert!(matches!(
+            office_format(Path::new("dir/a.PpTx")),
+            Some(OfficeFormat::Pptx)
+        ));
+        assert!(office_format(Path::new("a.txt")).is_none());
+        assert!(office_format(Path::new("docx")).is_none());
+    }
+
+    #[test]
+    fn redaction_override_replaces_policy_value_only_when_set() {
+        let mut policy = Policy::default();
+        let original = policy.mask.redaction.clone();
+
+        apply_redaction_override(&mut policy, None);
+        assert_eq!(policy.mask.redaction, original);
+
+        apply_redaction_override(&mut policy, Some(RedactionMode::Full));
+        assert_eq!(policy.mask.redaction, "full");
+        apply_redaction_override(&mut policy, Some(RedactionMode::Match));
+        assert_eq!(policy.mask.redaction, "match");
+        apply_redaction_override(&mut policy, Some(RedactionMode::Partial));
+        assert_eq!(policy.mask.redaction, "partial");
+    }
+
+    #[test]
+    fn min_severity_override_replaces_policy_value_only_when_set() {
+        let mut policy = Policy::default();
+        let original = policy.mask.min_severity.clone();
+
+        apply_min_severity_override(&mut policy, None);
+        assert_eq!(policy.mask.min_severity, original);
+
+        apply_min_severity_override(&mut policy, Some(SeverityArg::High));
+        assert_eq!(policy.mask.min_severity, SeverityArg::High.as_str());
+    }
+
+    #[test]
+    fn binary_detection_finds_nul_within_window() {
+        assert!(is_binary_or_non_utf8(b"ab\0cd", 8192));
+        assert!(is_binary_or_non_utf8(&[0xff, 0xfe, b'a'], 8192));
+        assert!(!is_binary_or_non_utf8("plain text\n".as_bytes(), 8192));
+        assert!(!is_binary_or_non_utf8(b"", 8192));
+    }
+
+    #[test]
+    fn binary_detection_ignores_nul_beyond_window() {
+        // NUL is valid UTF-8, so a NUL past the detection window does not
+        // flip the input to binary; it is masked as text.
+        let bytes = b"abcd\0";
+        assert!(!is_binary_or_non_utf8(bytes, 4));
+        assert!(is_binary_or_non_utf8(bytes, 5));
+    }
+
+    #[test]
+    fn binary_passthrough_finding_reports_unscanned_input() {
+        let f = binary_passthrough_finding("data.bin");
+        assert_eq!(f.rule_id, "mask.binary_passthrough");
+        assert_eq!(f.file, "data.bin");
+        assert_eq!(f.severity, "info");
+        assert_eq!(f.kind, "ignore");
+        assert_eq!(f.redacted_value, "[REDACTED]");
+    }
+
+    #[test]
+    fn read_mask_input_reads_file_and_labels_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompt.txt");
+        fs::write(&path, "hello").unwrap();
+
+        let (label, bytes) = read_mask_input(Some(&path)).unwrap();
+        assert_eq!(label, path.to_string_lossy());
+        assert_eq!(bytes, b"hello");
+    }
+
+    #[test]
+    fn resolve_repo_root_falls_back_to_cwd_outside_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolved = resolve_repo_root(dir.path());
+        assert_eq!(resolved, std::fs::canonicalize(dir.path()).unwrap());
     }
 }

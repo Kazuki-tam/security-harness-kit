@@ -47,28 +47,61 @@ pub fn is_inside_git_work_tree(cwd: &Path) -> bool {
 }
 
 /// Staged file paths relative to repo root, normalized with `/`.
+///
+/// Gitlink entries (submodule bumps, mode `160000`) are excluded: their staged
+/// object is a commit in the submodule's object database, so `git show :<path>`
+/// in the superproject would fail with "bad object".
 pub fn staged_files(repo_root: &Path) -> Result<Vec<PathBuf>> {
     let out = Command::new("git")
-        .args([
-            "diff",
-            "--cached",
-            "--name-only",
-            "--diff-filter=ACMR",
-            "-z",
-        ])
+        .args(["diff", "--cached", "--raw", "--diff-filter=ACMR", "-z"])
         .current_dir(repo_root)
         .output()
         .context("failed to run git")?;
     if !out.status.success() {
         bail!("git diff --cached failed");
     }
+    parse_staged_raw_entries(&out.stdout)
+}
+
+const GITLINK_MODE: &str = "160000";
+
+/// Parses `git diff --raw -z` output: records of
+/// `:<old-mode> <new-mode> <old-oid> <new-oid> <status>\0<path>\0`, where
+/// rename/copy records carry two path tokens (source, then destination).
+fn parse_staged_raw_entries(stdout: &[u8]) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
-    for chunk in out.stdout.split(|&b| b == 0) {
-        if chunk.is_empty() {
+    let mut tokens = stdout.split(|&b| b == 0);
+    while let Some(meta) = tokens.next() {
+        if meta.is_empty() {
             continue;
         }
-        let s = std::str::from_utf8(chunk).context("git path utf-8")?;
-        paths.push(PathBuf::from(s));
+        let meta = std::str::from_utf8(meta).context("git diff meta utf-8")?;
+        let mut fields = meta.trim_start_matches(':').split(' ');
+        let _old_mode = fields.next();
+        let new_mode = fields.next().unwrap_or("");
+        let _old_oid = fields.next();
+        let _new_oid = fields.next();
+        let status = fields.next().unwrap_or("");
+
+        let path_tokens = if status.starts_with('R') || status.starts_with('C') {
+            2
+        } else {
+            1
+        };
+        let mut dest = None;
+        for _ in 0..path_tokens {
+            dest = tokens.next();
+        }
+        let Some(dest) = dest else {
+            break;
+        };
+        if new_mode == GITLINK_MODE {
+            continue;
+        }
+        let s = std::str::from_utf8(dest).context("git path utf-8")?;
+        if !s.is_empty() {
+            paths.push(PathBuf::from(s));
+        }
     }
     Ok(paths)
 }
@@ -196,25 +229,30 @@ fn resolve_history_blobs(
         .spawn()
         .context("failed to run git cat-file --batch-check")?;
 
-    {
-        let stdin = child.stdin.as_mut().context("git cat-file stdin")?;
-        for (commit, path) in &candidates {
-            writeln!(
-                stdin,
-                "{}:{}",
-                commit,
-                path.to_string_lossy().replace('\\', "/")
-            )
-            .context("write git cat-file query")?;
-        }
-    }
+    // Feed queries from a separate thread while draining stdout on this one.
+    // Writing everything before reading would deadlock once the queries and
+    // responses both exceed the OS pipe buffer (large histories).
+    let mut stdin = child.stdin.take().context("git cat-file stdin")?;
+    let queries: String = candidates
+        .iter()
+        .map(|(commit, path)| format!("{}:{}\n", commit, path.to_string_lossy().replace('\\', "/")))
+        .collect();
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        stdin.write_all(queries.as_bytes())?;
+        // Drop stdin to close the pipe so git can finish.
+        Ok(())
+    });
 
     let out = child
         .wait_with_output()
         .context("wait for git cat-file --batch-check")?;
+    let write_result = writer
+        .join()
+        .map_err(|_| anyhow::anyhow!("git cat-file writer thread panicked"))?;
     if !out.status.success() {
         bail!("git cat-file --batch-check failed");
     }
+    write_result.context("write git cat-file query")?;
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let mut seen_oids = HashSet::new();
@@ -347,6 +385,38 @@ mod tests {
         assert_eq!(
             candidates,
             vec![(commit.to_string(), PathBuf::from("kept.txt"))]
+        );
+    }
+
+    #[test]
+    fn parse_staged_raw_entries_skips_gitlinks() {
+        let raw = concat!(
+            ":100644 100644 1111111 2222222 M\0src/app.rs\0",
+            ":160000 160000 3333333 4444444 M\0vendor/submodule\0",
+            ":000000 160000 0000000 5555555 A\0vendor/new-submodule\0",
+            ":000000 100644 0000000 6666666 A\0new.txt\0",
+        );
+
+        let paths = parse_staged_raw_entries(raw.as_bytes()).unwrap();
+
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("src/app.rs"), PathBuf::from("new.txt")]
+        );
+    }
+
+    #[test]
+    fn parse_staged_raw_entries_uses_rename_destination() {
+        let raw = concat!(
+            ":100644 100644 1111111 1111111 R100\0old/name.txt\0new/name.txt\0",
+            ":100644 100644 2222222 2222222 C75\0base.txt\0copy.txt\0",
+        );
+
+        let paths = parse_staged_raw_entries(raw.as_bytes()).unwrap();
+
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("new/name.txt"), PathBuf::from("copy.txt")]
         );
     }
 

@@ -249,7 +249,14 @@ fn is_pdf_path(path: &str) -> bool {
 }
 
 fn extract_pdf_text_entry(bytes: &[u8]) -> Result<Vec<DocumentTextEntry>> {
-    let mut text = pdf_extract::extract_text_from_mem(bytes).context("extract PDF text")?;
+    // pdf-extract is known to panic on malformed PDFs; catch the unwind so a
+    // single corrupt file degrades to a skipped finding instead of aborting
+    // the whole (rayon-parallel) scan.
+    let extracted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pdf_extract::extract_text_from_mem(bytes)
+    }))
+    .map_err(|_| anyhow::anyhow!("PDF text extraction panicked (corrupt or unsupported PDF)"))?;
+    let mut text = extracted.context("extract PDF text")?;
     if text.trim().is_empty() {
         text.zeroize();
         return Ok(Vec::new());

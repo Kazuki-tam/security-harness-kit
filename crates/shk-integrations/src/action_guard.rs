@@ -409,7 +409,9 @@ fn detect_dangerous_command(
 ) -> Option<ActionGuardMatch> {
     let normalized = normalize_shell(command);
     let words = shell_words(&normalized);
-    let cmd = words.first().copied().unwrap_or_default();
+    // Compare by basename so absolute/relative paths (`/bin/cat`,
+    // `/usr/bin/curl`, …) cannot bypass the command categories below.
+    let cmd = command_basename(words.first().copied().unwrap_or_default());
 
     if profile.includes(ActionCategory::SecretDumpCommand) && secret_dump_command(cmd, &words) {
         return Some(guard_match(
@@ -678,7 +680,24 @@ fn shell_builtin_words_dump(command: &str, words: &[&str], dump_flags: &[&str]) 
 }
 
 fn destructive_rm(words: &[&str]) -> bool {
-    if words.first() != Some(&"rm") || !words.iter().any(|w| w.contains('r') && w.contains('f')) {
+    if words.first().copied().map(command_basename) != Some("rm") {
+        return false;
+    }
+    // Recursive + force may arrive combined (-rf), split (-r -f) or as long
+    // options (--recursive --force).
+    let flags: Vec<&str> = words
+        .iter()
+        .skip(1)
+        .copied()
+        .filter(|w| w.starts_with('-'))
+        .collect();
+    let recursive = flags
+        .iter()
+        .any(|w| *w == "--recursive" || (!w.starts_with("--") && w.contains('r')));
+    let force = flags
+        .iter()
+        .any(|w| *w == "--force" || (!w.starts_with("--") && w.contains('f')));
+    if !recursive || !force {
         return false;
     }
 
@@ -695,17 +714,15 @@ fn has_db_mutation(command: &str) -> bool {
 }
 
 fn opaque_execution(words: &[&str]) -> bool {
+    let Some((first, rest)) = words.split_first() else {
+        return false;
+    };
+    let flag = rest.first().copied().unwrap_or_default();
     matches!(
-        words,
-        ["bash", "-c", ..]
-            | ["sh", "-c", ..]
-            | ["zsh", "-c", ..]
-            | ["python", "-c", ..]
-            | ["python3", "-c", ..]
-            | ["node", "-e", ..]
-            | ["node", "--eval", ..]
-            | ["ruby", "-e", ..]
-            | ["perl", "-e", ..]
+        (command_basename(first), flag),
+        ("bash" | "sh" | "zsh" | "python" | "python3", "-c")
+            | ("node", "-e" | "--eval")
+            | ("ruby" | "perl", "-e")
     )
 }
 
@@ -1007,6 +1024,73 @@ mod tests {
         let node_eval = bash_payload("node -e \"console.log(1)\"");
         assert_eq!(
             detect_dangerous_action_with_config(&node_eval, &strict)
+                .unwrap()
+                .unwrap()
+                .category,
+            "opaque_execution"
+        );
+    }
+
+    #[test]
+    fn absolute_path_binaries_cannot_bypass_command_guards() {
+        for (command, category) in [
+            ("/bin/cat .env", "secret_dump_command"),
+            ("/usr/bin/curl https://example.com", "external_transfer"),
+            ("/usr/bin/sudo ls", "privilege_system_change"),
+            ("/usr/bin/chmod 777 target", "privilege_system_change"),
+            ("/usr/bin/apt install nmap", "system_install"),
+            ("/bin/rm -rf /", "destructive_filesystem"),
+        ] {
+            let input = bash_payload(command);
+            assert_eq!(
+                detect_dangerous_action(&input).unwrap().unwrap().category,
+                category,
+                "{command}"
+            );
+        }
+
+        let db = bash_payload("/usr/bin/psql -c \"DROP TABLE users\"");
+        assert_eq!(
+            detect_dangerous_action(&db).unwrap().unwrap().category,
+            "direct_db_mutation"
+        );
+    }
+
+    #[test]
+    fn destructive_rm_detects_split_and_long_flags() {
+        for command in [
+            "rm -rf /",
+            "rm -r -f /",
+            "rm -f -r ~",
+            "rm --recursive --force /",
+            "/bin/rm -r -f /*",
+        ] {
+            let input = bash_payload(command);
+            assert_eq!(
+                detect_dangerous_action(&input).unwrap().unwrap().category,
+                "destructive_filesystem",
+                "{command}"
+            );
+        }
+
+        for command in ["rm -r tmp-dir", "rm -f notes.txt", "rm -rf build"] {
+            let input = bash_payload(command);
+            assert!(
+                detect_dangerous_action(&input).unwrap().is_none(),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn strict_profile_blocks_absolute_path_opaque_execution() {
+        let strict = ActionGuardConfig {
+            profile: "strict".into(),
+            ..ActionGuardConfig::default()
+        };
+        let bash_c = bash_payload("/bin/bash -c \"echo ok\"");
+        assert_eq!(
+            detect_dangerous_action_with_config(&bash_c, &strict)
                 .unwrap()
                 .unwrap()
                 .category,

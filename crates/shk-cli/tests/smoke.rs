@@ -810,10 +810,13 @@ fn mask_hook_mode_claude_post_returns_replacement_output() {
         String::from_utf8_lossy(&out.stderr)
     );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    // PostToolUse schema: masked replacement is delivered via the
+    // decision:block shape (permissionDecision is PreToolUse-only).
+    assert_eq!(v["decision"], "block");
     let hook_output = &v["hookSpecificOutput"];
     assert_eq!(hook_output["hookEventName"], "PostToolUse");
-    assert_eq!(hook_output["permissionDecision"], "allow");
-    let replacement = hook_output["output"].as_str().unwrap_or_default();
+    assert!(hook_output.get("permissionDecision").is_none(), "{v}");
+    let replacement = v["reason"].as_str().unwrap_or_default();
     assert!(replacement.contains("[REDACTED]"), "{replacement}");
     assert!(replacement.contains("tool output:"), "{replacement}");
     assert!(!replacement.contains(secret), "{replacement}");
@@ -1198,6 +1201,76 @@ fn scan_staged_reads_index_not_worktree() {
 }
 
 #[test]
+fn scan_staged_skips_submodule_gitlink_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    let path = dir.path().join("secret.txt");
+    std::fs::write(
+        &path,
+        // not real credential: synthetic detector fixture value only
+        "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
+    )
+    .unwrap();
+    Command::new("git")
+        .args(["add", "secret.txt"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git add");
+    // Stage a gitlink (submodule bump) without needing a real submodule. The
+    // referenced commit does not exist in this repository's object database,
+    // mirroring how submodule commits are unreadable from the superproject.
+    let stage_gitlink = Command::new("git")
+        .args([
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,vendor/submodule",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("git update-index");
+    assert!(
+        stage_gitlink.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&stage_gitlink.stdout),
+        String::from_utf8_lossy(&stage_gitlink.stderr)
+    );
+
+    let out = Command::new(shk_bin())
+        .args(["scan", "--staged", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan staged");
+
+    // Exit 1 (finding) — not exit 2 from a failed `git show :vendor/submodule`.
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["rule_id"] == "secret.openai_api_key"),
+        "{v}"
+    );
+    assert!(
+        !v["scanned_paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p.as_str().unwrap_or_default() == "vendor/submodule"),
+        "{v}"
+    );
+}
+
+#[test]
 fn scan_git_history_detects_removed_secret() {
     let dir = tempfile::tempdir().unwrap();
     init_git_repo(dir.path());
@@ -1246,6 +1319,40 @@ fn scan_git_history_detects_removed_secret() {
             .any(|p| p.as_str().unwrap_or_default().ends_with(":secret.txt")),
         "{v}"
     );
+}
+
+#[test]
+fn scan_git_history_handles_large_candidate_sets_without_deadlock() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    // Enough candidate paths that the cat-file --batch-check queries and
+    // responses both exceed a typical 64KB OS pipe buffer; a sequential
+    // write-all-then-read implementation deadlocks here.
+    for i in 0..2500 {
+        std::fs::write(
+            dir.path().join(format!("file-{i:04}.txt")),
+            format!("plain content {i}\n"),
+        )
+        .unwrap();
+    }
+    git_commit_all(dir.path(), "add many files");
+
+    let out = Command::new(shk_bin())
+        .args(["scan", "--git-history", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan git history");
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["scanned_paths"].as_array().unwrap().len(), 2500, "{v}");
 }
 
 #[test]

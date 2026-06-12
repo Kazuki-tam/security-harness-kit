@@ -42,6 +42,14 @@ pub fn install_pre_commit(repo_root: &Path) -> Result<()> {
             ensure_executable(&hook_path)?;
             return Ok(());
         }
+        if !is_sh_compatible_hook(&existing) {
+            bail!(
+                "{} has a non-POSIX-shell shebang ({}); refusing to append shell code. \
+                 Invoke `shk scan --staged` from your existing hook instead.",
+                hook_path.display(),
+                existing.lines().next().unwrap_or("").trim()
+            );
+        }
         let mut f = fs::OpenOptions::new().append(true).open(&hook_path)?;
         if !existing.ends_with('\n') {
             writeln!(f)?;
@@ -56,6 +64,23 @@ pub fn install_pre_commit(repo_root: &Path) -> Result<()> {
     fs::write(&hook_path, script)?;
     ensure_executable(&hook_path)?;
     Ok(())
+}
+
+/// A hook without a shebang is executed via sh by git, so it is sh-compatible.
+/// A hook with a shebang is only safe to append POSIX shell code to when the
+/// interpreter is a Bourne-style shell (sh/bash/dash/ksh/zsh).
+fn is_sh_compatible_hook(existing: &str) -> bool {
+    let first = existing.lines().next().unwrap_or("").trim();
+    let Some(shebang) = first.strip_prefix("#!") else {
+        return true;
+    };
+    let mut parts = shebang.split_whitespace();
+    let interpreter = match parts.next() {
+        Some(cmd) if cmd.ends_with("/env") => parts.next().unwrap_or(""),
+        Some(cmd) => cmd.rsplit('/').next().unwrap_or(cmd),
+        None => return true,
+    };
+    matches!(interpreter, "sh" | "bash" | "dash" | "ksh" | "zsh")
 }
 
 fn replace_managed_block(existing: &str, block: &str) -> String {
@@ -94,6 +119,21 @@ fn ensure_executable(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sh_compatible_hook_detection() {
+        assert!(is_sh_compatible_hook("#!/bin/sh\necho hi\n"));
+        assert!(is_sh_compatible_hook("#!/bin/bash\necho hi\n"));
+        assert!(is_sh_compatible_hook("#!/usr/bin/env bash\necho hi\n"));
+        assert!(is_sh_compatible_hook("#!/usr/bin/env zsh\n"));
+        assert!(is_sh_compatible_hook("echo no shebang\n"));
+        assert!(is_sh_compatible_hook(""));
+
+        assert!(!is_sh_compatible_hook("#!/usr/bin/env python3\nprint(1)\n"));
+        assert!(!is_sh_compatible_hook("#!/usr/bin/python\n"));
+        assert!(!is_sh_compatible_hook("#!/usr/bin/env node\n"));
+        assert!(!is_sh_compatible_hook("#!/usr/bin/perl -w\n"));
+    }
 
     #[test]
     fn managed_block_is_upgraded_in_place() {

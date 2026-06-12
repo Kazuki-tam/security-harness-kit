@@ -515,12 +515,24 @@ fn scan_bytes_with_display(
         bytes.zeroize();
         return Ok(ScanChunk::skipped(f));
     }
+    let non_utf8 = std::str::from_utf8(&bytes).is_err();
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
     let mut result = scan_text_prepared(scan_rel, &text, prepared, include_context);
     if scan_rel != display_rel
         && let Ok(chunk) = &mut result
     {
         rewrite_finding_paths(&mut chunk.findings, display_rel);
+    }
+    if non_utf8 && let Ok(chunk) = &mut result {
+        // Lossy decoding garbles legacy encodings (e.g. Shift-JIS), so
+        // pattern detection on this file may be incomplete. Surface that
+        // instead of silently reporting the file as clean.
+        chunk.findings.push(skipped_finding(
+            "scan.non_utf8_lossy",
+            display_rel.to_string(),
+            "File is not valid UTF-8; scanned with lossy decoding — detection may be incomplete"
+                .into(),
+        ));
     }
     text.zeroize();
     bytes.zeroize();
@@ -855,17 +867,35 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
         walk.follow_links(true);
     }
 
-    let entries: Vec<_> = walk.build().collect();
-    let scanned_files: Vec<PathBuf> = entries
-        .into_par_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_file())
-        .map(|e| e.into_path())
-        .filter(|full| {
-            let rel = rel_normalized(full, &policy_root);
-            filters.allows(&rel)
-        })
-        .collect();
+    let mut findings = expired;
+    let mut scanned_files: Vec<PathBuf> = Vec::new();
+    for entry in walk.build() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            // Surface walk errors (permission denied, broken links, …) as
+            // info findings instead of silently skipping whole subtrees.
+            Err(err) => {
+                findings.push(skipped_finding(
+                    "scan.walk_error",
+                    "<walk>".into(),
+                    format!("Skipped: directory walk error ({err})"),
+                ));
+                continue;
+            }
+        };
+        // DirEntry::file_type() does not follow symlinks unless the walker
+        // was built with follow_links(true), so symlinked files (which may
+        // point outside the repository) are excluded when
+        // follow_symlinks = false.
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+        let full = entry.into_path();
+        let rel = rel_normalized(&full, &policy_root);
+        if filters.allows(&rel) {
+            scanned_files.push(full);
+        }
+    }
 
     let chunk_results: Vec<Result<ScanChunk>> = scanned_files
         .par_iter()
@@ -875,7 +905,6 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
         })
         .collect();
 
-    let mut findings = expired;
     for chunk in chunk_results {
         let chunk = chunk?;
         findings.extend(chunk.findings);
@@ -1097,5 +1126,64 @@ mod tests {
             Err(err) => assert!(err.to_string().contains("scan target does not exist")),
             Ok(_) => panic!("missing target should fail"),
         }
+    }
+
+    fn default_scan_options() -> ScanOptions {
+        ScanOptions {
+            staged: false,
+            git_history: false,
+            git_history_ref: None,
+            git_history_since: None,
+            git_history_max_commits: None,
+            json: false,
+            fail_on_override: None,
+            use_pre_commit_threshold: false,
+            include_context: false,
+            include_binary: false,
+            follow_symlinks: false,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_skips_symlinked_files_when_follow_symlinks_disabled() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret_path = outside.path().join("secret.txt");
+        // not real credential: synthetic detector fixture value only
+        fs::write(
+            &secret_path,
+            "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
+        )
+        .unwrap();
+
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("clean.txt"), "nothing here\n").unwrap();
+        std::os::unix::fs::symlink(&secret_path, root.path().join("link.txt")).unwrap();
+
+        let res = scan_path(root.path(), default_scan_options()).unwrap();
+
+        assert!(
+            !res.scanned_paths.iter().any(|p| p.contains("link.txt")),
+            "symlinked file must not be read when follow_symlinks=false: {:?}",
+            res.scanned_paths
+        );
+        assert!(res.findings.is_empty(), "{:?}", res.findings);
+    }
+
+    #[test]
+    fn scan_reports_non_utf8_text_as_lossy() {
+        let root = tempfile::tempdir().unwrap();
+        // Shift-JIS encoded 「秘密」 — invalid UTF-8 but no NUL bytes.
+        fs::write(root.path().join("sjis.txt"), [0x94, 0xe9, 0x96, 0xa7, 0x0a]).unwrap();
+
+        let res = scan_path(root.path(), default_scan_options()).unwrap();
+
+        assert!(
+            res.findings
+                .iter()
+                .any(|f| f.rule_id == "scan.non_utf8_lossy"),
+            "{:?}",
+            res.findings
+        );
     }
 }

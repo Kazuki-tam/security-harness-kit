@@ -7,6 +7,7 @@ mod commands;
 pub mod desktop_api;
 mod doctor;
 mod exit;
+mod fs_atomic;
 mod hook_audit_log;
 mod hook_output;
 mod hooks;
@@ -154,6 +155,7 @@ pub fn run() -> Result<()> {
                 fail_on,
                 color_enabled: color,
             })?,
+            ClipboardCmd::Hold => commands::clipboard::hold()?,
             ClipboardCmd::Mask {
                 json,
                 write,
