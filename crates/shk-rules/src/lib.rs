@@ -604,6 +604,24 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             confidence: 0.45,
             validator: None,
         },
+        CompiledRule {
+            id: "pii.ja.address",
+            severity: Severity::Low,
+            kind: Kind::Pii,
+            // Requires prefecture + municipality + block number together, so
+            // prose mentions of places (東京都内で開催, 愛知県名古屋市は人口…)
+            // do not match without a 1-2-3 / 2丁目3番5号 style block suffix.
+            // The block-number tail consumes the whole chain so masking does
+            // not leave a partial address behind, and hyphens must be
+            // followed by digits to avoid matching dangling "2023-" tokens.
+            re: Regex::new(
+                r"(?:北海道|東京都|京都府|大阪府|[\p{Han}]{2,3}県)[\p{Han}\p{Hiragana}\p{Katakana}]{1,8}[市区町村郡][\p{Han}\p{Hiragana}\p{Katakana}ー]{0,20}(?:[0-9０-９一二三四五六七八九十]{1,4}(?:丁目|番地|番|号)|[0-9０-９]{1,4}(?:[-‐－−][0-9０-９]{1,4}){1,3}){1,4}",
+            )
+            .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Japanese address pattern detected",
+            confidence: 0.55,
+            validator: None,
+        },
     ]
 });
 
@@ -2204,5 +2222,57 @@ jobs:
         let cfg = RuleEngineConfig::default();
         let m = scan_content("山田太郎", "demo.txt", &cfg);
         assert!(!m.iter().any(|x| x.rule_id == "pii.ja.name"), "{m:?}");
+    }
+
+    #[test]
+    fn detects_structured_japanese_address() {
+        let cfg = RuleEngineConfig::default();
+        // not real personal data: synthetic detector fixture values only
+        for (text, expected) in [
+            (
+                "住所: 東京都千代田区丸の内1-1-1",
+                "東京都千代田区丸の内1-1-1",
+            ),
+            (
+                "神奈川県横浜市西区みなとみらい2丁目3番5号",
+                "神奈川県横浜市西区みなとみらい2丁目3番5号",
+            ),
+            ("大阪府大阪市北区梅田３−１", "大阪府大阪市北区梅田３−１"),
+            (
+                "北海道河東郡音更町木野西通12番地",
+                "北海道河東郡音更町木野西通12番地",
+            ),
+            ("鹿児島県鹿児島市山下町11-1", "鹿児島県鹿児島市山下町11-1"),
+            (
+                "京都府京都市中京区寺町通1丁目2-3",
+                "京都府京都市中京区寺町通1丁目2-3",
+            ),
+        ] {
+            let m = scan_content(text, "demo.txt", &cfg);
+            let hit = m.iter().find(|x| x.rule_id == "pii.ja.address");
+            assert!(hit.is_some(), "should match {text}: {m:?}");
+            // The whole address must be consumed so masking does not leave a
+            // partial block number (e.g. "1-1") behind.
+            assert_eq!(hit.unwrap().matched_text, expected, "for {text}");
+        }
+    }
+
+    #[test]
+    fn japanese_address_requires_block_number() {
+        let cfg = RuleEngineConfig::default();
+        for text in [
+            "東京都内で開催されたイベント",
+            "東京都渋谷区で開催されたカンファレンス",
+            "愛知県名古屋市は人口230万人の都市です",
+            "千葉県内には54の市町村があります",
+            "京都府に出張します",
+            "東京都新宿区では2023-年度の予算を審議",
+        ] {
+            let m = scan_content(text, "demo.txt", &cfg);
+            assert!(
+                !m.iter().any(|x| x.rule_id == "pii.ja.address"),
+                "should not match {text}: {m:?}"
+            );
+        }
     }
 }
