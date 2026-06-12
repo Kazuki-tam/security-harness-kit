@@ -195,7 +195,7 @@ shk hooks install-ai --tool antigravity
 shk ci init github
 shk ci init github --dry-run
 shk ci init github --mode audit
-shk ci init github --shk-version v0.3.19
+shk ci init github --shk-version v0.4.0
 
 shk skills install
 shk skills install --tool claude-code --global
