@@ -84,6 +84,13 @@ jobs:
           - os: windows-2022
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
+    # `dist build` compiles the whole workspace, so shk-desktop's build.rs runs
+    # in release profile and would panic on its updater-pubkey guard. The desktop
+    # artifact is discarded here (only shk-cli is packaged/published on this
+    # path); the real desktop release job sets TAURI_UPDATER_PUBKEY, so the guard
+    # still protects distributed desktop binaries.
+    env:
+      SHK_ALLOW_MISSING_UPDATER_PUBKEY: "1"
     steps:
       - uses: actions/checkout@v6
         with:
