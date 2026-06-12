@@ -401,7 +401,9 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "pii.credit_card",
             severity: Severity::Medium,
             kind: Kind::Pii,
-            re: Regex::new(r"\b(?:\d[ -]?){13,19}\b")
+            // Ends on a digit so the matched text (and thus allowlist value
+            // hashes) never carries a trailing separator.
+            re: Regex::new(r"\b\d(?:[ -]?\d){12,18}\b")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Credit card number pattern detected",
             confidence: 0.9,
@@ -665,8 +667,18 @@ fn ja_address_valid(candidate: &str) -> bool {
     true
 }
 
+/// `char::to_digit` only handles ASCII; the card regex's Unicode `\d` also
+/// matches full-width digits (４１１１…), so normalize those before validating.
+fn decimal_digit_value(c: char) -> Option<u32> {
+    match c {
+        '0'..='9' => c.to_digit(10),
+        '０'..='９' => Some(c as u32 - '０' as u32),
+        _ => None,
+    }
+}
+
 fn luhn_valid(candidate: &str) -> bool {
-    let digits: Vec<u32> = candidate.chars().filter_map(|c| c.to_digit(10)).collect();
+    let digits: Vec<u32> = candidate.chars().filter_map(decimal_digit_value).collect();
     if !(13..=19).contains(&digits.len()) {
         return false;
     }
@@ -2108,6 +2120,29 @@ jobs:
         // not real credential or personal data: synthetic detector fixture value only
         let m = scan_content("card: 4111 1111 1111 1112", "demo.txt", &cfg);
         assert!(!m.iter().any(|x| x.rule_id == "pii.credit_card"), "{m:?}");
+    }
+
+    #[test]
+    fn detects_full_width_digit_credit_card() {
+        let cfg = RuleEngineConfig::default();
+        // not real credential or personal data: synthetic detector fixture value only
+        let m = scan_content(
+            "カード番号: ４１１１１１１１１１１１１１１１",
+            "demo.txt",
+            &cfg,
+        );
+        assert!(m.iter().any(|x| x.rule_id == "pii.credit_card"), "{m:?}");
+    }
+
+    #[test]
+    fn credit_card_match_excludes_trailing_separator() {
+        let re = Regex::new(r"\b\d(?:[ -]?\d){12,18}\b").unwrap();
+        // not real credential or personal data: synthetic detector fixture value only
+        let text = "card: 4111 1111 1111 1111 ok";
+        let m = re.find(text).expect("card pattern should match");
+        assert_eq!(m.as_str(), "4111 1111 1111 1111");
+        assert!(!m.as_str().ends_with(' '));
+        assert!(!m.as_str().ends_with('-'));
     }
 
     #[test]

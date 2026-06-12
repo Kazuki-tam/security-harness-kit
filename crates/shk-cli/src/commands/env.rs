@@ -115,9 +115,12 @@ pub fn encrypt(cwd: &Path, args: EnvEncryptArgs) -> Result<()> {
         &project_root,
         &private_key_name,
     )?;
-    let plaintext = std::fs::read_to_string(&args.file)
+    let mut plaintext = std::fs::read_to_string(&args.file)
         .with_context(|| format!("read {}", args.file.display()))?;
-    let encrypted = encrypt_dotenv_body(&plaintext, &public_key_name, &key_material.public_key)?;
+    let encrypt_result =
+        encrypt_dotenv_body(&plaintext, &public_key_name, &key_material.public_key);
+    plaintext.zeroize();
+    let encrypted = encrypt_result?;
     key_material.private_key.zeroize();
     write_output(output, encrypted.as_bytes(), args.force || args.in_place)?;
     println!(
@@ -155,9 +158,11 @@ pub fn decrypt(cwd: &Path, args: EnvDecryptArgs) -> Result<()> {
                 "no stored {private_key_name}; run `shk env encrypt` or `shk env dotenvx import-keys .env.keys` first"
             )
         })?;
-    let plaintext = decrypt_dotenv_body(&body, &key_material.private_key)?;
+    let mut plaintext = decrypt_dotenv_body(&body, &key_material.private_key)?;
     key_material.private_key.zeroize();
-    write_output(output, &plaintext, args.force)?;
+    let write_result = write_output(output, &plaintext, args.force);
+    plaintext.zeroize();
+    write_result?;
     println!(
         "Decrypted {} to {} with {}",
         args.file.display(),

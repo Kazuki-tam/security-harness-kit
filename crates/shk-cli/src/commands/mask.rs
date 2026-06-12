@@ -101,10 +101,7 @@ pub fn run(inv: MaskInvocation) -> Result<()> {
             }
         };
         let output_result: Result<()> = if let Some(outp) = inv.output {
-            match fs::write(&outp, &bytes) {
-                Ok(()) => Ok(()),
-                Err(e) => Err(e.into()),
-            }
+            crate::fs_atomic::write_atomic(&outp, &bytes)
         } else {
             Ok(())
         };
@@ -128,7 +125,7 @@ pub fn run(inv: MaskInvocation) -> Result<()> {
         print!("{masked}");
     }
     if let Some(outp) = inv.output {
-        fs::write(&outp, masked)?;
+        crate::fs_atomic::write_atomic(&outp, masked.as_bytes())?;
     }
     Ok(())
 }

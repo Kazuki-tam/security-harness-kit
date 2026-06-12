@@ -261,7 +261,7 @@ fn save_json_formatted(path: &Path, v: &Value, dry_run: bool) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    fs::write(path, text).with_context(|| format!("write {}", path.display()))?;
+    crate::fs_atomic::write_atomic(path, text.as_bytes())?;
     Ok(())
 }
 
@@ -917,7 +917,7 @@ fn apply_codex(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    fs::write(path, &new_body).with_context(|| format!("write {}", path.display()))?;
+    crate::fs_atomic::write_atomic(path, new_body.as_bytes())?;
     Ok(format!(
         "wrote .codex/config.toml hooks block (applySandbox={apply_sandbox})"
     ))
@@ -932,7 +932,7 @@ fn remove_codex_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
     let re = codex_managed_block_regex();
     let updated = re.replace(&existing, "").to_string();
     if !dry_run && updated != existing {
-        fs::write(path, &updated).with_context(|| format!("write {}", path.display()))?;
+        crate::fs_atomic::write_atomic(path, updated.as_bytes())?;
     }
     Ok(if dry_run {
         "dry-run: would remove Codex managed hook block".to_string()
@@ -959,7 +959,7 @@ fn configure_codex_sandbox(path: &Path, dry_run: bool, enabled: bool) -> Result<
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
-        fs::write(path, &updated).with_context(|| format!("write {}", path.display()))?;
+        crate::fs_atomic::write_atomic(path, updated.as_bytes())?;
     }
     Ok(if dry_run {
         format!("dry-run: would configure Codex sandbox (enabled={enabled})")

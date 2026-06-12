@@ -44,6 +44,10 @@ jobs:
 
       - name: cargo build release
         run: cargo build --release
+        env:
+          # CI smoke build is not a distribution build; the desktop updater
+          # pubkey assertion only applies to real release workflows.
+          SHK_ALLOW_MISSING_UPDATER_PUBKEY: "1"
 
       - name: version (Unix)
         if: runner.os != 'Windows'
@@ -198,6 +202,10 @@ jobs:
 
       - name: tauri build (no bundle)
         run: pnpm tauri build --no-bundle
+        env:
+          # CI check build is not a distribution build; the updater pubkey
+          # assertion only applies to real release workflows.
+          SHK_ALLOW_MISSING_UPDATER_PUBKEY: "1"
 
   release-scripts:
     runs-on: ubuntu-latest

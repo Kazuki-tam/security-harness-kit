@@ -28,11 +28,21 @@ const PROTECTED_HOME_PATHS: &[&str] = &[
     ".ssh/authorized_keys",
     ".ssh/config",
     ".ssh/known_hosts",
+    ".ssh/id_dsa",
+    ".ssh/id_ecdsa",
+    ".ssh/id_ecdsa_sk",
+    ".ssh/id_ed25519",
+    ".ssh/id_ed25519_sk",
+    ".ssh/id_rsa",
     ".wgetrc",
     ".zprofile",
     ".zshenv",
     ".zshrc",
 ];
+
+// Whole credential directories: every file inside is treated as protected so
+// custom-named SSH keys (e.g. ~/.ssh/work_ed25519) cannot be clobbered either.
+const PROTECTED_HOME_DIR_PREFIXES: &[&str] = &[".ssh/", ".gnupg/", ".aws/", ".kube/"];
 
 pub fn require_project_policy(root: &Path, action: &str) -> Result<PathBuf> {
     let policy_path = root.join(POLICY_FILE);
@@ -52,13 +62,20 @@ pub fn ensure_writable_path_allowed(path: &Path) -> Result<()> {
         return Ok(());
     };
     let rel = rel.to_string_lossy().replace('\\', "/");
-    if PROTECTED_HOME_PATHS.iter().any(|p| *p == rel) {
+    if is_protected_home_rel(&rel) {
         bail!(
             "refusing to write protected home configuration file `{}`",
             path.display()
         );
     }
     Ok(())
+}
+
+fn is_protected_home_rel(rel: &str) -> bool {
+    PROTECTED_HOME_PATHS.contains(&rel)
+        || PROTECTED_HOME_DIR_PREFIXES
+            .iter()
+            .any(|prefix| rel.starts_with(prefix))
 }
 
 fn is_sensitive_env_file(path: &Path) -> bool {
@@ -170,6 +187,23 @@ mod tests {
     #[test]
     fn ensure_writable_path_allowed_accepts_regular_project_file() {
         ensure_writable_path_allowed(Path::new("src/main.rs")).expect("regular file is allowed");
+    }
+
+    #[test]
+    fn protected_home_rel_covers_ssh_private_keys_and_credential_dirs() {
+        for rel in [
+            ".ssh/id_ed25519",
+            ".ssh/id_rsa",
+            ".ssh/work_custom_key",
+            ".gnupg/private-keys-v1.d/foo.key",
+            ".aws/credentials",
+            ".kube/config",
+            ".netrc",
+        ] {
+            assert!(is_protected_home_rel(rel), "{rel} should be protected");
+        }
+        assert!(!is_protected_home_rel("projects/output.txt"));
+        assert!(!is_protected_home_rel(".sshfoo/file"));
     }
 
     #[test]
