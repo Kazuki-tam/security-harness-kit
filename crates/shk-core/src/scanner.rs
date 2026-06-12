@@ -843,10 +843,14 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
     }
 
     let mut walk = WalkBuilder::new(&scan_root);
+    // standard_filters must come first: it resets every filter (including
+    // hidden) and would otherwise override hidden(false) below.
+    walk.standard_filters(true);
     walk.hidden(false);
     walk.git_ignore(true);
     walk.git_exclude(true);
-    walk.standard_filters(true);
+    // With hidden files included, keep the walker out of .git itself.
+    walk.filter_entry(|e| e.file_name() != std::ffi::OsStr::new(".git"));
     if policy.scan.follow_symlinks {
         walk.follow_links(true);
     }

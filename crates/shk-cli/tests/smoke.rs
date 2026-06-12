@@ -942,6 +942,111 @@ message = "Internal confidential term detected"
 }
 
 #[test]
+fn project_root_flag_resolves_policy_from_subdirectory() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("shk.toml"),
+        r#"
+[rules]
+internal_terms = true
+
+[[custom_rules]]
+id = "internal.project_codename"
+pattern = "ProjectNebula"
+severity = "high"
+kind = "internal"
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("src/notes.txt"), "launch ProjectNebula\n").unwrap();
+
+    // Run from the subdirectory; --project-root must pull in the root shk.toml.
+    let out = Command::new(shk_bin())
+        .args([
+            "--project-root",
+            &dir.path().display().to_string(),
+            "scan",
+            "src",
+            "--json",
+            "--fail-on",
+            "critical",
+        ])
+        .current_dir(dir.path().join("src"))
+        .output()
+        .expect("scan with project root");
+
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["rule_id"] == "internal.project_codename"),
+        "{v}"
+    );
+}
+
+#[test]
+fn scan_includes_hidden_files_but_not_git_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".env"), "GREETING=hello\n").unwrap();
+    std::fs::write(dir.path().join("dev.env"), "GREETING=hello\n").unwrap();
+    // A stray .git directory must not be descended into even though hidden
+    // files are now included.
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join(".git/config"), "[core]\n").unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--json", "--fail-on", "critical"])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan hidden files");
+
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let scanned: Vec<&str> = v["scanned_paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p.as_str())
+        .collect();
+    assert!(scanned.iter().any(|p| p.ends_with(".env")), "{v}");
+    assert!(scanned.iter().any(|p| p.ends_with("dev.env")), "{v}");
+    assert!(!scanned.iter().any(|p| p.contains(".git/")), "{v}");
+}
+
+#[test]
+fn project_root_flag_rejects_missing_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("does-not-exist");
+    let out = Command::new(shk_bin())
+        .args([
+            "--project-root",
+            &missing.display().to_string(),
+            "scan",
+            ".",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan with missing project root");
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--project-root"), "{stderr}");
+}
+
+#[test]
 fn scan_target_uses_current_dir_policy() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("src")).unwrap();

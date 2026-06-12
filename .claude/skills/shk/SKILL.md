@@ -62,6 +62,17 @@ shk skills install --tool codex --global
 shk skills install --tool cursor --global
 ```
 
+Global flags work with every command:
+
+```bash
+shk --project-root /path/to/project scan .   # resolve shk.toml and paths from another directory
+shk --project-root "$(git rev-parse --show-toplevel)" mask < prompt.txt
+shk --no-color scan .                        # disable colored output
+```
+
+Use `--project-root` when running from a subdirectory or outside the project so the project
+`shk.toml` policy is applied instead of built-in defaults.
+
 ## Scanning
 
 Run `shk scan .` to detect secrets, API keys, and PII in the current directory. Scan also extracts text from `.docx`, `.xlsx`, `.pptx`, and text-layer `.pdf` files.
@@ -86,6 +97,10 @@ Document notes:
 - Office findings are labelled with internal entries such as `report.docx:word/document.xml`.
 - PDF findings use the PDF path itself.
 - Image-only PDFs are not OCRed; no extractable text is reported as an informational skip finding.
+
+Traversal and env-rule notes:
+- Hidden files (`.env`, `.envrc`, `.npmrc`, …) are scanned; the `.git` directory is always skipped, and `.gitignore` rules are honored inside Git repositories. Pass a gitignored file explicitly (`shk scan .env`) to scan it anyway.
+- `env.sensitive_assignment` flags dotenv-style assignments of sensitive variable names (`*PASSWORD*`, `*SECRET*`, `*TOKEN*`, …) with non-placeholder values. It only applies to dotenv-style files (`.env`, `.env.local`, `dev.env`, …); `.env.example` and `.env.sample` templates and `encrypted:` (dotenvx) values are skipped. Disable with `[rules] env = false`.
 
 ## Masking
 
@@ -177,6 +192,8 @@ Safe operating rules:
 
 Each hook runs `shk scan --hook-mode <tool>` on the payload before AI tool execution.
 Pre-hooks and user-prompt hooks block on findings (exit 2); post-hooks warn only (exit 0).
+Cursor gets blocking `before*` hooks plus non-blocking post scans on
+`afterShellExecution` and `afterMCPExecution`.
 Managed user-prompt hooks use `--fail-on medium` so PII is blocked before it enters
 the agent context.
 
@@ -269,6 +286,7 @@ shk scan . --hook-mode codex --fail-on medium < user_prompt_payload.json
 # Post-hook: scan inbound content, always non-blocking
 shk scan . --hook-mode claude-code --post < response_payload.json
 shk scan . --hook-mode codex --post < response_payload.json
+shk scan . --hook-mode cursor --post < response_payload.json
 
 # Audit mode: log findings to .shk/audit.log, never block
 shk scan . --hook-mode claude-code --audit < hook_payload.json

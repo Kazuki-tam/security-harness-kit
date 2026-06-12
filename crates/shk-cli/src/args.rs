@@ -14,6 +14,10 @@ pub struct Cli {
     /// Disable colored human-readable output.
     #[arg(long, global = true)]
     pub no_color: bool,
+    /// Resolve `shk.toml` and project-relative paths from this directory
+    /// instead of the current working directory.
+    #[arg(long, global = true, value_name = "DIR")]
+    pub project_root: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Commands,
 }

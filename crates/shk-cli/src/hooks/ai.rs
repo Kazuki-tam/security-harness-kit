@@ -584,13 +584,22 @@ fn apply_cursor(
         "beforeShellExecution",
         "beforeMCPExecution",
     ];
+    // Observational events: Cursor ignores hook responses here, matching shk's
+    // non-blocking `--post` semantics (always exit 0).
+    const POST_KEYS: &[&str] = &["afterShellExecution", "afterMCPExecution"];
 
     let cmd = hook_scan_cli_command(AiTool::Cursor, audit, log_blocked, false);
+    let post_cmd = hook_scan_cli_command(AiTool::Cursor, audit, log_blocked, true);
     let prompt_cmd = user_prompt_hook_scan_command(AiTool::Cursor, audit, log_blocked, None);
     let entry = json!({
         "command": cmd,
         "timeout": HOOK_CLI_TIMEOUT_SEC,
         "failClosed": fail_closed,
+        "_shk_managed": true
+    });
+    let post_entry = json!({
+        "command": post_cmd,
+        "timeout": HOOK_CLI_TIMEOUT_SEC,
         "_shk_managed": true
     });
     let prompt_entry = json!({
@@ -619,31 +628,30 @@ fn apply_cursor(
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("hooks must be an object"))?;
 
-    for k in PRE_KEYS {
-        let arr_val = hooks.entry((*k).to_string()).or_insert_with(|| json!([]));
-        let arr = arr_val
-            .as_array_mut()
-            .ok_or_else(|| anyhow::anyhow!("{k} hook list must be an array"))?;
-        arr.retain(|e| !is_managed_cursor_entry(e));
-        arr.push(entry.clone());
+    let managed: &[(&[&str], &Value)] = &[
+        (PRE_KEYS, &entry),
+        (POST_KEYS, &post_entry),
+        (&["beforeSubmitPrompt"], &prompt_entry),
+    ];
+    for (keys, managed_entry) in managed {
+        for k in *keys {
+            let arr_val = hooks.entry((*k).to_string()).or_insert_with(|| json!([]));
+            let arr = arr_val
+                .as_array_mut()
+                .ok_or_else(|| anyhow::anyhow!("{k} hook list must be an array"))?;
+            arr.retain(|e| !is_managed_cursor_entry(e));
+            arr.push((*managed_entry).clone());
+        }
     }
-    let prompt_arr_val = hooks
-        .entry("beforeSubmitPrompt".to_string())
-        .or_insert_with(|| json!([]));
-    let prompt_arr = prompt_arr_val
-        .as_array_mut()
-        .ok_or_else(|| anyhow::anyhow!("beforeSubmitPrompt hook list must be an array"))?;
-    prompt_arr.retain(|e| !is_managed_cursor_entry(e));
-    prompt_arr.push(prompt_entry);
 
     save_json_formatted(path, &root, dry_run)?;
     Ok(if dry_run {
         format!(
-            "dry-run: would write managed before* hooks (audit={audit}, logBlocked={log_blocked}, failClosed={fail_closed})"
+            "dry-run: would write managed before*/after* hooks (audit={audit}, logBlocked={log_blocked}, failClosed={fail_closed})"
         )
     } else {
         format!(
-            "wrote managed before* hooks (audit={audit}, logBlocked={log_blocked}, failClosed={fail_closed})"
+            "wrote managed before*/after* hooks (audit={audit}, logBlocked={log_blocked}, failClosed={fail_closed})"
         )
     })
 }
@@ -654,6 +662,8 @@ fn remove_cursor_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
         "beforeReadFile",
         "beforeShellExecution",
         "beforeMCPExecution",
+        "afterShellExecution",
+        "afterMCPExecution",
         "beforeSubmitPrompt",
     ];
     if !path.is_file() {
@@ -1069,6 +1079,16 @@ mod tests {
             let hooks = root["hooks"][key].as_array().unwrap();
             assert_eq!(hooks.len(), 1, "{key} should not duplicate: {hooks:?}");
             assert_eq!(hooks[0]["failClosed"], true);
+        }
+        for key in ["afterShellExecution", "afterMCPExecution"] {
+            let hooks = root["hooks"][key].as_array().unwrap();
+            assert_eq!(hooks.len(), 1, "{key} should not duplicate: {hooks:?}");
+            let cmd = hooks[0]["command"].as_str().unwrap_or_default();
+            assert!(cmd.contains("--post"), "{key} should scan as post: {cmd}");
+            assert!(
+                hooks[0].get("failClosed").is_none(),
+                "after* hooks are observational and should not set failClosed: {hooks:?}"
+            );
         }
         let prompt_cmd = root["hooks"]["beforeSubmitPrompt"][0]["command"]
             .as_str()

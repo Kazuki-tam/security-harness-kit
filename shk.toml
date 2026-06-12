@@ -112,6 +112,10 @@ path = "fixtures/basic/insecure-sample.txt"
 reason = "Intentional insecure sample fixture"
 
 [[allowlist]]
+path = "fixtures/env/**"
+reason = "Intentional env assignment detection demo fixtures"
+
+[[allowlist]]
 path = "crates/shk-core/tests/**"
 reason = "Synthetic values in core test assertions"
 

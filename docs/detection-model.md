@@ -37,7 +37,7 @@ The rule engine supports these kinds:
 |------|-------|
 | `secret` | API keys, tokens, database URLs, private keys, and similar sensitive credentials. |
 | `pii` | Personal information patterns. |
-| `env` | Env-related rules and hints. |
+| `env` | Env-related rules and hints. The built-in `env.sensitive_assignment` rule flags dotenv-style assignments of sensitive variable names (`*PASSWORD*`, `*SECRET*`, `*TOKEN*`, `*API_KEY*`, `*PRIVATE_KEY*`, `*ACCESS_KEY*`, `*CREDENTIAL*`) with non-placeholder values. Env rules only apply to dotenv-style files (file name starting with `.env` or ending in `.env`), so source code reading the environment (e.g. `DB_PASSWORD = os.environ[...]`) is not flagged. `.env.example` and `.env.sample` files are skipped, and `[rules] env = false` disables the kind. |
 | `ai-context` | AI-context-oriented rules. |
 | `ignore` | Scanner skip notices and policy warnings. |
 | `git` | Git-related findings. |

@@ -123,6 +123,21 @@ fn pii_false_positive_fixture_stays_clean() {
 }
 
 #[test]
+fn env_fixture_detects_sensitive_assignments_and_skips_placeholders() {
+    let res = scan_fixture("env");
+    assert!(
+        has_finding(&res, "env.sensitive_assignment", "sample.env"),
+        "missing env assignment finding: {:?}",
+        res.findings
+    );
+    assert!(
+        !has_finding(&res, "env.sensitive_assignment", "placeholders.env"),
+        "placeholder values must stay clean: {:?}",
+        res.findings
+    );
+}
+
+#[test]
 fn secret_provider_fixtures_cover_expected_rules() {
     let res = scan_fixture("secrets");
     let ids = finding_ids(&res);

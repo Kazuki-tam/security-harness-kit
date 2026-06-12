@@ -185,7 +185,7 @@ pub struct RulesSection {
     pub pii: bool,
     #[serde(default = "default_pii_langs")]
     pub pii_languages: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub env: bool,
     #[serde(default)]
     pub internal_terms: bool,

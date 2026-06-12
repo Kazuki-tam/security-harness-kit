@@ -45,6 +45,17 @@ pub fn run() -> Result<()> {
     } else {
         ColorMode::Auto
     });
+    // Policy resolution is cwd-based throughout the CLI; switching the process
+    // working directory makes `--project-root` apply uniformly to every command.
+    if let Some(root) = &cli.project_root {
+        let root = std::fs::canonicalize(root)
+            .with_context(|| format!("--project-root not found: {}", root.display()))?;
+        if !root.is_dir() {
+            anyhow::bail!("--project-root must be a directory: {}", root.display());
+        }
+        std::env::set_current_dir(&root)
+            .with_context(|| format!("switch to --project-root {}", root.display()))?;
+    }
     let cwd = std::env::current_dir().context("current directory")?;
 
     match cli.command {

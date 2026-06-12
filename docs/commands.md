@@ -2,6 +2,13 @@
 
 This page describes the implemented `shk` CLI commands and options.
 
+## Global options
+
+| Option | Behavior |
+|--------|----------|
+| `--project-root <DIR>` | Resolve `shk.toml` and project-relative paths from `DIR` instead of the current working directory. Works with every command, so `shk --project-root /path/to/project mask < prompt.txt` uses the project policy even when invoked from elsewhere. |
+| `--no-color` | Disable colored human-readable output. |
+
 ## `shk init`
 
 Create a starter `shk.toml` policy file in the current directory.
@@ -116,6 +123,11 @@ Options:
 | `--since <date>` | With `--git-history`, limit history to commits newer than a Git date expression, e.g. `30.days.ago` or `2026-01-01`. |
 | `--max-commits <n>` | With `--git-history`, limit history traversal to the most recent `n` commits in the selected scope. |
 | `--no-color` | Disable colored human-readable output. This is a global option. |
+
+Traversal notes:
+
+- Hidden files and directories (`.env`, `.envrc`, `.npmrc`, …) are scanned. The `.git` directory itself is always skipped.
+- `.gitignore` and `.git/info/exclude` rules are honored inside Git repositories. Because `shk doctor` recommends keeping `.env` in `.gitignore`, a gitignored `.env` in a Git repository is not part of a directory scan — pass it explicitly (`shk scan .env`) to scan it anyway.
 
 `--git-history` scans committed blobs from Git history, not the working tree or index. By default it uses `git log --all`, so local branches, tags, and remote-tracking refs are considered. Deleted secrets can still be detected because the older blob is read from the commit where the file existed. Uncommitted changes and unreachable objects are not scanned.
 
@@ -505,7 +517,7 @@ Installed entries:
 | Tool | Config file | Managed entries |
 |------|-------------|-----------------|
 | Claude Code | `.claude/settings.json` | `UserPromptSubmit`; `PreToolUse` for `Read|Write|Bash|WebFetch|mcp__.*`; `PostToolUse` for `WebFetch|WebSearch|Bash|mcp__.*|Skill|Agent`. |
-| Cursor | `.cursor/hooks.json` | `beforeReadFile`, `beforeShellExecution`, `beforeMCPExecution`, `beforeSubmitPrompt`. Prompt hooks use `--fail-on medium`. |
+| Cursor | `.cursor/hooks.json` | `beforeReadFile`, `beforeShellExecution`, `beforeMCPExecution`, `beforeSubmitPrompt`, plus non-blocking post scans on `afterShellExecution` and `afterMCPExecution`. Prompt hooks use `--fail-on medium`. |
 | Codex | `.codex/config.toml` | `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, and `PostToolUse` blocks; also ensures `features.hooks = true`. Project-local commands scan `$(git rev-parse --show-toplevel)` so Codex can start from a subdirectory. |
 
 Managed entries are tagged with `"_shk_managed": true` or `# shk-managed-start` / `# shk-managed-end`. Re-running replaces managed entries and leaves non-managed entries in place.
