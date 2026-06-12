@@ -195,3 +195,33 @@ reason = "CI documentation includes name-like labels"
 rule_id = "pii.ja.name"
 path = "apps/shk-desktop/src/i18n/messages/ja.ts"
 reason = "Japanese UI copy includes name-like labels"
+
+[[allowlist]]
+rule_id = "secret.generic_api_key"
+path = "crates/shk-integrations/src/ai_hooks.rs"
+reason = "Synthetic api_key value in hook payload tests"
+
+[[allowlist]]
+rule_id = "pii.email"
+path = ".github/workflows/release.yml"
+reason = "Bot noreply address for tap commits"
+
+[[allowlist]]
+rule_id = "pii.en.name"
+path = ".github/workflows/release-desktop-unsigned.yml"
+reason = "Workflow name label, not a personal name"
+
+[[allowlist]]
+rule_id = "pii.en.name"
+path = ".github/workflows/shk.yml"
+reason = "Generated workflow name label, not a personal name"
+
+[[allowlist]]
+rule_id = "pii.ipv4"
+path = ".github/scripts/release/generate-winget-manifests.sh"
+reason = "MinimumOSVersion value in winget manifest template looks like an IPv4 address"
+
+[[allowlist]]
+rule_id = "pii.email"
+path = ".github/scripts/release/test.sh"
+reason = "Synthetic example.com address in signing config test"
