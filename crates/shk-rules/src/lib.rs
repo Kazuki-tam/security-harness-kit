@@ -376,6 +376,18 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             validator: None,
         },
         CompiledRule {
+            id: "env.sensitive_assignment",
+            severity: Severity::Medium,
+            kind: Kind::Env,
+            re: Regex::new(
+                r"(?m)^\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_KEY|APIKEY|PRIVATE_KEY|ACCESS_KEY|CREDENTIAL)[A-Z0-9_]*\s*=\s*\S+",
+            )
+            .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Sensitive environment variable assignment detected",
+            confidence: 0.6,
+            validator: Some(env_assignment_valid),
+        },
+        CompiledRule {
             id: "pii.email",
             severity: Severity::Medium,
             kind: Kind::Pii,
@@ -665,7 +677,10 @@ fn value_after_assignment(candidate: &str) -> &str {
 }
 
 fn labelled_token_valid(candidate: &str) -> bool {
-    let value = value_after_assignment(candidate);
+    token_value_valid(value_after_assignment(candidate))
+}
+
+fn token_value_valid(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     if [
         "example",
@@ -724,6 +739,35 @@ fn has_long_ascii_sequence(value: &str, min_run: usize) -> bool {
     }
 
     false
+}
+
+fn env_assignment_valid(candidate: &str) -> bool {
+    // Dotenv semantics: the value is everything after the first `=`, so
+    // base64 padding (`=`) and URL values containing `:` stay intact.
+    let value = match candidate.split_once('=') {
+        Some((_, v)) => v.trim().trim_matches(|c| c == '"' || c == '\''),
+        None => return false,
+    };
+    let lower = value.to_ascii_lowercase();
+
+    // Placeholder / non-secret values common in templates and docs.
+    // dotenvx-encrypted values (`shk env encrypt` output) carry no plaintext.
+    if value.len() < 8
+        || value.starts_with("encrypted:")
+        || value.starts_with('$')
+        || value.starts_with('<')
+        || value.starts_with("%(")
+        || value.starts_with("{{")
+        || lower.contains("xxxx")
+        || matches!(
+            lower.as_str(),
+            "true" | "false" | "null" | "none" | "undefined" | "disabled" | "enabled"
+        )
+    {
+        return false;
+    }
+
+    token_value_valid(value)
 }
 
 fn generic_api_key_valid(candidate: &str) -> bool {
@@ -1276,16 +1320,27 @@ pub fn redact_line_for_display(line: &str, cfg: &RuleEngineConfig) -> String {
     }
 }
 
-/// Scan full file content; `rel_path` used only for env heuristics (skip .env.example noise).
+/// Env rules only fire on dotenv-style files (`.env`, `.env.local`, `dev.env`, ...);
+/// in source code, uppercase constants reading from the environment
+/// (`DB_PASSWORD = os.environ[...]`) would otherwise false-positive.
+/// `.env.example` / `.env.sample` templates are excluded.
+fn env_rules_apply_to(rel_path: &str) -> bool {
+    let file_name = rel_path.rsplit(['/', '\\']).next().unwrap_or(rel_path);
+    (file_name.starts_with(".env") || file_name.ends_with(".env"))
+        && !file_name.ends_with(".env.example")
+        && !file_name.ends_with(".env.sample")
+}
+
+/// Scan full file content; `rel_path` used only for env-rule file gating.
 pub fn scan_content(content: &str, rel_path: &str, cfg: &RuleEngineConfig) -> Vec<RuleMatch> {
     let mut out = Vec::new();
     let mut line_index = None;
-    let skip_env_heavy = rel_path.ends_with(".env.example") || rel_path.contains(".env.sample");
+    let env_rules_apply = env_rules_apply_to(rel_path);
     for r in RULES.iter() {
         if !rule_applies(r, cfg) {
             continue;
         }
-        if r.kind == Kind::Env && skip_env_heavy {
+        if r.kind == Kind::Env && !env_rules_apply {
             continue;
         }
         for m in r.re.find_iter(content) {
@@ -1515,6 +1570,136 @@ mod tests {
         assert!(
             !m.iter()
                 .any(|x| x.rule_id == "secret.notion_integration_token"),
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn detects_sensitive_env_assignment() {
+        let cfg = RuleEngineConfig::default();
+        // not real credentials: synthetic detector fixture values only
+        let text = "export DB_PASSWORD=hunter2-Prod98\nSTRIPE_TOKEN=\"tok-aB3dE5gH7jK9mN2p\"\n";
+        let m = scan_content(text, ".env", &cfg);
+        let hits = m
+            .iter()
+            .filter(|x| x.rule_id == "env.sensitive_assignment")
+            .count();
+        assert_eq!(hits, 2, "{m:?}");
+    }
+
+    #[test]
+    fn env_assignment_keeps_base64_padding_and_url_values() {
+        let cfg = RuleEngineConfig::default();
+        // not real credentials: synthetic detector fixture values only
+        let text = concat!(
+            "SESSION_SECRET=c2VjcmV0LXZhbHVlLTEyMw==\n",
+            "DB_CREDENTIALS=postgres://app:hunter2-Prod98@db.internal:5432/app\n",
+        );
+        let m = scan_content(text, ".env", &cfg);
+        let hits = m
+            .iter()
+            .filter(|x| x.rule_id == "env.sensitive_assignment")
+            .count();
+        assert_eq!(hits, 2, "{m:?}");
+    }
+
+    #[test]
+    fn env_assignment_rejects_placeholders_and_short_values() {
+        let cfg = RuleEngineConfig::default();
+        let text = concat!(
+            "DB_PASSWORD=${DB_PASSWORD}\n",
+            "API_KEY=<your-api-key>\n",
+            "SECRET_TOKEN=changeme\n",
+            "AUTH_TOKEN=xxxxxxxxxxxxxxxx\n",
+            "MY_PASSWORD=abc\n",
+            "FEATURE_TOKEN_ENABLED=true\n",
+        );
+        let m = scan_content(text, ".env", &cfg);
+        assert!(
+            !m.iter().any(|x| x.rule_id == "env.sensitive_assignment"),
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn env_assignment_skips_dotenvx_encrypted_values() {
+        let cfg = RuleEngineConfig::default();
+        // not real credentials: synthetic detector fixture values only
+        let text = concat!(
+            "API_KEY=\"encrypted:BDqDBibm4wsYqMpCjTQ6BsO3f3hxgMRcrqaQRWcDCNX\"\n",
+            "DB_PASSWORD=encrypted:BFs2mCkE6Z9XJqL2vRtY8wAeS5cD7hF1gK4mN6pQ\n",
+        );
+        let m = scan_content(text, ".env", &cfg);
+        assert!(
+            !m.iter().any(|x| x.rule_id == "env.sensitive_assignment"),
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn env_assignment_skips_env_example_files() {
+        let cfg = RuleEngineConfig::default();
+        let text = "DB_PASSWORD=hunter2-Prod98\n";
+        let m = scan_content(text, "config/.env.example", &cfg);
+        assert!(
+            !m.iter().any(|x| x.rule_id == "env.sensitive_assignment"),
+            "{m:?}"
+        );
+        // The skip is exact-suffix only: derived names like `.env.sample.bak`
+        // may hold real values and must still be scanned.
+        let m = scan_content(text, ".env.sample", &cfg);
+        assert!(
+            !m.iter().any(|x| x.rule_id == "env.sensitive_assignment"),
+            "{m:?}"
+        );
+        let m = scan_content(text, ".env.sample.bak", &cfg);
+        assert!(
+            m.iter().any(|x| x.rule_id == "env.sensitive_assignment"),
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn env_assignment_only_applies_to_dotenv_files() {
+        let cfg = RuleEngineConfig::default();
+        // Uppercase constants reading the environment in source code must not match.
+        let code = concat!(
+            "DB_PASSWORD = os.environ[\"DB_PASSWORD\"]\n",
+            "API_KEY = os.getenv(\"API_KEY\", \"\")\n",
+            "SECRET_TOKEN = fetch_secret_from_vault()\n",
+        );
+        for path in ["config.py", "settings.rb", "src/setup.sh", "Makefile"] {
+            let m = scan_content(code, path, &cfg);
+            assert!(
+                !m.iter().any(|x| x.rule_id == "env.sensitive_assignment"),
+                "{path}: {m:?}"
+            );
+        }
+        // Dotenv-style files still detect.
+        let text = "DB_PASSWORD=hunter2-Prod98\n";
+        for path in [
+            ".env",
+            ".env.local",
+            "config/.env.production",
+            "deploy/dev.env",
+        ] {
+            let m = scan_content(text, path, &cfg);
+            assert!(
+                m.iter().any(|x| x.rule_id == "env.sensitive_assignment"),
+                "{path}: {m:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn env_rules_can_be_disabled() {
+        let cfg = RuleEngineConfig {
+            env: false,
+            ..RuleEngineConfig::default()
+        };
+        let m = scan_content("DB_PASSWORD=hunter2-Prod98\n", ".env", &cfg);
+        assert!(
+            !m.iter().any(|x| x.rule_id == "env.sensitive_assignment"),
             "{m:?}"
         );
     }

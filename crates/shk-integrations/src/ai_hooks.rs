@@ -38,7 +38,18 @@ const CLAUDE_POST_TEXT_KEYS: &[&str] = &[
     "stdout", "stderr", "content", "response", "text", "body", "data", "result", "message",
     "messages", "items", "value",
 ];
-const CURSOR_POST_TEXT_KEYS: &[&str] = &["content", "text", "command", "shell_command", "args"];
+// Cursor afterShellExecution payload: { command, output, duration, sandbox };
+// afterMCPExecution payload: { tool_name, tool_input, result_json, duration }.
+const CURSOR_POST_TEXT_KEYS: &[&str] = &[
+    "content",
+    "text",
+    "command",
+    "shell_command",
+    "args",
+    "output",
+    "result_json",
+    "tool_input",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AiHookTool {
@@ -455,6 +466,46 @@ mod tests {
         assert!(!codex_body.contains("cursor command"), "{codex_body}");
         assert!(cursor_body.contains("cursor command"), "{cursor_body}");
         assert!(!cursor_body.contains("codex output"), "{cursor_body}");
+    }
+
+    #[test]
+    fn cursor_post_extracts_after_shell_and_mcp_payloads() {
+        let shell_stdin = serde_json::json!({
+            "command": "curl https://api.example.com",
+            "output": "shell output with token",
+            "duration": 1234,
+            "sandbox": false
+        })
+        .to_string();
+        let (_display, shell_body) = stdin_to_hook_body(
+            AiHookTool::Cursor,
+            true,
+            &shell_stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+        assert!(
+            shell_body.contains("shell output with token"),
+            "{shell_body}"
+        );
+
+        let mcp_stdin = serde_json::json!({
+            "tool_name": "mcp_fetch",
+            "tool_input": "{\"url\":\"https://example.com\"}",
+            "result_json": "{\"body\":\"mcp result body\"}",
+            "duration": 99
+        })
+        .to_string();
+        let (_display, mcp_body) = stdin_to_hook_body(
+            AiHookTool::Cursor,
+            true,
+            &mcp_stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+        assert!(mcp_body.contains("mcp result body"), "{mcp_body}");
     }
 
     #[test]

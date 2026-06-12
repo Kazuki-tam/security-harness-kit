@@ -203,7 +203,7 @@ shk skills status
 
 ## Configuration
 
-`shk` reads policy from `shk.toml` in the current working directory. Read-only commands can use built-in defaults. Commands that write files or tool configuration require a project policy file.
+`shk` reads policy from `shk.toml` in the current working directory. Read-only commands can use built-in defaults. Commands that write files or tool configuration require a project policy file. When running from outside the project, pass the global `--project-root <DIR>` flag to resolve the policy and project-relative paths from that directory.
 
 Create the default policy:
 

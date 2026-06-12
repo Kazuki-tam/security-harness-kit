@@ -251,7 +251,7 @@ Use [Conventional Commits](https://www.conventionalcommits.org/) style: `feat:`,
 - **Never log or emit raw secrets in JSON** (`redacted_value` is `[REDACTED]` per spec §6).
 - **`context_before` / `context_after`**: do not ship raw neighbor lines; run `shk_rules::redact_line_for_display` so patterns align with detection rules (toward “redacted lines only” in spec §6).
 - **Document scanning/masking**: document text extraction for scan lives in `crates/shk-core/src/document_masker.rs` alongside Office masking helpers. `.docx`, `.xlsx`, `.pptx`, and text-layer `.pdf` scan by extracted text; Office mask supports `.docx`, `.xlsx`, `.pptx` only and requires `--output`.
-- **Policy resolution**: `mask`, `doctor`, `policy init`, and `hooks install` resolve policy relative to **`std::env::current_dir()`**. From a subdirectory, `cd` to the project root or consider a future `--project-root` flag.
+- **Policy resolution**: `mask`, `doctor`, `policy init`, and `hooks install` resolve policy relative to **`std::env::current_dir()`**. From a subdirectory, `cd` to the project root or pass the global `--project-root <DIR>` flag (it switches the process working directory before dispatch, so it applies uniformly to every command).
 - **`Policy::default()` vs `serde::Default`**: beware `#[derive(Default)]` on structs with `bool` fields that should default to `true` (e.g. `RulesSection` needs an explicit `Default` impl).
 - **Paths**: scanning `canonicalize`s the root and matches `ignore` walker paths with `strip_prefix`.
 - **Windows**: respect path separators and `pre-commit` shebang limitations.

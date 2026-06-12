@@ -1,6 +1,6 @@
 # Configuration
 
-`shk` reads project policy from `shk.toml` in the current working directory. If the file is absent, read-only commands use built-in defaults. Commands that write project or tool configuration require `shk.toml`.
+`shk` reads project policy from `shk.toml` in the current working directory. If the file is absent, read-only commands use built-in defaults. Commands that write project or tool configuration require `shk.toml`. Pass the global `--project-root <DIR>` flag to resolve the policy from another directory.
 
 Create a starter policy:
 
@@ -136,7 +136,7 @@ Supported document formats (`.docx`, `.xlsx`, `.pptx`, and text-layer `.pdf`) ar
 | `secrets` | `true` | Enables built-in secret rules. |
 | `pii` | `true` | Enables built-in PII rules. |
 | `pii_languages` | `["en", "ja"]` | Enables language-gated PII rules. Universal PII rules run when `pii = true`. |
-| `env` | `true` | Enables env-related rules and hints. |
+| `env` | `true` | Enables env-related rules such as `env.sensitive_assignment` (dotenv-style assignments of sensitive variable names with non-placeholder values). Env rules only apply to dotenv-style files (`.env`, `.env.local`, `dev.env`, ...); `.env.example` and `.env.sample` files are always skipped. |
 | `internal_terms` | `false` | Enables custom rules with `kind = "internal"`. |
 | `ai_context` | `true` | Enables high-signal AI context safety rules for Unicode controls and unsafe URI schemes. |
 
