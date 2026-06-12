@@ -19,8 +19,8 @@ mod workflow_hardening;
 
 use anyhow::{Context, Result};
 use args::{
-    CiCmd, CiInitProvider, Cli, Commands, DoctorCmd, DotenvxCmd, EnvCmd, EnvKeyCmd, HooksCmd,
-    PolicyCmd, SecretsCmd, SkillToolArg, SkillsCmd,
+    CiCmd, CiInitProvider, Cli, ClipboardCmd, Commands, DoctorCmd, DotenvxCmd, EnvCmd, EnvKeyCmd,
+    HooksCmd, PolicyCmd, SecretsCmd, SkillToolArg, SkillsCmd,
 };
 use clap::Parser;
 use shk_core::policy::ColorMode;
@@ -132,6 +132,29 @@ pub fn run() -> Result<()> {
             hook_mode,
             post,
         })?,
+        Commands::Clipboard { cmd } => match cmd {
+            ClipboardCmd::Scan {
+                json,
+                verbose,
+                fail_on,
+            } => commands::clipboard::scan(commands::clipboard::ClipboardScanInvocation {
+                json,
+                verbose,
+                fail_on,
+                color_enabled: color,
+            })?,
+            ClipboardCmd::Mask {
+                json,
+                write,
+                redaction,
+                min_severity,
+            } => commands::clipboard::mask(commands::clipboard::ClipboardMaskInvocation {
+                json,
+                write,
+                redaction,
+                min_severity,
+            })?,
+        },
         Commands::Completions { shell } => commands::completions::run(shell)?,
         Commands::Status => commands::status::run(&cwd)?,
         Commands::Audit {

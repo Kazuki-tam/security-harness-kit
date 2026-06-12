@@ -63,62 +63,68 @@ impl VersionCheck {
 pub fn run(json: bool) -> Result<()> {
     match check_latest_version() {
         Ok(check) => {
-            if json {
-                let v = serde_json::json!({
-                    "current": check.current,
-                    "latest": check.latest_tag,
-                    "status": check.status.as_str(),
-                    "update_available": check.status.update_available(),
-                    "release_url": release_url(&check.latest_tag),
-                });
-                println!("{}", serde_json::to_string_pretty(&v)?);
-                return Ok(());
-            }
-
-            print_human(&check);
+            print!("{}", output_for_check(&check, json)?);
         }
         Err(err) => {
-            if json {
-                let v = serde_json::json!({
-                    "current": current_version(),
-                    "latest": null,
-                    "status": "unknown",
-                    "update_available": null,
-                    "error": err.to_string(),
-                });
-                println!("{}", serde_json::to_string_pretty(&v)?);
-            } else {
-                println!("version: unknown (could not check latest release: {err})");
-            }
+            print!("{}", output_for_error(&err, json)?);
         }
     }
     Ok(())
 }
 
-fn print_human(check: &VersionCheck) {
+fn output_for_check(check: &VersionCheck, json: bool) -> Result<String> {
+    if json {
+        let v = serde_json::json!({
+            "current": check.current,
+            "latest": check.latest_tag,
+            "status": check.status.as_str(),
+            "update_available": check.status.update_available(),
+            "release_url": release_url(&check.latest_tag),
+        });
+        return Ok(format!("{}\n", serde_json::to_string_pretty(&v)?));
+    }
+
+    Ok(format_human(check))
+}
+
+fn output_for_error(err: &anyhow::Error, json: bool) -> Result<String> {
+    if json {
+        let v = serde_json::json!({
+            "current": current_version(),
+            "latest": null,
+            "status": "unknown",
+            "update_available": null,
+            "error": err.to_string(),
+        });
+        Ok(format!("{}\n", serde_json::to_string_pretty(&v)?))
+    } else {
+        Ok(format!(
+            "version: unknown (could not check latest release: {err})\n"
+        ))
+    }
+}
+
+fn format_human(check: &VersionCheck) -> String {
     match check.status {
         VersionStatus::Current => {
-            println!("version: OK ({} is the latest release)", check.current);
+            format!("version: OK ({} is the latest release)\n", check.current)
         }
-        VersionStatus::UpdateAvailable => {
-            println!("version: update available");
-            println!("  current: {}", check.current);
-            println!("  latest:  {}", check.latest_tag);
-            println!("  update:  rerun the install script or use your package manager");
-            println!("  release: {}", release_url(&check.latest_tag));
-        }
-        VersionStatus::LocalNewer => {
-            println!(
-                "version: local version {} is newer than latest release {}",
-                check.current, check.latest_tag
-            );
-        }
-        VersionStatus::Unknown => {
-            println!("version: latest release differs from local version");
-            println!("  current: {}", check.current);
-            println!("  latest:  {}", check.latest_tag);
-            println!("  release: {}", release_url(&check.latest_tag));
-        }
+        VersionStatus::UpdateAvailable => format!(
+            "version: update available\n  current: {}\n  latest:  {}\n  update:  rerun the install script or use your package manager\n  release: {}\n",
+            check.current,
+            check.latest_tag,
+            release_url(&check.latest_tag)
+        ),
+        VersionStatus::LocalNewer => format!(
+            "version: local version {} is newer than latest release {}\n",
+            check.current, check.latest_tag
+        ),
+        VersionStatus::Unknown => format!(
+            "version: latest release differs from local version\n  current: {}\n  latest:  {}\n  release: {}\n",
+            check.current,
+            check.latest_tag,
+            release_url(&check.latest_tag)
+        ),
     }
 }
 
@@ -257,6 +263,57 @@ mod tests {
             check.release_url(),
             "https://github.com/Kazuki-tam/security-harness-kit/releases/tag/v1.2.4"
         );
+    }
+
+    #[test]
+    fn output_for_check_json_reports_update_status() {
+        let check = build_version_check("1.2.3", "v1.2.4".into());
+
+        let out = output_for_check(&check, true).expect("json output");
+
+        let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(json["current"], "1.2.3");
+        assert_eq!(json["latest"], "v1.2.4");
+        assert_eq!(json["status"], "update_available");
+        assert_eq!(json["update_available"], true);
+        assert_eq!(
+            json["release_url"],
+            "https://github.com/Kazuki-tam/security-harness-kit/releases/tag/v1.2.4"
+        );
+    }
+
+    #[test]
+    fn output_for_check_human_covers_all_statuses() {
+        let current = output_for_check(&build_version_check("1.2.3", "v1.2.3".into()), false)
+            .expect("current output");
+        let update = output_for_check(&build_version_check("1.2.3", "v1.2.4".into()), false)
+            .expect("update output");
+        let newer = output_for_check(&build_version_check("1.2.3", "v1.2.2".into()), false)
+            .expect("newer output");
+        let unknown = output_for_check(&build_version_check("1.2.3", "not-a-tag".into()), false)
+            .expect("unknown output");
+
+        assert!(current.contains("is the latest release"), "{current}");
+        assert!(update.contains("version: update available"), "{update}");
+        assert!(update.contains("release: https://"), "{update}");
+        assert!(newer.contains("is newer than latest release"), "{newer}");
+        assert!(
+            unknown.contains("latest release differs from local version"),
+            "{unknown}"
+        );
+    }
+
+    #[test]
+    fn output_for_error_supports_json_and_human() {
+        let err = anyhow::anyhow!("offline");
+
+        let json = output_for_error(&err, true).expect("json output");
+        let human = output_for_error(&err, false).expect("human output");
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("json");
+        assert_eq!(parsed["status"], "unknown");
+        assert_eq!(parsed["error"], "offline");
+        assert!(human.contains("could not check latest release: offline"));
     }
 
     #[test]

@@ -41,7 +41,7 @@ The command updates all of the following files.
 - `docs/installation.md`
 - `docs/ci.md`
 - `crates/shk-cli/src/skills/shk.md`
-- `.claude/skills/shk.md`
+- `.claude/skills/shk/SKILL.md`
 
 ## Notes
 

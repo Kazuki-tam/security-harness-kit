@@ -144,7 +144,7 @@ fn office_format(path: &Path) -> Option<OfficeFormat> {
     }
 }
 
-fn apply_redaction_override(policy: &mut Policy, redaction: Option<RedactionMode>) {
+pub(crate) fn apply_redaction_override(policy: &mut Policy, redaction: Option<RedactionMode>) {
     if let Some(mode) = redaction {
         policy.mask.redaction = match mode {
             RedactionMode::Full => "full",
@@ -155,7 +155,7 @@ fn apply_redaction_override(policy: &mut Policy, redaction: Option<RedactionMode
     }
 }
 
-fn apply_min_severity_override(policy: &mut Policy, min_severity: Option<SeverityArg>) {
+pub(crate) fn apply_min_severity_override(policy: &mut Policy, min_severity: Option<SeverityArg>) {
     if let Some(severity) = min_severity {
         policy.mask.min_severity = severity.as_str().into();
     }

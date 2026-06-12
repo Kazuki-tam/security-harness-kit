@@ -8,7 +8,7 @@ description = "Core scanning, masking, and policy for shk"
 publish = false
 
 [dependencies]
-shk-rules = { version = "0.3.17", path = "../shk-rules" }
+shk-rules = { version = "0.3.18", path = "../shk-rules" }
 anyhow.workspace = true
 ignore.workspace = true
 rayon.workspace = true

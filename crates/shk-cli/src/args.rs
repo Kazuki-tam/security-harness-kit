@@ -126,6 +126,11 @@ pub enum Commands {
         #[arg(long)]
         post: bool,
     },
+    /// Scan or mask the OS clipboard text
+    Clipboard {
+        #[command(subcommand)]
+        cmd: ClipboardCmd,
+    },
     /// Generate shell completion scripts
     Completions {
         #[arg(value_enum)]
@@ -189,6 +194,33 @@ pub enum Commands {
     Secrets {
         #[command(subcommand)]
         cmd: SecretsCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ClipboardCmd {
+    /// Scan clipboard text for secrets and PII
+    Scan {
+        #[arg(long)]
+        json: bool,
+        /// Show informational skip findings in human-readable output.
+        #[arg(long)]
+        verbose: bool,
+        #[arg(long, value_enum, value_name = "SEVERITY")]
+        fail_on: Option<SeverityArg>,
+    },
+    /// Mask clipboard text and print the redacted result
+    Mask {
+        #[arg(long)]
+        json: bool,
+        /// Replace the clipboard contents with the masked text.
+        #[arg(long)]
+        write: bool,
+        #[arg(long, value_enum)]
+        redaction: Option<RedactionMode>,
+        /// Minimum finding severity to mask.
+        #[arg(long, value_enum, value_name = "SEVERITY")]
+        min_severity: Option<SeverityArg>,
     },
 }
 
@@ -782,6 +814,37 @@ mod tests {
         };
 
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn clipboard_mask_accepts_write_and_json() {
+        let cli = Cli::try_parse_from(["shk", "clipboard", "mask", "--write", "--json"])
+            .expect("clipboard mask flags should parse");
+
+        let Commands::Clipboard {
+            cmd: ClipboardCmd::Mask { json, write, .. },
+        } = cli.command
+        else {
+            panic!("expected clipboard mask command");
+        };
+
+        assert!(json);
+        assert!(write);
+    }
+
+    #[test]
+    fn clipboard_scan_accepts_fail_on() {
+        let cli = Cli::try_parse_from(["shk", "clipboard", "scan", "--fail-on", "critical"])
+            .expect("clipboard scan flags should parse");
+
+        let Commands::Clipboard {
+            cmd: ClipboardCmd::Scan { fail_on, .. },
+        } = cli.command
+        else {
+            panic!("expected clipboard scan command");
+        };
+
+        assert_eq!(fail_on, Some(SeverityArg::Critical));
     }
 
     #[test]

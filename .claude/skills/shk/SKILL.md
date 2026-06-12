@@ -24,6 +24,9 @@ shk scan --git-history --ref HEAD~50..HEAD
 shk mask < file.txt                  # mask PII/secrets from stdin
 shk mask file.txt --json             # JSON output with findings + masked content
 shk mask report.docx --output report.redacted.docx
+shk clipboard scan                   # scan OS clipboard text
+shk clipboard mask                   # print masked clipboard text
+shk clipboard mask --write           # replace clipboard with masked text
 shk init                             # interactive first-run setup
 shk init --strict                    # stricter starter policy
 shk init --yes --tool codex --audit  # non-interactive setup with audit hooks
@@ -109,6 +112,16 @@ Hook-mode masking:
 shk mask --hook-mode cursor < payload.json
 shk mask --hook-mode claude-code --post < response_payload.json
 ```
+
+Clipboard scanning and masking:
+```bash
+shk clipboard scan                   # detect secrets/PII in clipboard text (exit 1 at/above threshold)
+shk clipboard scan --json
+shk clipboard mask                   # print masked clipboard text to stdout
+shk clipboard mask --write           # explicitly replace the clipboard with masked text
+```
+
+`shk clipboard …` exits 2 when the OS clipboard is unavailable. Non-text clipboard contents are treated as empty text.
 
 ## Local dotenvx key storage
 
@@ -200,7 +213,7 @@ shk ci init github                      # write .github/workflows/shk.yml
 shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
-shk ci init github --shk-version v0.3.17
+shk ci init github --shk-version v0.3.18
 shk ci init github --output .github/workflows/security.yml --force
 ```
 
@@ -383,11 +396,11 @@ For `shk secrets push`, profile keys are limited to supported fields such as `pr
 shk skills list                              # show available built-in skills
 shk skills status                            # check installation status
 shk skills install                           # install for all tools (claude-code + codex/cursor)
-shk skills install --tool claude-code        # .claude/skills/shk.md
+shk skills install --tool claude-code        # .claude/skills/shk/SKILL.md
 shk skills install --tool codex             # .agents/skills/shk/SKILL.md
 shk skills install --tool cursor            # .agents/skills/shk/SKILL.md
 shk skills install --tool all --global
-shk skills install --tool claude-code --global   # ~/.claude/skills/shk.md
+shk skills install --tool claude-code --global   # ~/.claude/skills/shk/SKILL.md
 shk skills install --tool codex --global    # ~/.agents/skills/shk/SKILL.md
 shk skills install --tool cursor --global   # ~/.agents/skills/shk/SKILL.md
 shk skills install --force                  # overwrite existing

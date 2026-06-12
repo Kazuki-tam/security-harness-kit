@@ -21,9 +21,9 @@ path = "src/main.rs"
 formula = "shk"
 
 [dependencies]
-shk-core = { version = "0.3.17", path = "../shk-core" }
-shk-rules = { version = "0.3.17", path = "../shk-rules" }
-shk-integrations = { version = "0.3.17", path = "../shk-integrations" }
+shk-core = { version = "0.3.18", path = "../shk-core" }
+shk-rules = { version = "0.3.18", path = "../shk-rules" }
+shk-integrations = { version = "0.3.18", path = "../shk-integrations" }
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
@@ -39,6 +39,7 @@ zeroize.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 dotenvx.workspace = true
+arboard.workspace = true
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"] }
 
 [dev-dependencies]
