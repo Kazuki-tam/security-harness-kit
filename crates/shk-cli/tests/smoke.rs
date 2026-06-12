@@ -2849,7 +2849,7 @@ fn init_yes_sets_up_selected_ai_tool_and_skill() {
         "{codex_config}"
     );
     assert!(dir.path().join(".agents/skills/shk/SKILL.md").is_file());
-    assert!(!dir.path().join(".claude/skills/shk.md").exists());
+    assert!(!dir.path().join(".claude/skills/shk/SKILL.md").exists());
 }
 
 #[test]
@@ -4021,7 +4021,7 @@ fn skills_install_all_writes_project_skill_files() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let claude_skill = dir.path().join(".claude/skills/shk.md");
+    let claude_skill = dir.path().join(".claude/skills/shk/SKILL.md");
     let agents_skill = dir.path().join(".agents/skills/shk/SKILL.md");
     assert!(claude_skill.exists(), "missing {}", claude_skill.display());
     assert!(agents_skill.exists(), "missing {}", agents_skill.display());
@@ -4051,7 +4051,44 @@ fn skills_install_all_preflights_existing_destinations() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("already exists"), "{stderr}");
     assert!(
-        !dir.path().join(".claude/skills/shk.md").exists(),
+        !dir.path().join(".claude/skills/shk/SKILL.md").exists(),
         "claude skill should not be partially written"
     );
+}
+
+#[test]
+fn skills_install_replaces_legacy_claude_skill_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(".claude/skills/shk.md");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, "old flat-file skill").unwrap();
+
+    let dry = Command::new(shk_bin())
+        .args(["skills", "install", "--tool", "claude-code", "--dry-run"])
+        .current_dir(dir.path())
+        .output()
+        .expect("skills install --dry-run");
+    assert!(
+        dry.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    let dry_stdout = String::from_utf8_lossy(&dry.stdout);
+    assert!(dry_stdout.contains("would remove legacy"), "{dry_stdout}");
+    assert!(legacy.is_file(), "dry-run must not remove the legacy file");
+
+    let out = Command::new(shk_bin())
+        .args(["skills", "install", "--tool", "claude-code"])
+        .current_dir(dir.path())
+        .output()
+        .expect("skills install");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Removed legacy"), "{stdout}");
+    assert!(dir.path().join(".claude/skills/shk/SKILL.md").is_file());
+    assert!(!legacy.exists(), "legacy flat file should be removed");
 }

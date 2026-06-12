@@ -44,7 +44,7 @@ const V_VERSION_FILES: &[&str] = &[
     "docs/installation.md",
     "docs/ci.md",
     "crates/shk-cli/src/skills/shk.md",
-    ".claude/skills/shk.md",
+    ".claude/skills/shk/SKILL.md",
 ];
 
 #[derive(Debug, Deserialize)]

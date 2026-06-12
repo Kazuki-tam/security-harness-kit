@@ -163,6 +163,10 @@ shk mask < prompt.txt
 shk mask --json < prompt.txt
 shk mask report.docx --output report.redacted.docx
 
+shk clipboard scan
+shk clipboard mask
+shk clipboard mask --write
+
 shk doctor
 shk doctor ignore --fix
 shk doctor env --dotenvx

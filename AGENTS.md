@@ -41,9 +41,9 @@ cargo build --release
 
 | Code | Meaning | Commands |
 |------|---------|----------|
-| `0` | No findings above threshold / success | `shk scan`, `shk scan --staged`, `shk mask`, `shk doctor`, `shk audit`, `shk scan --audit` |
-| `1` | Findings at or above the fail threshold | `shk scan`, `shk scan --staged` |
-| `2` | Blocking AI pre-hook triggered / runtime or config error | `shk scan --hook-mode <tool>` (block), `shk scan --staged` outside a Git repo |
+| `0` | No findings above threshold / success | `shk scan`, `shk scan --staged`, `shk mask`, `shk clipboard scan`, `shk clipboard mask`, `shk doctor`, `shk audit`, `shk scan --audit` |
+| `1` | Findings at or above the fail threshold | `shk scan`, `shk scan --staged`, `shk clipboard scan` |
+| `2` | Blocking AI pre-hook triggered / runtime or config error | `shk scan --hook-mode <tool>` (block), `shk scan --staged` outside a Git repo, `shk clipboard …` when the OS clipboard is unavailable |
 
 - `--audit` mode **always exits 0** (log-only; never blocks).
 - `--log-blocked` keeps blocking behavior and writes metadata-only blocked-event entries to `.shk/audit.log`.
@@ -83,6 +83,11 @@ cargo run -p shk-cli --bin shk -- scan fixtures/basic --json --fail-on critical
 
 # Mask (stdin)
 cargo run -p shk-cli --bin shk -- mask --json < fixtures/pii.txt
+
+# Clipboard (scan or mask OS clipboard text; --write replaces the clipboard)
+cargo run -p shk-cli --bin shk -- clipboard scan --json
+cargo run -p shk-cli --bin shk -- clipboard mask
+cargo run -p shk-cli --bin shk -- clipboard mask --write
 
 # Doctor
 cargo run -p shk-cli --bin shk -- doctor

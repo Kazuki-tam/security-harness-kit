@@ -197,6 +197,43 @@ file path (`shk mask prompt.txt`).
 
 Office document masking supports `.docx`, `.xlsx`, and `.pptx` files and always requires `--output` so the original document is left unchanged. JSON output reports `[DOCUMENT_WRITTEN]` as `masked_content` and includes findings from the rewritten document. PDF masking is not supported; use `shk scan` to detect text-layer PDF findings and convert or redact PDFs with a dedicated PDF tool.
 
+## `shk clipboard`
+
+Scan or mask the OS clipboard text. The clipboard is treated like any other untrusted input: `clipboard scan` never prints raw matched values, and `clipboard mask` only outputs redacted text.
+
+```bash
+shk clipboard scan
+shk clipboard scan --json
+shk clipboard scan --fail-on critical
+shk clipboard mask
+shk clipboard mask --json
+shk clipboard mask --write
+shk clipboard mask --write --redaction partial
+```
+
+`shk clipboard scan` options:
+
+| Option | Behavior |
+|--------|----------|
+| `--json` | Print the JSON report instead of human-readable output. |
+| `--verbose` | Show informational skip findings in human-readable output. |
+| `--fail-on <severity>` | Override the `[thresholds].scan_fail_on` threshold for this run. |
+
+`shk clipboard mask` options:
+
+| Option | Behavior |
+|--------|----------|
+| `--json` | Print masked content and findings as JSON. |
+| `--write` | Replace the clipboard contents with the masked text instead of printing it. |
+| `--redaction full\|match\|partial` | Override `[mask].redaction` for this run. |
+| `--min-severity <severity>` | Override `[mask].min_severity` for this run. |
+
+Exit codes follow the shared semantics: `clipboard scan` exits `1` when findings meet the fail threshold, and both subcommands exit `2` when the clipboard is unavailable (for example, no display server on Linux). Non-text clipboard contents (such as images) and an empty clipboard are treated as empty text.
+
+Policy is resolved from `shk.toml` in the current working directory, the same as `shk scan` and `shk mask`.
+
+Note for Linux: after `clipboard mask --write`, X11/Wayland clipboard contents are owned by the writing process; without a clipboard manager the replaced text may not persist after the command exits. macOS and Windows are unaffected.
+
 ## `shk doctor`
 
 Run project diagnostics.
@@ -548,7 +585,9 @@ Install destinations:
 
 | Tool | Project path | Global path |
 |------|-------------|-------------|
-| `claude-code` | `.claude/skills/shk.md` | `~/.claude/skills/shk.md` |
+| `claude-code` | `.claude/skills/shk/SKILL.md` | `~/.claude/skills/shk/SKILL.md` |
 | `codex` / `cursor` | `.agents/skills/shk/SKILL.md` | `~/.agents/skills/shk/SKILL.md` |
 
-The Codex and Cursor paths follow the [open agent skills standard](https://agentskills.io). The skill file is embedded in the `shk` binary at build time and requires no network access.
+All destinations use the directory-plus-`SKILL.md` layout from the [open agent skills standard](https://agentskills.io), which is also the layout Claude Code loads skills from. The skill file is embedded in the `shk` binary at build time and requires no network access.
+
+Versions up to 0.3.17 wrote the Claude Code skill as a flat `.claude/skills/shk.md` file, which Claude Code does not load. Re-running `shk skills install` writes the new layout and removes the legacy flat file.

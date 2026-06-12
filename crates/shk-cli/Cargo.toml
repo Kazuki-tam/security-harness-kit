@@ -39,6 +39,7 @@ zeroize.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 dotenvx.workspace = true
+arboard.workspace = true
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"] }
 
 [dev-dependencies]

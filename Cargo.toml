@@ -41,6 +41,8 @@ quick-xml = "0.40"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 pdf-extract = "0.10.0"
 dotenvx = "0.2.2"
+# Text-only clipboard access; image-data is intentionally disabled.
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
 
 # The profile that 'dist' will build with
 [profile.dist]
