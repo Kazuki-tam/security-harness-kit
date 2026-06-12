@@ -383,7 +383,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Email address detected",
             confidence: 0.85,
-            validator: None,
+            validator: Some(email_valid),
         },
         CompiledRule {
             id: "pii.credit_card",
@@ -461,8 +461,13 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "pii.en.name",
             severity: Severity::Info,
             kind: Kind::Pii,
-            re: Regex::new(r"(?i)\b(?:name|full name|author|by)\s*[:#]\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b")
-                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            // Label is case-insensitive, but name words must be Title Case and stay on
+            // one line; otherwise structural config keys like `- name: build` in
+            // YAML/CI files produce false positives.
+            re: Regex::new(
+                r"\b(?i:name|full name|author|by)[ \t]*[:#][ \t]*[A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){1,3}\b",
+            )
+            .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "English personal name label detected",
             confidence: 0.45,
             validator: None,
@@ -472,7 +477,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             severity: Severity::Info,
             kind: Kind::Pii,
             re: Regex::new(
-                r"(?i)\b(?:address|street address|mailing address)\s*[:#]\s*\d{1,6}\s+[A-Z][A-Za-z0-9.'-]*(?:\s+[A-Z][A-Za-z0-9.'-]*){0,5}\s+(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|boulevard|blvd|court|ct|way)\b",
+                r"\b(?i:address|street address|mailing address)[ \t]*[:#][ \t]*\d{1,6}[ \t]+[A-Z][A-Za-z0-9.'-]*(?:[ \t]+[A-Z][A-Za-z0-9.'-]*){0,5}[ \t]+(?i:street|st|avenue|ave|road|rd|drive|dr|lane|ln|boulevard|blvd|court|ct|way)\b",
             )
             .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "English street address label detected",
@@ -610,6 +615,37 @@ fn luhn_valid(candidate: &str) -> bool {
         double = !double;
     }
     sum % 10 == 0
+}
+
+/// Asset/media file extensions that commonly follow retina-style names like
+/// `128x128@2x.png`, which the email regex would otherwise treat as a domain TLD.
+/// Extensions containing digits (e.g. `woff2`) cannot match the `[a-zA-Z]{2,}`
+/// TLD group, so only alphabetic extensions are listed.
+const RETINA_ASSET_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "avif", "bmp", "tif", "tiff", "heic",
+    "heif", "mp4", "mov", "webm", "mkv", "avi", "ogv", "mp3", "wav", "flac", "aac", "ogg", "opus",
+    "woff", "ttf", "otf", "eot", "pdf",
+];
+
+fn email_valid(candidate: &str) -> bool {
+    !looks_like_retina_asset(candidate)
+}
+
+fn looks_like_retina_asset(candidate: &str) -> bool {
+    let Some((before_ext, ext)) = candidate.rsplit_once('.') else {
+        return false;
+    };
+    if !RETINA_ASSET_EXTENSIONS
+        .iter()
+        .any(|asset_ext| ext.eq_ignore_ascii_case(asset_ext))
+    {
+        return false;
+    }
+
+    let Some((_, scale_suffix)) = before_ext.rsplit_once('@') else {
+        return false;
+    };
+    matches!(scale_suffix, "2x" | "3x")
 }
 
 fn openai_key_valid(candidate: &str) -> bool {
@@ -1764,6 +1800,55 @@ secret_key = "0123456789abcdef0123456789abcdef""#;
         let out = redact_line_for_display("user: admin@example.com ok", &cfg);
         assert!(!out.contains("example.com"));
         assert!(out.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn english_name_rule_ignores_structural_config_keys() {
+        let cfg = RuleEngineConfig::default();
+        let yaml = "\
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v6
+      - name: build
+        run: echo hi
+      - name: checkout
+        uses: actions/checkout@v6
+";
+        let m = scan_content(yaml, "ci.yml", &cfg);
+        assert!(!m.iter().any(|x| x.rule_id == "pii.en.name"), "{m:?}");
+    }
+
+    #[test]
+    fn english_name_rule_still_detects_title_case_names() {
+        let cfg = RuleEngineConfig::default();
+        // not real personal data: synthetic detector fixture value only
+        let m = scan_content("author: Ada Lovelace", "notes.txt", &cfg);
+        assert!(m.iter().any(|x| x.rule_id == "pii.en.name"), "{m:?}");
+    }
+
+    #[test]
+    fn email_rule_ignores_asset_filename_matches() {
+        let cfg = RuleEngineConfig::default();
+        let m = scan_content(
+            r#"icons: ["icons/128x128@2x.png", "logo@3x.jpeg", "splash@2x.webp", "icon@2x.svg"]"#,
+            "tauri.conf.json",
+            &cfg,
+        );
+        assert!(!m.iter().any(|x| x.rule_id == "pii.email"), "{m:?}");
+    }
+
+    #[test]
+    fn email_rule_still_detects_real_addresses() {
+        let cfg = RuleEngineConfig::default();
+        // not real personal data: synthetic detector fixture value only
+        let m = scan_content(
+            "contact: alice@example.com\nasset team: image-team@assets.png",
+            "notes.txt",
+            &cfg,
+        );
+        let email_findings = m.iter().filter(|x| x.rule_id == "pii.email").count();
+        assert_eq!(email_findings, 2, "{m:?}");
     }
 
     #[test]
