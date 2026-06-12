@@ -9,6 +9,7 @@ pub enum SkillTool {
     ClaudeCode,
     Codex,
     Cursor,
+    Antigravity,
     All,
 }
 
@@ -42,9 +43,15 @@ pub fn install(args: SkillsInstallArgs) -> Result<()> {
 
 fn selected_tools(tool: SkillTool) -> Vec<SkillTool> {
     match tool {
-        // Codex and Cursor both use the open agent skills directory today, so
-        // installing for Codex also makes the embedded skill available to Cursor.
-        SkillTool::All => vec![SkillTool::ClaudeCode, SkillTool::Codex],
+        // Codex, Cursor, and Antigravity all read the open agent skills
+        // directory (`.agents/skills/`) at project level; Antigravity is listed
+        // separately because its global directory is `~/.gemini/config/skills/`.
+        // Duplicate destinations are collapsed in `install_for`.
+        SkillTool::All => vec![
+            SkillTool::ClaudeCode,
+            SkillTool::Codex,
+            SkillTool::Antigravity,
+        ],
         t => vec![t],
     }
 }
@@ -77,8 +84,13 @@ pub fn status_entries_for(root: &Path) -> Vec<SkillStatus> {
     let tools = [
         ("claude-code (project)", SkillTool::ClaudeCode, false),
         ("claude-code (global)", SkillTool::ClaudeCode, true),
-        ("codex/cursor (project)", SkillTool::Codex, false),
+        (
+            "codex/cursor/antigravity (project)",
+            SkillTool::Codex,
+            false,
+        ),
         ("codex/cursor (global)", SkillTool::Codex, true),
+        ("antigravity (global)", SkillTool::Antigravity, true),
     ];
 
     tools
@@ -102,7 +114,7 @@ pub fn status_entries_for(root: &Path) -> Vec<SkillStatus> {
 }
 
 pub fn install_for(root: &Path, args: SkillsInstallArgs) -> Result<Vec<String>> {
-    let plans = selected_tools(args.tool.unwrap_or(SkillTool::All))
+    let mut plans = selected_tools(args.tool.unwrap_or(SkillTool::All))
         .into_iter()
         .map(|tool| {
             let base = resolve_base_for(root, args.global)?;
@@ -113,6 +125,10 @@ pub fn install_for(root: &Path, args: SkillsInstallArgs) -> Result<Vec<String>> 
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    // Tools sharing a destination (e.g. Codex and Antigravity both use
+    // `.agents/skills/` at project level) collapse into a single write.
+    let mut seen_dests = std::collections::HashSet::new();
+    plans.retain(|plan| seen_dests.insert(plan.dest.clone()));
 
     if !args.dry_run && !args.force {
         ensure_no_existing_destinations(&plans)?;
@@ -178,7 +194,7 @@ fn resolve_base_for(root: &Path, global: bool) -> Result<PathBuf> {
     }
 }
 
-fn dest_path_for(base: &Path, tool: SkillTool, _global: bool) -> Result<PathBuf> {
+fn dest_path_for(base: &Path, tool: SkillTool, global: bool) -> Result<PathBuf> {
     Ok(match tool {
         SkillTool::ClaudeCode => base
             .join(".claude")
@@ -186,6 +202,19 @@ fn dest_path_for(base: &Path, tool: SkillTool, _global: bool) -> Result<PathBuf>
             .join(SKILL_NAME)
             .join("SKILL.md"),
         SkillTool::Codex | SkillTool::Cursor => base
+            .join(".agents")
+            .join("skills")
+            .join(SKILL_NAME)
+            .join("SKILL.md"),
+        // Antigravity reads workspace `.agents/skills/` but its global skills
+        // directory is `~/.gemini/config/skills/`.
+        SkillTool::Antigravity if global => base
+            .join(".gemini")
+            .join("config")
+            .join("skills")
+            .join(SKILL_NAME)
+            .join("SKILL.md"),
+        SkillTool::Antigravity => base
             .join(".agents")
             .join("skills")
             .join(SKILL_NAME)
@@ -213,6 +242,7 @@ impl SkillTool {
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex/cursor",
             Self::Cursor => "cursor",
+            Self::Antigravity => "antigravity",
             Self::All => "all",
         }
     }

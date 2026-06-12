@@ -19,6 +19,8 @@ const PATH_KEYS: &[&str] = &[
     "targetPath",
     "uri",
     "fileName",
+    // Antigravity tool arguments use PascalCase (e.g. view_file / write_to_file).
+    "TargetFile",
 ];
 const MAX_HOOK_TEXT_BYTES: usize = 4096 * 512;
 const PRE_TEXT_KEYS: &[&str] = &[
@@ -50,9 +52,27 @@ const CURSOR_POST_TEXT_KEYS: &[&str] = &[
     "result_json",
     "tool_input",
 ];
+// Antigravity PreToolUse payload: { toolCall: { name, args: {...} }, ... } with
+// PascalCase argument names (run_command, write_to_file, read_url_content, ...).
+// These extend the shared PRE_TEXT_KEYS; both sets are scanned for Antigravity.
+const ANTIGRAVITY_PRE_EXTRA_TEXT_KEYS: &[&str] = &[
+    "CommandLine",
+    "CodeContent",
+    "TargetContent",
+    "ReplacementContent",
+    "Url",
+    "Prompt",
+    "Query",
+    "Input",
+    "Message",
+];
+// Antigravity PostToolUse payload carries no tool output — only `error` plus
+// metadata — so only error text is scannable.
+const ANTIGRAVITY_POST_TEXT_KEYS: &[&str] = &["error", "output", "result", "content", "text"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AiHookTool {
+    Antigravity,
     ClaudeCode,
     Codex,
     Cursor,
@@ -61,6 +81,7 @@ pub enum AiHookTool {
 impl AiHookTool {
     pub fn kebab_str(self) -> &'static str {
         match self {
+            Self::Antigravity => "antigravity",
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
             Self::Cursor => "cursor",
@@ -69,6 +90,7 @@ impl AiHookTool {
 
     pub fn virtual_path_label(self) -> &'static str {
         match self {
+            Self::Antigravity => "<antigravity-hook>",
             Self::ClaudeCode => "<claude-hook>",
             Self::Codex => "<codex-hook>",
             Self::Cursor => "<cursor-hook>",
@@ -211,18 +233,24 @@ fn scan_path_keys(v: &Value, out: &mut Vec<String>) {
 }
 
 fn text_priority_chunks(v: &Value, post: bool, tool: AiHookTool, blobs: &mut Vec<String>) {
-    grab_strings_for_keys_deep(v, priority_text_keys(post, tool), blobs);
+    for keys in priority_text_key_sets(post, tool) {
+        grab_strings_for_keys_deep(v, keys, blobs);
+    }
 }
 
-fn priority_text_keys(post: bool, tool: AiHookTool) -> &'static [&'static str] {
+fn priority_text_key_sets(post: bool, tool: AiHookTool) -> &'static [&'static [&'static str]] {
     if !post {
-        return PRE_TEXT_KEYS;
+        return match tool {
+            AiHookTool::Antigravity => &[PRE_TEXT_KEYS, ANTIGRAVITY_PRE_EXTRA_TEXT_KEYS],
+            _ => &[PRE_TEXT_KEYS],
+        };
     }
 
     match tool {
-        AiHookTool::Codex => CODEX_POST_TEXT_KEYS,
-        AiHookTool::ClaudeCode => CLAUDE_POST_TEXT_KEYS,
-        AiHookTool::Cursor => CURSOR_POST_TEXT_KEYS,
+        AiHookTool::Antigravity => &[ANTIGRAVITY_POST_TEXT_KEYS],
+        AiHookTool::Codex => &[CODEX_POST_TEXT_KEYS],
+        AiHookTool::ClaudeCode => &[CLAUDE_POST_TEXT_KEYS],
+        AiHookTool::Cursor => &[CURSOR_POST_TEXT_KEYS],
     }
 }
 
@@ -301,10 +329,89 @@ mod tests {
         assert_eq!(AiHookTool::ClaudeCode.kebab_str(), "claude-code");
         assert_eq!(AiHookTool::Codex.kebab_str(), "codex");
         assert_eq!(AiHookTool::Cursor.kebab_str(), "cursor");
+        assert_eq!(AiHookTool::Antigravity.kebab_str(), "antigravity");
 
         assert_eq!(AiHookTool::ClaudeCode.virtual_path_label(), "<claude-hook>");
         assert_eq!(AiHookTool::Codex.virtual_path_label(), "<codex-hook>");
         assert_eq!(AiHookTool::Cursor.virtual_path_label(), "<cursor-hook>");
+        assert_eq!(
+            AiHookTool::Antigravity.virtual_path_label(),
+            "<antigravity-hook>"
+        );
+    }
+
+    #[test]
+    fn antigravity_pre_extracts_pascal_case_tool_call_args() {
+        let stdin = serde_json::json!({
+            "toolCall": {
+                "name": "run_command",
+                "args": {
+                    "CommandLine": "export TOKEN=sk-live-example",
+                    "Cwd": "/workspace/project"
+                }
+            },
+            "stepIdx": 3,
+            "conversationId": "uuid"
+        })
+        .to_string();
+
+        let (display, body) = stdin_to_hook_body(
+            AiHookTool::Antigravity,
+            false,
+            &stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert_eq!(display, "<antigravity-hook>");
+        assert!(body.contains("export TOKEN=sk-live-example"), "{body}");
+    }
+
+    #[test]
+    fn antigravity_pre_extracts_write_to_file_content() {
+        let stdin = serde_json::json!({
+            "toolCall": {
+                "name": "write_to_file",
+                "args": {
+                    "TargetFile": "/outside/of/repo/new.txt",
+                    "CodeContent": "api_key = embedded-secret-value"
+                }
+            }
+        })
+        .to_string();
+
+        let (_display, body) = stdin_to_hook_body(
+            AiHookTool::Antigravity,
+            false,
+            &stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert!(body.contains("embedded-secret-value"), "{body}");
+    }
+
+    #[test]
+    fn antigravity_post_extracts_error_text() {
+        let stdin = serde_json::json!({
+            "stepIdx": 5,
+            "error": "exit status 1: leaked-value-in-error",
+            "conversationId": "uuid"
+        })
+        .to_string();
+
+        let (_display, body) = stdin_to_hook_body(
+            AiHookTool::Antigravity,
+            true,
+            &stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert!(body.contains("leaked-value-in-error"), "{body}");
     }
 
     #[test]

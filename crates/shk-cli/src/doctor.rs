@@ -765,6 +765,7 @@ pub fn has_managed_ai_hooks(root: &Path) -> bool {
     let paths = [
         root.join(".claude/settings.json"),
         root.join(".cursor/hooks.json"),
+        root.join(".agents/hooks.json"),
         root.join(CONFIG_REL_PATH),
     ];
     for p in paths {

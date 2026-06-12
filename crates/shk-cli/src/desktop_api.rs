@@ -20,7 +20,6 @@ use crate::workflow_hardening;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use shk_core::git;
-use shk_integrations::CONFIG_REL_PATH;
 use shk_integrations::{MANAGED_MARKER_JSON, MANAGED_MARKER_SH};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -34,6 +33,7 @@ pub struct AiSafetyAppliedStatus {
     pub scan_hooks_claude_code: bool,
     pub scan_hooks_cursor: bool,
     pub scan_hooks_codex: bool,
+    pub scan_hooks_antigravity: bool,
     pub claude_deny: bool,
     pub claude_sandbox: bool,
     pub codex_sandbox: bool,
@@ -220,6 +220,9 @@ pub struct ApplyAiHookSettingsOptions {
     pub scan_hooks_claude_code: bool,
     pub scan_hooks_cursor: bool,
     pub scan_hooks_codex: bool,
+    /// Defaults to false for payloads from older desktop frontends.
+    #[serde(default)]
+    pub scan_hooks_antigravity: bool,
     #[serde(default = "default_cursor_fail_closed")]
     pub cursor_fail_closed: bool,
     pub claude_deny: bool,
@@ -274,6 +277,7 @@ fn desktop_configure_ai_options(options: &ApplyAiHookSettingsOptions) -> Configu
         scan_hooks_claude_code: options.scan_hooks_claude_code,
         scan_hooks_cursor: options.scan_hooks_cursor,
         scan_hooks_codex: options.scan_hooks_codex,
+        scan_hooks_antigravity: options.scan_hooks_antigravity,
         claude_deny: options.claude_deny,
         claude_sandbox: options.claude_sandbox,
         codex_sandbox: options.codex_sandbox,
@@ -303,6 +307,7 @@ struct ProjectCheckStatus {
     scan_hooks_claude_code: bool,
     scan_hooks_cursor: bool,
     scan_hooks_codex: bool,
+    scan_hooks_antigravity: bool,
     ignore: IgnoreStatus,
     claude: ClaudePermissionsStatus,
     codex: CodexConfigStatus,
@@ -427,6 +432,7 @@ fn ai_safety_applied_matches(a: &AiSafetyAppliedStatus, b: &AiSafetyAppliedStatu
     a.scan_hooks_claude_code == b.scan_hooks_claude_code
         && a.scan_hooks_cursor == b.scan_hooks_cursor
         && a.scan_hooks_codex == b.scan_hooks_codex
+        && a.scan_hooks_antigravity == b.scan_hooks_antigravity
         && a.claude_deny == b.claude_deny
         && a.claude_sandbox == b.claude_sandbox
         && a.codex_sandbox == b.codex_sandbox
@@ -436,6 +442,7 @@ fn ai_safety_fully_disabled(status: &AiSafetyAppliedStatus) -> bool {
     !status.scan_hooks_claude_code
         && !status.scan_hooks_cursor
         && !status.scan_hooks_codex
+        && !status.scan_hooks_antigravity
         && !status.claude_deny
         && !status.claude_sandbox
         && !status.codex_sandbox
@@ -451,6 +458,7 @@ fn current_ai_hook_settings_options(root: &Path) -> ApplyAiHookSettingsOptions {
         scan_hooks_claude_code: applied.scan_hooks_claude_code,
         scan_hooks_cursor: applied.scan_hooks_cursor,
         scan_hooks_codex: applied.scan_hooks_codex,
+        scan_hooks_antigravity: applied.scan_hooks_antigravity,
         cursor_fail_closed: true,
         claude_deny: applied.claude_deny,
         claude_sandbox: applied.claude_sandbox,
@@ -862,6 +870,7 @@ fn collect_project_check_status(root: &Path) -> ProjectCheckStatus {
         scan_hooks_claude_code: scan_hooks_for("claude-code"),
         scan_hooks_cursor: scan_hooks_for("cursor"),
         scan_hooks_codex: scan_hooks_for("codex"),
+        scan_hooks_antigravity: scan_hooks_for("antigravity"),
         ignore: collect_ignore_status(root),
         claude: collect_claude_permissions_status(root),
         codex: collect_codex_config_status(root),
@@ -890,36 +899,30 @@ fn build_hooks_status(root: &Path, git_root: Option<&Path>) -> HooksStatus {
 }
 
 fn ai_tool_statuses(root: &Path, global: bool) -> Vec<AiHookToolStatus> {
-    [AiTool::ClaudeCode, AiTool::Codex, AiTool::Cursor]
-        .into_iter()
-        .filter_map(|tool| {
-            let config_path = resolve_ai_config_path(tool, root, global).ok()?;
-            let installed = config_path.is_file()
-                && fs::read_to_string(&config_path)
-                    .map(|s| s.contains(MANAGED_MARKER_JSON) || s.contains(MANAGED_MARKER_SH))
-                    .unwrap_or(false);
-            Some(AiHookToolStatus {
-                tool: tool.kebab_str().to_string(),
-                config_path: config_path.display().to_string(),
-                installed,
-            })
+    [
+        AiTool::ClaudeCode,
+        AiTool::Codex,
+        AiTool::Cursor,
+        AiTool::Antigravity,
+    ]
+    .into_iter()
+    .filter_map(|tool| {
+        let config_path = resolve_ai_config_path(tool, root, global).ok()?;
+        let installed = config_path.is_file()
+            && fs::read_to_string(&config_path)
+                .map(|s| s.contains(MANAGED_MARKER_JSON) || s.contains(MANAGED_MARKER_SH))
+                .unwrap_or(false);
+        Some(AiHookToolStatus {
+            tool: tool.kebab_str().to_string(),
+            config_path: config_path.display().to_string(),
+            installed,
         })
-        .collect()
+    })
+    .collect()
 }
 
 fn resolve_ai_config_path(tool: AiTool, root: &Path, global: bool) -> Result<PathBuf> {
-    let rel = match tool {
-        AiTool::ClaudeCode => ".claude/settings.json",
-        AiTool::Cursor => ".cursor/hooks.json",
-        AiTool::Codex => CONFIG_REL_PATH,
-    };
-    Ok(if global {
-        dirs::home_dir()
-            .context("home directory not found")?
-            .join(rel)
-    } else {
-        root.join(rel)
-    })
+    crate::hooks::resolve_ai_config_path(tool, root, global)
 }
 
 fn build_recommended_fixes(
@@ -956,7 +959,9 @@ fn build_recommended_fixes(
         fixes.push(RecommendedFixDto {
             id: "ai_hooks".into(),
             severity: "warn".into(),
-            message: "Install managed AI scan hooks for Cursor, Claude Code, and Codex".into(),
+            message:
+                "Install managed AI scan hooks for Cursor, Claude Code, Codex, and Antigravity"
+                    .into(),
             requires_policy: true,
             default_selected: true,
         });
@@ -1133,6 +1138,7 @@ fn ai_safety_applied_from(checks: &ProjectCheckStatus) -> AiSafetyAppliedStatus 
         scan_hooks_claude_code: checks.scan_hooks_claude_code,
         scan_hooks_cursor: checks.scan_hooks_cursor,
         scan_hooks_codex: checks.scan_hooks_codex,
+        scan_hooks_antigravity: checks.scan_hooks_antigravity,
         claude_deny: checks.claude.settings_exists && checks.claude.deny_ok,
         claude_sandbox: checks.claude.settings_exists && checks.claude.sandbox_ok,
         codex_sandbox: checks.codex.config_exists
@@ -1230,6 +1236,7 @@ fn parse_ai_tool(value: &str) -> Result<AiTool> {
         "claude-code" => Ok(AiTool::ClaudeCode),
         "codex" => Ok(AiTool::Codex),
         "cursor" => Ok(AiTool::Cursor),
+        "antigravity" => Ok(AiTool::Antigravity),
         other => anyhow::bail!("unknown AI tool: {other}"),
     }
 }
@@ -1248,6 +1255,7 @@ fn parse_skill_tool(value: &str) -> Result<SkillTool> {
         "claude-code" => Ok(SkillTool::ClaudeCode),
         "codex" => Ok(SkillTool::Codex),
         "cursor" => Ok(SkillTool::Cursor),
+        "antigravity" => Ok(SkillTool::Antigravity),
         "all" => Ok(SkillTool::All),
         other => anyhow::bail!("unknown skill tool: {other}"),
     }
@@ -1792,6 +1800,7 @@ mod tests {
             ApplyAiHookSettingsOptions {
                 scan_hooks_claude_code: false,
                 scan_hooks_cursor: false,
+                scan_hooks_antigravity: false,
                 scan_hooks_codex: false,
                 cursor_fail_closed: true,
                 claude_deny: false,
@@ -1836,6 +1845,7 @@ mod tests {
             ApplyAiHookSettingsOptions {
                 scan_hooks_claude_code: true,
                 scan_hooks_cursor: false,
+                scan_hooks_antigravity: false,
                 scan_hooks_codex: false,
                 cursor_fail_closed: true,
                 claude_deny: false,
@@ -1878,6 +1888,7 @@ mod tests {
             ApplyAiHookSettingsOptions {
                 scan_hooks_claude_code: true,
                 scan_hooks_cursor: false,
+                scan_hooks_antigravity: false,
                 scan_hooks_codex: false,
                 cursor_fail_closed: true,
                 claude_deny: false,
@@ -1907,6 +1918,7 @@ mod tests {
         let opts = desktop_configure_ai_options(&ApplyAiHookSettingsOptions {
             scan_hooks_claude_code: true,
             scan_hooks_cursor: false,
+            scan_hooks_antigravity: false,
             scan_hooks_codex: false,
             cursor_fail_closed: true,
             claude_deny: false,
@@ -1923,6 +1935,7 @@ mod tests {
         let opts = desktop_configure_ai_options(&ApplyAiHookSettingsOptions {
             scan_hooks_claude_code: false,
             scan_hooks_cursor: true,
+            scan_hooks_antigravity: false,
             scan_hooks_codex: false,
             cursor_fail_closed: true,
             claude_deny: false,

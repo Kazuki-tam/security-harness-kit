@@ -242,8 +242,9 @@ Source build: run `cargo clean` in the cloned repository to remove build output,
 | `shk hooks install-ai` (Claude Code) | `.claude/settings.json` | Remove entries tagged with `"_shk_managed": true`. Delete the file if it has no remaining entries. If you used `--apply-deny` or `--apply-sandbox`, also review the `permissions.deny` and `sandbox` settings that were merged into the same file. |
 | `shk hooks install-ai` (Cursor) | `.cursor/hooks.json` | Remove entries tagged with `"_shk_managed": true`. |
 | `shk hooks install-ai` (Codex) | `.codex/config.toml` | Remove the block delimited by `# shk-managed-start` / `# shk-managed-end`, and `features.hooks = true` if no longer needed. The managed block covers `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, and `PostToolUse`. If you used `--apply-sandbox`, also review the top-level `sandbox_mode` and `approval_policy` values. |
+| `shk hooks install-ai` (Antigravity) | `.agents/hooks.json` | Remove the top-level `shk-security` entry (its hook entries are tagged with `"_shk_managed": true`). Delete the file if it has no remaining entries. |
 | `shk skills install` (Claude Code) | `.claude/skills/shk/SKILL.md` | Bundled skill file. Installs from 0.3.17 or earlier used `.claude/skills/shk.md`; remove that file too if present. |
-| `shk skills install` (Codex / Cursor) | `.agents/skills/shk/SKILL.md` | Bundled skill file. |
+| `shk skills install` (Codex / Cursor / Antigravity) | `.agents/skills/shk/SKILL.md` | Bundled skill file. |
 | `shk ci init github` | `.github/workflows/shk.yml` by default | Generated GitHub Actions workflow. If you passed `--output`, remove that custom path instead. |
 
 For commands that support it, re-running with `--dry-run` is a safe way to confirm the exact paths used in your project before deleting them. This applies to `shk hooks install-ai`, `shk skills install`, and `shk ci init github`; `shk hooks install` and `shk init` do not have a dry-run mode.
@@ -257,8 +258,10 @@ For commands that support it, re-running with `--dry-run` is a safe way to confi
 | `shk hooks install-ai --global --tool claude-code` | `~/.claude/settings.json` (managed entries, plus any `permissions.deny` or `sandbox` settings you explicitly enabled) |
 | `shk hooks install-ai --global --tool codex` | `~/.codex/config.toml` (managed block, plus top-level sandbox settings if you used `--apply-sandbox`) |
 | `shk hooks install-ai --global --tool cursor` | `~/.cursor/hooks.json` (managed entries) |
+| `shk hooks install-ai --global --tool antigravity` | `~/.gemini/config/hooks.json` (managed `shk-security` entry) |
 | `shk skills install --global --tool claude-code` | `~/.claude/skills/shk/SKILL.md` (or the legacy `~/.claude/skills/shk.md` from 0.3.17 or earlier) |
 | `shk skills install --global --tool codex` / `--tool cursor` | `~/.agents/skills/shk/SKILL.md` |
+| `shk skills install --global --tool antigravity` | `~/.gemini/config/skills/shk/SKILL.md` |
 
 Managed entries use the same markers as project installs (`"_shk_managed": true` for JSON files, `# shk-managed-start` / `# shk-managed-end` for shell and TOML files), so they are safe to identify and remove by hand. Settings merged by `--apply-deny` and `--apply-sandbox` are not individually tagged; review them before removing so you do not discard unrelated user configuration.
 

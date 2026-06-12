@@ -73,6 +73,7 @@ export function ProjectSetupPanel({
     status.aiSafetyApplied.scanHooksClaudeCode,
     status.aiSafetyApplied.scanHooksCursor,
     status.aiSafetyApplied.scanHooksCodex,
+    status.aiSafetyApplied.scanHooksAntigravity,
     status.aiSafetyApplied.claudeDeny,
     status.aiSafetyApplied.claudeSandbox,
     status.aiSafetyApplied.codexSandbox,
@@ -112,7 +113,8 @@ export function ProjectSetupPanel({
   const scanHooksSelected =
     aiHookSelection.scanHooksClaudeCode ||
     aiHookSelection.scanHooksCursor ||
-    aiHookSelection.scanHooksCodex;
+    aiHookSelection.scanHooksCodex ||
+    aiHookSelection.scanHooksAntigravity;
   const showCliNotFoundWarning = !status.cliInstalled && scanHooksSelected;
   const aiHookStatusLabel = !policyExists
     ? m.statusMissing
@@ -347,6 +349,13 @@ export function ProjectSetupPanel({
                 label={m.aiHooks.toolNames.codex}
                 hint={m.aiHooks.scanHooksToolHint}
                 onToggle={() => toggleAiHookSelection("scanHooksCodex")}
+              />
+              <AiHookOption
+                checked={aiHookSelection.scanHooksAntigravity}
+                disabled={running}
+                label={m.aiHooks.toolNames.antigravity}
+                hint={m.aiHooks.scanHooksToolHint}
+                onToggle={() => toggleAiHookSelection("scanHooksAntigravity")}
               />
             </ul>
             {showCliNotFoundWarning && (

@@ -203,6 +203,71 @@ pub fn claude_recommended_deny_entries() -> Vec<&'static str> {
         .collect()
 }
 
+/// Recommended entries for Antigravity's permission Deny list, in the
+/// `action(target)` resource format from the Antigravity permissions docs.
+/// Antigravity manages its Allow/Ask/Deny lists in its own settings UI and
+/// internal per-project config, so shk cannot write them programmatically;
+/// these are emitted as copy-paste guidance.
+///
+/// `command(prefix)` matches whitespace-separated tokens as anchored regexes,
+/// so `command(rm -rf)` covers every `rm -rf ...` invocation. Denying
+/// `read_file` on a path also implicitly denies `write_file` on it.
+const ANTIGRAVITY_SECRET_DENY_ENTRIES: &[&str] = &[
+    "read_file(**/.env)",
+    "read_file(**/.env.*)",
+    "read_file(tokens/)",
+    "read_file(**/*token*)",
+    "read_file(**/*key*)",
+    "read_file(**/*secret*)",
+    "read_file(**/*password*)",
+    "read_file(**/*credential*)",
+    "write_file(.git/)",
+    "command(cat .env)",
+    "command(cat tokens/.*)",
+    "command(source .env)",
+];
+
+const ANTIGRAVITY_ACTION_DENY_ENTRIES: &[&str] = &[
+    "command(rm -rf)",
+    "command(sudo)",
+    "command(su)",
+    "command(curl)",
+    "command(wget)",
+    "command(nc)",
+    "command(netcat)",
+    "command(ssh)",
+    "command(scp)",
+    "command(rsync)",
+    "command(ftp)",
+    "command(sftp)",
+    "command(psql)",
+    "command(mysql)",
+    "command(mongosh)",
+    "command(mongo)",
+    "command(redis-cli)",
+    "command(sqlite3)",
+    "command(sqlite)",
+    "command(chmod 777)",
+    "command(chown)",
+    "command(chgrp)",
+    "command(mount)",
+    "command(umount)",
+    "command(systemctl)",
+    "command(service)",
+    "command(apt)",
+    "command(yum)",
+    "command(dnf)",
+    "command(pacman)",
+];
+
+pub fn antigravity_recommended_deny_entries() -> Vec<&'static str> {
+    ANTIGRAVITY_SECRET_DENY_ENTRIES
+        .iter()
+        .chain(ANTIGRAVITY_ACTION_DENY_ENTRIES.iter())
+        .copied()
+        .collect()
+}
+
 pub fn normalize_claude_deny_entry(entry: &str) -> String {
     entry
         .trim()
@@ -320,7 +385,8 @@ fn access_kind_for_path(v: &Value) -> Option<&'static str> {
     let hay = compact_json_text(v);
     if contains_any(&hay, &["write", "edit", "create", "update", "delete"]) {
         Some("write")
-    } else if contains_any(&hay, &["read", "open"]) {
+    } else if contains_any(&hay, &["read", "open", "view"]) {
+        // "view" covers Antigravity's view_file tool.
         Some("read")
     } else {
         None
@@ -339,6 +405,9 @@ fn candidate_paths(v: &Value) -> Vec<String> {
             "targetPath",
             "uri",
             "fileName",
+            // Antigravity PascalCase tool arguments (view_file / write_to_file).
+            "TargetFile",
+            "AbsolutePath",
         ],
         &mut out,
     );
@@ -351,7 +420,15 @@ fn candidate_commands(v: &Value) -> Vec<String> {
     let mut out = Vec::new();
     collect_strings_for_keys(
         v,
-        &["command", "shell_command", "cmd", "args", "input"],
+        // `CommandLine` is the Antigravity run_command argument name.
+        &[
+            "command",
+            "shell_command",
+            "cmd",
+            "args",
+            "input",
+            "CommandLine",
+        ],
         &mut out,
     );
     out.sort();
@@ -843,6 +920,55 @@ mod tests {
         let input = r#"{"tool_name":"Read","tool_input":{"file_path":".env"}}"#;
         assert_eq!(
             detect_dangerous_action(input).unwrap().unwrap().category,
+            "secret_file_access"
+        );
+    }
+
+    #[test]
+    fn antigravity_deny_entries_use_action_target_resource_format() {
+        let entries = antigravity_recommended_deny_entries();
+        assert!(!entries.is_empty());
+        for entry in &entries {
+            assert!(
+                entry.starts_with("read_file(")
+                    || entry.starts_with("write_file(")
+                    || entry.starts_with("command("),
+                "unexpected Antigravity permission action: {entry}"
+            );
+            assert!(entry.ends_with(')'), "{entry}");
+        }
+        assert!(entries.contains(&"command(rm -rf)"));
+        assert!(entries.contains(&"read_file(**/.env)"));
+    }
+
+    #[test]
+    fn blocks_antigravity_command_line_payloads() {
+        let input = serde_json::json!({
+            "toolCall": {
+                "name": "run_command",
+                "args": { "CommandLine": "rm -rf /", "Cwd": "/workspace" }
+            }
+        })
+        .to_string();
+
+        assert_eq!(
+            detect_dangerous_action(&input).unwrap().unwrap().category,
+            "destructive_filesystem"
+        );
+    }
+
+    #[test]
+    fn blocks_antigravity_secret_file_reads() {
+        let input = serde_json::json!({
+            "toolCall": {
+                "name": "view_file",
+                "args": { "AbsolutePath": "/workspace/.env" }
+            }
+        })
+        .to_string();
+
+        assert_eq!(
+            detect_dangerous_action(&input).unwrap().unwrap().category,
             "secret_file_access"
         );
     }

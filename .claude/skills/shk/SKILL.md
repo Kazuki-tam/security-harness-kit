@@ -56,10 +56,11 @@ shk env dotenvx run -- npm test       # inject stored keys only into child proce
 shk env dotenvx delete --all
 shk secrets push --profile prod       # push dotenv payload to AWS/GCP secret manager
 shk secrets push --profile prod --dry-run
-shk skills install                   # install this skill (claude-code + codex/cursor)
+shk skills install                   # install this skill (claude-code + codex/cursor/antigravity)
 shk skills install --tool claude-code --global
 shk skills install --tool codex --global
 shk skills install --tool cursor --global
+shk skills install --tool antigravity --global
 ```
 
 Global flags work with every command:
@@ -188,7 +189,8 @@ Safe operating rules:
 ## AI hook integration
 
 `shk hooks install-ai` writes managed entries to `.claude/settings.json`,
-`.cursor/hooks.json`, and `.codex/config.toml`.
+`.cursor/hooks.json`, `.codex/config.toml`, and `.agents/hooks.json` (Antigravity;
+global installs use `~/.gemini/config/hooks.json`).
 
 Each hook runs `shk scan --hook-mode <tool>` on the payload before AI tool execution.
 Pre-hooks and user-prompt hooks block on findings (exit 2); post-hooks warn only (exit 0).
@@ -202,6 +204,13 @@ Codex project hooks also ensure `features.hooks = true`, install `PreToolUse`,
 `$(git rev-parse --show-toplevel)` so hooks still resolve the repo when Codex starts
 from a subdirectory. Global Codex hooks keep the session cwd and omit the git-root path.
 
+Antigravity gets a managed `shk-security` entry with a blocking `PreToolUse` hook
+(`run_command`, file writes/edits, `view_file`, `read_url_content`, `search_web`).
+No post hook is installed because Antigravity `PostToolUse` payloads carry no tool output.
+Antigravity permission lists (Deny > Ask > Allow, `action(target)` format) are managed
+in its settings UI; `--apply-deny` with `--tool antigravity` prints recommended Deny
+entries (e.g. `command(rm -rf)`, `read_file(**/.env)`) to add manually.
+
 ```bash
 shk hooks install-ai                             # all detected tools
 shk hooks install-ai --audit                     # non-blocking, writes .shk/audit.log
@@ -211,10 +220,11 @@ shk hooks install-ai --tool claude-code --global
 shk hooks install-ai --tool claude-code --apply-deny
 shk hooks install-ai --apply-sandbox
 shk hooks install-ai --tool cursor --fail-closed
+shk hooks install-ai --tool antigravity
 ```
 
 Important hook behavior:
-- Without `--tool`, installs managed hooks for Claude Code, Codex, and Cursor.
+- Without `--tool`, installs managed hooks for Claude Code, Codex, Cursor, and Antigravity.
 - `--audit` makes installed hooks non-blocking and writes metadata-only entries to `.shk/audit.log`.
 - `--log-blocked` keeps installed hooks blocking and writes metadata-only blocked-event entries to `.shk/audit.log`; inspect them with `shk audit`.
 - `--apply-sandbox` hardens supported tool sandbox settings. Cursor has no local sandbox setting in `hooks.json`, so this sets managed hooks fail-closed.
@@ -413,14 +423,16 @@ For `shk secrets push`, profile keys are limited to supported fields such as `pr
 ```bash
 shk skills list                              # show available built-in skills
 shk skills status                            # check installation status
-shk skills install                           # install for all tools (claude-code + codex/cursor)
+shk skills install                           # install for all tools (claude-code + codex/cursor/antigravity)
 shk skills install --tool claude-code        # .claude/skills/shk/SKILL.md
 shk skills install --tool codex             # .agents/skills/shk/SKILL.md
 shk skills install --tool cursor            # .agents/skills/shk/SKILL.md
+shk skills install --tool antigravity       # .agents/skills/shk/SKILL.md (shared)
 shk skills install --tool all --global
 shk skills install --tool claude-code --global   # ~/.claude/skills/shk/SKILL.md
 shk skills install --tool codex --global    # ~/.agents/skills/shk/SKILL.md
 shk skills install --tool cursor --global   # ~/.agents/skills/shk/SKILL.md
+shk skills install --tool antigravity --global   # ~/.gemini/config/skills/shk/SKILL.md
 shk skills install --force                  # overwrite existing
 shk skills install --dry-run                # preview without writing
 ```

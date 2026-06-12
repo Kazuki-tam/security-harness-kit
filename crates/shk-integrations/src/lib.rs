@@ -8,8 +8,9 @@ pub mod ai_hooks;
 pub mod codex;
 
 pub use action_guard::{
-    ActionGuardConfig, ActionGuardMatch, claude_deny_entry_covers, claude_recommended_deny_entries,
-    detect_dangerous_action, detect_dangerous_action_with_config, normalize_claude_deny_entry,
+    ActionGuardConfig, ActionGuardMatch, antigravity_recommended_deny_entries,
+    claude_deny_entry_covers, claude_recommended_deny_entries, detect_dangerous_action,
+    detect_dangerous_action_with_config, normalize_claude_deny_entry,
 };
 pub use ai_hooks::{AiHookTool, USER_PROMPT_HOOK_FAIL_ON, extract_user_prompt, stdin_to_hook_body};
 pub use codex::{

@@ -41,7 +41,7 @@ pub enum Commands {
         /// Install blocking AI hooks that append metadata-only block entries to `.shk/audit.log`.
         #[arg(long, conflicts_with = "audit")]
         log_blocked: bool,
-        /// AI tools to configure: claude-code, codex, cursor. Repeat or use commas.
+        /// AI tools to configure: claude-code, codex, cursor, antigravity. Repeat or use commas.
         #[arg(long, value_enum, value_delimiter = ',')]
         tool: Vec<AiTool>,
         /// Skip Git pre-commit hook setup.
@@ -245,6 +245,7 @@ pub enum AuditReasonArg {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
 #[clap(rename_all = "kebab-case")]
 pub enum AiTool {
+    Antigravity,
     ClaudeCode,
     Codex,
     Cursor,
@@ -253,6 +254,7 @@ pub enum AiTool {
 impl AiTool {
     pub fn kebab_str(self) -> &'static str {
         match self {
+            Self::Antigravity => "antigravity",
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
             Self::Cursor => "cursor",
@@ -261,6 +263,7 @@ impl AiTool {
 
     pub fn integration_tool(self) -> shk_integrations::AiHookTool {
         match self {
+            Self::Antigravity => shk_integrations::AiHookTool::Antigravity,
             Self::ClaudeCode => shk_integrations::AiHookTool::ClaudeCode,
             Self::Codex => shk_integrations::AiHookTool::Codex,
             Self::Cursor => shk_integrations::AiHookTool::Cursor,
@@ -302,7 +305,7 @@ pub enum HooksCmd {
         #[arg(long, help = "Explicit alias for the default pre-commit hook.")]
         pre_commit: bool,
     },
-    /// Configure AI-editor hooks (Cursor / Claude Code / Codex)
+    /// Configure AI-editor hooks (Cursor / Claude Code / Codex / Antigravity)
     InstallAi {
         #[arg(
             long,
@@ -320,7 +323,7 @@ pub enum HooksCmd {
         dry_run: bool,
         #[arg(
             long,
-            help = "Write user-level configs (~/.cursor, ~/.codex, ~/.claude)."
+            help = "Write user-level configs (~/.cursor, ~/.codex, ~/.claude, ~/.gemini/config)."
         )]
         global: bool,
         #[arg(long, value_enum)]
@@ -328,7 +331,9 @@ pub enum HooksCmd {
         /// Cursor hooks only: sets `failClosed` in injected entries.
         #[arg(long)]
         fail_closed: bool,
-        /// Claude Code only: merge recommended permissions.deny action guard entries.
+        /// Claude Code: merge recommended permissions.deny action guard entries.
+        /// Antigravity: print recommended permission Deny list entries to add
+        /// manually (Antigravity permissions are managed in its settings UI).
         #[arg(long)]
         apply_deny: bool,
         /// Apply supported sandbox hardening for Claude Code and Codex.
@@ -461,9 +466,9 @@ pub enum SkillsCmd {
     List,
     /// Show installation status for all supported tools
     Status,
-    /// Install shk skill for Claude Code, Codex, and/or Cursor
+    /// Install shk skill for Claude Code, Codex, Cursor, and/or Antigravity
     Install {
-        /// Target tool: claude-code, codex, cursor, or all (default: all)
+        /// Target tool: claude-code, codex, cursor, antigravity, or all (default: all)
         #[arg(long, value_enum)]
         tool: Option<SkillToolArg>,
         /// Write to user-level directory (~/.claude/skills/ or ~/.agents/skills/)
@@ -899,6 +904,7 @@ mod tests {
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 #[clap(rename_all = "kebab-case")]
 pub enum SkillToolArg {
+    Antigravity,
     ClaudeCode,
     Codex,
     Cursor,

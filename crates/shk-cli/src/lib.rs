@@ -257,6 +257,7 @@ pub fn run() -> Result<()> {
                 force,
             } => commands::skills::install(commands::skills::SkillsInstallArgs {
                 tool: tool.map(|t| match t {
+                    SkillToolArg::Antigravity => commands::skills::SkillTool::Antigravity,
                     SkillToolArg::ClaudeCode => commands::skills::SkillTool::ClaudeCode,
                     SkillToolArg::Codex => commands::skills::SkillTool::Codex,
                     SkillToolArg::Cursor => commands::skills::SkillTool::Cursor,
