@@ -24,6 +24,10 @@ exceptions = [
   { allow = ["Zlib"], crate = "zlib-rs" },
   { allow = ["CC0-1.0"], crate = "secp256k1" },
   { allow = ["CC0-1.0"], crate = "secp256k1-sys" },
+  # BSL-1.0 (Boost Software License) is OSI-approved and FSF-free; pulled in by
+  # arboard (clipboard access) on Windows targets.
+  { allow = ["BSL-1.0"], crate = "clipboard-win" },
+  { allow = ["BSL-1.0"], crate = "error-code" },
 ]
 
 [bans]
