@@ -40,12 +40,17 @@ fn mask_text_with_custom(
     min_severity: Severity,
 ) -> (String, Vec<crate::finding::Finding>) {
     let mut findings = Vec::new();
-    let ends_with_newline = content.ends_with('\n');
     let mut out = String::with_capacity(content.len());
-    for (i, line) in content.lines().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
+    // Preserve each line's original terminator (LF vs CRLF) so masking never
+    // rewrites line endings on lines without findings.
+    for (i, raw_line) in content.split_inclusive('\n').enumerate() {
+        let (line, ending) = if let Some(stripped) = raw_line.strip_suffix("\r\n") {
+            (stripped, "\r\n")
+        } else if let Some(stripped) = raw_line.strip_suffix('\n') {
+            (stripped, "\n")
+        } else {
+            (raw_line, "")
+        };
         let mut ms = scan_content(line, rel_path, cfg);
         ms.retain(|m| Severity::from(m.severity).meets_threshold(min_severity));
         let mut custom_ms = custom_rules::scan_content(line, custom);
@@ -96,9 +101,7 @@ fn mask_text_with_custom(
                 m.matched_text.zeroize();
             }
         }
-    }
-    if ends_with_newline {
-        out.push('\n');
+        out.push_str(ending);
     }
     (out, findings)
 }
@@ -220,6 +223,27 @@ mod tests {
         assert!(out.contains("ok line"));
         assert!(out.contains("[REDACTED_LINE]"));
         assert!(!hits.is_empty());
+    }
+
+    #[test]
+    fn mask_preserves_crlf_line_endings() {
+        let cfg = RuleEngineConfig::default();
+        let (out, hits) = mask_text(
+            // not real credential: synthetic detector fixture value only
+            "clean one\r\nsk-proj-abcdefghijklmnopqrstuvwxyz0123456789\r\nclean two\r\n",
+            &cfg,
+            "x.txt",
+            MaskRedaction::FullLine,
+        );
+        assert_eq!(out, "clean one\r\n[REDACTED_LINE]\r\nclean two\r\n");
+        assert!(!hits.is_empty());
+    }
+
+    #[test]
+    fn mask_preserves_missing_trailing_newline() {
+        let cfg = RuleEngineConfig::default();
+        let (out, _) = mask_text("no newline at end", &cfg, "x.txt", MaskRedaction::FullLine);
+        assert_eq!(out, "no newline at end");
     }
 
     #[test]

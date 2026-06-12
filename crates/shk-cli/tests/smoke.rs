@@ -810,10 +810,13 @@ fn mask_hook_mode_claude_post_returns_replacement_output() {
         String::from_utf8_lossy(&out.stderr)
     );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    // PostToolUse schema: masked replacement is delivered via the
+    // decision:block shape (permissionDecision is PreToolUse-only).
+    assert_eq!(v["decision"], "block");
     let hook_output = &v["hookSpecificOutput"];
     assert_eq!(hook_output["hookEventName"], "PostToolUse");
-    assert_eq!(hook_output["permissionDecision"], "allow");
-    let replacement = hook_output["output"].as_str().unwrap_or_default();
+    assert!(hook_output.get("permissionDecision").is_none(), "{v}");
+    let replacement = v["reason"].as_str().unwrap_or_default();
     assert!(replacement.contains("[REDACTED]"), "{replacement}");
     assert!(replacement.contains("tool output:"), "{replacement}");
     assert!(!replacement.contains(secret), "{replacement}");

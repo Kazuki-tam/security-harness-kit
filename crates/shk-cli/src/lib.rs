@@ -154,6 +154,7 @@ pub fn run() -> Result<()> {
                 fail_on,
                 color_enabled: color,
             })?,
+            ClipboardCmd::Hold => commands::clipboard::hold()?,
             ClipboardCmd::Mask {
                 json,
                 write,

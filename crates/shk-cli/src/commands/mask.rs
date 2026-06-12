@@ -90,6 +90,11 @@ pub fn run(inv: MaskInvocation) -> Result<()> {
                 Err(e) => Err(e.into()),
             }
         } else {
+            // stdout stays a clean passthrough; warn on stderr so secrets in
+            // non-UTF-8 input (Shift-JIS, UTF-16, …) do not flow out silently.
+            eprintln!(
+                "shk mask: warning: binary or non-UTF-8 input passed through unchanged (not scanned)"
+            );
             match io::stdout().write_all(&bytes) {
                 Ok(()) => Ok(()),
                 Err(e) => Err(e.into()),
