@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  aiHookSelectionHasAdditions,
+  aiHookSelectionHasRemovals,
+  aiHookSelectionIsFullyDisabled,
+  aiHookSelectionMatches,
   aiSafetyReady,
   buildQuickSetupSteps,
   defaultQuickSetupIgnoreTargets,
@@ -59,6 +63,7 @@ function status(overrides: Partial<ProjectStatus> = {}): ProjectStatus {
       scanHooksCodex: false,
       scanHooksCopilot: false,
       scanHooksAntigravity: false,
+      scanHooksWindsurf: false,
       claudeDeny: false,
       claudeSandbox: false,
       codexSandbox: false,
@@ -218,6 +223,23 @@ describe("buildQuickSetupSteps", () => {
     ).find((step) => step.id === "npm");
 
     expect(npmStep).toEqual({ id: "npm", done: true, pending: false });
+  });
+});
+
+describe("AI hook selection helpers", () => {
+  it("include Windsurf in matching, additions, removals, and fully-disabled checks", () => {
+    const applied = {
+      ...status().aiSafetyApplied,
+      cursorFailClosed: true,
+      scanHooksWindsurf: false,
+    };
+    const withWindsurf = { ...applied, scanHooksWindsurf: true };
+
+    expect(aiHookSelectionMatches(applied, withWindsurf)).toBe(false);
+    expect(aiHookSelectionHasAdditions(applied, withWindsurf)).toBe(true);
+    expect(aiHookSelectionHasRemovals(withWindsurf, applied)).toBe(true);
+    expect(aiHookSelectionIsFullyDisabled(applied)).toBe(true);
+    expect(aiHookSelectionIsFullyDisabled(withWindsurf)).toBe(false);
   });
 });
 

@@ -151,6 +151,7 @@ export const en: Messages = {
       codex: "Codex",
       copilot: "GitHub Copilot",
       antigravity: "Antigravity",
+      windsurf: "Windsurf",
     },
     actionCategories: {
       secret_file_access: "Sensitive file read",
@@ -295,7 +296,8 @@ export const en: Messages = {
     },
     aiHooks: {
       title: "AI editor safety",
-      description: "Configure scan hooks and safety settings for Cursor, Claude Code, and Codex.",
+      description:
+        "Configure scan hooks and safety settings for Cursor, Claude Code, Codex, Copilot, Antigravity, and Windsurf.",
       install: "Install scan hooks",
       applySelected: "Apply checked settings",
       syncSelected: "Apply changes",
@@ -318,6 +320,7 @@ export const en: Messages = {
         codex: "Codex",
         copilot: "GitHub Copilot",
         antigravity: "Antigravity",
+        windsurf: "Windsurf",
       },
       installClaudeDeny: "Apply deny",
       installCodexSandbox: "Apply sandbox",
@@ -345,7 +348,8 @@ export const en: Messages = {
     },
     skills: {
       title: "Agent skills",
-      description: "Deploy the bundled shk skill for Claude Code and Codex/Cursor.",
+      description:
+        "Deploy the bundled shk skill for Claude Code, Codex, Cursor, Copilot, Antigravity, and Windsurf.",
       install: "Install skills",
     },
     doctor: {

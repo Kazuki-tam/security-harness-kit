@@ -250,6 +250,8 @@ pub enum AiTool {
     Codex,
     Copilot,
     Cursor,
+    /// Windsurf (Cascade hooks; `.windsurf/` + `~/.codeium/windsurf/`).
+    Windsurf,
 }
 
 impl AiTool {
@@ -260,6 +262,7 @@ impl AiTool {
             Self::Codex => "codex",
             Self::Copilot => "copilot",
             Self::Cursor => "cursor",
+            Self::Windsurf => "windsurf",
         }
     }
 
@@ -270,6 +273,7 @@ impl AiTool {
             Self::Codex => shk_integrations::AiHookTool::Codex,
             Self::Copilot => shk_integrations::AiHookTool::Copilot,
             Self::Cursor => shk_integrations::AiHookTool::Cursor,
+            Self::Windsurf => shk_integrations::AiHookTool::Windsurf,
         }
     }
 }
@@ -326,7 +330,7 @@ pub enum HooksCmd {
         dry_run: bool,
         #[arg(
             long,
-            help = "Write user-level configs (~/.cursor, ~/.codex, ~/.claude, ~/.gemini/config, ~/.copilot)."
+            help = "Write user-level configs (~/.cursor, ~/.codex, ~/.claude, ~/.gemini/config, ~/.copilot, ~/.codeium/windsurf)."
         )]
         global: bool,
         #[arg(long, value_enum)]
@@ -912,5 +916,6 @@ pub enum SkillToolArg {
     Codex,
     Copilot,
     Cursor,
+    Windsurf,
     All,
 }

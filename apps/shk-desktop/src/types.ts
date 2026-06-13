@@ -90,6 +90,7 @@ export type AiSafetyAppliedStatus = {
   scanHooksCodex: boolean;
   scanHooksCopilot: boolean;
   scanHooksAntigravity: boolean;
+  scanHooksWindsurf: boolean;
   claudeDeny: boolean;
   claudeSandbox: boolean;
   codexSandbox: boolean;
@@ -150,6 +151,7 @@ export type ApplyAiHookSettingsOptions = {
   scanHooksCodex: boolean;
   scanHooksCopilot: boolean;
   scanHooksAntigravity: boolean;
+  scanHooksWindsurf: boolean;
   cursorFailClosed: boolean;
   claudeDeny: boolean;
   claudeSandbox: boolean;

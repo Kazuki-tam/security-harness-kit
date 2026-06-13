@@ -457,7 +457,9 @@ fn hook_deny_exit_code(tool: AiTool, event: hook_output::HookEvent) -> i32 {
 fn emit_blocking_reason_to_stderr(tool: AiTool, event: hook_output::HookEvent, reason: &str) {
     let copilot_user_prompt =
         tool == AiTool::Copilot && event == hook_output::HookEvent::UserPromptSubmit;
-    if tool == AiTool::Codex || copilot_user_prompt {
+    // Cascade (Windsurf) surfaces the stderr message of a
+    // blocking pre-hook (exit 2) to the agent; stdout is ignored.
+    if tool == AiTool::Codex || tool == AiTool::Windsurf || copilot_user_prompt {
         eprintln!("{reason}");
     }
 }
@@ -475,6 +477,12 @@ fn hook_event_from_stdin(stdin: &str, post: bool) -> hook_output::HookEvent {
         Some("UserPromptSubmit" | "UserPromptSubmitted") => {
             hook_output::HookEvent::UserPromptSubmit
         }
+        // Cascade (Windsurf) uses `agent_action_name`; only
+        // `pre_user_prompt` maps to the prompt event, other `pre_*` actions are
+        // ordinary pre-tool guards.
+        _ if cascade_action_name(&value) == Some("pre_user_prompt") => {
+            hook_output::HookEvent::UserPromptSubmit
+        }
         _ if looks_like_user_prompt_payload(&value) => hook_output::HookEvent::UserPromptSubmit,
         _ => hook_output::HookEvent::PreToolUse,
     }
@@ -484,6 +492,12 @@ fn hook_event_name(value: &serde_json::Value) -> Option<&str> {
     value
         .get("hook_event_name")
         .or_else(|| value.get("hookEventName"))
+        .and_then(serde_json::Value::as_str)
+}
+
+fn cascade_action_name(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("agent_action_name")
         .and_then(serde_json::Value::as_str)
 }
 
@@ -498,4 +512,103 @@ fn looks_like_user_prompt_payload(value: &serde_json::Value) -> bool {
 
 fn fs_canonical_or_same(p: PathBuf) -> PathBuf {
     std::fs::canonicalize(&p).unwrap_or(p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hook_output::HookEvent;
+
+    #[test]
+    fn hook_event_post_flag_always_maps_to_post_tool_use() {
+        assert_eq!(
+            hook_event_from_stdin(r#"{"agent_action_name":"pre_read_code"}"#, true),
+            HookEvent::PostToolUse
+        );
+    }
+
+    #[test]
+    fn hook_event_recognizes_explicit_event_names() {
+        assert_eq!(
+            hook_event_from_stdin(r#"{"hook_event_name":"PermissionRequest"}"#, false),
+            HookEvent::PermissionRequest
+        );
+        assert_eq!(
+            hook_event_from_stdin(r#"{"hookEventName":"UserPromptSubmitted"}"#, false),
+            HookEvent::UserPromptSubmit
+        );
+    }
+
+    #[test]
+    fn hook_event_maps_cascade_action_names() {
+        // Only `pre_user_prompt` is the prompt event; other pre_* actions are
+        // ordinary pre-tool guards.
+        assert_eq!(
+            hook_event_from_stdin(
+                r#"{"agent_action_name":"pre_user_prompt","tool_info":{"user_prompt":"hi"}}"#,
+                false
+            ),
+            HookEvent::UserPromptSubmit
+        );
+        for action in [
+            "pre_read_code",
+            "pre_write_code",
+            "pre_run_command",
+            "pre_mcp_tool_use",
+        ] {
+            let stdin = format!(r#"{{"agent_action_name":"{action}","tool_info":{{}}}}"#);
+            assert_eq!(
+                hook_event_from_stdin(&stdin, false),
+                HookEvent::PreToolUse,
+                "{action} should be a pre-tool guard"
+            );
+        }
+    }
+
+    #[test]
+    fn hook_event_falls_back_to_pre_tool_use_for_invalid_or_unknown() {
+        assert_eq!(
+            hook_event_from_stdin("not json", false),
+            HookEvent::PreToolUse
+        );
+        assert_eq!(
+            hook_event_from_stdin(r#"{"tool_name":"bash"}"#, false),
+            HookEvent::PreToolUse
+        );
+    }
+
+    #[test]
+    fn hook_event_top_level_prompt_heuristic_still_applies() {
+        assert_eq!(
+            hook_event_from_stdin(r#"{"prompt":"do a thing"}"#, false),
+            HookEvent::UserPromptSubmit
+        );
+        // A prompt accompanied by a tool name is not a user-prompt submission.
+        assert_eq!(
+            hook_event_from_stdin(r#"{"prompt":"x","tool_name":"bash"}"#, false),
+            HookEvent::PreToolUse
+        );
+    }
+
+    #[test]
+    fn cascade_action_name_reads_only_string_field() {
+        let value: serde_json::Value =
+            serde_json::from_str(r#"{"agent_action_name":"pre_run_command"}"#).unwrap();
+        assert_eq!(cascade_action_name(&value), Some("pre_run_command"));
+        let missing: serde_json::Value = serde_json::from_str(r#"{"other":1}"#).unwrap();
+        assert_eq!(cascade_action_name(&missing), None);
+    }
+
+    #[test]
+    fn windsurf_routes_block_reason_to_stderr_like_codex() {
+        // Smoke-level behavior is covered elsewhere; this guards the routing
+        // predicate so a future tool list change cannot silently drop Windsurf.
+        for event in [
+            HookEvent::PreToolUse,
+            HookEvent::PermissionRequest,
+            HookEvent::UserPromptSubmit,
+        ] {
+            assert_eq!(hook_deny_exit_code(AiTool::Windsurf, event), 2);
+        }
+    }
 }

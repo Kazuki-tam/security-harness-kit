@@ -4573,3 +4573,199 @@ fn skills_install_replaces_legacy_claude_skill_file() {
     assert!(dir.path().join(".claude/skills/shk/SKILL.md").is_file());
     assert!(!legacy.exists(), "legacy flat file should be removed");
 }
+
+#[test]
+fn hooks_install_ai_windsurf_writes_cascade_hooks_and_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::create_dir_all(dir.path().join(".windsurf")).unwrap();
+    // Pre-existing user hook in a managed event array must be preserved.
+    std::fs::write(
+        dir.path().join(".windsurf/hooks.json"),
+        r#"{"hooks":{"pre_run_command":[{"command":"./my-check.sh","show_output":false}]}}"#,
+    )
+    .unwrap();
+
+    for _ in 0..2 {
+        let out = Command::new(shk_bin())
+            .args(["hooks", "install-ai", "--tool", "windsurf"])
+            .current_dir(dir.path())
+            .output()
+            .expect("install-ai windsurf");
+        assert!(
+            out.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let hooks: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".windsurf/hooks.json")).unwrap(),
+    )
+    .unwrap();
+
+    let pre_run = hooks["hooks"]["pre_run_command"].as_array().unwrap();
+    assert!(
+        pre_run.iter().any(|e| e["command"] == "./my-check.sh"),
+        "user hook must be preserved: {pre_run:?}"
+    );
+    let managed: Vec<_> = pre_run
+        .iter()
+        .filter(|e| {
+            e["command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("--hook-mode windsurf")
+        })
+        .collect();
+    assert_eq!(
+        managed.len(),
+        1,
+        "managed hook should not duplicate: {pre_run:?}"
+    );
+
+    for key in ["pre_read_code", "pre_write_code", "pre_mcp_tool_use"] {
+        let arr = hooks["hooks"][key].as_array().unwrap();
+        assert_eq!(arr.len(), 1, "{key}: {arr:?}");
+        let cmd = arr[0]["command"].as_str().unwrap();
+        assert_eq!(cmd, "shk scan --hook-mode windsurf", "{key}");
+        assert_eq!(arr[0]["show_output"], true, "{key}");
+    }
+    for key in ["post_run_command", "post_mcp_tool_use"] {
+        let cmd = hooks["hooks"][key][0]["command"].as_str().unwrap();
+        assert!(cmd.contains("--post"), "{key} should scan as post: {cmd}");
+    }
+    let prompt_cmd = hooks["hooks"]["pre_user_prompt"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        prompt_cmd.contains(&format!("--fail-on {USER_PROMPT_HOOK_FAIL_ON}")),
+        "pre_user_prompt should block medium PII: {prompt_cmd}"
+    );
+}
+
+#[test]
+fn hook_mode_windsurf_blocks_with_exit_2_and_stderr() {
+    use std::io::Write;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir_in(&root).unwrap();
+    // Neutral filename so the action guard (path-based) does not intercept and
+    // the content-scan path is exercised instead.
+    let fixture = dir.path().join("hook-fixture.txt");
+    // not real credential: synthetic detector fixture value only
+    std::fs::write(&fixture, "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n").unwrap();
+    let fixture = std::fs::canonicalize(fixture).unwrap();
+    // Cascade payload shape: agent_action_name + nested tool_info.
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "agent_action_name": "pre_read_code",
+        "tool_info": { "file_path": fixture.to_str().unwrap() },
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "windsurf"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("hook scan");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Cascade reads the block reason from stderr, not stdout JSON.
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("sensitive content detected"), "stderr={err}");
+}
+
+#[test]
+fn hook_mode_windsurf_user_prompt_blocks_secret_prompt() {
+    use std::io::Write;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // Cascade nests the prompt under tool_info.user_prompt with agent_action_name.
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "agent_action_name": "pre_user_prompt",
+        "tool_info": {
+            // not a real credential: synthetic detector fixture value only
+            "user_prompt": "use this key sk-proj-abcdefghijklmnopqrstuvwxyz0123456789 please",
+        },
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "windsurf"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("hook scan");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("sensitive content detected"), "stderr={err}");
+}
+
+#[test]
+fn hook_mode_windsurf_allows_clean_prompt() {
+    use std::io::Write;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "agent_action_name": "pre_user_prompt",
+        "tool_info": { "user_prompt": "please refactor this helper function" },
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "windsurf"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("hook scan");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "clean prompt should pass: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn skills_install_windsurf_uses_windsurf_skills_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(shk_bin())
+        .args(["skills", "install", "--tool", "windsurf"])
+        .current_dir(dir.path())
+        .output()
+        .expect("skills install windsurf");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        dir.path().join(".windsurf/skills/shk/SKILL.md").is_file(),
+        "windsurf skill should be written to .windsurf/skills/shk/SKILL.md"
+    );
+}
