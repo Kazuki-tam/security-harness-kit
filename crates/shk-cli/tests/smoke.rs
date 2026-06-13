@@ -2190,6 +2190,102 @@ fn skills_install_antigravity_project_uses_agents_dir() {
 }
 
 #[test]
+fn hooks_install_ai_copilot_writes_github_hooks_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::create_dir_all(dir.path().join(".github/hooks")).unwrap();
+    std::fs::write(
+        dir.path().join(".github/hooks/shk-security.json"),
+        r#"{"version":1,"hooks":{"preToolUse":[{"type":"command","command":"./lint.sh"}]}}"#,
+    )
+    .unwrap();
+
+    for _ in 0..2 {
+        let out = Command::new(shk_bin())
+            .args(["hooks", "install-ai", "--tool", "copilot"])
+            .current_dir(dir.path())
+            .output()
+            .expect("install-ai copilot");
+        assert!(
+            out.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let hooks: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".github/hooks/shk-security.json")).unwrap(),
+    )
+    .unwrap();
+    let pre = hooks["hooks"]["preToolUse"].as_array().unwrap();
+    assert_eq!(
+        pre.iter()
+            .filter(|entry| entry["command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("--hook-mode copilot"))
+            .count(),
+        1,
+        "managed hook should not duplicate: {pre:?}"
+    );
+    assert!(
+        pre.iter()
+            .any(|entry| entry["command"].as_str().unwrap_or_default() == "./lint.sh"),
+        "user hooks must be preserved: {hooks}"
+    );
+    assert!(
+        hooks["hooks"]["PermissionRequest"].is_array(),
+        "permissionRequest should use PascalCase payloads: {hooks}"
+    );
+    assert!(
+        hooks["hooks"]["UserPromptSubmit"].is_array(),
+        "prompt hook should use PascalCase payloads: {hooks}"
+    );
+}
+
+#[test]
+fn hook_mode_copilot_pre_tool_deny_exits_zero_with_permission_decision() {
+    use std::io::Write;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "bash",
+        "tool_input": {
+            "command": "psql -c \"DROP TABLE users\""
+        }
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "copilot"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("hook scan");
+    assert!(
+        out.status.success(),
+        "Copilot preToolUse denies must use stdout JSON with exit 0: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(stdout["permissionDecision"], "deny", "{stdout}");
+    assert!(
+        stdout["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("action guard"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn hook_mode_codex_permission_request_uses_decision_shape() {
     use std::io::Write;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");

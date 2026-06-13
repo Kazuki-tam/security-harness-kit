@@ -66,15 +66,30 @@ const ANTIGRAVITY_PRE_EXTRA_TEXT_KEYS: &[&str] = &[
     "Input",
     "Message",
 ];
-// Antigravity PostToolUse payload carries no tool output — only `error` plus
-// metadata — so only error text is scannable.
+// Antigravity PostToolUse payload carries no tool output: only `error` plus
+// metadata, so only error text is scannable.
 const ANTIGRAVITY_POST_TEXT_KEYS: &[&str] = &["error", "output", "result", "content", "text"];
+// GitHub Copilot PostToolUse payload carries the tool result under
+// `toolResult.textResultForLlm` (camelCase) / `tool_result.text_result_for_llm`
+// (VS Code-compatible snake_case). PostToolUseFailure carries `error`.
+const COPILOT_POST_TEXT_KEYS: &[&str] = &[
+    "textResultForLlm",
+    "text_result_for_llm",
+    "output",
+    "result",
+    "content",
+    "text",
+    "stdout",
+    "stderr",
+    "error",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AiHookTool {
     Antigravity,
     ClaudeCode,
     Codex,
+    Copilot,
     Cursor,
 }
 
@@ -84,6 +99,7 @@ impl AiHookTool {
             Self::Antigravity => "antigravity",
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
+            Self::Copilot => "copilot",
             Self::Cursor => "cursor",
         }
     }
@@ -93,6 +109,7 @@ impl AiHookTool {
             Self::Antigravity => "<antigravity-hook>",
             Self::ClaudeCode => "<claude-hook>",
             Self::Codex => "<codex-hook>",
+            Self::Copilot => "<copilot-hook>",
             Self::Cursor => "<cursor-hook>",
         }
     }
@@ -250,6 +267,7 @@ fn priority_text_key_sets(post: bool, tool: AiHookTool) -> &'static [&'static [&
         AiHookTool::Antigravity => &[ANTIGRAVITY_POST_TEXT_KEYS],
         AiHookTool::Codex => &[CODEX_POST_TEXT_KEYS],
         AiHookTool::ClaudeCode => &[CLAUDE_POST_TEXT_KEYS],
+        AiHookTool::Copilot => &[COPILOT_POST_TEXT_KEYS],
         AiHookTool::Cursor => &[CURSOR_POST_TEXT_KEYS],
     }
 }
@@ -328,11 +346,13 @@ mod tests {
     fn ai_hook_tool_labels_are_stable() {
         assert_eq!(AiHookTool::ClaudeCode.kebab_str(), "claude-code");
         assert_eq!(AiHookTool::Codex.kebab_str(), "codex");
+        assert_eq!(AiHookTool::Copilot.kebab_str(), "copilot");
         assert_eq!(AiHookTool::Cursor.kebab_str(), "cursor");
         assert_eq!(AiHookTool::Antigravity.kebab_str(), "antigravity");
 
         assert_eq!(AiHookTool::ClaudeCode.virtual_path_label(), "<claude-hook>");
         assert_eq!(AiHookTool::Codex.virtual_path_label(), "<codex-hook>");
+        assert_eq!(AiHookTool::Copilot.virtual_path_label(), "<copilot-hook>");
         assert_eq!(AiHookTool::Cursor.virtual_path_label(), "<cursor-hook>");
         assert_eq!(
             AiHookTool::Antigravity.virtual_path_label(),
@@ -412,6 +432,54 @@ mod tests {
         .unwrap();
 
         assert!(body.contains("leaked-value-in-error"), "{body}");
+    }
+
+    #[test]
+    fn copilot_post_extracts_tool_result_text() {
+        let stdin = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "bash",
+            "tool_result": {
+                "result_type": "success",
+                "text_result_for_llm": "copilot-result-marker-text"
+            }
+        })
+        .to_string();
+
+        let (_display, body) = stdin_to_hook_body(
+            AiHookTool::Copilot,
+            true,
+            &stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert!(body.contains("copilot-result-marker-text"), "{body}");
+    }
+
+    #[test]
+    fn copilot_pre_extracts_tool_args_command() {
+        let stdin = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "bash",
+            "tool_input": {
+                "command": "echo copilot-args-marker"
+            }
+        })
+        .to_string();
+
+        let (display, body) = stdin_to_hook_body(
+            AiHookTool::Copilot,
+            false,
+            &stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert_eq!(display, "<copilot-hook>");
+        assert!(body.contains("echo copilot-args-marker"), "{body}");
     }
 
     #[test]

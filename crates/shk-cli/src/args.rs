@@ -41,7 +41,7 @@ pub enum Commands {
         /// Install blocking AI hooks that append metadata-only block entries to `.shk/audit.log`.
         #[arg(long, conflicts_with = "audit")]
         log_blocked: bool,
-        /// AI tools to configure: claude-code, codex, cursor, antigravity. Repeat or use commas.
+        /// AI tools to configure: claude-code, codex, cursor, copilot, antigravity. Repeat or use commas.
         #[arg(long, value_enum, value_delimiter = ',')]
         tool: Vec<AiTool>,
         /// Skip Git pre-commit hook setup.
@@ -248,6 +248,7 @@ pub enum AiTool {
     Antigravity,
     ClaudeCode,
     Codex,
+    Copilot,
     Cursor,
 }
 
@@ -257,6 +258,7 @@ impl AiTool {
             Self::Antigravity => "antigravity",
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
+            Self::Copilot => "copilot",
             Self::Cursor => "cursor",
         }
     }
@@ -266,6 +268,7 @@ impl AiTool {
             Self::Antigravity => shk_integrations::AiHookTool::Antigravity,
             Self::ClaudeCode => shk_integrations::AiHookTool::ClaudeCode,
             Self::Codex => shk_integrations::AiHookTool::Codex,
+            Self::Copilot => shk_integrations::AiHookTool::Copilot,
             Self::Cursor => shk_integrations::AiHookTool::Cursor,
         }
     }
@@ -305,7 +308,7 @@ pub enum HooksCmd {
         #[arg(long, help = "Explicit alias for the default pre-commit hook.")]
         pre_commit: bool,
     },
-    /// Configure AI-editor hooks (Cursor / Claude Code / Codex / Antigravity)
+    /// Configure AI-editor hooks (Cursor / Claude Code / Codex / Antigravity / GitHub Copilot)
     InstallAi {
         #[arg(
             long,
@@ -323,7 +326,7 @@ pub enum HooksCmd {
         dry_run: bool,
         #[arg(
             long,
-            help = "Write user-level configs (~/.cursor, ~/.codex, ~/.claude, ~/.gemini/config)."
+            help = "Write user-level configs (~/.cursor, ~/.codex, ~/.claude, ~/.gemini/config, ~/.copilot)."
         )]
         global: bool,
         #[arg(long, value_enum)]
@@ -466,12 +469,12 @@ pub enum SkillsCmd {
     List,
     /// Show installation status for all supported tools
     Status,
-    /// Install shk skill for Claude Code, Codex, Cursor, and/or Antigravity
+    /// Install shk skill for Claude Code, Codex, Cursor, Copilot, and/or Antigravity
     Install {
-        /// Target tool: claude-code, codex, cursor, antigravity, or all (default: all)
+        /// Target tool: claude-code, codex, cursor, copilot, antigravity, or all (default: all)
         #[arg(long, value_enum)]
         tool: Option<SkillToolArg>,
-        /// Write to user-level directory (~/.claude/skills/ or ~/.agents/skills/)
+        /// Write to user-level directory (~/.claude/skills/, ~/.agents/skills/, or ~/.copilot/skills/)
         #[arg(long)]
         global: bool,
         /// Print planned changes without writing
@@ -907,6 +910,7 @@ pub enum SkillToolArg {
     Antigravity,
     ClaudeCode,
     Codex,
+    Copilot,
     Cursor,
     All,
 }

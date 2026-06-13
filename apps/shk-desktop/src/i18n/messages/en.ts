@@ -149,6 +149,7 @@ export const en: Messages = {
       "claude-code": "Claude Code",
       cursor: "Cursor",
       codex: "Codex",
+      copilot: "GitHub Copilot",
       antigravity: "Antigravity",
     },
     actionCategories: {
@@ -315,6 +316,7 @@ export const en: Messages = {
         "claude-code": "Claude Code",
         cursor: "Cursor",
         codex: "Codex",
+        copilot: "GitHub Copilot",
         antigravity: "Antigravity",
       },
       installClaudeDeny: "Apply deny",

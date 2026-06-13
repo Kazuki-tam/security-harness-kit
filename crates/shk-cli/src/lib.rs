@@ -260,6 +260,7 @@ pub fn run() -> Result<()> {
                     SkillToolArg::Antigravity => commands::skills::SkillTool::Antigravity,
                     SkillToolArg::ClaudeCode => commands::skills::SkillTool::ClaudeCode,
                     SkillToolArg::Codex => commands::skills::SkillTool::Codex,
+                    SkillToolArg::Copilot => commands::skills::SkillTool::Copilot,
                     SkillToolArg::Cursor => commands::skills::SkillTool::Cursor,
                     SkillToolArg::All => commands::skills::SkillTool::All,
                 }),

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use crate::args::{AiTool, SeverityArg};
 
 const HOOK_DENY_REASON_DEFAULT: &str =
-    "shk: sensitive content detected above threshold — run `shk scan` for details";
+    "shk: sensitive content detected above threshold - run `shk scan` for details";
 
 /// Flat `clap` flags for [`run`], grouped for readability at the CLI boundary.
 #[derive(Clone, Debug)]
@@ -325,7 +325,7 @@ fn emit_post_hook_result(tool: AiTool, hook_event: hook_output::HookEvent, res: 
     }
 
     let hint = format!(
-        "shk: {} finding(s) in tool output — review before using ({} suppressed, {} deduplicated)",
+        "shk: {} finding(s) in tool output - review before using ({} suppressed, {} deduplicated)",
         res.findings.len(),
         res.suppressed,
         res.deduplicated,
@@ -427,12 +427,37 @@ fn deny_hook(tool: AiTool, event: hook_output::HookEvent, reason: &str) -> Resul
         "{}",
         hook_output::deny_stdout_for_event(tool, event, reason)
     );
-    emit_exit2_reason_for_tool(tool, reason);
-    Err(CliExit::silent(2).into())
+    emit_blocking_reason_to_stderr(tool, event, reason);
+    match hook_deny_exit_code(tool, event) {
+        0 => Ok(()),
+        code => Err(CliExit::silent(code).into()),
+    }
 }
 
-fn emit_exit2_reason_for_tool(tool: AiTool, reason: &str) {
-    if tool == AiTool::Codex {
+/// Exit code for a denied hook, per tool/event contract.
+///
+/// GitHub Copilot's `preToolUse` / `permissionRequest` denies travel via the
+/// stdout JSON (`permissionDecision` / `behavior`) and require exit 0 to be
+/// honored; exit 2 is treated as a non-blocking warning for those events.
+/// Copilot's `userPromptSubmitted` output is not processed, so exit 2 (a
+/// stderr warning) is the only user-visible signal; it cannot hard-block.
+/// Every other tool uses exit 2 to abort the pending operation.
+fn hook_deny_exit_code(tool: AiTool, event: hook_output::HookEvent) -> i32 {
+    match tool {
+        AiTool::Copilot => match event {
+            hook_output::HookEvent::PreToolUse
+            | hook_output::HookEvent::PermissionRequest
+            | hook_output::HookEvent::PostToolUse => 0,
+            hook_output::HookEvent::UserPromptSubmit => 2,
+        },
+        _ => 2,
+    }
+}
+
+fn emit_blocking_reason_to_stderr(tool: AiTool, event: hook_output::HookEvent, reason: &str) {
+    let copilot_user_prompt =
+        tool == AiTool::Copilot && event == hook_output::HookEvent::UserPromptSubmit;
+    if tool == AiTool::Codex || copilot_user_prompt {
         eprintln!("{reason}");
     }
 }
@@ -445,14 +470,30 @@ fn hook_event_from_stdin(stdin: &str, post: bool) -> hook_output::HookEvent {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(stdin) else {
         return hook_output::HookEvent::PreToolUse;
     };
-    match value
-        .get("hook_event_name")
-        .and_then(serde_json::Value::as_str)
-    {
+    match hook_event_name(&value) {
         Some("PermissionRequest") => hook_output::HookEvent::PermissionRequest,
-        Some("UserPromptSubmit") => hook_output::HookEvent::UserPromptSubmit,
+        Some("UserPromptSubmit" | "UserPromptSubmitted") => {
+            hook_output::HookEvent::UserPromptSubmit
+        }
+        _ if looks_like_user_prompt_payload(&value) => hook_output::HookEvent::UserPromptSubmit,
         _ => hook_output::HookEvent::PreToolUse,
     }
+}
+
+fn hook_event_name(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("hook_event_name")
+        .or_else(|| value.get("hookEventName"))
+        .and_then(serde_json::Value::as_str)
+}
+
+fn looks_like_user_prompt_payload(value: &serde_json::Value) -> bool {
+    value
+        .get("prompt")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+        && value.get("toolName").is_none()
+        && value.get("tool_name").is_none()
 }
 
 fn fs_canonical_or_same(p: PathBuf) -> PathBuf {

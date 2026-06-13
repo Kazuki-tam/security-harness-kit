@@ -5,6 +5,7 @@ const AI_HOOK_BOOLEAN_FIELDS = [
   "scanHooksClaudeCode",
   "scanHooksCursor",
   "scanHooksCodex",
+  "scanHooksCopilot",
   "scanHooksAntigravity",
   "claudeDeny",
   "claudeSandbox",
@@ -50,6 +51,7 @@ export function aiHookSelectionMatches(
     applied.scanHooksClaudeCode === selection.scanHooksClaudeCode &&
     applied.scanHooksCursor === selection.scanHooksCursor &&
     applied.scanHooksCodex === selection.scanHooksCodex &&
+    applied.scanHooksCopilot === selection.scanHooksCopilot &&
     applied.scanHooksAntigravity === selection.scanHooksAntigravity &&
     applied.cursorFailClosed === selection.cursorFailClosed &&
     applied.claudeDeny === selection.claudeDeny &&

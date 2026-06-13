@@ -766,11 +766,14 @@ pub fn has_managed_ai_hooks(root: &Path) -> bool {
         root.join(".claude/settings.json"),
         root.join(".cursor/hooks.json"),
         root.join(".agents/hooks.json"),
+        root.join(".github/hooks/shk-security.json"),
         root.join(CONFIG_REL_PATH),
     ];
     for p in paths {
         if let Ok(s) = fs::read_to_string(&p)
-            && (s.contains(MANAGED_MARKER_JSON) || s.contains(MANAGED_MARKER_SH))
+            && (s.contains(MANAGED_MARKER_JSON)
+                || s.contains(MANAGED_MARKER_SH)
+                || (s.contains("shk scan") && s.contains("--hook-mode copilot")))
         {
             return true;
         }

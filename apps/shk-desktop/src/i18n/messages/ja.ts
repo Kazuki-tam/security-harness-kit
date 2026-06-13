@@ -146,6 +146,7 @@ export const ja: Messages = {
       "claude-code": "Claude Code",
       cursor: "Cursor",
       codex: "Codex",
+      copilot: "GitHub Copilot",
       antigravity: "Antigravity",
     },
     actionCategories: {
@@ -311,6 +312,7 @@ export const ja: Messages = {
         "claude-code": "Claude Code",
         cursor: "Cursor",
         codex: "Codex",
+        copilot: "GitHub Copilot",
         antigravity: "Antigravity",
       },
       installClaudeDeny: "deny を適用",
