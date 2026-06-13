@@ -311,15 +311,17 @@ mod tests {
             },
         )
         .unwrap();
+        let normalized_details: Vec<String> =
+            details.iter().map(|line| line.replace('\\', "/")).collect();
 
         assert!(
-            details
+            normalized_details
                 .iter()
                 .any(|line| line.contains(".agents/skills/shk/SKILL.md")),
             "{details:?}"
         );
         assert_eq!(
-            details
+            normalized_details
                 .iter()
                 .filter(|line| line.contains(".agents/skills/shk/SKILL.md"))
                 .count(),
