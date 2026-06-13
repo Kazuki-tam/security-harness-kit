@@ -119,7 +119,7 @@ Release assets are also covered by GitHub artifact attestations.
 For CI or security-sensitive environments, install from a pinned release tag and verify both the checksum and GitHub artifact attestation before placing the binary on `PATH`:
 
 ```bash
-version=v0.4.1
+version=v0.4.2
 target=x86_64-unknown-linux-gnu
 asset="shk-cli-${target}.tar.xz"
 repo=Kazuki-tam/security-harness-kit
