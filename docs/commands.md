@@ -157,10 +157,11 @@ shk scan . --hook-mode claude-code --audit < payload.json
 shk scan . --hook-mode cursor --log-blocked < payload.json
 shk scan . --hook-mode codex < payload.json
 shk scan . --hook-mode codex --post < payload.json
+shk scan . --hook-mode copilot < payload.json
 shk scan . --hook-mode antigravity < payload.json
 ```
 
-Supported hook mode tools are `claude-code`, `codex`, `cursor`, and `antigravity`.
+Supported hook mode tools are `claude-code`, `codex`, `cursor`, `copilot`, and `antigravity`.
 
 Hook mode notes:
 
@@ -171,6 +172,7 @@ Hook mode notes:
 - Cursor pre-hook scans use the pre-commit threshold by default.
 - Codex `UserPromptSubmit` payloads are scanned when `hook_event_name` is `UserPromptSubmit`; blocks return `{"decision":"block","reason":...}`.
 - Project-local Codex hooks installed by `shk hooks install-ai --tool codex` scan `$(git rev-parse --show-toplevel)` instead of `.` so subdirectory starts still resolve the repo root.
+- Copilot `preToolUse` and `permissionRequest` denials are returned through stdout JSON with exit `0`, matching Copilot's hook contract. `userPromptSubmitted` output is not processed by Copilot, so prompt scan blocks are advisory warnings.
 - Antigravity `PreToolUse` payloads (`{"toolCall":{"name":...,"args":{...}}}`) are parsed with their PascalCase argument names (`CommandLine`, `TargetFile`, `CodeContent`, `Url`, ...). Blocks return `{"decision":"deny","reason":...}`; allows return `{"decision":"allow"}`. Antigravity post hooks always print `{}` because the post payload carries no tool output.
 
 ## `shk mask`
@@ -497,6 +499,7 @@ shk hooks install-ai --tool claude-code --global
 shk hooks install-ai --tool claude-code --apply-deny
 shk hooks install-ai --apply-sandbox
 shk hooks install-ai --tool cursor --fail-closed
+shk hooks install-ai --tool copilot
 shk hooks install-ai --tool antigravity
 ```
 
@@ -508,12 +511,12 @@ Options:
 | `--audit` | Add `--audit` to installed hook commands. Hooks log metadata and never block. |
 | `--log-blocked` | Add `--log-blocked` to installed hook commands. Hooks still block and append metadata-only block entries to `.shk/audit.log`. Mutually exclusive with `--audit`. |
 | `--global` | Write user-level config files under the user's home directory. |
-| `--tool <tool>` | Limit installation to one of `claude-code`, `codex`, `cursor`, or `antigravity`. |
+| `--tool <tool>` | Limit installation to one of `claude-code`, `codex`, `cursor`, `copilot`, or `antigravity`. |
 | `--fail-closed` | Cursor hooks only. Sets `failClosed` on managed entries. |
 | `--apply-deny` | Claude Code: merges recommended `permissions.deny` entries for sensitive files and dangerous actions. Antigravity: prints recommended permission Deny list entries in the `action(target)` format (e.g. `command(rm -rf)`, `read_file(**/.env)`) for manual entry — Antigravity's Allow/Ask/Deny lists are managed in its settings UI, not a documented project file. |
 | `--apply-sandbox` | Applies supported sandbox hardening. Claude Code gets `sandbox.enabled`, hard-fail, and no unsandboxed escape hatch. Project installs also add a home-read deny with project read re-allow; global installs skip those project-relative read rules. Codex gets `sandbox_mode = "workspace-write"` and `approval_policy = "on-request"` when absent or risky. Cursor has no local sandbox setting in `hooks.json`, so managed hooks are set fail-closed. |
 
-Without `--tool`, the command targets Claude Code, Codex, Cursor, and Antigravity. Non-dry-run installation requires a project `shk.toml`.
+Without `--tool`, the command targets Claude Code, Codex, Cursor, Copilot, and Antigravity. Non-dry-run installation requires a project `shk.toml`.
 
 Installed entries:
 
@@ -522,6 +525,7 @@ Installed entries:
 | Claude Code | `.claude/settings.json` | `UserPromptSubmit`; `PreToolUse` for `Read|Write|Bash|WebFetch|mcp__.*`; `PostToolUse` for `WebFetch|WebSearch|Bash|mcp__.*|Skill|Agent`. |
 | Cursor | `.cursor/hooks.json` | `beforeReadFile`, `beforeShellExecution`, `beforeMCPExecution`, `beforeSubmitPrompt`, plus non-blocking post scans on `afterShellExecution` and `afterMCPExecution`. Prompt hooks use `--fail-on medium`. |
 | Codex | `.codex/config.toml` | `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, and `PostToolUse` blocks; also ensures `features.hooks = true`. Project-local commands scan `$(git rev-parse --show-toplevel)` so Codex can start from a subdirectory. |
+| Copilot | `.github/hooks/shk-security.json` (global: `~/.copilot/hooks/shk-security.json`) | Command hooks for `preToolUse`, `PermissionRequest`, `UserPromptSubmit`, `postToolUse`, and `postToolUseFailure`. Pre-tool and permission denials use Copilot's stdout JSON contract. |
 | Antigravity | `.agents/hooks.json` (global: `~/.gemini/config/hooks.json`) | A managed `shk-security` entry with a blocking `PreToolUse` hook matching `run_command`, file write/edit, `view_file`, `read_url_content`, and `search_web`. No post hook is installed because Antigravity `PostToolUse` payloads carry no tool output. |
 
 Antigravity also has a unified permission engine (`Deny > Ask > Allow`, resources formatted as `action(target)`), but those lists are managed in the Antigravity settings UI and internal per-project config. Use `shk hooks install-ai --tool antigravity --apply-deny` to print recommended Deny entries to paste there; the shk PreToolUse hook provides equivalent runtime blocking regardless.
@@ -573,6 +577,7 @@ shk skills install
 shk skills install --tool claude-code
 shk skills install --tool codex
 shk skills install --tool cursor
+shk skills install --tool copilot
 shk skills install --tool antigravity
 shk skills install --tool all --global
 shk skills install --dry-run
@@ -595,8 +600,8 @@ Options:
 
 | Option | Behavior |
 |--------|----------|
-| `--tool <tool>` | Target: `claude-code`, `codex`, `cursor`, `antigravity`, or `all` (default: `all`). |
-| `--global` | Write to user-level directories (`~/.claude/skills/`, `~/.agents/skills/`, or `~/.gemini/config/skills/`) instead of the project. |
+| `--tool <tool>` | Target: `claude-code`, `codex`, `cursor`, `copilot`, `antigravity`, or `all` (default: `all`). |
+| `--global` | Write to user-level directories (`~/.claude/skills/`, `~/.agents/skills/`, `~/.copilot/skills/`, or `~/.gemini/config/skills/`) instead of the project. |
 | `--dry-run` | Print planned paths without writing files. |
 | `--force` | Overwrite an existing skill file. |
 
@@ -606,6 +611,7 @@ Install destinations:
 |------|-------------|-------------|
 | `claude-code` | `.claude/skills/shk/SKILL.md` | `~/.claude/skills/shk/SKILL.md` |
 | `codex` / `cursor` | `.agents/skills/shk/SKILL.md` | `~/.agents/skills/shk/SKILL.md` |
+| `copilot` | `.github/skills/shk/SKILL.md` | `~/.copilot/skills/shk/SKILL.md` |
 | `antigravity` | `.agents/skills/shk/SKILL.md` (shared with codex/cursor) | `~/.gemini/config/skills/shk/SKILL.md` |
 
 All destinations use the directory-plus-`SKILL.md` layout from the [open agent skills standard](https://agentskills.io), which is also the layout Claude Code loads skills from. The skill file is embedded in the `shk` binary at build time and requires no network access.

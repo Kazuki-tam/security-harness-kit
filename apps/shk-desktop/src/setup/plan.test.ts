@@ -57,6 +57,7 @@ function status(overrides: Partial<ProjectStatus> = {}): ProjectStatus {
       scanHooksClaudeCode: false,
       scanHooksCursor: false,
       scanHooksCodex: false,
+      scanHooksCopilot: false,
       scanHooksAntigravity: false,
       claudeDeny: false,
       claudeSandbox: false,

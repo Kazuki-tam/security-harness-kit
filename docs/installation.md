@@ -258,9 +258,11 @@ For commands that support it, re-running with `--dry-run` is a safe way to confi
 | `shk hooks install-ai --global --tool claude-code` | `~/.claude/settings.json` (managed entries, plus any `permissions.deny` or `sandbox` settings you explicitly enabled) |
 | `shk hooks install-ai --global --tool codex` | `~/.codex/config.toml` (managed block, plus top-level sandbox settings if you used `--apply-sandbox`) |
 | `shk hooks install-ai --global --tool cursor` | `~/.cursor/hooks.json` (managed entries) |
+| `shk hooks install-ai --global --tool copilot` | `~/.copilot/hooks/shk-security.json` (managed entries) |
 | `shk hooks install-ai --global --tool antigravity` | `~/.gemini/config/hooks.json` (managed `shk-security` entry) |
 | `shk skills install --global --tool claude-code` | `~/.claude/skills/shk/SKILL.md` (or the legacy `~/.claude/skills/shk.md` from 0.3.17 or earlier) |
 | `shk skills install --global --tool codex` / `--tool cursor` | `~/.agents/skills/shk/SKILL.md` |
+| `shk skills install --global --tool copilot` | `~/.copilot/skills/shk/SKILL.md` |
 | `shk skills install --global --tool antigravity` | `~/.gemini/config/skills/shk/SKILL.md` |
 
 Managed entries use the same markers as project installs (`"_shk_managed": true` for JSON files, `# shk-managed-start` / `# shk-managed-end` for shell and TOML files), so they are safe to identify and remove by hand. Settings merged by `--apply-deny` and `--apply-sandbox` are not individually tagged; review them before removing so you do not discard unrelated user configuration.

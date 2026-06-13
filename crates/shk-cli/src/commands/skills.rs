@@ -9,6 +9,7 @@ pub enum SkillTool {
     ClaudeCode,
     Codex,
     Cursor,
+    Copilot,
     Antigravity,
     All,
 }
@@ -41,15 +42,18 @@ pub fn install(args: SkillsInstallArgs) -> Result<()> {
     Ok(())
 }
 
-fn selected_tools(tool: SkillTool) -> Vec<SkillTool> {
+pub(crate) fn selected_tools(tool: SkillTool) -> Vec<SkillTool> {
     match tool {
         // Codex, Cursor, and Antigravity all read the open agent skills
         // directory (`.agents/skills/`) at project level; Antigravity is listed
         // separately because its global directory is `~/.gemini/config/skills/`.
+        // Copilot reads `.github/skills/` at project level and `~/.copilot/skills/`.
         // Duplicate destinations are collapsed in `install_for`.
         SkillTool::All => vec![
             SkillTool::ClaudeCode,
             SkillTool::Codex,
+            SkillTool::Cursor,
+            SkillTool::Copilot,
             SkillTool::Antigravity,
         ],
         t => vec![t],
@@ -59,7 +63,7 @@ fn selected_tools(tool: SkillTool) -> Vec<SkillTool> {
 fn ensure_no_existing_destinations(plans: &[InstallPlan]) -> Result<()> {
     if let Some(plan) = plans.iter().find(|plan| plan.dest.exists()) {
         bail!(
-            "{} already exists — use --force to overwrite",
+            "{} already exists - use --force to overwrite",
             plan.dest.display()
         );
     }
@@ -90,6 +94,8 @@ pub fn status_entries_for(root: &Path) -> Vec<SkillStatus> {
             false,
         ),
         ("codex/cursor (global)", SkillTool::Codex, true),
+        ("copilot (project)", SkillTool::Copilot, false),
+        ("copilot (global)", SkillTool::Copilot, true),
         ("antigravity (global)", SkillTool::Antigravity, true),
     ];
 
@@ -114,13 +120,30 @@ pub fn status_entries_for(root: &Path) -> Vec<SkillStatus> {
 }
 
 pub fn install_for(root: &Path, args: SkillsInstallArgs) -> Result<Vec<String>> {
-    let mut plans = selected_tools(args.tool.unwrap_or(SkillTool::All))
-        .into_iter()
+    install_selected_tools_for(
+        root,
+        &selected_tools(args.tool.unwrap_or(SkillTool::All)),
+        args.global,
+        args.dry_run,
+        args.force,
+    )
+}
+
+pub(crate) fn install_selected_tools_for(
+    root: &Path,
+    tools: &[SkillTool],
+    global: bool,
+    dry_run: bool,
+    force: bool,
+) -> Result<Vec<String>> {
+    let mut plans = tools
+        .iter()
+        .copied()
         .map(|tool| {
-            let base = resolve_base_for(root, args.global)?;
+            let base = resolve_base_for(root, global)?;
             Ok(InstallPlan {
                 legacy: legacy_path_for(&base, tool).filter(|path| path.exists()),
-                dest: dest_path_for(&base, tool, args.global)?,
+                dest: dest_path_for(&base, tool, global)?,
                 tool,
             })
         })
@@ -130,13 +153,13 @@ pub fn install_for(root: &Path, args: SkillsInstallArgs) -> Result<Vec<String>> 
     let mut seen_dests = std::collections::HashSet::new();
     plans.retain(|plan| seen_dests.insert(plan.dest.clone()));
 
-    if !args.dry_run && !args.force {
+    if !dry_run && !force {
         ensure_no_existing_destinations(&plans)?;
     }
 
     let mut details = Vec::new();
     for plan in &plans {
-        if args.dry_run {
+        if dry_run {
             details.push(format!(
                 "[dry-run] would write {} skill to {} ({} bytes)",
                 plan.tool.label(),
@@ -158,7 +181,7 @@ pub fn install_for(root: &Path, args: SkillsInstallArgs) -> Result<Vec<String>> 
         std::fs::write(&plan.dest, SKILL_CONTENT)
             .with_context(|| format!("write {}", plan.dest.display()))?;
         details.push(format!(
-            "Installed {} skill → {}",
+            "Installed {} skill -> {}",
             plan.tool.label(),
             plan.dest.display()
         ));
@@ -206,6 +229,13 @@ fn dest_path_for(base: &Path, tool: SkillTool, global: bool) -> Result<PathBuf> 
             .join("skills")
             .join(SKILL_NAME)
             .join("SKILL.md"),
+        SkillTool::Copilot => {
+            let dir = if global { ".copilot" } else { ".github" };
+            base.join(dir)
+                .join("skills")
+                .join(SKILL_NAME)
+                .join("SKILL.md")
+        }
         // Antigravity reads workspace `.agents/skills/` but its global skills
         // directory is `~/.gemini/config/skills/`.
         SkillTool::Antigravity if global => base
@@ -223,7 +253,7 @@ fn dest_path_for(base: &Path, tool: SkillTool, global: bool) -> Result<PathBuf> 
     })
 }
 
-// shk ≤ 0.3.17 wrote the Claude Code skill as a flat `.claude/skills/shk.md`,
+// shk <= 0.3.17 wrote the Claude Code skill as a flat `.claude/skills/shk.md`,
 // a layout Claude Code never loads; installs replace it with the directory form.
 fn legacy_path_for(base: &Path, tool: SkillTool) -> Option<PathBuf> {
     match tool {
@@ -242,8 +272,59 @@ impl SkillTool {
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex/cursor",
             Self::Cursor => "cursor",
+            Self::Copilot => "copilot",
             Self::Antigravity => "antigravity",
             Self::All => "all",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_selection_includes_every_supported_skill_tool() {
+        assert_eq!(
+            selected_tools(SkillTool::All),
+            vec![
+                SkillTool::ClaudeCode,
+                SkillTool::Codex,
+                SkillTool::Cursor,
+                SkillTool::Copilot,
+                SkillTool::Antigravity,
+            ]
+        );
+    }
+
+    #[test]
+    fn all_install_collapses_shared_skill_destinations() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let details = install_for(
+            dir.path(),
+            SkillsInstallArgs {
+                tool: Some(SkillTool::All),
+                global: false,
+                dry_run: true,
+                force: false,
+            },
+        )
+        .unwrap();
+
+        assert!(
+            details
+                .iter()
+                .any(|line| line.contains(".agents/skills/shk/SKILL.md")),
+            "{details:?}"
+        );
+        assert_eq!(
+            details
+                .iter()
+                .filter(|line| line.contains(".agents/skills/shk/SKILL.md"))
+                .count(),
+            1,
+            "Codex, Cursor, and Antigravity should share one project destination: {details:?}"
+        );
     }
 }

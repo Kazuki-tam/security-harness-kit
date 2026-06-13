@@ -103,9 +103,50 @@ fn antigravity_decision(decision: &str, reason: Option<&str>) -> String {
     out.to_string()
 }
 
+/// GitHub Copilot hook stdout shapes (hooks reference, version 1).
+///
+/// - `preToolUse`: flat `{"permissionDecision":"allow"|"deny","permissionDecisionReason":...}`.
+///   A deny travels via stdout JSON with exit 0 (exit 2 is a non-blocking
+///   warning for `preToolUse`; the scan command exits 0 for Copilot pre denies).
+/// - `permissionRequest`: `{"behavior":"allow"|"deny","message":...}`.
+/// - `postToolUse`: `{"modifiedResult":{...}, "additionalContext":...}`; never blocks.
+/// - `userPromptSubmitted`: output is NOT processed by Copilot, so emit `{}`
+///   and rely on stderr + exit 2 for an advisory warning.
+fn copilot_deny(event: HookEvent, reason: &str) -> String {
+    match event {
+        HookEvent::PreToolUse => json!({
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        })
+        .to_string(),
+        HookEvent::PermissionRequest => json!({
+            "behavior": "deny",
+            "message": reason,
+        })
+        .to_string(),
+        HookEvent::PostToolUse => json!({ "additionalContext": reason }).to_string(),
+        // userPromptSubmitted output is not processed; advisory only.
+        HookEvent::UserPromptSubmit => "{}".to_string(),
+    }
+}
+
+fn copilot_allow(event: HookEvent, info: Option<&str>) -> String {
+    match (event, info) {
+        (HookEvent::PreToolUse, Some(msg)) => json!({
+            "permissionDecision": "allow",
+            "permissionDecisionReason": msg,
+        })
+        .to_string(),
+        (HookEvent::PostToolUse, Some(msg)) => json!({ "additionalContext": msg }).to_string(),
+        // Empty output falls through to Copilot's default (allow) behavior.
+        _ => "{}".to_string(),
+    }
+}
+
 pub fn deny_stdout_for_event(tool: AiTool, event: HookEvent, reason: &str) -> String {
     match tool {
         AiTool::Antigravity => antigravity_decision("deny", Some(reason)),
+        AiTool::Copilot => copilot_deny(event, reason),
         AiTool::Cursor => json!({
             "permission":"deny",
             "user_message": reason,
@@ -121,6 +162,7 @@ pub fn allow_stdout_for_event(tool: AiTool, event: HookEvent, info: Option<&str>
     match tool {
         AiTool::Antigravity if event == HookEvent::PostToolUse => "{}".to_string(),
         AiTool::Antigravity => antigravity_decision("allow", info),
+        AiTool::Copilot => copilot_allow(event, info),
         AiTool::Cursor => {
             let msg = info.unwrap_or("shk: OK");
             json!({
@@ -156,6 +198,25 @@ pub fn mask_stdout(
         // hooks must return `{}` and pre hooks report via decision/reason only.
         AiTool::Antigravity if post => "{}".to_string(),
         AiTool::Antigravity => antigravity_decision("allow", Some(&msg)),
+        // Copilot postToolUse replaces the result via `modifiedResult`; preToolUse
+        // cannot rewrite tool args here, so it allows with an advisory note.
+        AiTool::Copilot if post => {
+            if let Some(content) = masked_content {
+                json!({
+                    "modifiedResult": {
+                        "resultType": "success",
+                        "textResultForLlm": content,
+                    },
+                    "additionalContext": format!(
+                        "shk mask: sanitized {finding_count} sensitive value(s) from tool output"
+                    ),
+                })
+                .to_string()
+            } else {
+                "{}".to_string()
+            }
+        }
+        AiTool::Copilot => copilot_allow(HookEvent::PreToolUse, Some(&msg)),
         AiTool::Cursor => {
             let mut out = json!({
                 "permission": "allow",
@@ -439,6 +500,65 @@ mod tests {
 
         assert_eq!(value["decision"], "allow");
         assert_eq!(value["reason"], "shk mask: redacted 2 finding(s)");
+    }
+
+    #[test]
+    fn copilot_pre_deny_uses_flat_permission_decision() {
+        let output = deny_stdout_for_event(AiTool::Copilot, HookEvent::PreToolUse, "blocked");
+        let value = parse_json(&output);
+
+        assert_eq!(value["permissionDecision"], "deny");
+        assert_eq!(value["permissionDecisionReason"], "blocked");
+        assert!(value.get("hookSpecificOutput").is_none());
+    }
+
+    #[test]
+    fn copilot_permission_request_deny_uses_behavior_shape() {
+        let output = deny_stdout_for_event(
+            AiTool::Copilot,
+            HookEvent::PermissionRequest,
+            "needs review",
+        );
+        let value = parse_json(&output);
+
+        assert_eq!(value["behavior"], "deny");
+        assert_eq!(value["message"], "needs review");
+    }
+
+    #[test]
+    fn copilot_pre_allow_without_info_is_empty_object() {
+        let output = allow_stdout_for_event(AiTool::Copilot, HookEvent::PreToolUse, None);
+        assert_eq!(parse_json(&output), json!({}));
+    }
+
+    #[test]
+    fn copilot_pre_allow_with_info_sets_permission_decision_allow() {
+        let output = allow_stdout_for_event(AiTool::Copilot, HookEvent::PreToolUse, Some("ok"));
+        let value = parse_json(&output);
+
+        assert_eq!(value["permissionDecision"], "allow");
+        assert_eq!(value["permissionDecisionReason"], "ok");
+    }
+
+    #[test]
+    fn copilot_post_mask_uses_modified_result() {
+        let output = mask_stdout(AiTool::Copilot, true, 2, Some("safe output"));
+        let value = parse_json(&output);
+
+        assert_eq!(value["modifiedResult"]["resultType"], "success");
+        assert_eq!(value["modifiedResult"]["textResultForLlm"], "safe output");
+        assert!(
+            value["additionalContext"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("sanitized 2")
+        );
+    }
+
+    #[test]
+    fn copilot_post_mask_without_findings_is_empty_object() {
+        let output = mask_stdout(AiTool::Copilot, true, 0, None);
+        assert_eq!(parse_json(&output), json!({}));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use crate::args::AiTool;
-use crate::commands::skills::{SkillTool, SkillsInstallArgs};
+use crate::commands::skills::SkillTool;
 use crate::{hooks, npm_hardening, policy_cmd, safety};
 use anyhow::Result;
 use dialoguer::{Confirm, MultiSelect, Select, theme::ColorfulTheme};
@@ -52,6 +52,10 @@ const AI_TOOL_CHOICES: &[PromptChoice<AiTool>] = &[
     PromptChoice {
         value: AiTool::Cursor,
         label: "Cursor",
+    },
+    PromptChoice {
+        value: AiTool::Copilot,
+        label: "GitHub Copilot",
     },
     PromptChoice {
         value: AiTool::Antigravity,
@@ -186,12 +190,15 @@ pub fn run(cwd: &Path, args: InitArgs) -> Result<()> {
         && !tools.is_empty()
         && prompt.confirm("Install bundled agent skill?", true)?;
     if install_skills {
-        crate::commands::skills::install(SkillsInstallArgs {
-            tool: Some(skill_tool_for(&tools)),
-            global: args.global,
-            dry_run: false,
-            force: args.force,
-        })?;
+        for line in crate::commands::skills::install_selected_tools_for(
+            cwd,
+            &skill_tools_for(&tools),
+            args.global,
+            false,
+            args.force,
+        )? {
+            println!("{line}");
+        }
     } else if args.no_skills {
         println!("Skipped agent skills");
     }
@@ -222,6 +229,7 @@ fn resolve_tools(prompt: &mut Prompt, args: &InitArgs) -> Result<Vec<AiTool>> {
             AiTool::ClaudeCode,
             AiTool::Codex,
             AiTool::Cursor,
+            AiTool::Copilot,
             AiTool::Antigravity,
         ]);
     }
@@ -231,6 +239,7 @@ fn resolve_tools(prompt: &mut Prompt, args: &InitArgs) -> Result<Vec<AiTool>> {
             AiTool::ClaudeCode,
             AiTool::Codex,
             AiTool::Cursor,
+            AiTool::Copilot,
             AiTool::Antigravity,
         ],
     )
@@ -240,29 +249,25 @@ fn dedupe_tools(tools: &[AiTool]) -> Vec<AiTool> {
     dedupe_values(tools)
 }
 
-fn skill_tool_for(tools: &[AiTool]) -> SkillTool {
-    let has_claude = tools.contains(&AiTool::ClaudeCode);
-    let has_agent_skill = tools
-        .iter()
-        .any(|tool| matches!(tool, AiTool::Codex | AiTool::Cursor | AiTool::Antigravity));
-
-    match (has_claude, has_agent_skill) {
-        (true, true) => SkillTool::All,
-        (true, false) => SkillTool::ClaudeCode,
-        (false, true) => {
-            let has_codex_or_cursor = tools
-                .iter()
-                .any(|tool| matches!(tool, AiTool::Codex | AiTool::Cursor));
-            if tools.contains(&AiTool::Antigravity) && !has_codex_or_cursor {
-                SkillTool::Antigravity
-            } else if tools.contains(&AiTool::Cursor) && !tools.contains(&AiTool::Codex) {
-                SkillTool::Cursor
-            } else {
-                SkillTool::Codex
-            }
+fn skill_tools_for(tools: &[AiTool]) -> Vec<SkillTool> {
+    let mut skill_tools = Vec::new();
+    for tool in tools {
+        let skill_tool = match tool {
+            AiTool::ClaudeCode => SkillTool::ClaudeCode,
+            AiTool::Codex => SkillTool::Codex,
+            AiTool::Cursor => SkillTool::Cursor,
+            AiTool::Copilot => SkillTool::Copilot,
+            AiTool::Antigravity => SkillTool::Antigravity,
+        };
+        if !skill_tools.contains(&skill_tool) {
+            skill_tools.push(skill_tool);
         }
-        (false, false) => unreachable!("skill installation requires at least one tool"),
     }
+    assert!(
+        !skill_tools.is_empty(),
+        "skill installation requires at least one tool"
+    );
+    skill_tools
 }
 
 struct Prompt {
@@ -494,9 +499,21 @@ mod tests {
     #[test]
     fn maps_mixed_tools_to_all_skill_install() {
         assert_eq!(
-            skill_tool_for(&[AiTool::ClaudeCode, AiTool::Cursor]),
-            SkillTool::All
+            skill_tools_for(&[AiTool::ClaudeCode, AiTool::Cursor]),
+            vec![SkillTool::ClaudeCode, SkillTool::Cursor]
         );
-        assert_eq!(skill_tool_for(&[AiTool::Cursor]), SkillTool::Cursor);
+        assert_eq!(skill_tools_for(&[AiTool::Cursor]), vec![SkillTool::Cursor]);
+        assert_eq!(
+            skill_tools_for(&[AiTool::Copilot]),
+            vec![SkillTool::Copilot]
+        );
+        assert_eq!(
+            skill_tools_for(&[AiTool::ClaudeCode, AiTool::Copilot]),
+            vec![SkillTool::ClaudeCode, SkillTool::Copilot]
+        );
+        assert_eq!(
+            skill_tools_for(&[AiTool::Copilot, AiTool::Cursor]),
+            vec![SkillTool::Copilot, SkillTool::Cursor]
+        );
     }
 }

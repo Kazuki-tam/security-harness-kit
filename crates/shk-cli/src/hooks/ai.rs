@@ -37,6 +37,7 @@ pub struct ConfigureAiOptions {
     pub scan_hooks_claude_code: bool,
     pub scan_hooks_cursor: bool,
     pub scan_hooks_codex: bool,
+    pub scan_hooks_copilot: bool,
     pub scan_hooks_antigravity: bool,
     pub claude_deny: bool,
     pub claude_sandbox: bool,
@@ -48,6 +49,7 @@ fn scan_hooks_enabled_for(opts: &ConfigureAiOptions, tool: AiTool) -> bool {
         AiTool::ClaudeCode => opts.scan_hooks_claude_code,
         AiTool::Cursor => opts.scan_hooks_cursor,
         AiTool::Codex => opts.scan_hooks_codex,
+        AiTool::Copilot => opts.scan_hooks_copilot,
         AiTool::Antigravity => opts.scan_hooks_antigravity,
     }
 }
@@ -61,6 +63,7 @@ fn ai_config_relative_path(tool: AiTool) -> &'static str {
         AiTool::ClaudeCode => ".claude/settings.json",
         AiTool::Cursor => ".cursor/hooks.json",
         AiTool::Codex => CONFIG_REL_PATH,
+        AiTool::Copilot => ".github/hooks/shk-security.json",
         AiTool::Antigravity => ".agents/hooks.json",
     }
 }
@@ -71,6 +74,7 @@ fn ai_config_relative_path(tool: AiTool) -> &'static str {
 fn ai_config_global_relative_path(tool: AiTool) -> &'static str {
     match tool {
         AiTool::Antigravity => ".gemini/config/hooks.json",
+        AiTool::Copilot => ".copilot/hooks/shk-security.json",
         _ => ai_config_relative_path(tool),
     }
 }
@@ -153,6 +157,7 @@ pub fn install_ai_with_summaries(
             AiTool::ClaudeCode,
             AiTool::Codex,
             AiTool::Cursor,
+            AiTool::Copilot,
             AiTool::Antigravity,
         ]
     };
@@ -189,6 +194,7 @@ pub fn configure_ai_with_summaries(cwd: &Path, opts: ConfigureAiOptions) -> Resu
         AiTool::ClaudeCode,
         AiTool::Codex,
         AiTool::Cursor,
+        AiTool::Copilot,
         AiTool::Antigravity,
     ] {
         let path = resolve_ai_config_path(tool, &cwd, opts.global)?;
@@ -264,6 +270,7 @@ fn apply_tool(
             opts.apply_sandbox,
             !opts.global,
         ),
+        AiTool::Copilot => apply_copilot(path, opts.audit, opts.log_blocked, opts.dry_run),
         AiTool::Antigravity => apply_antigravity(
             path,
             opts.audit,
@@ -279,6 +286,7 @@ fn remove_scan_hooks_for_tool(path: &Path, tool: AiTool, dry_run: bool) -> Resul
         AiTool::ClaudeCode => remove_claude_scan_hooks(path, dry_run),
         AiTool::Cursor => remove_cursor_scan_hooks(path, dry_run),
         AiTool::Codex => remove_codex_scan_hooks(path, dry_run),
+        AiTool::Copilot => remove_copilot_scan_hooks(path, dry_run),
         AiTool::Antigravity => remove_antigravity_scan_hooks(path, dry_run),
     }
 }
@@ -720,6 +728,132 @@ fn remove_cursor_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
     })
 }
 
+fn is_managed_copilot_entry(entry: &Value) -> bool {
+    entry
+        .get("_shk_managed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || ["command", "bash", "powershell"].iter().any(|key| {
+            entry
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|cmd| cmd.contains("shk scan") && cmd.contains("--hook-mode copilot"))
+        })
+}
+
+fn copilot_command_entry(command: String) -> Value {
+    json!({
+        "type": "command",
+        "command": command,
+        "cwd": ".",
+        "timeoutSec": HOOK_CLI_TIMEOUT_SEC
+    })
+}
+
+fn apply_copilot(path: &Path, audit: bool, log_blocked: bool, dry_run: bool) -> Result<String> {
+    const PRE_KEYS: &[&str] = &["preToolUse", "PermissionRequest"];
+    const POST_KEYS: &[&str] = &["postToolUse", "postToolUseFailure"];
+
+    let pre = copilot_command_entry(hook_scan_cli_command(
+        AiTool::Copilot,
+        audit,
+        log_blocked,
+        false,
+    ));
+    let post = copilot_command_entry(hook_scan_cli_command(
+        AiTool::Copilot,
+        audit,
+        log_blocked,
+        true,
+    ));
+    let prompt = copilot_command_entry(user_prompt_hook_scan_command(
+        AiTool::Copilot,
+        audit,
+        log_blocked,
+        None,
+    ));
+
+    let mut root = if path.is_file() {
+        load_json(path)?
+    } else {
+        json!({
+            "version": 1,
+            "hooks": {}
+        })
+    };
+
+    let root_obj = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("Copilot hooks root must be a JSON object"))?;
+    root_obj.entry("version").or_insert(json!(1));
+    let hooks = root_obj
+        .entry("hooks")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("hooks must be an object"))?;
+
+    for (keys, entry) in [
+        (PRE_KEYS, &pre),
+        (POST_KEYS, &post),
+        (&["UserPromptSubmit"][..], &prompt),
+    ] {
+        for key in keys {
+            let arr_val = hooks.entry((*key).to_string()).or_insert_with(|| json!([]));
+            let arr = arr_val
+                .as_array_mut()
+                .ok_or_else(|| anyhow::anyhow!("{key} hook list must be an array"))?;
+            arr.retain(|existing| !is_managed_copilot_entry(existing));
+            arr.push(entry.clone());
+        }
+    }
+
+    save_json_formatted(path, &root, dry_run)?;
+    Ok(if dry_run {
+        format!(
+            "dry-run: would write managed preToolUse/permissionRequest/postToolUse/userPromptSubmitted hooks (audit={audit}, logBlocked={log_blocked})"
+        )
+    } else {
+        format!(
+            "wrote managed preToolUse/permissionRequest/postToolUse/userPromptSubmitted hooks (audit={audit}, logBlocked={log_blocked})"
+        )
+    })
+}
+
+#[allow(dead_code)]
+fn remove_copilot_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
+    const KEYS: &[&str] = &[
+        "preToolUse",
+        "permissionRequest",
+        "PermissionRequest",
+        "postToolUse",
+        "postToolUseFailure",
+        "userPromptSubmitted",
+        "UserPromptSubmit",
+    ];
+    if !path.is_file() {
+        return Ok("no Copilot hooks file".to_string());
+    }
+    let mut root = load_json(path)?;
+    let hooks = root
+        .get_mut("hooks")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow::anyhow!("hooks must be an object"))?;
+    let mut removed = 0;
+    for key in KEYS {
+        if let Some(arr) = hooks.get_mut(*key).and_then(Value::as_array_mut) {
+            let before = arr.len();
+            arr.retain(|entry| !is_managed_copilot_entry(entry));
+            removed += before - arr.len();
+        }
+    }
+    save_json_formatted(path, &root, dry_run)?;
+    Ok(if dry_run {
+        format!("dry-run: would remove {removed} managed Copilot hook entry(s)")
+    } else {
+        format!("removed {removed} managed Copilot hook entry(s)")
+    })
+}
+
 /// Top-level key shk owns inside Antigravity's `hooks.json`
 /// (the file maps hook names to event configurations).
 const ANTIGRAVITY_HOOK_NAME: &str = "shk-security";
@@ -765,7 +899,7 @@ fn apply_antigravity(
 
     if apply_deny {
         // Antigravity's Allow/Ask/Deny permission lists live in its settings UI
-        // and internal per-project config — there is no documented project file
+        // and internal per-project config; there is no documented project file
         // shk could merge into, so print copy-paste guidance instead.
         print_antigravity_deny_guidance();
     }
@@ -786,7 +920,7 @@ fn print_antigravity_deny_guidance() {
         "Antigravity permissions cannot be written programmatically (managed in the Antigravity settings UI)."
     );
     println!(
-        "Recommended Deny list entries — add them via Antigravity settings > Permissions (Deny > Ask > Allow precedence):"
+        "Recommended Deny list entries - add them via Antigravity settings > Permissions (Deny > Ask > Allow precedence):"
     );
     for entry in shk_integrations::antigravity_recommended_deny_entries() {
         println!("  {entry}");
@@ -1587,6 +1721,7 @@ sandbox_mode = "danger-full-access"
                 scan_hooks_claude_code: false,
                 scan_hooks_cursor: false,
                 scan_hooks_codex: false,
+                scan_hooks_copilot: false,
                 scan_hooks_antigravity: false,
                 claude_deny: false,
                 claude_sandbox: true,

@@ -56,10 +56,11 @@ shk env dotenvx run -- npm test       # inject stored keys only into child proce
 shk env dotenvx delete --all
 shk secrets push --profile prod       # push dotenv payload to AWS/GCP secret manager
 shk secrets push --profile prod --dry-run
-shk skills install                   # install this skill (claude-code + codex/cursor/antigravity)
+shk skills install                   # install this skill (claude-code + codex/cursor/antigravity + copilot)
 shk skills install --tool claude-code --global
 shk skills install --tool codex --global
 shk skills install --tool cursor --global
+shk skills install --tool copilot --global
 shk skills install --tool antigravity --global
 ```
 
@@ -220,11 +221,12 @@ shk hooks install-ai --tool claude-code --global
 shk hooks install-ai --tool claude-code --apply-deny
 shk hooks install-ai --apply-sandbox
 shk hooks install-ai --tool cursor --fail-closed
+shk hooks install-ai --tool copilot
 shk hooks install-ai --tool antigravity
 ```
 
 Important hook behavior:
-- Without `--tool`, installs managed hooks for Claude Code, Codex, Cursor, and Antigravity.
+- Without `--tool`, installs managed hooks for Claude Code, Codex, Cursor, Copilot, and Antigravity.
 - `--audit` makes installed hooks non-blocking and writes metadata-only entries to `.shk/audit.log`.
 - `--log-blocked` keeps installed hooks blocking and writes metadata-only blocked-event entries to `.shk/audit.log`; inspect them with `shk audit`.
 - `--apply-sandbox` hardens supported tool sandbox settings. Cursor has no local sandbox setting in `hooks.json`, so this sets managed hooks fail-closed.
@@ -423,15 +425,17 @@ For `shk secrets push`, profile keys are limited to supported fields such as `pr
 ```bash
 shk skills list                              # show available built-in skills
 shk skills status                            # check installation status
-shk skills install                           # install for all tools (claude-code + codex/cursor/antigravity)
+shk skills install                           # install for all tools (claude-code + codex/cursor/antigravity + copilot)
 shk skills install --tool claude-code        # .claude/skills/shk/SKILL.md
 shk skills install --tool codex             # .agents/skills/shk/SKILL.md
 shk skills install --tool cursor            # .agents/skills/shk/SKILL.md
+shk skills install --tool copilot           # .github/skills/shk/SKILL.md
 shk skills install --tool antigravity       # .agents/skills/shk/SKILL.md (shared)
 shk skills install --tool all --global
 shk skills install --tool claude-code --global   # ~/.claude/skills/shk/SKILL.md
 shk skills install --tool codex --global    # ~/.agents/skills/shk/SKILL.md
 shk skills install --tool cursor --global   # ~/.agents/skills/shk/SKILL.md
+shk skills install --tool copilot --global  # ~/.copilot/skills/shk/SKILL.md
 shk skills install --tool antigravity --global   # ~/.gemini/config/skills/shk/SKILL.md
 shk skills install --force                  # overwrite existing
 shk skills install --dry-run                # preview without writing
