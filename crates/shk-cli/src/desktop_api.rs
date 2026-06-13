@@ -901,13 +901,8 @@ fn collect_project_check_status(root: &Path) -> ProjectCheckStatus {
 }
 
 fn has_all_managed_ai_hooks(root: &Path) -> bool {
-    const LEGACY_REQUIRED_TOOLS: &[&str] = &["claude-code", "codex", "cursor", "antigravity"];
     let statuses = ai_tool_statuses(root, false);
-    LEGACY_REQUIRED_TOOLS.iter().all(|tool| {
-        statuses
-            .iter()
-            .any(|status| status.tool == *tool && status.installed)
-    })
+    !statuses.is_empty() && statuses.iter().all(|status| status.installed)
 }
 
 fn build_hooks_status(root: &Path, git_root: Option<&Path>) -> HooksStatus {
@@ -1908,7 +1903,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_ai_managed_hooks_remain_complete_without_copilot() {
+    fn desktop_ai_managed_hooks_require_all_supported_tools() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".claude")).unwrap();
         fs::write(
@@ -1962,7 +1957,7 @@ mod tests {
 
         let checks = collect_project_check_status(dir.path());
 
-        assert!(checks.ai_managed_hooks);
+        assert!(!checks.ai_managed_hooks);
         assert!(!checks.scan_hooks_copilot);
         assert!(!checks.scan_hooks_windsurf);
     }

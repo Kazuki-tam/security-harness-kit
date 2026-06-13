@@ -67,7 +67,7 @@ Options:
 | `PATH` | Project path whose `.shk/audit.log` should be read. Defaults to `.`. |
 | `--json` | Print the audit preview as JSON. |
 | `--since <duration>` | Limit entries to a relative duration such as `30m`, `24h`, `7d`, or `1w`. |
-| `--tool <tool>` | Limit entries to `claude-code`, `codex`, or `cursor`. |
+| `--tool <tool>` | Limit entries to `claude-code`, `codex`, `cursor`, `copilot`, `antigravity`, or `windsurf`. |
 | `--reason <reason>` | Limit entries to `blocked`, `finding-threshold`, or `action-guard`. |
 | `--limit <n>` | Limit the recent event rows. Defaults to `10`. |
 | `--no-paths` | Omit `display_path` from recent event rows. |
