@@ -148,6 +148,7 @@ export const ja: Messages = {
       codex: "Codex",
       copilot: "GitHub Copilot",
       antigravity: "Antigravity",
+      windsurf: "Windsurf",
     },
     actionCategories: {
       secret_file_access: "機密ファイルの読み取り",
@@ -291,7 +292,7 @@ export const ja: Messages = {
     aiHooks: {
       title: "AI エディターの安全設定",
       description:
-        "Cursor / Claude Code / Codex 向けに、スキャンフックと危険操作の制限を設定します。",
+        "Cursor / Claude Code / Codex / Copilot / Antigravity / Windsurf 向けに、スキャンフックと危険操作の制限を設定します。",
       install: "スキャンフックを設定",
       applySelected: "チェックした設定を適用",
       syncSelected: "変更を反映",
@@ -314,6 +315,7 @@ export const ja: Messages = {
         codex: "Codex",
         copilot: "GitHub Copilot",
         antigravity: "Antigravity",
+        windsurf: "Windsurf",
       },
       installClaudeDeny: "deny を適用",
       installCodexSandbox: "sandbox を適用",
@@ -341,7 +343,8 @@ export const ja: Messages = {
     },
     skills: {
       title: "エージェントスキル",
-      description: "Claude Code と Codex/Cursor 向けの shk スキルを配置します。",
+      description:
+        "Claude Code / Codex / Cursor / Copilot / Antigravity / Windsurf 向けの shk スキルを配置します。",
       install: "スキルをインストール",
     },
     doctor: {

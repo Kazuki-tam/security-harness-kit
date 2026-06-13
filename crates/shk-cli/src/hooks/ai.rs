@@ -39,6 +39,7 @@ pub struct ConfigureAiOptions {
     pub scan_hooks_codex: bool,
     pub scan_hooks_copilot: bool,
     pub scan_hooks_antigravity: bool,
+    pub scan_hooks_windsurf: bool,
     pub claude_deny: bool,
     pub claude_sandbox: bool,
     pub codex_sandbox: bool,
@@ -51,6 +52,7 @@ fn scan_hooks_enabled_for(opts: &ConfigureAiOptions, tool: AiTool) -> bool {
         AiTool::Codex => opts.scan_hooks_codex,
         AiTool::Copilot => opts.scan_hooks_copilot,
         AiTool::Antigravity => opts.scan_hooks_antigravity,
+        AiTool::Windsurf => opts.scan_hooks_windsurf,
     }
 }
 
@@ -65,16 +67,19 @@ fn ai_config_relative_path(tool: AiTool) -> &'static str {
         AiTool::Codex => CONFIG_REL_PATH,
         AiTool::Copilot => ".github/hooks/shk-security.json",
         AiTool::Antigravity => ".agents/hooks.json",
+        AiTool::Windsurf => ".windsurf/hooks.json",
     }
 }
 
 /// Home-relative config path for `--global` installs. Antigravity's
 /// user-level customization directory is `~/.gemini/config/`, not a
-/// dot-directory mirroring the project layout.
+/// dot-directory mirroring the project layout. Windsurf reads
+/// user-level hooks from `~/.codeium/windsurf/hooks.json`.
 fn ai_config_global_relative_path(tool: AiTool) -> &'static str {
     match tool {
         AiTool::Antigravity => ".gemini/config/hooks.json",
         AiTool::Copilot => ".copilot/hooks/shk-security.json",
+        AiTool::Windsurf => ".codeium/windsurf/hooks.json",
         _ => ai_config_relative_path(tool),
     }
 }
@@ -159,6 +164,7 @@ pub fn install_ai_with_summaries(
             AiTool::Cursor,
             AiTool::Copilot,
             AiTool::Antigravity,
+            AiTool::Windsurf,
         ]
     };
 
@@ -196,6 +202,7 @@ pub fn configure_ai_with_summaries(cwd: &Path, opts: ConfigureAiOptions) -> Resu
         AiTool::Cursor,
         AiTool::Copilot,
         AiTool::Antigravity,
+        AiTool::Windsurf,
     ] {
         let path = resolve_ai_config_path(tool, &cwd, opts.global)?;
         if scan_hooks_enabled_for(&opts, tool) {
@@ -278,6 +285,7 @@ fn apply_tool(
             opts.dry_run,
             opts.apply_deny,
         ),
+        AiTool::Windsurf => apply_windsurf(path, opts.audit, opts.log_blocked, opts.dry_run),
     }
 }
 
@@ -288,6 +296,7 @@ fn remove_scan_hooks_for_tool(path: &Path, tool: AiTool, dry_run: bool) -> Resul
         AiTool::Codex => remove_codex_scan_hooks(path, dry_run),
         AiTool::Copilot => remove_copilot_scan_hooks(path, dry_run),
         AiTool::Antigravity => remove_antigravity_scan_hooks(path, dry_run),
+        AiTool::Windsurf => remove_windsurf_scan_hooks(path, dry_run),
     }
 }
 
@@ -945,6 +954,123 @@ fn remove_antigravity_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
     })
 }
 
+/// Cascade (Windsurf) hook events shk owns inside `hooks.json`.
+/// Blocking pre-hooks scan inbound content (reads, writes, commands, MCP args);
+/// observational post-hooks (always exit 0) scan tool output. Cascade runs each
+/// command via `bash -c` with the workspace root as the working directory, so
+/// `shk scan` (no path) is correct.
+const WINDSURF_PRE_KEYS: &[&str] = &[
+    "pre_read_code",
+    "pre_write_code",
+    "pre_run_command",
+    "pre_mcp_tool_use",
+];
+const WINDSURF_POST_KEYS: &[&str] = &["post_run_command", "post_mcp_tool_use"];
+const WINDSURF_PROMPT_KEY: &str = "pre_user_prompt";
+
+/// Cascade ignores extra config keys, so managed entries are identified by the
+/// `shk scan ... --hook-mode windsurf` command string (no `_shk_managed` marker
+/// is injected, keeping the file schema-clean).
+fn is_managed_windsurf_entry(entry: &Value) -> bool {
+    ["command", "powershell"].iter().any(|key| {
+        entry
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|cmd| cmd.contains("shk scan") && cmd.contains("--hook-mode windsurf"))
+    })
+}
+
+fn windsurf_command_entry(command: String) -> Value {
+    json!({
+        "command": command,
+        "show_output": true
+    })
+}
+
+fn apply_windsurf(path: &Path, audit: bool, log_blocked: bool, dry_run: bool) -> Result<String> {
+    let pre = windsurf_command_entry(hook_scan_cli_command(
+        AiTool::Windsurf,
+        audit,
+        log_blocked,
+        false,
+    ));
+    let post = windsurf_command_entry(hook_scan_cli_command(
+        AiTool::Windsurf,
+        audit,
+        log_blocked,
+        true,
+    ));
+    let prompt = windsurf_command_entry(user_prompt_hook_scan_command(
+        AiTool::Windsurf,
+        audit,
+        log_blocked,
+        None,
+    ));
+
+    let mut root = if path.is_file() {
+        load_json(path)?
+    } else {
+        json!({ "hooks": {} })
+    };
+
+    let root_obj = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("Windsurf hooks.json root must be a JSON object"))?;
+    let hooks = root_obj
+        .entry("hooks")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("hooks must be an object"))?;
+
+    for (keys, entry) in [
+        (WINDSURF_PRE_KEYS, &pre),
+        (WINDSURF_POST_KEYS, &post),
+        (&[WINDSURF_PROMPT_KEY][..], &prompt),
+    ] {
+        for key in keys {
+            let arr_val = hooks.entry((*key).to_string()).or_insert_with(|| json!([]));
+            let arr = arr_val
+                .as_array_mut()
+                .ok_or_else(|| anyhow::anyhow!("{key} hook list must be an array"))?;
+            arr.retain(|existing| !is_managed_windsurf_entry(existing));
+            arr.push(entry.clone());
+        }
+    }
+
+    save_json_formatted(path, &root, dry_run)?;
+    Ok(if dry_run {
+        format!(
+            "dry-run: would write managed pre_*/post_* Cascade hooks (audit={audit}, logBlocked={log_blocked})"
+        )
+    } else {
+        format!(
+            "wrote managed pre_*/post_* Cascade hooks (audit={audit}, logBlocked={log_blocked})"
+        )
+    })
+}
+
+#[allow(dead_code)]
+fn remove_windsurf_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
+    if !path.is_file() {
+        return Ok("no Windsurf hooks file".to_string());
+    }
+    let mut root = load_json(path)?;
+    let mut removed = 0;
+    if let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) {
+        for arr in hooks.values_mut().filter_map(Value::as_array_mut) {
+            let before = arr.len();
+            arr.retain(|entry| !is_managed_windsurf_entry(entry));
+            removed += before - arr.len();
+        }
+    }
+    save_json_formatted(path, &root, dry_run)?;
+    Ok(if dry_run {
+        format!("dry-run: would remove {removed} managed Windsurf hook entry(s)")
+    } else {
+        format!("removed {removed} managed Windsurf hook entry(s)")
+    })
+}
+
 fn codex_root_arg(use_git_root_path: bool) -> Option<&'static str> {
     use_git_root_path.then_some(CODEX_GIT_ROOT_ARG)
 }
@@ -1429,6 +1555,125 @@ mod tests {
     }
 
     #[test]
+    fn windsurf_managed_hooks_are_replaced_on_rerun() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hooks.json");
+        // Pre-existing user hook in a managed event array must survive re-runs.
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "pre_run_command": [
+                        { "command": "./lint.sh", "show_output": false }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        apply_windsurf(&path, false, false, false).unwrap();
+        apply_windsurf(&path, true, false, false).unwrap();
+
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+
+        let pre_run = root["hooks"]["pre_run_command"].as_array().unwrap();
+        assert!(
+            pre_run.iter().any(|e| e["command"] == "./lint.sh"),
+            "user hook must be preserved: {pre_run:?}"
+        );
+        assert_eq!(
+            pre_run
+                .iter()
+                .filter(|e| is_managed_windsurf_entry(e))
+                .count(),
+            1,
+            "managed hook should not duplicate: {pre_run:?}"
+        );
+
+        for key in WINDSURF_PRE_KEYS {
+            let arr = root["hooks"][*key].as_array().unwrap();
+            let managed = arr.iter().find(|e| is_managed_windsurf_entry(e)).unwrap();
+            let cmd = managed["command"].as_str().unwrap();
+            assert!(!cmd.contains("--post"), "{key} is a pre hook: {cmd}");
+            assert!(cmd.contains("--audit"), "second run sets audit: {cmd}");
+            assert_eq!(managed["show_output"], true, "{key}");
+        }
+        for key in WINDSURF_POST_KEYS {
+            let cmd = root["hooks"][*key][0]["command"].as_str().unwrap();
+            assert!(cmd.contains("--post"), "{key} scans as post: {cmd}");
+        }
+        let prompt_cmd = root["hooks"][WINDSURF_PROMPT_KEY][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(
+            prompt_cmd.contains(&format!("--fail-on {USER_PROMPT_HOOK_FAIL_ON}")),
+            "pre_user_prompt should block medium PII: {prompt_cmd}"
+        );
+    }
+
+    #[test]
+    fn windsurf_dry_run_does_not_write_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hooks.json");
+
+        let summary = apply_windsurf(&path, false, false, true).unwrap();
+
+        assert!(summary.starts_with("dry-run:"), "{summary}");
+        assert!(!path.exists(), "dry-run must not create the hooks file");
+    }
+
+    #[test]
+    fn windsurf_remove_deletes_only_managed_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hooks.json");
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "pre_run_command": [
+                        { "command": "./lint.sh", "show_output": false }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        apply_windsurf(&path, false, false, false).unwrap();
+
+        let summary = remove_windsurf_scan_hooks(&path, false).unwrap();
+        assert!(summary.contains("removed"), "{summary}");
+
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        for arr in root["hooks"].as_object().unwrap().values() {
+            assert!(
+                !arr.as_array()
+                    .unwrap()
+                    .iter()
+                    .any(is_managed_windsurf_entry),
+                "managed entries should be gone: {root}"
+            );
+        }
+        // Non-managed user hook survives.
+        assert!(
+            root["hooks"]["pre_run_command"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["command"] == "./lint.sh"),
+            "user hook must be preserved: {root}"
+        );
+    }
+
+    #[test]
+    fn windsurf_remove_without_file_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.json");
+        let summary = remove_windsurf_scan_hooks(&path, false).unwrap();
+        assert!(summary.contains("no Windsurf hooks file"), "{summary}");
+    }
+
+    #[test]
     fn antigravity_remove_deletes_only_managed_entry() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hooks.json");
@@ -1723,6 +1968,7 @@ sandbox_mode = "danger-full-access"
                 scan_hooks_codex: false,
                 scan_hooks_copilot: false,
                 scan_hooks_antigravity: false,
+                scan_hooks_windsurf: false,
                 claude_deny: false,
                 claude_sandbox: true,
                 codex_sandbox: false,

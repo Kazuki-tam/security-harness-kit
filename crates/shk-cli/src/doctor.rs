@@ -767,13 +767,15 @@ pub fn has_managed_ai_hooks(root: &Path) -> bool {
         root.join(".cursor/hooks.json"),
         root.join(".agents/hooks.json"),
         root.join(".github/hooks/shk-security.json"),
+        root.join(".windsurf/hooks.json"),
         root.join(CONFIG_REL_PATH),
     ];
     for p in paths {
         if let Ok(s) = fs::read_to_string(&p)
             && (s.contains(MANAGED_MARKER_JSON)
                 || s.contains(MANAGED_MARKER_SH)
-                || (s.contains("shk scan") && s.contains("--hook-mode copilot")))
+                || (s.contains("shk scan")
+                    && (s.contains("--hook-mode copilot") || s.contains("--hook-mode windsurf"))))
         {
             return true;
         }
@@ -1054,6 +1056,29 @@ mod tests {
         assert_eq!(
             doctor_ignore_path(Some(PathBuf::from("/tmp/proj"))),
             PathBuf::from("/tmp/proj")
+        );
+    }
+
+    #[test]
+    fn has_managed_ai_hooks_detects_windsurf_command_marker() {
+        let dir = tempdir().unwrap();
+        assert!(
+            !has_managed_ai_hooks(dir.path()),
+            "empty project has no managed hooks"
+        );
+
+        fs::create_dir_all(dir.path().join(".windsurf")).unwrap();
+        // Windsurf entries carry no `_shk_managed` marker; detection relies on
+        // the `--hook-mode windsurf` command string.
+        fs::write(
+            dir.path().join(".windsurf/hooks.json"),
+            r#"{"hooks":{"pre_run_command":[{"command":"shk scan --hook-mode windsurf","show_output":true}]}}"#,
+        )
+        .unwrap();
+
+        assert!(
+            has_managed_ai_hooks(dir.path()),
+            "managed Windsurf Cascade hooks should be detected"
         );
     }
 

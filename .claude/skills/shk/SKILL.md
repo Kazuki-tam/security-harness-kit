@@ -3,7 +3,7 @@ name: shk
 description: >
   Security scanning, PII detection, secret masking, and AI hook installation using the shk CLI.
   Use when the user asks to: scan for secrets/credentials/sensitive data, detect or mask PII,
-  set up security hooks for Claude Code/Cursor/Codex, run security diagnostics (shk doctor),
+  set up security hooks for Claude Code/Cursor/Codex/Copilot/Antigravity/Windsurf, run security diagnostics (shk doctor),
   manage dotenvx private keys, push dotenv payloads to AWS/GCP secret managers,
   or guard content flowing through MCP tools or external data connections.
 ---
@@ -34,7 +34,7 @@ shk init --yes --no-npm-hardening    # skip package-manager hardening
 shk completions zsh                  # generate shell completions
 shk status                           # concise project health summary
 shk hooks install                    # install Git pre-commit hook
-shk hooks install-ai                 # install hooks for Claude Code / Cursor / Codex
+shk hooks install-ai                 # install hooks for Claude Code / Cursor / Codex / Copilot / Antigravity / Windsurf
 shk hooks install-ai --tool claude-code --global
 shk hooks install-ai --apply-sandbox # harden supported tool sandbox settings
 shk hooks install-ai --dry-run       # preview changes
@@ -56,12 +56,13 @@ shk env dotenvx run -- npm test       # inject stored keys only into child proce
 shk env dotenvx delete --all
 shk secrets push --profile prod       # push dotenv payload to AWS/GCP secret manager
 shk secrets push --profile prod --dry-run
-shk skills install                   # install this skill (claude-code + codex/cursor/antigravity + copilot)
+shk skills install                   # install this skill (claude-code + codex/cursor/antigravity + copilot + windsurf)
 shk skills install --tool claude-code --global
 shk skills install --tool codex --global
 shk skills install --tool cursor --global
 shk skills install --tool copilot --global
 shk skills install --tool antigravity --global
+shk skills install --tool windsurf --global
 ```
 
 Global flags work with every command:
@@ -190,8 +191,10 @@ Safe operating rules:
 ## AI hook integration
 
 `shk hooks install-ai` writes managed entries to `.claude/settings.json`,
-`.cursor/hooks.json`, `.codex/config.toml`, and `.agents/hooks.json` (Antigravity;
-global installs use `~/.gemini/config/hooks.json`).
+`.cursor/hooks.json`, `.codex/config.toml`, `.github/hooks/shk-security.json`,
+`.agents/hooks.json` (Antigravity; global installs use `~/.gemini/config/hooks.json`),
+and `.windsurf/hooks.json` (Windsurf; global installs use
+`~/.codeium/windsurf/hooks.json`).
 
 Each hook runs `shk scan --hook-mode <tool>` on the payload before AI tool execution.
 Pre-hooks and user-prompt hooks block on findings (exit 2); post-hooks warn only (exit 0).
@@ -212,6 +215,12 @@ Antigravity permission lists (Deny > Ask > Allow, `action(target)` format) are m
 in its settings UI; `--apply-deny` with `--tool antigravity` prints recommended Deny
 entries (e.g. `command(rm -rf)`, `read_file(**/.env)`) to add manually.
 
+Windsurf gets Cascade hooks in `.windsurf/hooks.json`: blocking pre hooks for
+`pre_read_code`, `pre_write_code`, `pre_run_command`, `pre_mcp_tool_use`, and
+`pre_user_prompt` (with `--fail-on medium`), plus non-blocking post scans for
+`post_run_command` and `post_mcp_tool_use`. Cascade ignores hook stdout, so
+blocks travel via exit 2 and stderr.
+
 ```bash
 shk hooks install-ai                             # all detected tools
 shk hooks install-ai --audit                     # non-blocking, writes .shk/audit.log
@@ -223,10 +232,11 @@ shk hooks install-ai --apply-sandbox
 shk hooks install-ai --tool cursor --fail-closed
 shk hooks install-ai --tool copilot
 shk hooks install-ai --tool antigravity
+shk hooks install-ai --tool windsurf
 ```
 
 Important hook behavior:
-- Without `--tool`, installs managed hooks for Claude Code, Codex, Cursor, Copilot, and Antigravity.
+- Without `--tool`, installs managed hooks for Claude Code, Codex, Cursor, Copilot, Antigravity, and Windsurf.
 - `--audit` makes installed hooks non-blocking and writes metadata-only entries to `.shk/audit.log`.
 - `--log-blocked` keeps installed hooks blocking and writes metadata-only blocked-event entries to `.shk/audit.log`; inspect them with `shk audit`.
 - `--apply-sandbox` hardens supported tool sandbox settings. Cursor has no local sandbox setting in `hooks.json`, so this sets managed hooks fail-closed.
@@ -242,7 +252,7 @@ shk ci init github                      # write .github/workflows/shk.yml
 shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
-shk ci init github --shk-version v0.4.1
+shk ci init github --shk-version v0.4.2
 shk ci init github --output .github/workflows/security.yml --force
 ```
 
@@ -291,14 +301,17 @@ Hook-mode scanning (used internally by installed hooks):
 # Pre-hook: scan tool payload from stdin, block on findings (exit 2)
 shk scan . --hook-mode claude-code < hook_payload.json
 shk scan . --hook-mode codex < hook_payload.json
+shk scan . --hook-mode windsurf < hook_payload.json
 
-# User prompt hook: scan prompt before submission (Codex / Claude Code)
+# User prompt hook: scan prompt before submission (Codex / Claude Code / Windsurf)
 shk scan . --hook-mode codex --fail-on medium < user_prompt_payload.json
+shk scan . --hook-mode windsurf --fail-on medium < user_prompt_payload.json
 
 # Post-hook: scan inbound content, always non-blocking
 shk scan . --hook-mode claude-code --post < response_payload.json
 shk scan . --hook-mode codex --post < response_payload.json
 shk scan . --hook-mode cursor --post < response_payload.json
+shk scan . --hook-mode windsurf --post < response_payload.json
 
 # Audit mode: log findings to .shk/audit.log, never block
 shk scan . --hook-mode claude-code --audit < hook_payload.json
@@ -425,18 +438,20 @@ For `shk secrets push`, profile keys are limited to supported fields such as `pr
 ```bash
 shk skills list                              # show available built-in skills
 shk skills status                            # check installation status
-shk skills install                           # install for all tools (claude-code + codex/cursor/antigravity + copilot)
+shk skills install                           # install for all tools (claude-code + codex/cursor/antigravity + copilot + windsurf)
 shk skills install --tool claude-code        # .claude/skills/shk/SKILL.md
 shk skills install --tool codex             # .agents/skills/shk/SKILL.md
 shk skills install --tool cursor            # .agents/skills/shk/SKILL.md
 shk skills install --tool copilot           # .github/skills/shk/SKILL.md
 shk skills install --tool antigravity       # .agents/skills/shk/SKILL.md (shared)
+shk skills install --tool windsurf          # .windsurf/skills/shk/SKILL.md
 shk skills install --tool all --global
 shk skills install --tool claude-code --global   # ~/.claude/skills/shk/SKILL.md
 shk skills install --tool codex --global    # ~/.agents/skills/shk/SKILL.md
 shk skills install --tool cursor --global   # ~/.agents/skills/shk/SKILL.md
 shk skills install --tool copilot --global  # ~/.copilot/skills/shk/SKILL.md
 shk skills install --tool antigravity --global   # ~/.gemini/config/skills/shk/SKILL.md
+shk skills install --tool windsurf --global # ~/.codeium/windsurf/skills/shk/SKILL.md
 shk skills install --force                  # overwrite existing
 shk skills install --dry-run                # preview without writing
 ```

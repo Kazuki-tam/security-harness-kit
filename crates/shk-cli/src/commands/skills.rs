@@ -11,6 +11,7 @@ pub enum SkillTool {
     Cursor,
     Copilot,
     Antigravity,
+    Windsurf,
     All,
 }
 
@@ -55,6 +56,7 @@ pub(crate) fn selected_tools(tool: SkillTool) -> Vec<SkillTool> {
             SkillTool::Cursor,
             SkillTool::Copilot,
             SkillTool::Antigravity,
+            SkillTool::Windsurf,
         ],
         t => vec![t],
     }
@@ -97,6 +99,8 @@ pub fn status_entries_for(root: &Path) -> Vec<SkillStatus> {
         ("copilot (project)", SkillTool::Copilot, false),
         ("copilot (global)", SkillTool::Copilot, true),
         ("antigravity (global)", SkillTool::Antigravity, true),
+        ("windsurf (project)", SkillTool::Windsurf, false),
+        ("windsurf (global)", SkillTool::Windsurf, true),
     ];
 
     tools
@@ -249,6 +253,19 @@ fn dest_path_for(base: &Path, tool: SkillTool, global: bool) -> Result<PathBuf> 
             .join("skills")
             .join(SKILL_NAME)
             .join("SKILL.md"),
+        // Cascade (Windsurf) reads workspace `.windsurf/skills/`
+        // and user-level `~/.codeium/windsurf/skills/`.
+        SkillTool::Windsurf if global => base
+            .join(".codeium")
+            .join("windsurf")
+            .join("skills")
+            .join(SKILL_NAME)
+            .join("SKILL.md"),
+        SkillTool::Windsurf => base
+            .join(".windsurf")
+            .join("skills")
+            .join(SKILL_NAME)
+            .join("SKILL.md"),
         SkillTool::All => unreachable!("All is resolved before dest_path"),
     })
 }
@@ -274,6 +291,7 @@ impl SkillTool {
             Self::Cursor => "cursor",
             Self::Copilot => "copilot",
             Self::Antigravity => "antigravity",
+            Self::Windsurf => "windsurf",
             Self::All => "all",
         }
     }
@@ -293,6 +311,7 @@ mod tests {
                 SkillTool::Cursor,
                 SkillTool::Copilot,
                 SkillTool::Antigravity,
+                SkillTool::Windsurf,
             ]
         );
     }

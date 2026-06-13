@@ -28,11 +28,11 @@ With `shk`, you can:
 - Mask sensitive content from stdin, text files, and Office documents (`.docx`, `.xlsx`, `.pptx`).
 - Encrypt `.env` files, store private keys in the OS credential store, and run commands with decrypted values injected only at runtime.
 - Install Git pre-commit hooks.
-- Install managed hooks for Claude Code, Cursor, Codex, GitHub Copilot, and Google Antigravity.
+- Install managed hooks for Claude Code, Cursor, Codex, GitHub Copilot, Google Antigravity, and Windsurf.
 - Preview metadata-only audit logs to understand blocked hook activity without storing detected values.
 - Generate a GitHub Actions workflow that runs `shk scan` on every pull request.
 - Diagnose ignore file and `.env` safety coverage.
-- Deploy AI agent skills to Claude Code, Codex, Cursor, GitHub Copilot, and Antigravity project directories.
+- Deploy AI agent skills to Claude Code, Codex, Cursor, GitHub Copilot, Antigravity, and Windsurf project directories.
 
 ## Installation
 
@@ -125,7 +125,7 @@ Generate a GitHub Actions workflow that scans every pull request:
 shk ci init github
 ```
 
-Install the shk agent skill for Claude Code, Codex/Cursor, and Antigravity:
+Install the shk agent skill for Claude Code, Codex/Cursor, Copilot, Antigravity, and Windsurf:
 
 ```bash
 shk skills install
@@ -192,14 +192,16 @@ shk hooks install-ai --audit
 shk hooks install-ai --log-blocked
 shk hooks install-ai --tool copilot
 shk hooks install-ai --tool antigravity
+shk hooks install-ai --tool windsurf
 
 shk ci init github
 shk ci init github --dry-run
 shk ci init github --mode audit
-shk ci init github --shk-version v0.4.1
+shk ci init github --shk-version v0.4.2
 
 shk skills install
 shk skills install --tool claude-code --global
+shk skills install --tool windsurf
 shk skills status
 ```
 

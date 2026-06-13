@@ -262,6 +262,7 @@ pub fn run() -> Result<()> {
                     SkillToolArg::Codex => commands::skills::SkillTool::Codex,
                     SkillToolArg::Copilot => commands::skills::SkillTool::Copilot,
                     SkillToolArg::Cursor => commands::skills::SkillTool::Cursor,
+                    SkillToolArg::Windsurf => commands::skills::SkillTool::Windsurf,
                     SkillToolArg::All => commands::skills::SkillTool::All,
                 }),
                 global,

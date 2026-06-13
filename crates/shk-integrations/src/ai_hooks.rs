@@ -83,6 +83,28 @@ const COPILOT_POST_TEXT_KEYS: &[&str] = &[
     "stderr",
     "error",
 ];
+// Windsurf (Cascade) wraps event data under `tool_info`:
+// - pre_run_command / post_run_command: { command_line, cwd }
+// - pre_mcp_tool_use: { mcp_server_name, mcp_tool_name, mcp_tool_arguments }
+// - pre_user_prompt: { user_prompt }
+// - pre_read_code / pre_write_code: { file_path, edits[] } (file body read via PATH_KEYS)
+const WINDSURF_PRE_EXTRA_TEXT_KEYS: &[&str] = &[
+    "command_line",
+    "user_prompt",
+    "mcp_tool_arguments",
+    "new_string",
+    "old_string",
+];
+// post_mcp_tool_use carries the tool output under `mcp_result`; post_run_command
+// only carries `command_line` (Cascade omits stdout from the post payload).
+const WINDSURF_POST_TEXT_KEYS: &[&str] = &[
+    "mcp_result",
+    "command_line",
+    "output",
+    "result",
+    "content",
+    "text",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AiHookTool {
@@ -91,6 +113,7 @@ pub enum AiHookTool {
     Codex,
     Copilot,
     Cursor,
+    Windsurf,
 }
 
 impl AiHookTool {
@@ -101,6 +124,7 @@ impl AiHookTool {
             Self::Codex => "codex",
             Self::Copilot => "copilot",
             Self::Cursor => "cursor",
+            Self::Windsurf => "windsurf",
         }
     }
 
@@ -111,22 +135,34 @@ impl AiHookTool {
             Self::Codex => "<codex-hook>",
             Self::Copilot => "<copilot-hook>",
             Self::Cursor => "<cursor-hook>",
+            Self::Windsurf => "<windsurf-hook>",
         }
     }
 }
 
-/// Extracts the `prompt` field from a `UserPromptSubmit` JSON payload.
-/// Returns `None` when the field is absent or the payload is not valid JSON.
+/// Extracts the user prompt from a `UserPromptSubmit` JSON payload.
+///
+/// Recognizes the top-level `prompt` field used by most tools, and falls back
+/// to Cascade's (Windsurf) nested `tool_info.user_prompt`.
+/// Returns `None` when neither field is present or the payload is not valid JSON.
 pub fn extract_user_prompt(stdin: &str) -> Option<Cow<'_, str>> {
+    #[derive(Deserialize)]
+    struct ToolInfo<'a> {
+        #[serde(borrow)]
+        user_prompt: Option<Cow<'a, str>>,
+    }
     #[derive(Deserialize)]
     struct UserPromptPayload<'a> {
         #[serde(borrow)]
         prompt: Option<Cow<'a, str>>,
+        #[serde(borrow)]
+        tool_info: Option<ToolInfo<'a>>,
     }
 
-    serde_json::from_str::<UserPromptPayload<'_>>(stdin)
-        .ok()?
+    let payload = serde_json::from_str::<UserPromptPayload<'_>>(stdin).ok()?;
+    payload
         .prompt
+        .or_else(|| payload.tool_info.and_then(|info| info.user_prompt))
 }
 
 /// Returns display path (posix-ish relative to repo) + body content to scan.
@@ -259,6 +295,7 @@ fn priority_text_key_sets(post: bool, tool: AiHookTool) -> &'static [&'static [&
     if !post {
         return match tool {
             AiHookTool::Antigravity => &[PRE_TEXT_KEYS, ANTIGRAVITY_PRE_EXTRA_TEXT_KEYS],
+            AiHookTool::Windsurf => &[PRE_TEXT_KEYS, WINDSURF_PRE_EXTRA_TEXT_KEYS],
             _ => &[PRE_TEXT_KEYS],
         };
     }
@@ -269,6 +306,7 @@ fn priority_text_key_sets(post: bool, tool: AiHookTool) -> &'static [&'static [&
         AiHookTool::ClaudeCode => &[CLAUDE_POST_TEXT_KEYS],
         AiHookTool::Copilot => &[COPILOT_POST_TEXT_KEYS],
         AiHookTool::Cursor => &[CURSOR_POST_TEXT_KEYS],
+        AiHookTool::Windsurf => &[WINDSURF_POST_TEXT_KEYS],
     }
 }
 
@@ -357,6 +395,72 @@ mod tests {
         assert_eq!(
             AiHookTool::Antigravity.virtual_path_label(),
             "<antigravity-hook>"
+        );
+        assert_eq!(AiHookTool::Windsurf.kebab_str(), "windsurf");
+        assert_eq!(AiHookTool::Windsurf.virtual_path_label(), "<windsurf-hook>");
+    }
+
+    #[test]
+    fn windsurf_pre_extracts_command_line_from_tool_info() {
+        let stdin = serde_json::json!({
+            "agent_action_name": "pre_run_command",
+            "tool_info": {
+                "command_line": "echo windsurf-command-marker",
+                "cwd": "/workspace/project"
+            }
+        })
+        .to_string();
+
+        let (display, body) = stdin_to_hook_body(
+            AiHookTool::Windsurf,
+            false,
+            &stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert_eq!(display, "<windsurf-hook>");
+        assert!(body.contains("echo windsurf-command-marker"), "{body}");
+    }
+
+    #[test]
+    fn windsurf_post_extracts_mcp_result() {
+        let stdin = serde_json::json!({
+            "agent_action_name": "post_mcp_tool_use",
+            "tool_info": {
+                "mcp_tool_name": "list_commits",
+                "mcp_result": "windsurf-result-marker-text"
+            }
+        })
+        .to_string();
+
+        let (_display, body) = stdin_to_hook_body(
+            AiHookTool::Windsurf,
+            true,
+            &stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert!(body.contains("windsurf-result-marker-text"), "{body}");
+    }
+
+    #[test]
+    fn extract_user_prompt_reads_cascade_tool_info() {
+        assert_eq!(
+            extract_user_prompt(
+                r#"{"agent_action_name":"pre_user_prompt","tool_info":{"user_prompt":"scan cascade"}}"#
+            )
+            .as_deref(),
+            Some("scan cascade")
+        );
+        // Top-level prompt still takes priority over the nested form.
+        assert_eq!(
+            extract_user_prompt(r#"{"prompt":"top","tool_info":{"user_prompt":"nested"}}"#)
+                .as_deref(),
+            Some("top")
         );
     }
 

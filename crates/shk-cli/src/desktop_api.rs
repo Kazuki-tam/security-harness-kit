@@ -35,6 +35,7 @@ pub struct AiSafetyAppliedStatus {
     pub scan_hooks_codex: bool,
     pub scan_hooks_copilot: bool,
     pub scan_hooks_antigravity: bool,
+    pub scan_hooks_windsurf: bool,
     pub claude_deny: bool,
     pub claude_sandbox: bool,
     pub codex_sandbox: bool,
@@ -227,6 +228,9 @@ pub struct ApplyAiHookSettingsOptions {
     /// Defaults to false for payloads from older desktop frontends.
     #[serde(default)]
     pub scan_hooks_antigravity: bool,
+    /// Defaults to false for payloads from older desktop frontends.
+    #[serde(default)]
+    pub scan_hooks_windsurf: bool,
     #[serde(default = "default_cursor_fail_closed")]
     pub cursor_fail_closed: bool,
     pub claude_deny: bool,
@@ -283,6 +287,7 @@ fn desktop_configure_ai_options(options: &ApplyAiHookSettingsOptions) -> Configu
         scan_hooks_codex: options.scan_hooks_codex,
         scan_hooks_copilot: options.scan_hooks_copilot,
         scan_hooks_antigravity: options.scan_hooks_antigravity,
+        scan_hooks_windsurf: options.scan_hooks_windsurf,
         claude_deny: options.claude_deny,
         claude_sandbox: options.claude_sandbox,
         codex_sandbox: options.codex_sandbox,
@@ -314,6 +319,7 @@ struct ProjectCheckStatus {
     scan_hooks_codex: bool,
     scan_hooks_copilot: bool,
     scan_hooks_antigravity: bool,
+    scan_hooks_windsurf: bool,
     ignore: IgnoreStatus,
     claude: ClaudePermissionsStatus,
     codex: CodexConfigStatus,
@@ -440,6 +446,7 @@ fn ai_safety_applied_matches(a: &AiSafetyAppliedStatus, b: &AiSafetyAppliedStatu
         && a.scan_hooks_codex == b.scan_hooks_codex
         && a.scan_hooks_copilot == b.scan_hooks_copilot
         && a.scan_hooks_antigravity == b.scan_hooks_antigravity
+        && a.scan_hooks_windsurf == b.scan_hooks_windsurf
         && a.claude_deny == b.claude_deny
         && a.claude_sandbox == b.claude_sandbox
         && a.codex_sandbox == b.codex_sandbox
@@ -451,6 +458,7 @@ fn ai_safety_fully_disabled(status: &AiSafetyAppliedStatus) -> bool {
         && !status.scan_hooks_codex
         && !status.scan_hooks_copilot
         && !status.scan_hooks_antigravity
+        && !status.scan_hooks_windsurf
         && !status.claude_deny
         && !status.claude_sandbox
         && !status.codex_sandbox
@@ -468,6 +476,7 @@ fn current_ai_hook_settings_options(root: &Path) -> ApplyAiHookSettingsOptions {
         scan_hooks_codex: applied.scan_hooks_codex,
         scan_hooks_copilot: applied.scan_hooks_copilot,
         scan_hooks_antigravity: applied.scan_hooks_antigravity,
+        scan_hooks_windsurf: applied.scan_hooks_windsurf,
         cursor_fail_closed: true,
         claude_deny: applied.claude_deny,
         claude_sandbox: applied.claude_sandbox,
@@ -881,6 +890,7 @@ fn collect_project_check_status(root: &Path) -> ProjectCheckStatus {
         scan_hooks_codex: scan_hooks_for("codex"),
         scan_hooks_copilot: scan_hooks_for("copilot"),
         scan_hooks_antigravity: scan_hooks_for("antigravity"),
+        scan_hooks_windsurf: scan_hooks_for("windsurf"),
         ignore: collect_ignore_status(root),
         claude: collect_claude_permissions_status(root),
         codex: collect_codex_config_status(root),
@@ -891,13 +901,8 @@ fn collect_project_check_status(root: &Path) -> ProjectCheckStatus {
 }
 
 fn has_all_managed_ai_hooks(root: &Path) -> bool {
-    const LEGACY_REQUIRED_TOOLS: &[&str] = &["claude-code", "codex", "cursor", "antigravity"];
     let statuses = ai_tool_statuses(root, false);
-    LEGACY_REQUIRED_TOOLS.iter().all(|tool| {
-        statuses
-            .iter()
-            .any(|status| status.tool == *tool && status.installed)
-    })
+    !statuses.is_empty() && statuses.iter().all(|status| status.installed)
 }
 
 fn build_hooks_status(root: &Path, git_root: Option<&Path>) -> HooksStatus {
@@ -920,6 +925,7 @@ fn ai_tool_statuses(root: &Path, global: bool) -> Vec<AiHookToolStatus> {
         AiTool::Cursor,
         AiTool::Copilot,
         AiTool::Antigravity,
+        AiTool::Windsurf,
     ]
     .into_iter()
     .filter_map(|tool| {
@@ -940,9 +946,9 @@ fn ai_tool_statuses(root: &Path, global: bool) -> Vec<AiHookToolStatus> {
 fn has_managed_hook_marker(tool: AiTool, content: &str) -> bool {
     content.contains(MANAGED_MARKER_JSON)
         || content.contains(MANAGED_MARKER_SH)
-        || (tool == AiTool::Copilot
+        || ((tool == AiTool::Copilot || tool == AiTool::Windsurf)
             && content.contains("shk scan")
-            && content.contains("--hook-mode copilot"))
+            && content.contains(&format!("--hook-mode {}", tool.kebab_str())))
 }
 
 fn resolve_ai_config_path(tool: AiTool, root: &Path, global: bool) -> Result<PathBuf> {
@@ -983,7 +989,7 @@ fn build_recommended_fixes(
         fixes.push(RecommendedFixDto {
             id: "ai_hooks".into(),
             severity: "warn".into(),
-            message: "Install managed AI scan hooks for Cursor, Claude Code, Codex, Copilot, and Antigravity"
+            message: "Install managed AI scan hooks for Cursor, Claude Code, Codex, Copilot, Antigravity, and Windsurf"
                 .into(),
             requires_policy: true,
             default_selected: true,
@@ -1163,6 +1169,7 @@ fn ai_safety_applied_from(checks: &ProjectCheckStatus) -> AiSafetyAppliedStatus 
         scan_hooks_codex: checks.scan_hooks_codex,
         scan_hooks_copilot: checks.scan_hooks_copilot,
         scan_hooks_antigravity: checks.scan_hooks_antigravity,
+        scan_hooks_windsurf: checks.scan_hooks_windsurf,
         claude_deny: checks.claude.settings_exists && checks.claude.deny_ok,
         claude_sandbox: checks.claude.settings_exists && checks.claude.sandbox_ok,
         codex_sandbox: checks.codex.config_exists
@@ -1262,6 +1269,7 @@ fn parse_ai_tool(value: &str) -> Result<AiTool> {
         "copilot" => Ok(AiTool::Copilot),
         "cursor" => Ok(AiTool::Cursor),
         "antigravity" => Ok(AiTool::Antigravity),
+        "windsurf" => Ok(AiTool::Windsurf),
         other => anyhow::bail!("unknown AI tool: {other}"),
     }
 }
@@ -1282,6 +1290,7 @@ fn parse_skill_tool(value: &str) -> Result<SkillTool> {
         "copilot" => Ok(SkillTool::Copilot),
         "cursor" => Ok(SkillTool::Cursor),
         "antigravity" => Ok(SkillTool::Antigravity),
+        "windsurf" => Ok(SkillTool::Windsurf),
         "all" => Ok(SkillTool::All),
         other => anyhow::bail!("unknown skill tool: {other}"),
     }
@@ -1827,6 +1836,7 @@ mod tests {
                 scan_hooks_claude_code: false,
                 scan_hooks_cursor: false,
                 scan_hooks_antigravity: false,
+                scan_hooks_windsurf: false,
                 scan_hooks_codex: false,
                 scan_hooks_copilot: false,
                 cursor_fail_closed: true,
@@ -1873,6 +1883,7 @@ mod tests {
                 scan_hooks_claude_code: true,
                 scan_hooks_cursor: false,
                 scan_hooks_antigravity: false,
+                scan_hooks_windsurf: false,
                 scan_hooks_codex: false,
                 scan_hooks_copilot: false,
                 cursor_fail_closed: true,
@@ -1892,7 +1903,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_ai_managed_hooks_remain_complete_without_copilot() {
+    fn desktop_ai_managed_hooks_require_all_supported_tools() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".claude")).unwrap();
         fs::write(
@@ -1946,8 +1957,50 @@ mod tests {
 
         let checks = collect_project_check_status(dir.path());
 
-        assert!(checks.ai_managed_hooks);
+        assert!(!checks.ai_managed_hooks);
         assert!(!checks.scan_hooks_copilot);
+        assert!(!checks.scan_hooks_windsurf);
+    }
+
+    #[test]
+    fn desktop_apply_ai_hook_settings_installs_windsurf_toggle() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "").unwrap();
+
+        let result = apply_ai_hook_settings(
+            dir.path().to_str().unwrap(),
+            ApplyAiHookSettingsOptions {
+                scan_hooks_claude_code: false,
+                scan_hooks_cursor: false,
+                scan_hooks_antigravity: false,
+                scan_hooks_windsurf: true,
+                scan_hooks_codex: false,
+                scan_hooks_copilot: false,
+                cursor_fail_closed: true,
+                claude_deny: false,
+                claude_sandbox: false,
+                codex_sandbox: false,
+            },
+        )
+        .unwrap();
+        assert!(result.success, "{result:?}");
+
+        let hooks = fs::read_to_string(dir.path().join(".windsurf/hooks.json")).unwrap();
+        assert!(hooks.contains("--hook-mode windsurf"), "{hooks}");
+        assert!(hooks.contains("--log-blocked"), "{hooks}");
+        assert!(hooks.contains("pre_write_code"), "{hooks}");
+
+        let status = build_project_status(dir.path());
+        assert!(status.ai_safety_applied.scan_hooks_windsurf);
+        assert!(
+            status
+                .hooks
+                .ai_tools
+                .iter()
+                .any(|tool| tool.tool == "windsurf" && tool.installed),
+            "{:?}",
+            status.hooks.ai_tools
+        );
     }
 
     #[test]
@@ -1976,6 +2029,7 @@ mod tests {
                 scan_hooks_claude_code: true,
                 scan_hooks_cursor: false,
                 scan_hooks_antigravity: false,
+                scan_hooks_windsurf: false,
                 scan_hooks_codex: false,
                 scan_hooks_copilot: false,
                 cursor_fail_closed: true,
@@ -2007,6 +2061,7 @@ mod tests {
             scan_hooks_claude_code: true,
             scan_hooks_cursor: false,
             scan_hooks_antigravity: false,
+            scan_hooks_windsurf: true,
             scan_hooks_codex: false,
             scan_hooks_copilot: false,
             cursor_fail_closed: true,
@@ -2017,6 +2072,7 @@ mod tests {
         assert!(opts.log_blocked);
         assert!(!opts.audit);
         assert!(opts.fail_closed);
+        assert!(opts.scan_hooks_windsurf);
     }
 
     #[test]
@@ -2025,6 +2081,7 @@ mod tests {
             scan_hooks_claude_code: false,
             scan_hooks_cursor: true,
             scan_hooks_antigravity: false,
+            scan_hooks_windsurf: false,
             scan_hooks_codex: false,
             scan_hooks_copilot: false,
             cursor_fail_closed: true,

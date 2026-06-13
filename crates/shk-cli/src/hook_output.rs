@@ -155,6 +155,9 @@ pub fn deny_stdout_for_event(tool: AiTool, event: HookEvent, reason: &str) -> St
         .to_string(),
         AiTool::Codex => codex_deny_stdout(event, reason),
         AiTool::ClaudeCode => permission_output(event, "deny", reason).to_string(),
+        // Cascade (Windsurf) does not parse hook stdout for
+        // decisions; a block travels via exit code 2 + the stderr message.
+        AiTool::Windsurf => "{}".to_string(),
     }
 }
 
@@ -177,6 +180,8 @@ pub fn allow_stdout_for_event(tool: AiTool, event: HookEvent, info: Option<&str>
             let reason = info.unwrap_or("shk: OK");
             permission_output(event, "allow", reason).to_string()
         }
+        // Cascade ignores hook stdout; exit 0 already lets the action proceed.
+        AiTool::Windsurf => "{}".to_string(),
     }
 }
 
@@ -198,6 +203,9 @@ pub fn mask_stdout(
         // hooks must return `{}` and pre hooks report via decision/reason only.
         AiTool::Antigravity if post => "{}".to_string(),
         AiTool::Antigravity => antigravity_decision("allow", Some(&msg)),
+        // Cascade has no schema for replacing tool payloads via hook stdout, so
+        // masking is advisory only (the stderr hint reports the finding count).
+        AiTool::Windsurf => "{}".to_string(),
         // Copilot postToolUse replaces the result via `modifiedResult`; preToolUse
         // cannot rewrite tool args here, so it allows with an advisory note.
         AiTool::Copilot if post => {
@@ -559,6 +567,21 @@ mod tests {
     fn copilot_post_mask_without_findings_is_empty_object() {
         let output = mask_stdout(AiTool::Copilot, true, 0, None);
         assert_eq!(parse_json(&output), json!({}));
+    }
+
+    #[test]
+    fn windsurf_outputs_are_empty_objects_blocking_is_via_exit_and_stderr() {
+        // Cascade ignores hook stdout; decisions travel via exit code + stderr.
+        let deny = deny_stdout_for_event(AiTool::Windsurf, HookEvent::PreToolUse, "blocked");
+        assert_eq!(parse_json(&deny), json!({}));
+
+        let allow = allow_stdout_for_event(AiTool::Windsurf, HookEvent::PreToolUse, Some("ok"));
+        assert_eq!(parse_json(&allow), json!({}));
+
+        let mask_pre = mask_stdout(AiTool::Windsurf, false, 2, Some("[REDACTED]"));
+        assert_eq!(parse_json(&mask_pre), json!({}));
+        let mask_post = mask_stdout(AiTool::Windsurf, true, 2, Some("[REDACTED]"));
+        assert_eq!(parse_json(&mask_post), json!({}));
     }
 
     #[test]
