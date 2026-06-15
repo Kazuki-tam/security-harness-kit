@@ -917,7 +917,7 @@ pub fn run_all(root: &Path, json: bool) -> Result<()> {
     println!();
     print_workflow_status(&workflows);
     println!();
-    run_npm_hardening_check(root);
+    print_npm_hardening_check(&npm);
     Ok(())
 }
 
@@ -925,8 +925,7 @@ pub fn doctor_ignore_path(path: Option<PathBuf>) -> PathBuf {
     path.unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn run_npm_hardening_check(root: &Path) {
-    let status = npm_hardening::status(root);
+fn print_npm_hardening_check(status: &npm_hardening::NpmHardeningStatus) {
     if !status.has_npm_projects() {
         println!("npm hardening: no package.json detected under project");
         return;
