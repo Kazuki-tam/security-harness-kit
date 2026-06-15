@@ -222,6 +222,45 @@ fn scan_changed_since_allows_missing_path_as_repo_hint() {
     assert!(v["scanned_paths"].as_array().unwrap().is_empty(), "{v}");
 }
 
+#[cfg(unix)]
+#[test]
+fn scan_changed_since_does_not_follow_symlinks_by_default() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    init_git_repo(tmp.path());
+    std::fs::write(tmp.path().join("README.md"), "clean\n").expect("write readme");
+    git_commit_all(tmp.path(), "initial");
+
+    let outside = tmp.path().with_extension("outside-secret");
+    std::fs::write(&outside, synthetic_openai_key('d')).expect("write outside secret");
+    std::os::unix::fs::symlink(&outside, tmp.path().join("linked.txt")).expect("symlink");
+    git_commit_all(tmp.path(), "add symlink");
+
+    let out = Command::new(shk_bin())
+        .args([
+            "scan",
+            ".",
+            "--changed-since",
+            "HEAD~1",
+            "--json",
+            "--fail-on",
+            "high",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .expect("run changed-since scan");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert!(
+        v["findings"].as_array().unwrap().is_empty(),
+        "symlink target should not be scanned by default: {v}"
+    );
+}
+
 #[test]
 fn allowlist_suggest_prints_safe_toml_from_scan_json() {
     let tmp = tempfile::tempdir().expect("tempdir");

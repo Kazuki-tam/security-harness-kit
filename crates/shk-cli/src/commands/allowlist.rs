@@ -16,9 +16,16 @@ pub fn suggest(args: SuggestArgs) -> Result<()> {
     let input = read_input(&args.from)?;
     let report: ScanJsonReport =
         serde_json::from_str(&input).context("parse scan JSON report from --from")?;
+    let allowlist_candidates: Vec<&Finding> = report
+        .findings
+        .iter()
+        .filter(|finding| is_allowlist_candidate(finding))
+        .collect();
     if args.value_hash
-        && report.findings.iter().any(is_allowlist_candidate)
-        && !report.findings.iter().any(|f| f.value_hash.is_some())
+        && !allowlist_candidates.is_empty()
+        && allowlist_candidates
+            .iter()
+            .any(|finding| finding.value_hash.is_none())
     {
         bail!(
             "report does not contain value_hash metadata; rerun `shk scan --json --with-value-hash`"
@@ -108,7 +115,10 @@ fn render_entry(
 }
 
 fn is_allowlist_candidate(finding: &Finding) -> bool {
-    finding.severity != "info" && !finding.rule_id.starts_with("scan.")
+    finding.severity != "info"
+        && finding.kind != "ignore"
+        && !finding.rule_id.starts_with("scan.")
+        && !finding.rule_id.starts_with("policy.")
 }
 
 fn toml_escape(s: &str) -> String {
@@ -230,6 +240,108 @@ mod tests {
             err.contains("rerun `shk scan --json --with-value-hash`"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn value_hash_request_requires_hash_metadata_on_allowlist_candidates() {
+        let report = ScanJsonReport {
+            version: 1,
+            scanned_paths: vec!["demo.env".into()],
+            findings: vec![
+                Finding {
+                    rule_id: "scan.binary_skipped".into(),
+                    severity: "info".into(),
+                    kind: "ignore".into(),
+                    file: "image.png".into(),
+                    line: 1,
+                    column: 1,
+                    message: "Skipped binary file".into(),
+                    redacted_value: "[REDACTED]".into(),
+                    value_hash: Some("sha256-hmac:noncandidate".into()),
+                    confidence: 1.0,
+                    context_before: vec![],
+                    context_after: vec![],
+                },
+                Finding {
+                    rule_id: "secret.generic_api_key".into(),
+                    severity: "high".into(),
+                    kind: "secret".into(),
+                    file: "demo.env".into(),
+                    line: 1,
+                    column: 1,
+                    message: "Possible API key detected".into(),
+                    redacted_value: "[REDACTED]".into(),
+                    value_hash: None,
+                    confidence: 0.9,
+                    context_before: vec![],
+                    context_after: vec![],
+                },
+            ],
+            summary: shk_core::finding::ScanSummary {
+                total: 2,
+                by_severity: std::collections::BTreeMap::new(),
+            },
+            exit_threshold: "high".into(),
+            policy_path: None,
+            suppressed: 0,
+            deduplicated: 0,
+            color_mode: "never".into(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.json");
+        std::fs::write(&path, serde_json::to_string(&report).unwrap()).unwrap();
+
+        let err = suggest(SuggestArgs {
+            from: path,
+            value_hash: true,
+            reason: None,
+            expires: None,
+        })
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            err.contains("rerun `shk scan --json --with-value-hash`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn skips_policy_and_ignore_findings() {
+        let findings = vec![
+            Finding {
+                rule_id: "policy.allowlist_expired".into(),
+                severity: "low".into(),
+                kind: "ignore".into(),
+                file: "shk.toml".into(),
+                line: 1,
+                column: 1,
+                message: "Expired allowlist entry".into(),
+                redacted_value: "[REDACTED]".into(),
+                value_hash: None,
+                confidence: 1.0,
+                context_before: vec![],
+                context_after: vec![],
+            },
+            Finding {
+                rule_id: "scan.binary_skipped".into(),
+                severity: "info".into(),
+                kind: "ignore".into(),
+                file: "image.png".into(),
+                line: 1,
+                column: 1,
+                message: "Skipped binary file".into(),
+                redacted_value: "[REDACTED]".into(),
+                value_hash: None,
+                confidence: 1.0,
+                context_before: vec![],
+                context_after: vec![],
+            },
+        ];
+
+        let suggestions = suggestions_from_findings(&findings, false, None, None);
+
+        assert!(suggestions.is_empty(), "{suggestions:?}");
     }
 
     #[test]

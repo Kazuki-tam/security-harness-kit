@@ -662,9 +662,26 @@ pub fn scan_changed_since(cwd: &Path, base: &str, opts: ScanOptions) -> Result<S
         paths,
         &opts,
         |repo, rel, prepared, include_context| {
-            scan_one_path(repo, rel, repo, prepared, include_context)
+            scan_changed_worktree_path(repo, rel, prepared, include_context)
         },
     )
+}
+
+fn scan_changed_worktree_path(
+    repo: &Path,
+    rel_path: &Path,
+    prepared: &PreparedScan<'_>,
+    include_context: bool,
+) -> Result<ScanChunk> {
+    let full = repo.join(rel_path);
+    let meta = match fs::symlink_metadata(&full) {
+        Ok(m) => m,
+        Err(_) => return Ok(ScanChunk::empty()),
+    };
+    if meta.file_type().is_symlink() && !prepared.policy.scan.follow_symlinks {
+        return Ok(ScanChunk::empty());
+    }
+    scan_one_path(repo, rel_path, repo, prepared, include_context)
 }
 
 fn scan_git_rel_paths(
