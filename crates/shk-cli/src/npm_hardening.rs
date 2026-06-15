@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+use ignore::WalkBuilder;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -34,6 +36,14 @@ const RENOVATE_FILES: &[&str] = &[
     ".renovaterc",
     ".renovaterc.json",
     ".renovaterc.json5",
+];
+const PACKAGE_WALK_SKIP_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "dist",
+    "build",
+    "coverage",
+    "target",
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -653,9 +663,52 @@ fn toml_line_integer_value(line: &str) -> Option<u64> {
 
 fn find_package_dirs(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    visit_package_dirs(root, root, &mut out);
+    let walk = package_dir_walk(root);
+
+    for entry in walk.build().flatten() {
+        if let Some(package_dir) = package_dir_from_walk_entry(root, &entry) {
+            out.push(package_dir);
+        }
+    }
+
     out.sort();
     out
+}
+
+fn package_dir_walk(root: &Path) -> WalkBuilder {
+    let mut walk = WalkBuilder::new(root);
+    walk.standard_filters(true);
+    walk.hidden(false);
+    walk.require_git(false);
+    walk.follow_links(false);
+    walk.filter_entry(|entry| !is_skipped_package_walk_dir(entry.file_name()));
+    walk
+}
+
+fn package_dir_from_walk_entry(root: &Path, entry: &ignore::DirEntry) -> Option<PathBuf> {
+    if !entry
+        .file_type()
+        .is_some_and(|file_type| file_type.is_dir())
+    {
+        return None;
+    }
+    let path = entry.path();
+    if !path.join(PACKAGE_JSON).is_file() {
+        return None;
+    }
+    Some(relative_package_dir(root, path))
+}
+
+fn relative_package_dir(root: &Path, path: &Path) -> PathBuf {
+    let rel = path
+        .strip_prefix(root)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| path.to_path_buf());
+    if rel.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        rel
+    }
 }
 
 fn detect_package_managers(root: &Path, package_dirs: &[PathBuf]) -> Vec<PackageManager> {
@@ -763,43 +816,9 @@ fn has_lockfile(dir: &Path) -> bool {
         .any(|name| dir.join(name).is_file())
 }
 
-fn visit_package_dirs(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
-    if dir.join(PACKAGE_JSON).is_file() {
-        let rel = dir
-            .strip_prefix(root)
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|_| dir.to_path_buf());
-        out.push(if rel.as_os_str().is_empty() {
-            PathBuf::from(".")
-        } else {
-            rel
-        });
-    }
-
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_dir() {
-            continue;
-        }
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if is_skipped_dir(&name) {
-            continue;
-        }
-        visit_package_dirs(root, &entry.path(), out);
-    }
-}
-
-fn is_skipped_dir(name: &str) -> bool {
-    matches!(
-        name,
-        ".git" | "node_modules" | "dist" | "build" | "coverage" | "target"
-    )
+fn is_skipped_package_walk_dir(name: &OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| PACKAGE_WALK_SKIP_DIRS.contains(&name))
 }
 
 fn dependabot_status(root: &Path) -> DependencyBotStatus {
@@ -1048,6 +1067,33 @@ min-release-age=1
         fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
         fs::write(dir.path().join("node_modules/pkg/package.json"), "{}").unwrap();
         assert!(find_package_dirs(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn detects_root_package_json() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(PACKAGE_JSON), "{}").unwrap();
+        assert_eq!(find_package_dirs(dir.path()), vec![PathBuf::from(".")]);
+    }
+
+    #[test]
+    fn skips_package_json_under_gitignored_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".gitignore"), "cache/\n").unwrap();
+        fs::create_dir_all(dir.path().join("cache/pkg")).unwrap();
+        fs::write(dir.path().join("cache/pkg/package.json"), "{}").unwrap();
+        assert!(find_package_dirs(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn detects_package_json_under_hidden_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".next/server")).unwrap();
+        fs::write(dir.path().join(".next/server/package.json"), "{}").unwrap();
+        assert_eq!(
+            find_package_dirs(dir.path()),
+            vec![PathBuf::from(".next/server")]
+        );
     }
 
     #[test]

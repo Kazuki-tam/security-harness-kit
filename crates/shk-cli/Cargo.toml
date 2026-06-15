@@ -21,9 +21,9 @@ path = "src/main.rs"
 formula = "shk"
 
 [dependencies]
-shk-core = { version = "0.4.2", path = "../shk-core" }
-shk-rules = { version = "0.4.2", path = "../shk-rules" }
-shk-integrations = { version = "0.4.2", path = "../shk-integrations" }
+shk-core = { version = "0.4.3", path = "../shk-core" }
+shk-rules = { version = "0.4.3", path = "../shk-rules" }
+shk-integrations = { version = "0.4.3", path = "../shk-integrations" }
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
@@ -32,6 +32,7 @@ serde_json.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 dialoguer.workspace = true
+ignore.workspace = true
 regex.workspace = true
 toml.workspace = true
 ureq.workspace = true
