@@ -15,6 +15,7 @@ use zeroize::Zeroize;
 
 pub struct ScanOptions {
     pub staged: bool,
+    pub changed_since: Option<String>,
     pub git_history: bool,
     pub git_history_ref: Option<String>,
     pub git_history_since: Option<String>,
@@ -70,14 +71,28 @@ impl ScanResult {
     }
 
     pub fn to_json_report(&self, color_mode: ColorMode) -> ScanJsonReport {
+        self.to_json_report_with_value_hash(color_mode, false)
+    }
+
+    pub fn to_json_report_with_value_hash(
+        &self,
+        color_mode: ColorMode,
+        include_value_hash: bool,
+    ) -> ScanJsonReport {
         let mut by_sev: BTreeMap<String, usize> = BTreeMap::new();
         for f in &self.findings {
             *by_sev.entry(f.severity.clone()).or_insert(0) += 1;
         }
+        let mut findings = self.findings.clone();
+        if !include_value_hash {
+            for finding in &mut findings {
+                finding.value_hash = None;
+            }
+        }
         ScanJsonReport {
             version: 1,
             scanned_paths: self.scanned_paths.clone(),
-            findings: self.findings.clone(),
+            findings,
             summary: ScanSummary {
                 total: self.findings.len(),
                 by_severity: by_sev,
@@ -185,6 +200,7 @@ fn skipped_finding(rule_id: &str, rel: String, message: String) -> Finding {
         column: 1,
         message,
         redacted_value: "[REDACTED]".into(),
+        value_hash: None,
         confidence: 1.0,
         context_before: vec![],
         context_after: vec![],
@@ -630,19 +646,53 @@ pub fn scan_staged(cwd: &Path, opts: ScanOptions) -> Result<ScanResult> {
     if !git::is_inside_git_work_tree(&repo) {
         bail!("shk scan --staged requires a Git repository");
     }
-    let (mut policy, policy_path) = Policy::load_from_dir(&repo)?;
-    apply_scan_flag_overrides(&mut policy, &opts);
     let paths = git::staged_files(&repo)?;
+    scan_git_rel_paths(&repo, paths, &opts, scan_staged_blob)
+}
+
+pub fn scan_changed_since(cwd: &Path, base: &str, opts: ScanOptions) -> Result<ScanResult> {
+    let repo = git::discover_repo_root(cwd).context("not a git repository")?;
+    let repo = fs::canonicalize(&repo).unwrap_or(repo);
+    if !git::is_inside_git_work_tree(&repo) {
+        bail!("shk scan --changed-since requires a Git repository");
+    }
+    let paths = git::changed_files_since(&repo, base)?;
+    scan_git_rel_paths(
+        &repo,
+        paths,
+        &opts,
+        |repo, rel, prepared, include_context| {
+            scan_one_path(repo, rel, repo, prepared, include_context)
+        },
+    )
+}
+
+fn scan_git_rel_paths(
+    repo: &Path,
+    paths: Vec<PathBuf>,
+    opts: &ScanOptions,
+    scan_file: impl Fn(&Path, &Path, &PreparedScan<'_>, bool) -> Result<ScanChunk> + Sync,
+) -> Result<ScanResult> {
+    let (mut policy, policy_path) = Policy::load_from_dir(repo)?;
+    apply_scan_flag_overrides(&mut policy, opts);
+    let filters = PathFilters::from_policy(&policy)?;
     let include_context = opts.include_context || opts.json;
     let mut findings = suppression::expired_allowlist_warnings(&policy.allowlist);
     let prepared = PreparedScan::new(&policy)?;
-    let scanned: Vec<String> = paths
+    let filtered_paths: Vec<PathBuf> = paths
+        .into_iter()
+        .filter(|p| {
+            let rel = p.to_string_lossy().replace('\\', "/");
+            filters.allows(&rel)
+        })
+        .collect();
+    let scanned: Vec<String> = filtered_paths
         .iter()
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .collect();
-    let chunk_results: Vec<Result<ScanChunk>> = paths
+    let chunk_results: Vec<Result<ScanChunk>> = filtered_paths
         .par_iter()
-        .map(|rel| scan_staged_blob(&repo, rel, &prepared, include_context))
+        .map(|rel| scan_file(repo, rel, &prepared, include_context))
         .collect();
     let mut suppressed_total = 0u64;
     let mut deduplicated_total = 0u64;
@@ -778,6 +828,9 @@ fn select_git_history(cwd: &Path, opts: &ScanOptions) -> Result<GitHistorySelect
 pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
     if opts.staged {
         return scan_staged(target, opts);
+    }
+    if let Some(base) = opts.changed_since.clone() {
+        return scan_changed_since(target, &base, opts);
     }
     if opts.git_history {
         return scan_git_history(target, opts);
@@ -1110,6 +1163,7 @@ mod tests {
             &missing,
             ScanOptions {
                 staged: false,
+                changed_since: None,
                 git_history: false,
                 git_history_ref: None,
                 git_history_since: None,
@@ -1131,6 +1185,7 @@ mod tests {
     fn default_scan_options() -> ScanOptions {
         ScanOptions {
             staged: false,
+            changed_since: None,
             git_history: false,
             git_history_ref: None,
             git_history_since: None,

@@ -21,6 +21,7 @@ shk scan . --json                    # JSON report
 shk scan --staged                    # scan git-staged files (pre-commit)
 shk scan --git-history --preview     # inspect history scan scope
 shk scan --git-history --ref HEAD~50..HEAD
+shk allowlist suggest --from report.json # generate safe [[allowlist]] TOML snippets
 shk mask < file.txt                  # mask PII/secrets from stdin
 shk mask file.txt --json             # JSON output with findings + masked content
 shk mask report.docx --output report.redacted.docx
@@ -426,6 +427,8 @@ Suppression and ignore methods agents should know:
 - Markdown-friendly suppression: `<!-- shk-ignore-next-line <rule_id> -->` before the line, or `value <!-- shk-ignore <rule_id> -->` on the same line.
 - Omit `<rule_id>` only when intentionally suppressing all rules on the target line.
 - Prefer `[[allowlist]]` for durable project policy. Use `path` + `rule_id` when possible; use `value_hash` for value-specific suppression. Never put raw secret values in `shk.toml`.
+- Generate entries from scan JSON with `shk allowlist suggest --from report.json`; add `--value-hash` only when the report was produced with `shk scan --json --with-value-hash`.
+- `shk allowlist suggest` never prints raw matched values, but value hashes for low-entropy PII can be dictionary-guessed. Avoid uploading reports with value hashes to third-party systems unless that risk is acceptable.
 - Office document findings use paths such as `report.docx:word/document.xml` in reports and allowlists.
 - Scanner skip notices and policy warnings with kind `ignore` are not file-content findings, so they are not suppressed by inline comments. Use scan settings, `[[allowlist]]`, or `[doctor.ignore]` as appropriate.
 

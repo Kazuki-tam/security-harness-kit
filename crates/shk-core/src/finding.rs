@@ -1,9 +1,10 @@
 use crate::custom_rules::{CompiledCustomRule, CustomMatch};
 use crate::policy::Severity;
-use serde::Serialize;
+use serde::ser::{SerializeSeq, SerializeStruct};
+use serde::{Deserialize, Serialize};
 use shk_rules::{Kind, RuleEngineConfig, redact_line_for_display};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Finding {
     pub rule_id: String,
     pub severity: String,
@@ -13,6 +14,8 @@ pub struct Finding {
     pub column: usize,
     pub message: String,
     pub redacted_value: String,
+    #[serde(skip_serializing, default)]
+    pub value_hash: Option<String>,
     pub confidence: f32,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub context_before: Vec<String>,
@@ -53,6 +56,10 @@ impl Finding {
             column: m.column,
             message: m.message.to_string(),
             redacted_value: "[REDACTED]".into(),
+            value_hash: Some(crate::suppression::compute_value_hmac(
+                m.rule_id,
+                &m.matched_text,
+            )),
             confidence: m.confidence,
             context_before: sanitize_context(ctx_before, rule_cfg, custom_rules),
             context_after: sanitize_context(ctx_after, rule_cfg, custom_rules),
@@ -81,6 +88,10 @@ impl Finding {
             column: m.column,
             message: m.message.clone(),
             redacted_value: "[REDACTED]".into(),
+            value_hash: Some(crate::suppression::compute_value_hmac(
+                &m.rule_id,
+                &m.matched_text,
+            )),
             confidence: m.confidence,
             context_before: sanitize_context(ctx_before, rule_cfg, custom_rules),
             context_after: sanitize_context(ctx_after, rule_cfg, custom_rules),
@@ -135,7 +146,7 @@ fn sanitize_context(
         .collect()
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize)]
 pub struct ScanJsonReport {
     pub version: u32,
     pub scanned_paths: Vec<String>,
@@ -149,7 +160,88 @@ pub struct ScanJsonReport {
     pub color_mode: String,
 }
 
-#[derive(Debug, Serialize)]
+impl Serialize for ScanJsonReport {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut len = 8;
+        if self.policy_path.is_some() {
+            len += 1;
+        }
+        let mut state = serializer.serialize_struct("ScanJsonReport", len)?;
+        state.serialize_field("version", &self.version)?;
+        state.serialize_field("scanned_paths", &self.scanned_paths)?;
+        state.serialize_field("findings", &ReportFindings(&self.findings))?;
+        state.serialize_field("summary", &self.summary)?;
+        state.serialize_field("exit_threshold", &self.exit_threshold)?;
+        if let Some(policy_path) = &self.policy_path {
+            state.serialize_field("policy_path", policy_path)?;
+        }
+        state.serialize_field("suppressed", &self.suppressed)?;
+        state.serialize_field("deduplicated", &self.deduplicated)?;
+        state.serialize_field("color_mode", &self.color_mode)?;
+        state.end()
+    }
+}
+
+struct ReportFindings<'a>(&'a [Finding]);
+
+impl Serialize for ReportFindings<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for finding in self.0 {
+            seq.serialize_element(&ReportFinding(finding))?;
+        }
+        seq.end()
+    }
+}
+
+struct ReportFinding<'a>(&'a Finding);
+
+impl Serialize for ReportFinding<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let finding = self.0;
+        let mut len = 9;
+        if finding.value_hash.is_some() {
+            len += 1;
+        }
+        if !finding.context_before.is_empty() {
+            len += 1;
+        }
+        if !finding.context_after.is_empty() {
+            len += 1;
+        }
+        let mut state = serializer.serialize_struct("Finding", len)?;
+        state.serialize_field("rule_id", &finding.rule_id)?;
+        state.serialize_field("severity", &finding.severity)?;
+        state.serialize_field("kind", &finding.kind)?;
+        state.serialize_field("file", &finding.file)?;
+        state.serialize_field("line", &finding.line)?;
+        state.serialize_field("column", &finding.column)?;
+        state.serialize_field("message", &finding.message)?;
+        state.serialize_field("redacted_value", &finding.redacted_value)?;
+        if let Some(value_hash) = &finding.value_hash {
+            state.serialize_field("value_hash", value_hash)?;
+        }
+        state.serialize_field("confidence", &finding.confidence)?;
+        if !finding.context_before.is_empty() {
+            state.serialize_field("context_before", &finding.context_before)?;
+        }
+        if !finding.context_after.is_empty() {
+            state.serialize_field("context_after", &finding.context_after)?;
+        }
+        state.end()
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ScanSummary {
     pub total: usize,
     pub by_severity: std::collections::BTreeMap<String, usize>,

@@ -1,5 +1,6 @@
 //! Subcommand implementations invoked from `lib` / `main`.
 
+pub mod allowlist;
 pub mod audit;
 pub mod ci;
 pub mod clipboard;

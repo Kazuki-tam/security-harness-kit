@@ -139,6 +139,7 @@ fn scan_clipboard_text(
 ) -> Result<ScanResult> {
     let opts = ScanOptions {
         staged: false,
+        changed_since: None,
         git_history: false,
         git_history_ref: None,
         git_history_since: None,

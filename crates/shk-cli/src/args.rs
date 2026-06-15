@@ -69,6 +69,9 @@ pub enum Commands {
         path: PathBuf,
         #[arg(long)]
         staged: bool,
+        /// Scan files changed on this branch since the merge base with REV, e.g. origin/main.
+        #[arg(long, value_name = "REV", conflicts_with_all = ["staged", "git_history"])]
+        changed_since: Option<String>,
         /// Scan committed Git history reachable from refs.
         #[arg(long, conflicts_with = "staged")]
         git_history: bool,
@@ -86,6 +89,12 @@ pub enum Commands {
         max_commits: Option<usize>,
         #[arg(long)]
         json: bool,
+        /// Emit SARIF 2.1.0 for GitHub code scanning and compatible tools.
+        #[arg(long, conflicts_with = "json")]
+        sarif: bool,
+        /// Include deterministic value hashes in JSON/SARIF output. Review before sharing reports.
+        #[arg(long)]
+        with_value_hash: bool,
         /// Show informational skip findings in human-readable output.
         #[arg(long)]
         verbose: bool,
@@ -178,6 +187,11 @@ pub enum Commands {
     Policy {
         #[command(subcommand)]
         cmd: PolicyCmd,
+    },
+    /// Generate allowlist entries from scan reports
+    Allowlist {
+        #[command(subcommand)]
+        cmd: AllowlistCmd,
     },
     /// Generate CI configuration
     Ci {
@@ -360,6 +374,25 @@ pub enum PolicyCmd {
         strict: bool,
         #[arg(long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AllowlistCmd {
+    /// Print TOML [[allowlist]] suggestions from `shk scan --json` output.
+    Suggest {
+        /// JSON report file produced by `shk scan --json`; use `-` for stdin.
+        #[arg(long = "from", value_name = "FILE")]
+        from: PathBuf,
+        /// Prefer value_hash suggestions when the report contains value_hash metadata.
+        #[arg(long)]
+        value_hash: bool,
+        /// Reason to include in each suggested entry.
+        #[arg(long)]
+        reason: Option<String>,
+        /// Expiration date to include, formatted as YYYY-MM-DD.
+        #[arg(long)]
+        expires: Option<String>,
     },
 }
 

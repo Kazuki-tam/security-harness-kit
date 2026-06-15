@@ -246,6 +246,7 @@ pub fn expired_allowlist_warnings(entries: &[AllowlistEntry]) -> Vec<Finding> {
                 e.path
             ),
             redacted_value: "[REDACTED]".into(),
+            value_hash: None,
             confidence: 1.0,
             context_before: vec![],
             context_after: vec![],

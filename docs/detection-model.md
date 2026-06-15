@@ -148,6 +148,7 @@ The extractor handles common Office rich-text splits by joining text within logi
 
 ```bash
 shk scan . --json
+shk scan . --json --with-value-hash
 ```
 
 Example report:
@@ -183,6 +184,10 @@ Example report:
 ```
 
 JSON scans include redacted surrounding context when context lines are available. Empty context fields are omitted from the serialized report. Repeated findings with the same rule and value in a single scanned file are emitted once and counted in `deduplicated`.
+
+When `--with-value-hash` is passed, each content finding also includes `value_hash`, which is `HMAC-SHA256(raw_value, rule_id)` formatted as `sha256-hmac:<hex>`. It supports value-specific `[[allowlist]]` entries and `shk allowlist suggest --value-hash` without printing raw matched values.
+
+Value hashes are deterministic and keyed by public rule IDs. They are not raw values, but low-entropy values such as common email addresses, names, or phone numbers may be recoverable by dictionary attack. Treat reports containing value hashes as sensitive artifacts, especially when exporting SARIF or CI logs to third-party systems.
 
 ## Masking Model
 

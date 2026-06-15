@@ -254,6 +254,7 @@ fn binary_passthrough_finding(file: &str) -> Finding {
         column: 1,
         message: "Binary or non-UTF-8 input was passed through unchanged and not scanned".into(),
         redacted_value: "[REDACTED]".into(),
+        value_hash: None,
         confidence: 1.0,
         context_before: vec![],
         context_after: vec![],

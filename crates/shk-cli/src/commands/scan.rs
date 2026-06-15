@@ -22,12 +22,15 @@ const HOOK_DENY_REASON_DEFAULT: &str =
 pub struct ScanInvocation {
     pub path: PathBuf,
     pub staged: bool,
+    pub changed_since: Option<String>,
     pub git_history: bool,
     pub preview: bool,
     pub git_history_ref: Option<String>,
     pub since: Option<String>,
     pub max_commits: Option<usize>,
     pub json: bool,
+    pub sarif: bool,
+    pub with_value_hash: bool,
     pub verbose: bool,
     pub fail_on: Option<SeverityArg>,
     pub include_binary: bool,
@@ -42,8 +45,13 @@ pub struct ScanInvocation {
 pub fn run(inv: ScanInvocation) -> Result<()> {
     let cwd = std::env::current_dir().context("current directory for policy resolution")?;
 
-    if inv.hook_mode.is_some() && (inv.staged || inv.git_history) {
-        bail!("`--hook-mode` cannot be combined with `--staged` or `--git-history`");
+    if inv.hook_mode.is_some() && (inv.staged || inv.changed_since.is_some() || inv.git_history) {
+        bail!(
+            "`--hook-mode` cannot be combined with `--staged`, `--changed-since`, or `--git-history`"
+        );
+    }
+    if inv.with_value_hash && !inv.json && !inv.sarif {
+        bail!("`--with-value-hash` requires `--json` or `--sarif`");
     }
 
     if let Some(tool) = inv.hook_mode {
@@ -61,6 +69,7 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
     let fail_on_override = inv.fail_on.map(Severity::from);
     let opts = ScanOptions {
         staged: inv.staged,
+        changed_since: inv.changed_since.clone(),
         git_history: inv.git_history,
         git_history_ref: inv.git_history_ref.clone(),
         git_history_since: inv.since.clone(),
@@ -75,10 +84,15 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
     if inv.staged && shk_core::git::discover_repo_root(&inv.path).is_none() {
         return Err(CliExit::message(2, "shk scan --staged requires a Git repository").into());
     }
+    if inv.changed_since.is_some() && shk_core::git::discover_repo_root(&inv.path).is_none() {
+        return Err(
+            CliExit::message(2, "shk scan --changed-since requires a Git repository").into(),
+        );
+    }
     if inv.git_history && shk_core::git::discover_repo_root(&inv.path).is_none() {
         return Err(CliExit::message(2, "shk scan --git-history requires a Git repository").into());
     }
-    if !inv.staged && !inv.git_history && !inv.path.exists() {
+    if !inv.staged && inv.changed_since.is_none() && !inv.git_history && !inv.path.exists() {
         return Err(CliExit::message(
             2,
             format!("scan target does not exist: {}", inv.path.display()),
@@ -97,10 +111,17 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
     }
 
     let res = scan_path(&inv.path, opts).context("scan failed")?;
-    if inv.json {
+    if inv.sarif {
         println!(
             "{}",
-            serde_json::to_string_pretty(&res.to_json_report(ColorMode::Never))?
+            serde_json::to_string_pretty(&sarif_report(&res, inv.with_value_hash))?
+        );
+    } else if inv.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &res.to_json_report_with_value_hash(ColorMode::Never, inv.with_value_hash)
+            )?
         );
     } else {
         print!(
@@ -125,6 +146,129 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
         return Err(CliExit::silent(1).into());
     }
     Ok(())
+}
+
+fn sarif_report(res: &ScanResult, include_value_hash: bool) -> serde_json::Value {
+    let rules = sarif_rules(res);
+    let results: Vec<serde_json::Value> = res
+        .findings
+        .iter()
+        .map(|finding| sarif_result(finding, include_value_hash))
+        .collect();
+    serde_json::json!({
+        "version": "2.1.0",
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "shk",
+                        "informationUri": "https://github.com/Kazuki-tam/security-harness-kit",
+                        "rules": rules
+                    }
+                },
+                "results": results,
+                "properties": {
+                    "scannedPaths": res.scanned_paths,
+                    "exitThreshold": res.exit_threshold.as_str(),
+                    "suppressed": res.suppressed,
+                    "deduplicated": res.deduplicated
+                }
+            }
+        ]
+    })
+}
+
+fn sarif_rules(res: &ScanResult) -> Vec<serde_json::Value> {
+    let mut by_rule = std::collections::BTreeMap::<String, &shk_core::finding::Finding>::new();
+    for finding in &res.findings {
+        by_rule.entry(finding.rule_id.clone()).or_insert(finding);
+    }
+    by_rule
+        .into_iter()
+        .map(|(rule_id, finding)| {
+            serde_json::json!({
+                "id": rule_id,
+                "name": finding.rule_id,
+                "shortDescription": { "text": finding.message },
+                "properties": {
+                    "kind": finding.kind,
+                    "security-severity": sarif_security_severity(&finding.severity),
+                    "precision": sarif_precision(finding.confidence),
+                    "tags": ["security", finding.kind]
+                }
+            })
+        })
+        .collect()
+}
+
+fn sarif_result(
+    finding: &shk_core::finding::Finding,
+    include_value_hash: bool,
+) -> serde_json::Value {
+    let mut properties = serde_json::json!({
+        "severity": finding.severity,
+        "kind": finding.kind,
+        "confidence": finding.confidence,
+        "redactedValue": finding.redacted_value,
+    });
+    if include_value_hash
+        && let Some(hash) = &finding.value_hash
+        && let Some(map) = properties.as_object_mut()
+    {
+        map.insert("valueHash".into(), serde_json::json!(hash));
+    }
+
+    serde_json::json!({
+        "ruleId": finding.rule_id,
+        "level": sarif_level(&finding.severity),
+        "message": { "text": finding.message },
+        "locations": [
+            {
+                "physicalLocation": {
+                    "artifactLocation": { "uri": finding.file },
+                    "region": {
+                        "startLine": finding.line.max(1),
+                        "startColumn": finding.column.max(1)
+                    }
+                }
+            }
+        ],
+        "partialFingerprints": {
+            "primaryLocationLineHash": format!("{}:{}:{}", finding.rule_id, finding.file, finding.line)
+        },
+        "properties": properties
+    })
+}
+
+fn sarif_level(severity: &str) -> &'static str {
+    match severity {
+        "critical" | "high" => "error",
+        "medium" => "warning",
+        "low" | "info" => "note",
+        _ => "warning",
+    }
+}
+
+fn sarif_security_severity(severity: &str) -> &'static str {
+    match severity {
+        "critical" => "9.0",
+        "high" => "8.0",
+        "medium" => "5.0",
+        "low" => "2.0",
+        "info" => "0.0",
+        _ => "5.0",
+    }
+}
+
+fn sarif_precision(confidence: f32) -> &'static str {
+    if confidence >= 0.85 {
+        "high"
+    } else if confidence >= 0.6 {
+        "medium"
+    } else {
+        "low"
+    }
 }
 
 fn format_git_history_preview(preview: &GitHistoryPreview) -> String {
@@ -409,6 +553,7 @@ fn run_user_prompt_mode(
 fn hook_scan_options(fail_on: Option<SeverityArg>, use_pre_commit_threshold: bool) -> ScanOptions {
     ScanOptions {
         staged: false,
+        changed_since: None,
         git_history: false,
         git_history_ref: None,
         git_history_since: None,
