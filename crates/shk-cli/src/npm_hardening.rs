@@ -678,6 +678,7 @@ fn find_package_dirs(root: &Path) -> Vec<PathBuf> {
 fn package_dir_walk(root: &Path) -> WalkBuilder {
     let mut walk = WalkBuilder::new(root);
     walk.standard_filters(true);
+    walk.hidden(false);
     walk.require_git(false);
     walk.follow_links(false);
     walk.filter_entry(|entry| !is_skipped_package_walk_dir(entry.file_name()));
@@ -1069,6 +1070,13 @@ min-release-age=1
     }
 
     #[test]
+    fn detects_root_package_json() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(PACKAGE_JSON), "{}").unwrap();
+        assert_eq!(find_package_dirs(dir.path()), vec![PathBuf::from(".")]);
+    }
+
+    #[test]
     fn skips_package_json_under_gitignored_dirs() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join(".gitignore"), "cache/\n").unwrap();
@@ -1078,11 +1086,14 @@ min-release-age=1
     }
 
     #[test]
-    fn skips_package_json_under_hidden_dirs() {
+    fn detects_package_json_under_hidden_dirs() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".next/server")).unwrap();
         fs::write(dir.path().join(".next/server/package.json"), "{}").unwrap();
-        assert!(find_package_dirs(dir.path()).is_empty());
+        assert_eq!(
+            find_package_dirs(dir.path()),
+            vec![PathBuf::from(".next/server")]
+        );
     }
 
     #[test]
