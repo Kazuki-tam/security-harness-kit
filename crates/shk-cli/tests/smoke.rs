@@ -259,6 +259,10 @@ fn scan_changed_since_does_not_follow_symlinks_by_default() {
         v["findings"].as_array().unwrap().is_empty(),
         "symlink target should not be scanned by default: {v}"
     );
+    assert!(
+        v["scanned_paths"].as_array().unwrap().is_empty(),
+        "symlink should not be reported as scanned when follow_symlinks=false: {v}"
+    );
 }
 
 #[test]

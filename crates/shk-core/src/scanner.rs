@@ -285,6 +285,7 @@ struct ScanChunk {
     findings: Vec<Finding>,
     suppressed: u64,
     deduplicated: u64,
+    scanned: bool,
 }
 
 impl ScanChunk {
@@ -293,6 +294,7 @@ impl ScanChunk {
             findings: vec![],
             suppressed: 0,
             deduplicated: 0,
+            scanned: false,
         }
     }
 
@@ -301,6 +303,7 @@ impl ScanChunk {
             findings,
             suppressed: 0,
             deduplicated: 0,
+            scanned: true,
         }
     }
 
@@ -308,6 +311,7 @@ impl ScanChunk {
         self.findings.append(&mut other.findings);
         self.suppressed += other.suppressed;
         self.deduplicated += other.deduplicated;
+        self.scanned |= other.scanned;
     }
 }
 
@@ -402,6 +406,7 @@ fn scan_text_prepared(
         findings,
         suppressed,
         deduplicated,
+        scanned: true,
     })
 }
 
@@ -703,18 +708,18 @@ fn scan_git_rel_paths(
             filters.allows(&rel)
         })
         .collect();
-    let scanned: Vec<String> = filtered_paths
-        .iter()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .collect();
     let chunk_results: Vec<Result<ScanChunk>> = filtered_paths
         .par_iter()
         .map(|rel| scan_file(repo, rel, &prepared, include_context))
         .collect();
+    let mut scanned = Vec::new();
     let mut suppressed_total = 0u64;
     let mut deduplicated_total = 0u64;
-    for chunk in chunk_results {
+    for (rel, chunk) in filtered_paths.iter().zip(chunk_results) {
         let chunk = chunk?;
+        if chunk.scanned {
+            scanned.push(rel.to_string_lossy().replace('\\', "/"));
+        }
         findings.extend(chunk.findings);
         suppressed_total += chunk.suppressed;
         deduplicated_total += chunk.deduplicated;
