@@ -156,7 +156,7 @@ pub fn status(root: &Path) -> NpmHardeningStatus {
     let package_dirs = find_package_dirs(root);
     let root_project = is_root_package_project(root, &package_dirs);
     let package_managers = detect_package_managers(root, &package_dirs);
-    let npmrc_path = root.join(NPMRC_FILE);
+    let npmrc_path = resolve_npmrc_path(root, &package_dirs);
     let pnpm_workspace_path = resolve_pnpm_workspace_path(root, &package_dirs);
     let yarnrc_path = root.join(YARNRC_FILE);
     let bunfig_path = root.join(BUNFIG_FILE);
@@ -787,6 +787,39 @@ fn resolve_pnpm_workspace_path(root: &Path, package_dirs: &[PathBuf]) -> PathBuf
         .unwrap_or(root_workspace)
 }
 
+fn resolve_npmrc_path(root: &Path, package_dirs: &[PathBuf]) -> PathBuf {
+    let root_npmrc = root.join(NPMRC_FILE);
+    if is_root_package_project(root, package_dirs) || root_npmrc.is_file() {
+        // Preserve an existing root-level npm config instead of moving user-owned settings.
+        return root_npmrc;
+    }
+
+    if let Some(existing_npmrc) = package_dirs
+        .iter()
+        .map(|package_dir| package_dir_to_abs(root, package_dir))
+        .map(|dir| dir.join(NPMRC_FILE))
+        .find(|path| path.is_file())
+    {
+        return existing_npmrc;
+    }
+
+    package_dirs
+        .iter()
+        .find(|package_dir| package_dir_uses_npmrc(root, package_dir))
+        .or_else(|| package_dirs.first())
+        .map(|dir| package_dir_to_abs(root, dir).join(NPMRC_FILE))
+        .unwrap_or(root_npmrc)
+}
+
+fn package_dir_uses_npmrc(root: &Path, package_dir: &Path) -> bool {
+    matches!(
+        package_manager_from_package_json(
+            &package_dir_to_abs(root, package_dir).join(PACKAGE_JSON)
+        ),
+        Some(PackageManager::Npm | PackageManager::Pnpm)
+    )
+}
+
 fn package_dir_to_abs(root: &Path, package_dir: &Path) -> PathBuf {
     if package_dir == Path::new(".") {
         root.to_path_buf()
@@ -1194,6 +1227,9 @@ updates:
 
         apply(dir.path()).unwrap();
 
+        assert!(!dir.path().join(NPMRC_FILE).exists());
+        let npmrc = fs::read_to_string(app.join(NPMRC_FILE)).unwrap();
+        assert!(npmrc.contains("ignore-scripts=true"), "{npmrc}");
         let root_workspace = dir.path().join(PNPM_WORKSPACE_FILE);
         assert!(!root_workspace.exists());
         let pnpm_workspace = fs::read_to_string(app.join(PNPM_WORKSPACE_FILE)).unwrap();
@@ -1201,6 +1237,92 @@ updates:
             pnpm_workspace.contains("minimumReleaseAge: 10080"),
             "{pnpm_workspace}"
         );
+    }
+
+    #[test]
+    fn resolves_npmrc_to_nested_package_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("apps/web");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join(PACKAGE_JSON),
+            r#"{"name":"web","packageManager":"pnpm@11.0.0"}"#,
+        )
+        .unwrap();
+
+        let status = status(dir.path());
+
+        assert_eq!(status.npmrc_path, app.join(NPMRC_FILE));
+    }
+
+    #[test]
+    fn resolves_new_npmrc_to_nested_npmrc_package_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let yarn_app = dir.path().join("apps/a-yarn");
+        let pnpm_app = dir.path().join("apps/z-pnpm");
+        fs::create_dir_all(&yarn_app).unwrap();
+        fs::create_dir_all(&pnpm_app).unwrap();
+        fs::write(
+            yarn_app.join(PACKAGE_JSON),
+            r#"{"name":"a-yarn","packageManager":"yarn@4.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            pnpm_app.join(PACKAGE_JSON),
+            r#"{"name":"z-pnpm","packageManager":"pnpm@11.0.0"}"#,
+        )
+        .unwrap();
+
+        let status = status(dir.path());
+
+        assert_eq!(status.npmrc_path, pnpm_app.join(NPMRC_FILE));
+    }
+
+    #[test]
+    fn preserves_existing_root_npmrc_for_nested_package_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("apps/web");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join(PACKAGE_JSON),
+            r#"{"name":"web","packageManager":"pnpm@11.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join(NPMRC_FILE), "ignore-scripts=false\n").unwrap();
+
+        let status = status(dir.path());
+
+        assert_eq!(status.npmrc_path, dir.path().join(NPMRC_FILE));
+    }
+
+    #[test]
+    fn updates_existing_nested_npmrc_without_root_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("apps/web");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join(PACKAGE_JSON),
+            r#"{"name":"web","packageManager":"npm@10.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            app.join(NPMRC_FILE),
+            "registry=https://registry.npmjs.org/\nignore-scripts=false\nmin-release-age=1\n",
+        )
+        .unwrap();
+
+        apply(dir.path()).unwrap();
+
+        assert!(!dir.path().join(NPMRC_FILE).exists());
+        let npmrc = fs::read_to_string(app.join(NPMRC_FILE)).unwrap();
+        assert!(
+            npmrc.contains("registry=https://registry.npmjs.org/"),
+            "{npmrc}"
+        );
+        assert!(npmrc.contains("ignore-scripts=true\n"), "{npmrc}");
+        assert!(npmrc.contains("min-release-age=7\n"), "{npmrc}");
+        assert_eq!(npmrc.matches("ignore-scripts=").count(), 1, "{npmrc}");
+        assert_eq!(npmrc.matches("min-release-age=").count(), 1, "{npmrc}");
     }
 
     #[test]
