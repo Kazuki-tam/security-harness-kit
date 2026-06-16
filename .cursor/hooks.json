@@ -1,5 +1,19 @@
 {
   "hooks": {
+    "afterMCPExecution": [
+      {
+        "_shk_managed": true,
+        "command": "shk scan --hook-mode cursor --log-blocked --post",
+        "timeout": 30
+      }
+    ],
+    "afterShellExecution": [
+      {
+        "_shk_managed": true,
+        "command": "shk scan --hook-mode cursor --log-blocked --post",
+        "timeout": 30
+      }
+    ],
     "beforeMCPExecution": [
       {
         "_shk_managed": true,

@@ -1,0 +1,46 @@
+{
+  "hooks": {
+    "post_mcp_tool_use": [
+      {
+        "command": "shk scan --hook-mode windsurf --log-blocked --post",
+        "show_output": true
+      }
+    ],
+    "post_run_command": [
+      {
+        "command": "shk scan --hook-mode windsurf --log-blocked --post",
+        "show_output": true
+      }
+    ],
+    "pre_mcp_tool_use": [
+      {
+        "command": "shk scan --hook-mode windsurf --log-blocked",
+        "show_output": true
+      }
+    ],
+    "pre_read_code": [
+      {
+        "command": "shk scan --hook-mode windsurf --log-blocked",
+        "show_output": true
+      }
+    ],
+    "pre_run_command": [
+      {
+        "command": "shk scan --hook-mode windsurf --log-blocked",
+        "show_output": true
+      }
+    ],
+    "pre_user_prompt": [
+      {
+        "command": "shk scan --hook-mode windsurf --log-blocked --fail-on medium",
+        "show_output": true
+      }
+    ],
+    "pre_write_code": [
+      {
+        "command": "shk scan --hook-mode windsurf --log-blocked",
+        "show_output": true
+      }
+    ]
+  }
+}
