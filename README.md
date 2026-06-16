@@ -28,7 +28,7 @@ With `shk`, you can:
 - Mask sensitive content from stdin, text files, and Office documents (`.docx`, `.xlsx`, `.pptx`).
 - Encrypt `.env` files, store private keys in the OS credential store, and run commands with decrypted values injected only at runtime.
 - Install Git pre-commit hooks.
-- Install managed hooks for Claude Code, Cursor, Codex, GitHub Copilot, Google Antigravity, and Windsurf.
+- Install managed hooks for Claude Code, Cursor, Codex, GitHub Copilot, Antigravity, and Windsurf.
 - Preview metadata-only audit logs to understand blocked hook activity without storing detected values.
 - Generate a GitHub Actions workflow that runs `shk scan` on every pull request.
 - Diagnose ignore file and `.env` safety coverage.
