@@ -1,0 +1,17 @@
+{
+  "shk-security": {
+    "PreToolUse": [
+      {
+        "_shk_managed": true,
+        "hooks": [
+          {
+            "command": "shk scan --hook-mode antigravity --log-blocked",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "run_command|view_file|write_to_file|replace_file_content|multi_replace_file_content|read_url_content|search_web"
+      }
+    ]
+  }
+}

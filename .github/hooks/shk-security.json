@@ -1,0 +1,45 @@
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "command": "shk scan --hook-mode copilot --log-blocked",
+        "cwd": ".",
+        "timeoutSec": 30,
+        "type": "command"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "command": "shk scan --hook-mode copilot --log-blocked --fail-on medium",
+        "cwd": ".",
+        "timeoutSec": 30,
+        "type": "command"
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "shk scan --hook-mode copilot --log-blocked --post",
+        "cwd": ".",
+        "timeoutSec": 30,
+        "type": "command"
+      }
+    ],
+    "postToolUseFailure": [
+      {
+        "command": "shk scan --hook-mode copilot --log-blocked --post",
+        "cwd": ".",
+        "timeoutSec": 30,
+        "type": "command"
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": "shk scan --hook-mode copilot --log-blocked",
+        "cwd": ".",
+        "timeoutSec": 30,
+        "type": "command"
+      }
+    ]
+  },
+  "version": 1
+}

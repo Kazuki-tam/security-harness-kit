@@ -3798,6 +3798,51 @@ fn init_yes_applies_package_manager_specific_age_gates() {
 }
 
 #[test]
+fn init_yes_places_npmrc_in_nested_package_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("apps/shk-desktop");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        app.join("package.json"),
+        r#"{"name":"shk-desktop","packageManager":"pnpm@11.1.3"}"#,
+    )
+    .unwrap();
+    std::fs::write(app.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+    std::fs::write(
+        app.join(".npmrc"),
+        "registry=https://registry.npmjs.org/\nignore-scripts=false\n",
+    )
+    .unwrap();
+
+    let out = Command::new(shk_bin())
+        .args([
+            "init",
+            "--yes",
+            "--no-git-hook",
+            "--no-ai-hooks",
+            "--no-skills",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("init --yes nested pnpm");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(!dir.path().join(".npmrc").exists());
+    let npmrc = std::fs::read_to_string(app.join(".npmrc")).unwrap();
+    assert!(
+        npmrc.contains("registry=https://registry.npmjs.org/"),
+        "{npmrc}"
+    );
+    assert!(npmrc.contains("ignore-scripts=true\n"), "{npmrc}");
+    assert!(!npmrc.contains("min-release-age=7"), "{npmrc}");
+}
+
+#[test]
 fn mask_output_requires_project_policy() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input.txt");
