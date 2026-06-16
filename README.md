@@ -154,10 +154,14 @@ shk init --yes --no-npm-hardening
 
 shk scan .
 shk scan . --json
+shk scan . --json --with-value-hash
+shk scan . --sarif
 shk scan --staged
+shk scan . --changed-since origin/main
 shk scan --git-history
 shk scan --git-history --preview
 shk scan --git-history --ref HEAD~50..HEAD
+shk allowlist suggest --from report-with-hashes.json --value-hash
 
 shk mask < prompt.txt
 shk mask --json < prompt.txt
@@ -197,7 +201,7 @@ shk hooks install-ai --tool windsurf
 shk ci init github
 shk ci init github --dry-run
 shk ci init github --mode audit
-shk ci init github --shk-version v0.4.3
+shk ci init github --shk-version v0.4.4
 
 shk skills install
 shk skills install --tool claude-code --global
@@ -239,8 +243,10 @@ See [Configuration](docs/configuration.md) for the full `shk.toml` reference, cu
 - Document scanning extracts text from Office documents and text-layer PDFs. Image-only PDFs require OCR outside `shk`; when no text can be extracted, scan reports an informational skip finding.
 - Office document masking writes a new `.docx`, `.xlsx`, or `.pptx` file and requires `--output`.
 - `shk scan --git-history` scans committed blobs reachable from Git refs. Use `--preview` to inspect candidate counts before a broad history scan, and `--ref`, `--since`, or `--max-commits` to narrow the scope.
+- `shk scan --changed-since <rev>` scans files changed on the current branch relative to a merge base with `<rev>`, which is useful for PR CI.
 - Built-in detection is pattern-based and includes hand-tuned `shk` rules plus generated gitleaks-derived `secret.gitleaks.*` rules; use it as an AI/local workflow guardrail, not as a complete replacement for dedicated secret scanning platforms.
-- JSON reports use `redacted_value: "[REDACTED]"`.
+- JSON reports use `redacted_value: "[REDACTED]"`; `value_hash` is omitted unless `--with-value-hash` is passed.
+- Value hashes are deterministic fingerprints keyed by public rule IDs. Low-entropy values can be recoverable by dictionary attack, so treat reports containing value hashes as sensitive artifacts.
 - Hook audit logs contain metadata such as counts, tool name, hook phase, rule IDs, action categories, and display path; they do not store raw matched values, prompt bodies, or command text.
 - Use `shk audit` to summarize `.shk/audit.log`; add `--no-paths` when path labels should not be printed.
 - Allowlist `value_hash` entries are deterministic fingerprints for suppression, not cryptographic secret storage.

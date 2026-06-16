@@ -20,8 +20,8 @@ mod workflow_hardening;
 
 use anyhow::{Context, Result};
 use args::{
-    CiCmd, CiInitProvider, Cli, ClipboardCmd, Commands, DoctorCmd, DotenvxCmd, EnvCmd, EnvKeyCmd,
-    HooksCmd, PolicyCmd, SecretsCmd, SkillToolArg, SkillsCmd,
+    AllowlistCmd, CiCmd, CiInitProvider, Cli, ClipboardCmd, Commands, DoctorCmd, DotenvxCmd,
+    EnvCmd, EnvKeyCmd, HooksCmd, PolicyCmd, SecretsCmd, SkillToolArg, SkillsCmd,
 };
 use clap::Parser;
 use shk_core::policy::ColorMode;
@@ -93,12 +93,15 @@ pub fn run() -> Result<()> {
         Commands::Scan {
             path,
             staged,
+            changed_since,
             git_history,
             preview,
             git_history_ref,
             since,
             max_commits,
             json,
+            sarif,
+            with_value_hash,
             verbose,
             fail_on,
             include_binary,
@@ -110,12 +113,15 @@ pub fn run() -> Result<()> {
         } => commands::scan::run(commands::scan::ScanInvocation {
             path,
             staged,
+            changed_since,
             git_history,
             preview,
             git_history_ref,
             since,
             max_commits,
             json,
+            sarif,
+            with_value_hash,
             verbose,
             fail_on,
             include_binary,
@@ -241,6 +247,19 @@ pub fn run() -> Result<()> {
         },
         Commands::Policy { cmd } => match cmd {
             PolicyCmd::Init { strict, force } => policy_cmd::init(&cwd, strict, force)?,
+        },
+        Commands::Allowlist { cmd } => match cmd {
+            AllowlistCmd::Suggest {
+                from,
+                value_hash,
+                reason,
+                expires,
+            } => commands::allowlist::suggest(commands::allowlist::SuggestArgs {
+                from,
+                value_hash,
+                reason,
+                expires,
+            })?,
         },
         Commands::Ci { cmd } => match cmd {
             CiCmd::Init { provider } => match provider {

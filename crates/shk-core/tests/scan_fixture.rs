@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 fn default_scan_options() -> ScanOptions {
     ScanOptions {
         staged: false,
+        changed_since: None,
         git_history: false,
         git_history_ref: None,
         git_history_since: None,

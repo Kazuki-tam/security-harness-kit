@@ -98,6 +98,220 @@ fn scan_basic_fixture() {
         "expected openai rule hit: {}",
         String::from_utf8_lossy(&out.stdout)
     );
+    assert!(
+        findings.iter().all(|f| f.get("value_hash").is_none()),
+        "value_hash should be opt-in: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn scan_sarif_outputs_code_scanning_shape() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("fixtures/basic");
+    let out = Command::new(shk_bin())
+        .args([
+            "scan",
+            &root.display().to_string(),
+            "--sarif",
+            "--fail-on",
+            "critical",
+        ])
+        .output()
+        .expect("run shk sarif");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("sarif json");
+    assert_eq!(v["version"], "2.1.0");
+    let results = v["runs"][0]["results"].as_array().expect("sarif results");
+    assert!(
+        results
+            .iter()
+            .any(|r| r["ruleId"] == "secret.openai_api_key"),
+        "expected openai rule hit: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        results
+            .iter()
+            .all(|r| r["properties"].get("valueHash").is_none()),
+        "valueHash should be opt-in: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn scan_with_value_hash_requires_machine_output() {
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--with-value-hash"])
+        .output()
+        .expect("run scan with invalid value hash mode");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`--with-value-hash` requires `--json` or `--sarif`"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn scan_changed_since_limits_scan_to_changed_files() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    init_git_repo(tmp.path());
+    std::fs::write(tmp.path().join("old.txt"), synthetic_openai_key('a')).expect("write old");
+    git_commit_all(tmp.path(), "initial");
+
+    std::fs::write(tmp.path().join("new.txt"), synthetic_openai_key('b')).expect("write new");
+    git_commit_all(tmp.path(), "add new");
+
+    let out = Command::new(shk_bin())
+        .args([
+            "scan",
+            ".",
+            "--changed-since",
+            "HEAD~1",
+            "--json",
+            "--fail-on",
+            "critical",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .expect("run changed-since scan");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let scanned = v["scanned_paths"].as_array().expect("scanned paths");
+    assert_eq!(scanned, &vec![serde_json::json!("new.txt")]);
+}
+
+#[test]
+fn scan_changed_since_allows_missing_path_as_repo_hint() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    init_git_repo(tmp.path());
+    std::fs::write(tmp.path().join("README.md"), "clean\n").expect("write readme");
+    git_commit_all(tmp.path(), "initial");
+
+    let out = Command::new(shk_bin())
+        .args([
+            "scan",
+            "does-not-exist",
+            "--changed-since",
+            "HEAD",
+            "--json",
+            "--fail-on",
+            "critical",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .expect("run changed-since from missing path");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert!(v["scanned_paths"].as_array().unwrap().is_empty(), "{v}");
+}
+
+#[cfg(unix)]
+#[test]
+fn scan_changed_since_does_not_follow_symlinks_by_default() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    init_git_repo(tmp.path());
+    std::fs::write(tmp.path().join("README.md"), "clean\n").expect("write readme");
+    git_commit_all(tmp.path(), "initial");
+
+    let outside = tmp.path().with_extension("outside-secret");
+    std::fs::write(&outside, synthetic_openai_key('d')).expect("write outside secret");
+    std::os::unix::fs::symlink(&outside, tmp.path().join("linked.txt")).expect("symlink");
+    git_commit_all(tmp.path(), "add symlink");
+
+    let out = Command::new(shk_bin())
+        .args([
+            "scan",
+            ".",
+            "--changed-since",
+            "HEAD~1",
+            "--json",
+            "--fail-on",
+            "high",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .expect("run changed-since scan");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert!(
+        v["findings"].as_array().unwrap().is_empty(),
+        "symlink target should not be scanned by default: {v}"
+    );
+    assert!(
+        v["scanned_paths"].as_array().unwrap().is_empty(),
+        "symlink should not be reported as scanned when follow_symlinks=false: {v}"
+    );
+}
+
+#[test]
+fn allowlist_suggest_prints_safe_toml_from_scan_json() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let secret = synthetic_openai_key('c');
+    std::fs::write(tmp.path().join("demo.env"), format!("TOKEN={secret}\n")).expect("write demo");
+    let report = tmp.path().join("report.json");
+    let scan = Command::new(shk_bin())
+        .args([
+            "scan",
+            ".",
+            "--json",
+            "--with-value-hash",
+            "--fail-on",
+            "critical",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .expect("run scan json");
+    assert!(
+        scan.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&scan.stderr)
+    );
+    std::fs::write(&report, &scan.stdout).expect("write report");
+
+    let out = Command::new(shk_bin())
+        .args([
+            "allowlist",
+            "suggest",
+            "--from",
+            &report.display().to_string(),
+            "--value-hash",
+            "--reason",
+            "Intentional fixture",
+        ])
+        .output()
+        .expect("run allowlist suggest");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("[[allowlist]]"), "{stdout}");
+    assert!(stdout.contains("path = \"demo.env\""), "{stdout}");
+    assert!(stdout.contains("value_hash = \"sha256-hmac:"), "{stdout}");
+    assert!(!stdout.contains(&secret), "{stdout}");
 }
 
 #[test]
@@ -230,6 +444,14 @@ fn mask_partial_redaction_json_preserves_edges() {
     let masked = v["masked_content"].as_str().unwrap_or_default();
     assert!(masked.contains("sk-p[REDACTED]6789"), "{masked}");
     assert!(!masked.contains(secret), "{masked}");
+    assert!(
+        v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f.get("value_hash").is_none()),
+        "mask JSON should not expose value hashes: {v}"
+    );
 }
 
 #[test]
@@ -1198,6 +1420,47 @@ fn scan_staged_reads_index_not_worktree() {
             .any(|f| f["rule_id"] == "secret.openai_api_key"),
         "{v}"
     );
+}
+
+#[test]
+fn scan_staged_respects_policy_exclude() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    std::fs::write(
+        dir.path().join("shk.toml"),
+        "[scan]\nexclude = [\"vendor/**\"]\n",
+    )
+    .unwrap();
+    std::fs::create_dir(dir.path().join("vendor")).unwrap();
+    let secret = synthetic_openai_key('d');
+    std::fs::write(dir.path().join("vendor/secret.txt"), format!("{secret}\n")).unwrap();
+    let add = Command::new("git")
+        .args(["add", "vendor/secret.txt"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git add");
+    assert!(
+        add.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&add.stdout),
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let out = Command::new(shk_bin())
+        .args(["scan", "--staged", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("scan staged");
+
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v["scanned_paths"].as_array().unwrap().is_empty(), "{v}");
+    assert!(v["findings"].as_array().unwrap().is_empty(), "{v}");
 }
 
 #[test]

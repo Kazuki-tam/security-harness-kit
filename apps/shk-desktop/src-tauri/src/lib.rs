@@ -48,6 +48,7 @@ async fn scan_path(path: String) -> Result<ScanJsonReport, AppError> {
     run_blocking(move || {
         let opts = ScanOptions {
             staged: false,
+            changed_since: None,
             git_history: false,
             git_history_ref: None,
             git_history_since: None,

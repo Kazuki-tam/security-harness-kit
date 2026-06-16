@@ -119,6 +119,32 @@ pub fn staged_file_bytes(repo_root: &Path, rel_path: &Path) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
+/// Changed file paths relative to repo root, normalized by Git.
+///
+/// Uses Git's triple-dot range so CI can scan files changed on the current
+/// branch relative to a merge base, e.g. `origin/main...HEAD`.
+pub fn changed_files_since(repo_root: &Path, base: &str) -> Result<Vec<PathBuf>> {
+    if base.starts_with('-') {
+        bail!("--changed-since must be a Git revision, not an option");
+    }
+    let range = format!("{base}...HEAD");
+    let out = Command::new("git")
+        .args(["diff", "--name-only", "--diff-filter=ACMR", "-z", &range])
+        .current_dir(repo_root)
+        .output()
+        .with_context(|| format!("failed to run git diff {range}"))?;
+    if !out.status.success() {
+        bail!("git diff failed for range {range}");
+    }
+    Ok(out
+        .stdout
+        .split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .map(PathBuf::from)
+        .collect())
+}
+
 pub fn history_blobs(repo_root: &Path, opts: &GitHistoryOptions) -> Result<Vec<GitHistoryBlob>> {
     Ok(history_inventory(repo_root, opts)?.blobs)
 }

@@ -94,11 +94,14 @@ Scan a repository or path for secrets, PII, and configured custom rules. Text is
 shk scan
 shk scan ./src
 shk scan . --json
+shk scan . --json --with-value-hash
+shk scan . --sarif
 shk scan . --verbose
 shk scan . --fail-on medium
 shk scan . --include-binary
 shk scan . --follow-symlinks
 shk scan --staged
+shk scan . --changed-since origin/main
 shk scan --git-history
 shk scan --git-history --preview
 shk scan --git-history --ref HEAD~50..HEAD
@@ -112,11 +115,14 @@ Options:
 |--------|----------|
 | `PATH` | Path to scan. Defaults to `.`. |
 | `--json` | Print a JSON report. |
+| `--sarif` | Print SARIF 2.1.0 for GitHub code scanning and compatible tools. Cannot be combined with `--json`. |
+| `--with-value-hash` | Include deterministic value hashes in JSON/SARIF output. Use only when reports are handled as sensitive artifacts. |
 | `--verbose` | Include informational skip findings in human-readable output. |
 | `--fail-on <severity>` | Override the configured failure threshold. Valid values: `info`, `low`, `medium`, `high`, `critical`. |
 | `--include-binary` | Scan binary-looking files instead of reporting `scan.binary_skipped` info findings. |
 | `--follow-symlinks` | Follow symlinks during traversal. |
 | `--staged` | Scan Git-staged files. Intended for pre-commit usage. |
+| `--changed-since <rev>` | Scan files changed on the current branch since the merge base with `<rev>`, using `git diff <rev>...HEAD`. Intended for PR/CI scans. |
 | `--git-history` | Scan committed Git history reachable from refs. Reports paths as `<commit>:<path>`. |
 | `--preview` | With `--git-history`, print candidate commit/path/blob counts and sample paths without scanning blob contents. |
 | `--ref <rev>` | With `--git-history`, scan a Git revision or revision range instead of `--all`, e.g. `main` or `HEAD~50..HEAD`. |
@@ -130,6 +136,8 @@ Traversal notes:
 - `.gitignore` and `.git/info/exclude` rules are honored inside Git repositories. Because `shk doctor` recommends keeping `.env` in `.gitignore`, a gitignored `.env` in a Git repository is not part of a directory scan — pass it explicitly (`shk scan .env`) to scan it anyway.
 
 `--git-history` scans committed blobs from Git history, not the working tree or index. By default it uses `git log --all`, so local branches, tags, and remote-tracking refs are considered. Deleted secrets can still be detected because the older blob is read from the commit where the file existed. Uncommitted changes and unreachable objects are not scanned.
+
+`--changed-since` scans the current working-tree content for files listed by Git in the selected branch diff. Deleted files are skipped, and untracked files are not included. Use a stable base such as `origin/main` in pull request CI.
 
 Use `--preview` before a broad history scan to see the selected scope, candidate commit/path counts, unique blob count, policy-filtered blob count, and up to 10 sample `<commit>:<path>` labels. With `--json`, preview emits the same metadata as machine-readable JSON and exits `0`.
 
@@ -146,6 +154,28 @@ Exit codes:
 | `0` | No findings at or above the active threshold, or command completed successfully. |
 | `1` | Scan findings met or exceeded the active threshold. |
 | `2` | Blocking AI pre-hook triggered, or a Git-specific scan mode was run outside a Git repository. |
+
+## `shk allowlist suggest`
+
+Generate `[[allowlist]]` TOML snippets from a JSON scan report. Suggestions include rule and path metadata, and can include `value_hash` when the report was produced with `--with-value-hash`. Raw matched values are never printed.
+
+```bash
+shk scan . --json --fail-on critical > report.json
+shk allowlist suggest --from report.json
+shk scan . --json --with-value-hash --fail-on critical > report-with-hashes.json
+shk allowlist suggest --from report-with-hashes.json --value-hash --reason "Intentional fixture" --expires 2026-12-31
+```
+
+Options:
+
+| Option | Behavior |
+|--------|----------|
+| `--from <file>` | Read a `shk scan --json` report. Use `-` to read from stdin. |
+| `--value-hash` | Include `value_hash = "sha256-hmac:..."` when available, for value-specific suppression. |
+| `--reason <text>` | Fill the `reason` field in generated entries. |
+| `--expires <YYYY-MM-DD>` | Add an expiration date to generated entries. |
+
+`value_hash` is deterministic and keyed by public rule IDs, so low-entropy values such as common email addresses or phone numbers may be recoverable by dictionary attack. Do not upload reports containing value hashes to third-party systems unless that exposure is acceptable.
 
 ## `shk scan --hook-mode`
 
