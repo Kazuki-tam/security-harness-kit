@@ -866,8 +866,22 @@ fn remove_copilot_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
 /// Top-level key shk owns inside Antigravity's `hooks.json`
 /// (the file maps hook names to event configurations).
 const ANTIGRAVITY_HOOK_NAME: &str = "shk-security";
-/// Tools whose proposed calls carry scannable content or run commands.
-const ANTIGRAVITY_PRE_MATCHER: &str = "run_command|view_file|write_to_file|replace_file_content|multi_replace_file_content|read_url_content|search_web";
+/// Match every Antigravity tool. Most tool payloads carry paths, prompts,
+/// permission targets, or command-like inputs, and future tools should default
+/// to being protected.
+const ANTIGRAVITY_TOOL_MATCHER: &str = ".*";
+
+fn antigravity_command_hook(command: String) -> Value {
+    json!({
+        "_shk_managed": true,
+        "matcher": ANTIGRAVITY_TOOL_MATCHER,
+        "hooks": [{
+            "type": "command",
+            "command": command,
+            "timeout": HOOK_CLI_TIMEOUT_SEC
+        }]
+    })
+}
 
 fn apply_antigravity(
     path: &Path,
@@ -877,6 +891,7 @@ fn apply_antigravity(
     apply_deny: bool,
 ) -> Result<String> {
     let pre = hook_scan_cli_command(AiTool::Antigravity, audit, log_blocked, false);
+    let post = hook_scan_cli_command(AiTool::Antigravity, audit, log_blocked, true);
 
     let mut root = if path.is_file() {
         load_json(path)?
@@ -887,20 +902,14 @@ fn apply_antigravity(
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("Antigravity hooks.json root must be a JSON object"))?;
 
-    // Antigravity PostToolUse payloads carry no tool output (only stepIdx/error),
-    // so only a blocking PreToolUse hook is installed.
+    // Antigravity PostToolUse payloads carry no tool output, but they do carry
+    // runtime errors and support a schema-valid `{}` response for audit-only
+    // post scans.
     root_obj.insert(
         ANTIGRAVITY_HOOK_NAME.to_string(),
         json!({
-            "PreToolUse": [{
-                "_shk_managed": true,
-                "matcher": ANTIGRAVITY_PRE_MATCHER,
-                "hooks": [{
-                    "type": "command",
-                    "command": pre,
-                    "timeout": HOOK_CLI_TIMEOUT_SEC
-                }]
-            }]
+            "PreToolUse": [antigravity_command_hook(pre)],
+            "PostToolUse": [antigravity_command_hook(post)]
         }),
     );
 
@@ -915,11 +924,11 @@ fn apply_antigravity(
 
     Ok(if dry_run {
         format!(
-            "dry-run: would write managed `{ANTIGRAVITY_HOOK_NAME}` PreToolUse hook (audit={audit}, logBlocked={log_blocked})"
+            "dry-run: would write managed `{ANTIGRAVITY_HOOK_NAME}` PreToolUse/PostToolUse hooks (audit={audit}, logBlocked={log_blocked})"
         )
     } else {
         format!(
-            "wrote managed `{ANTIGRAVITY_HOOK_NAME}` PreToolUse hook (audit={audit}, logBlocked={log_blocked})"
+            "wrote managed `{ANTIGRAVITY_HOOK_NAME}` PreToolUse/PostToolUse hooks (audit={audit}, logBlocked={log_blocked})"
         )
     })
 }
@@ -1542,15 +1551,22 @@ mod tests {
             .unwrap();
         assert_eq!(pre.len(), 1, "{pre:?}");
         assert_eq!(pre[0]["_shk_managed"], true);
-        assert_eq!(pre[0]["matcher"], ANTIGRAVITY_PRE_MATCHER);
+        assert_eq!(pre[0]["matcher"], ANTIGRAVITY_TOOL_MATCHER);
         let cmd = pre[0]["hooks"][0]["command"].as_str().unwrap();
         assert!(
             cmd.contains("shk scan --hook-mode antigravity --audit"),
             "{cmd}"
         );
+        let post = root[ANTIGRAVITY_HOOK_NAME]["PostToolUse"]
+            .as_array()
+            .unwrap();
+        assert_eq!(post.len(), 1, "{post:?}");
+        assert_eq!(post[0]["_shk_managed"], true);
+        assert_eq!(post[0]["matcher"], ANTIGRAVITY_TOOL_MATCHER);
+        let post_cmd = post[0]["hooks"][0]["command"].as_str().unwrap();
         assert!(
-            root[ANTIGRAVITY_HOOK_NAME].get("PostToolUse").is_none(),
-            "Antigravity post payloads carry no tool output, so no post hook: {root}"
+            post_cmd.contains("shk scan --hook-mode antigravity --audit --post"),
+            "{post_cmd}"
         );
     }
 

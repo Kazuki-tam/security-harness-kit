@@ -198,13 +198,13 @@ Hook mode notes:
 
 - `--hook-mode` cannot be combined with `--staged`.
 - `--audit` appends metadata-only JSON lines to `.shk/audit.log`, always exits `0`, and requires a project `shk.toml`.
-- `--log-blocked` keeps blocking behavior, appends metadata-only block entries to `.shk/audit.log`, and requires a project `shk.toml`.
+- `--log-blocked` keeps pre-hook blocking behavior, appends metadata-only blocked entries to `.shk/audit.log`, and requires a project `shk.toml`. Combined with `--post`, it writes non-blocking post audit entries.
 - `--post` is non-blocking and always exits `0`. It reports findings in tool output for review.
 - Cursor pre-hook scans use the pre-commit threshold by default.
 - Codex `UserPromptSubmit` payloads are scanned when `hook_event_name` is `UserPromptSubmit`; blocks return `{"decision":"block","reason":...}`.
 - Project-local Codex hooks installed by `shk hooks install-ai --tool codex` scan `$(git rev-parse --show-toplevel)` instead of `.` so subdirectory starts still resolve the repo root.
 - Copilot `preToolUse` and `permissionRequest` denials are returned through stdout JSON with exit `0`, matching Copilot's hook contract. `userPromptSubmitted` output is not processed by Copilot, so prompt scan blocks are advisory warnings.
-- Antigravity `PreToolUse` payloads (`{"toolCall":{"name":...,"args":{...}}}`) are parsed with their PascalCase argument names (`CommandLine`, `TargetFile`, `CodeContent`, `Url`, ...). Blocks return `{"decision":"deny","reason":...}`; allows return `{"decision":"allow"}`. Antigravity post hooks always print `{}` because the post payload carries no tool output.
+- Antigravity `PreToolUse` payloads (`{"toolCall":{"name":...,"args":{...}}}`) are parsed with their PascalCase argument names (`CommandLine`, `TargetFile`, `CodeContent`, `Url`, ...). Blocks return `{"decision":"deny","reason":...}`; allows return `{"decision":"allow"}`. Antigravity post hooks always print `{}` because that is the PostToolUse output schema; post scans can still log runtime error text when present.
 - Windsurf Cascade payloads use `agent_action_name` plus nested `tool_info` (`command_line`, `user_prompt`, `mcp_tool_arguments`, `mcp_result`, `file_path`, and edit strings). Blocks use exit `2` with the message on stderr; stdout is `{}` because Cascade does not consume a decision payload.
 
 ## `shk mask`
@@ -542,7 +542,7 @@ Options:
 |--------|----------|
 | `--dry-run` | Print planned changes without writing config files. |
 | `--audit` | Add `--audit` to installed hook commands. Hooks log metadata and never block. |
-| `--log-blocked` | Add `--log-blocked` to installed hook commands. Hooks still block and append metadata-only block entries to `.shk/audit.log`. Mutually exclusive with `--audit`. |
+| `--log-blocked` | Add `--log-blocked` to installed hook commands. Pre hooks still block and append metadata-only block entries to `.shk/audit.log`; post hooks stay non-blocking and append post audit entries. Mutually exclusive with `--audit`. |
 | `--global` | Write user-level config files under the user's home directory. |
 | `--tool <tool>` | Limit installation to one of `claude-code`, `codex`, `cursor`, `copilot`, `antigravity`, or `windsurf`. |
 | `--fail-closed` | Cursor hooks only. Sets `failClosed` on managed entries. |
@@ -559,7 +559,7 @@ Installed entries:
 | Cursor | `.cursor/hooks.json` | `beforeReadFile`, `beforeShellExecution`, `beforeMCPExecution`, `beforeSubmitPrompt`, plus non-blocking post scans on `afterShellExecution` and `afterMCPExecution`. Prompt hooks use `--fail-on medium`. |
 | Codex | `.codex/config.toml` | `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, and `PostToolUse` blocks; also ensures `features.hooks = true`. Project-local commands scan `$(git rev-parse --show-toplevel)` so Codex can start from a subdirectory. |
 | Copilot | `.github/hooks/shk-security.json` (global: `~/.copilot/hooks/shk-security.json`) | Command hooks for `preToolUse`, `PermissionRequest`, `UserPromptSubmit`, `postToolUse`, and `postToolUseFailure`. Pre-tool and permission denials use Copilot's stdout JSON contract. |
-| Antigravity | `.agents/hooks.json` (global: `~/.gemini/config/hooks.json`) | A managed `shk-security` entry with a blocking `PreToolUse` hook matching `run_command`, file write/edit, `view_file`, `read_url_content`, and `search_web`. No post hook is installed because Antigravity `PostToolUse` payloads carry no tool output. |
+| Antigravity | `.agents/hooks.json` (global: `~/.gemini/config/hooks.json`) | A managed `shk-security` entry with blocking `PreToolUse` and non-blocking `PostToolUse` hooks matching all Antigravity tools (`.*`). This covers commands, file operations, searches, scheduled prompts, subagents, permission requests, and future tool names by default. Post hooks run with `--post` and return `{}`. |
 | Windsurf | `.windsurf/hooks.json` (global: `~/.codeium/windsurf/hooks.json`) | Cascade hook commands for `pre_read_code`, `pre_write_code`, `pre_run_command`, `pre_mcp_tool_use` (blocking), `pre_user_prompt` (`--fail-on medium`), plus non-blocking post scans on `post_run_command` and `post_mcp_tool_use`. Cascade ignores hook stdout, so a block travels via exit code 2 + the stderr message; managed entries are identified by their `--hook-mode windsurf` command. |
 
 Antigravity also has a unified permission engine (`Deny > Ask > Allow`, resources formatted as `action(target)`), but those lists are managed in the Antigravity settings UI and internal per-project config. Use `shk hooks install-ai --tool antigravity --apply-deny` to print recommended Deny entries to paste there; the shk PreToolUse hook provides equivalent runtime blocking regardless.

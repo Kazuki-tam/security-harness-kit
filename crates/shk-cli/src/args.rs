@@ -336,7 +336,7 @@ pub enum HooksCmd {
         audit: bool,
         #[arg(
             long,
-            help = "Append `--log-blocked` to hook commands (blocking with metadata-only `.shk/audit.log` entries).",
+            help = "Append `--log-blocked` to hook commands (blocked pre events plus post audit entries in `.shk/audit.log`).",
             conflicts_with = "audit"
         )]
         log_blocked: bool,

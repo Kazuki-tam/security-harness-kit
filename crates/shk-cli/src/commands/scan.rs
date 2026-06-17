@@ -378,7 +378,11 @@ fn run_hook_mode(
     let res = scan_string(&repo_root, &disp, &body, opts).context("hook scan failed")?;
 
     if audit {
-        hook_audit_log::append_audit_hook(&repo_root, tool, hook_event, &disp, &res)?;
+        if post {
+            append_post_audit_hook(&repo_root, tool, hook_event, &disp, &res);
+        } else {
+            hook_audit_log::append_audit_hook(&repo_root, tool, hook_event, &disp, &res)?;
+        }
         println!(
             "{}",
             hook_output::allow_stdout_for_event(
@@ -391,6 +395,9 @@ fn run_hook_mode(
     }
 
     if post {
+        if log_blocked {
+            append_post_audit_hook(&repo_root, tool, hook_event, &disp, &res);
+        }
         emit_post_hook_result(tool, hook_event, &res);
         return Ok(());
     }
@@ -414,6 +421,20 @@ fn run_hook_mode(
         hook_output::allow_stdout_for_event(tool, hook_event, None)
     );
     Ok(())
+}
+
+fn append_post_audit_hook(
+    repo_root: &Path,
+    tool: AiTool,
+    hook_event: hook_output::HookEvent,
+    display_path: &str,
+    res: &ScanResult,
+) {
+    if let Err(err) =
+        hook_audit_log::append_audit_hook(repo_root, tool, hook_event, display_path, res)
+    {
+        eprintln!("shk post audit: unable to write .shk/audit.log: {err:#}");
+    }
 }
 
 fn require_hook_log_policy(repo_root: &Path, audit: bool, log_blocked: bool) -> Result<()> {
