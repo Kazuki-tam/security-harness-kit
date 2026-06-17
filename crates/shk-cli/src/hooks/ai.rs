@@ -871,6 +871,18 @@ const ANTIGRAVITY_HOOK_NAME: &str = "shk-security";
 /// to being protected.
 const ANTIGRAVITY_TOOL_MATCHER: &str = ".*";
 
+fn antigravity_command_hook(command: String) -> Value {
+    json!({
+        "_shk_managed": true,
+        "matcher": ANTIGRAVITY_TOOL_MATCHER,
+        "hooks": [{
+            "type": "command",
+            "command": command,
+            "timeout": HOOK_CLI_TIMEOUT_SEC
+        }]
+    })
+}
+
 fn apply_antigravity(
     path: &Path,
     audit: bool,
@@ -896,24 +908,8 @@ fn apply_antigravity(
     root_obj.insert(
         ANTIGRAVITY_HOOK_NAME.to_string(),
         json!({
-            "PreToolUse": [{
-                "_shk_managed": true,
-                "matcher": ANTIGRAVITY_TOOL_MATCHER,
-                "hooks": [{
-                    "type": "command",
-                    "command": pre,
-                    "timeout": HOOK_CLI_TIMEOUT_SEC
-                }]
-            }],
-            "PostToolUse": [{
-                "_shk_managed": true,
-                "matcher": ANTIGRAVITY_TOOL_MATCHER,
-                "hooks": [{
-                    "type": "command",
-                    "command": post,
-                    "timeout": HOOK_CLI_TIMEOUT_SEC
-                }]
-            }]
+            "PreToolUse": [antigravity_command_hook(pre)],
+            "PostToolUse": [antigravity_command_hook(post)]
         }),
     );
 

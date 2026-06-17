@@ -3570,6 +3570,54 @@ fn hook_mode_antigravity_post_log_blocked_writes_audit_and_empty_stdout() {
 }
 
 #[test]
+fn hook_mode_antigravity_post_audit_stays_non_blocking_when_log_write_fails() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::write(dir.path().join(".shk"), "not a directory").unwrap();
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "stepIdx": 5,
+        "error": "tool failed while handling john@example.com",
+        "conversationId": "ec33ebf9-0cba-4100-8142-c61503f6c587"
+    }))
+    .unwrap();
+
+    let out = Command::new(shk_bin())
+        .args([
+            "scan",
+            ".",
+            "--hook-mode",
+            "antigravity",
+            "--audit",
+            "--post",
+        ])
+        .current_dir(dir.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("antigravity post audit hook");
+
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(stdout, serde_json::json!({}));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("shk post audit: unable to write .shk/audit.log"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn init_creates_project_policy() {
     let dir = tempfile::tempdir().unwrap();
     let out = Command::new(shk_bin())
