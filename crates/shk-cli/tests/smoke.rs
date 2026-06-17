@@ -2280,7 +2280,7 @@ fn hook_mode_cursor_blocks_with_exit_2() {
 }
 
 #[test]
-fn hooks_install_ai_antigravity_writes_managed_pre_hook() {
+fn hooks_install_ai_antigravity_writes_managed_pre_and_post_hooks() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
     std::fs::create_dir_all(dir.path().join(".agents")).unwrap();
@@ -2292,7 +2292,13 @@ fn hooks_install_ai_antigravity_writes_managed_pre_hook() {
 
     for _ in 0..2 {
         let out = Command::new(shk_bin())
-            .args(["hooks", "install-ai", "--tool", "antigravity"])
+            .args([
+                "hooks",
+                "install-ai",
+                "--tool",
+                "antigravity",
+                "--log-blocked",
+            ])
             .current_dir(dir.path())
             .output()
             .expect("install-ai antigravity");
@@ -2315,12 +2321,42 @@ fn hooks_install_ai_antigravity_writes_managed_pre_hook() {
     let pre = hooks["shk-security"]["PreToolUse"].as_array().unwrap();
     assert_eq!(pre.len(), 1, "managed hook should not duplicate: {pre:?}");
     assert_eq!(pre[0]["_shk_managed"], true);
+    assert_eq!(pre[0]["matcher"], ".*");
     assert!(
         pre[0]["hooks"][0]["command"]
             .as_str()
             .unwrap_or_default()
             .contains("shk scan --hook-mode antigravity"),
         "{pre:?}"
+    );
+    assert!(
+        pre[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("--log-blocked"),
+        "{pre:?}"
+    );
+    assert!(
+        !pre[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("--post"),
+        "{pre:?}"
+    );
+    let post = hooks["shk-security"]["PostToolUse"].as_array().unwrap();
+    assert_eq!(
+        post.len(),
+        1,
+        "managed post hook should not duplicate: {post:?}"
+    );
+    assert_eq!(post[0]["_shk_managed"], true);
+    assert_eq!(post[0]["matcher"], pre[0]["matcher"]);
+    let post_cmd = post[0]["hooks"][0]["command"].as_str().unwrap_or_default();
+    assert!(
+        post_cmd.contains("shk scan --hook-mode antigravity")
+            && post_cmd.contains("--log-blocked")
+            && post_cmd.contains("--post"),
+        "{post:?}"
     );
 }
 
@@ -3484,6 +3520,53 @@ fn hook_mode_post_warns_but_exits_0() {
     assert!(msg.contains("finding(s) in tool output"), "{msg}");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("finding(s) in tool output"), "{stderr}");
+}
+
+#[test]
+fn hook_mode_antigravity_post_log_blocked_writes_audit_and_empty_stdout() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "stepIdx": 5,
+        "error": "tool failed while handling john@example.com",
+        "conversationId": "ec33ebf9-0cba-4100-8142-c61503f6c587"
+    }))
+    .unwrap();
+
+    let out = Command::new(shk_bin())
+        .args([
+            "scan",
+            ".",
+            "--hook-mode",
+            "antigravity",
+            "--log-blocked",
+            "--post",
+        ])
+        .current_dir(dir.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("antigravity post hook");
+
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(stdout, serde_json::json!({}));
+
+    let log = std::fs::read_to_string(dir.path().join(".shk/audit.log")).unwrap();
+    assert!(log.contains(r#""tool":"antigravity""#), "{log}");
+    assert!(log.contains(r#""hook":"post""#), "{log}");
+    assert!(!log.contains("john@example.com"), "{log}");
 }
 
 #[test]

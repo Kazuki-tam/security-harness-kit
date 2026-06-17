@@ -206,7 +206,7 @@ Office document masking supports `.docx`, `.xlsx`, and `.pptx` with `--output`; 
 
 `shk scan --hook-mode <tool> --audit` writes JSON lines to `.shk/audit.log`. Audit entries contain metadata such as tool name, hook phase, display path, finding count, suppressed count, deduplicated count, and maximum severity. They do not contain raw matched values.
 
-`shk scan --hook-mode <tool> --log-blocked` keeps blocking behavior and writes metadata-only `event = "blocked"` entries for blocked pre-hook and user-prompt events. Finding-threshold block entries include rule IDs, finding kinds, counts, and maximum severity for findings at or above the active threshold. Action guard block entries include only the action category, not the command text, file path, prompt body, or guard reason.
+`shk scan --hook-mode <tool> --log-blocked` keeps pre-hook blocking behavior and writes metadata-only `event = "blocked"` entries for blocked pre-hook and user-prompt events. With `--post`, it stays non-blocking and writes `event = "audit"` entries for post-hook scans. Finding-threshold block entries include rule IDs, finding kinds, counts, and maximum severity for findings at or above the active threshold. Action guard block entries include only the action category, not the command text, file path, prompt body, or guard reason.
 
 Use `shk audit` to preview `.shk/audit.log`:
 

@@ -20,7 +20,17 @@ const PATH_KEYS: &[&str] = &[
     "uri",
     "fileName",
     // Antigravity tool arguments use PascalCase (e.g. view_file / write_to_file).
+    "AbsolutePath",
     "TargetFile",
+    "SearchPath",
+    "DirectoryPath",
+    "SearchDirectory",
+];
+const METADATA_PATH_KEYS: &[&str] = &[
+    "artifactDirectoryPath",
+    "transcriptPath",
+    "workspacePath",
+    "workspacePaths",
 ];
 const MAX_HOOK_TEXT_BYTES: usize = 4096 * 512;
 const PRE_TEXT_KEYS: &[&str] = &[
@@ -63,8 +73,22 @@ const ANTIGRAVITY_PRE_EXTRA_TEXT_KEYS: &[&str] = &[
     "Url",
     "Prompt",
     "Query",
+    "Pattern",
+    "Action",
+    "Target",
+    "Reason",
+    "Recipient",
+    "Description",
+    "Includes",
+    "Excludes",
+    "Extensions",
+    "ImagePaths",
     "Input",
     "Message",
+    "system_prompt",
+    "description",
+    "question",
+    "options",
 ];
 // Antigravity PostToolUse payload carries no tool output: only `error` plus
 // metadata, so only error text is scannable.
@@ -268,7 +292,9 @@ fn scan_path_keys(v: &Value, out: &mut Vec<String>) {
     match v {
         Value::Object(map) => {
             for (k, val) in map {
-                if (PATH_KEYS.iter().any(|pk| pk == k) || k.to_ascii_lowercase().ends_with("path"))
+                if !METADATA_PATH_KEYS.iter().any(|pk| pk == k)
+                    && (PATH_KEYS.iter().any(|pk| pk == k)
+                        || k.to_ascii_lowercase().ends_with("path"))
                     && let Some(s) = val.as_str()
                 {
                     out.push(s.to_string());
@@ -515,6 +541,121 @@ mod tests {
         .unwrap();
 
         assert!(body.contains("embedded-secret-value"), "{body}");
+    }
+
+    #[test]
+    fn antigravity_pre_extracts_search_tool_arguments() {
+        let stdin = serde_json::json!({
+            "toolCall": {
+                "name": "grep_search",
+                "args": {
+                    "SearchPath": "/outside/of/repo/src",
+                    "Query": "needle-from-query",
+                    "Includes": ["*.env"]
+                }
+            }
+        })
+        .to_string();
+
+        let (_display, body) = stdin_to_hook_body(
+            AiHookTool::Antigravity,
+            false,
+            &stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert!(body.contains("needle-from-query"), "{body}");
+        assert!(body.contains("*.env"), "{body}");
+    }
+
+    #[test]
+    fn antigravity_pre_extracts_find_by_name_pattern() {
+        let stdin = serde_json::json!({
+            "toolCall": {
+                "name": "find_by_name",
+                "args": {
+                    "SearchDirectory": "/outside/of/repo",
+                    "Pattern": "*sensitive-name*.pem",
+                    "Excludes": ["node_modules"]
+                }
+            }
+        })
+        .to_string();
+
+        let (_display, body) = stdin_to_hook_body(
+            AiHookTool::Antigravity,
+            false,
+            &stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert!(body.contains("*sensitive-name*.pem"), "{body}");
+        assert!(body.contains("node_modules"), "{body}");
+    }
+
+    #[test]
+    fn antigravity_pre_extracts_collaboration_tool_arguments() {
+        let stdin = serde_json::json!({
+            "toolCall": {
+                "name": "invoke_subagent",
+                "args": {
+                    "Subagents": [{
+                        "Prompt": "investigate secret handling",
+                        "Role": "security-reviewer",
+                        "Workspace": "/outside/of/repo"
+                    }]
+                }
+            }
+        })
+        .to_string();
+
+        let (_display, body) = stdin_to_hook_body(
+            AiHookTool::Antigravity,
+            false,
+            &stdin,
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert!(body.contains("investigate secret handling"), "{body}");
+        assert!(body.contains("security-reviewer"), "{body}");
+    }
+
+    #[test]
+    fn antigravity_metadata_paths_are_not_scanned_as_files() {
+        let repo = tempdir().expect("temp repo");
+        let transcript = repo.path().join("transcript.jsonl");
+        std::fs::write(&transcript, "previous-secret-value").expect("write transcript");
+        let stdin = serde_json::json!({
+            "toolCall": {
+                "name": "run_command",
+                "args": {
+                    "CommandLine": "echo safe-command"
+                }
+            },
+            "transcriptPath": transcript,
+            "artifactDirectoryPath": repo.path().join("artifacts"),
+            "workspacePaths": [repo.path()]
+        })
+        .to_string();
+
+        let (display, body) = stdin_to_hook_body(
+            AiHookTool::Antigravity,
+            false,
+            &stdin,
+            repo.path(),
+            repo.path(),
+        )
+        .unwrap();
+
+        assert_eq!(display, "<antigravity-hook>");
+        assert!(body.contains("echo safe-command"), "{body}");
+        assert!(!body.contains("previous-secret-value"), "{body}");
     }
 
     #[test]

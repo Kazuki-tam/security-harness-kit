@@ -391,6 +391,13 @@ fn run_hook_mode(
     }
 
     if post {
+        if log_blocked {
+            if let Err(err) =
+                hook_audit_log::append_audit_hook(&repo_root, tool, hook_event, &disp, &res)
+            {
+                eprintln!("shk post audit: unable to write .shk/audit.log: {err:#}");
+            }
+        }
         emit_post_hook_result(tool, hook_event, &res);
         return Ok(());
     }

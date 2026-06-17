@@ -209,9 +209,11 @@ Codex project hooks also ensure `features.hooks = true`, install `PreToolUse`,
 `$(git rev-parse --show-toplevel)` so hooks still resolve the repo when Codex starts
 from a subdirectory. Global Codex hooks keep the session cwd and omit the git-root path.
 
-Antigravity gets a managed `shk-security` entry with a blocking `PreToolUse` hook
-(`run_command`, file writes/edits, `view_file`, `read_url_content`, `search_web`).
-No post hook is installed because Antigravity `PostToolUse` payloads carry no tool output.
+Antigravity gets a managed `shk-security` entry with blocking `PreToolUse` and
+non-blocking `PostToolUse` hooks matching all Antigravity tools (`.*`) so
+commands, file operations, searches, scheduled prompts, subagents, permission
+requests, and future tool names are covered by default.
+The post hook runs with `--post` and returns Antigravity's schema-valid `{}`.
 Antigravity permission lists (Deny > Ask > Allow, `action(target)` format) are managed
 in its settings UI; `--apply-deny` with `--tool antigravity` prints recommended Deny
 entries (e.g. `command(rm -rf)`, `read_file(**/.env)`) to add manually.
@@ -225,7 +227,7 @@ blocks travel via exit 2 and stderr.
 ```bash
 shk hooks install-ai                             # all detected tools
 shk hooks install-ai --audit                     # non-blocking, writes .shk/audit.log
-shk hooks install-ai --log-blocked               # blocking, writes metadata-only block entries
+shk hooks install-ai --log-blocked               # blocking pre logs plus post audit logs
 shk hooks install-ai --tool claude-code
 shk hooks install-ai --tool claude-code --global
 shk hooks install-ai --tool claude-code --apply-deny
@@ -239,7 +241,7 @@ shk hooks install-ai --tool windsurf
 Important hook behavior:
 - Without `--tool`, installs managed hooks for Claude Code, Codex, Cursor, Copilot, Antigravity, and Windsurf.
 - `--audit` makes installed hooks non-blocking and writes metadata-only entries to `.shk/audit.log`.
-- `--log-blocked` keeps installed hooks blocking and writes metadata-only blocked-event entries to `.shk/audit.log`; inspect them with `shk audit`.
+- `--log-blocked` keeps installed pre hooks blocking and writes metadata-only blocked-event entries to `.shk/audit.log`; post hooks stay non-blocking and write post audit entries. Inspect them with `shk audit`.
 - `--apply-sandbox` hardens supported tool sandbox settings. Cursor has no local sandbox setting in `hooks.json`, so this sets managed hooks fail-closed.
 - Pre-hook mode runs action guard before content scanning. Tune with `[action_guard]` in `shk.toml`.
 

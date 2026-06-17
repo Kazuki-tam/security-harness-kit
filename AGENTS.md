@@ -46,7 +46,7 @@ cargo build --release
 | `2` | Blocking AI pre-hook triggered / runtime or config error | `shk scan --hook-mode <tool>` (block), `shk scan --staged` outside a Git repo, `shk clipboard …` when the OS clipboard is unavailable |
 
 - `--audit` mode **always exits 0** (log-only; never blocks).
-- `--log-blocked` keeps blocking behavior and writes metadata-only blocked-event entries to `.shk/audit.log`.
+- `--log-blocked` keeps pre-hook blocking behavior, writes metadata-only blocked-event entries to `.shk/audit.log`, and lets post hooks write non-blocking audit entries.
 - Post-execution hooks (`--post`) **always exit 0** — data is already in the AI's context.
 - Exit code 2 from a blocking pre-hook causes the AI tool to abort the pending operation.
 
