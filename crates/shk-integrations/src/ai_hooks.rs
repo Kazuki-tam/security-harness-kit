@@ -594,7 +594,7 @@ mod tests {
             "toolCall": {
                 "name": "search_web",
                 "args": {
-                    "query": "john@example.com",
+                    "query": "john@example.com", // shk-ignore pii.email
                     "domain": "example.com"
                 }
             }
@@ -610,7 +610,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(body.contains("john@example.com"), "{body}");
+        assert!(body.contains("john@example.com"), "{body}"); // shk-ignore pii.email
         assert!(body.contains("example.com"), "{body}");
     }
 
