@@ -21,9 +21,9 @@ path = "src/main.rs"
 formula = "shk"
 
 [dependencies]
-shk-core = { version = "0.4.6", path = "../shk-core" }
-shk-rules = { version = "0.4.6", path = "../shk-rules" }
-shk-integrations = { version = "0.4.6", path = "../shk-integrations" }
+shk-core = { version = "0.4.7", path = "../shk-core" }
+shk-rules = { version = "0.4.7", path = "../shk-rules" }
+shk-integrations = { version = "0.4.7", path = "../shk-integrations" }
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
