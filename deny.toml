@@ -3,7 +3,15 @@ version = 2
 db-urls = ["https://github.com/RustSec/advisory-db"]
 unmaintained = "workspace"
 yanked = "deny"
-ignore = []
+ignore = [
+  # Transitive quick-xml 0.39.4 pulled in by plist 1.9.0 <- tauri. The latest
+  # published plist still requires quick-xml 0.39.x, so there is no upstream
+  # fix we can pull via a dependency bump. Our direct dependency is already on
+  # quick-xml 0.41.0 (unaffected). Re-evaluate and remove once plist releases a
+  # version depending on quick-xml >= 0.41.0.
+  { id = "RUSTSEC-2026-0194", reason = "Transitive quick-xml 0.39.4 via plist<-tauri; no upstream fix. Direct dependency is quick-xml 0.41.0." },
+  { id = "RUSTSEC-2026-0195", reason = "Transitive quick-xml 0.39.4 via plist<-tauri; no upstream fix. Direct dependency is quick-xml 0.41.0." },
+]
 
 [licenses]
 version = 2
