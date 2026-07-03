@@ -554,12 +554,13 @@ fn run_user_prompt_mode(
     }
 
     if res.should_fail() {
+        let reason = user_prompt_deny_reason(&res.findings);
         return deny_hook_with_log(
             repo_root,
             log_blocked,
             tool,
             event,
-            HOOK_DENY_REASON_DEFAULT,
+            &reason,
             BlockLog::Scan {
                 display_path: "<user-prompt>",
                 result: &res,
@@ -569,6 +570,31 @@ fn run_user_prompt_mode(
 
     println!("{}", hook_output::allow_stdout_for_event(tool, event, None));
     Ok(())
+}
+
+/// User-facing reason for a blocked prompt: what was detected (rule id,
+/// severity, prompt line) and how to fix it. Never includes raw values.
+fn user_prompt_deny_reason(findings: &[shk_core::finding::Finding]) -> String {
+    use std::fmt::Write as _;
+    const MAX_LISTED: usize = 5;
+
+    let mut msg = String::from("shk: prompt blocked - sensitive content detected");
+    for f in findings.iter().take(MAX_LISTED) {
+        let _ = write!(
+            msg,
+            "\n- {} ({}) at prompt line {}",
+            f.rule_id, f.severity, f.line
+        );
+    }
+    if findings.len() > MAX_LISTED {
+        let _ = write!(
+            msg,
+            "\n- ... and {} more finding(s)",
+            findings.len() - MAX_LISTED
+        );
+    }
+    msg.push_str("\nRemove or redact the value(s) and resubmit the prompt.");
+    msg
 }
 
 fn hook_scan_options(fail_on: Option<SeverityArg>, use_pre_commit_threshold: bool) -> ScanOptions {
@@ -607,6 +633,10 @@ fn deny_hook(tool: AiTool, event: hook_output::HookEvent, reason: &str) -> Resul
 /// honored; exit 2 is treated as a non-blocking warning for those events.
 /// Copilot's `userPromptSubmitted` output is not processed, so exit 2 (a
 /// stderr warning) is the only user-visible signal; it cannot hard-block.
+/// Claude Code's `UserPromptSubmit` blocks require exit 0: the
+/// `decision: "block"` stdout JSON (whose `reason` is displayed to the user)
+/// is only parsed on exit 0, while exit 2 discards stdout and would show an
+/// empty stderr. The prompt is still blocked and erased either way.
 /// Every other tool uses exit 2 to abort the pending operation.
 fn hook_deny_exit_code(tool: AiTool, event: hook_output::HookEvent) -> i32 {
     match tool {
@@ -616,6 +646,7 @@ fn hook_deny_exit_code(tool: AiTool, event: hook_output::HookEvent) -> i32 {
             | hook_output::HookEvent::PostToolUse => 0,
             hook_output::HookEvent::UserPromptSubmit => 2,
         },
+        AiTool::ClaudeCode if event == hook_output::HookEvent::UserPromptSubmit => 0,
         _ => 2,
     }
 }
@@ -763,6 +794,53 @@ mod tests {
         assert_eq!(cascade_action_name(&value), Some("pre_run_command"));
         let missing: serde_json::Value = serde_json::from_str(r#"{"other":1}"#).unwrap();
         assert_eq!(cascade_action_name(&missing), None);
+    }
+
+    #[test]
+    fn claude_user_prompt_deny_exits_zero_other_events_exit_two() {
+        // The decision:block JSON (with the user-visible reason) is only
+        // parsed by Claude Code on exit 0.
+        assert_eq!(
+            hook_deny_exit_code(AiTool::ClaudeCode, HookEvent::UserPromptSubmit),
+            0
+        );
+        for event in [
+            HookEvent::PreToolUse,
+            HookEvent::PermissionRequest,
+            HookEvent::PostToolUse,
+        ] {
+            assert_eq!(hook_deny_exit_code(AiTool::ClaudeCode, event), 2);
+        }
+    }
+
+    #[test]
+    fn user_prompt_deny_reason_lists_findings_without_raw_values() {
+        let finding = |rule_id: &str, line: usize| shk_core::finding::Finding {
+            rule_id: rule_id.to_string(),
+            severity: "medium".to_string(),
+            kind: "pii".to_string(),
+            file: "<user-prompt>".to_string(),
+            line,
+            column: 1,
+            message: "detected".to_string(),
+            redacted_value: "[REDACTED]".to_string(),
+            value_hash: None,
+            confidence: 0.9,
+            context_before: vec![],
+            context_after: vec![],
+        };
+
+        let reason = user_prompt_deny_reason(&[finding("pii.email", 3)]);
+        assert!(reason.contains("prompt blocked"), "{reason}");
+        assert!(
+            reason.contains("pii.email (medium) at prompt line 3"),
+            "{reason}"
+        );
+        assert!(reason.contains("resubmit the prompt"), "{reason}");
+
+        let many: Vec<_> = (1..=7).map(|i| finding("pii.email", i)).collect();
+        let reason = user_prompt_deny_reason(&many);
+        assert!(reason.contains("and 2 more finding(s)"), "{reason}");
     }
 
     #[test]

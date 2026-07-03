@@ -2750,19 +2750,34 @@ fn hook_mode_claude_user_prompt_blocks_medium_pii() {
             c.wait_with_output()
         })
         .expect("prompt hook scan");
+    // Claude Code only parses the decision:block JSON on exit 0; exit 2 would
+    // discard stdout and show the user nothing.
     assert_eq!(
         out.status.code(),
-        Some(2),
+        Some(0),
         "stdout={} stderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(stdout["decision"], "block");
+    let reason = stdout["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("sensitive content detected") && reason.contains("pii."),
+        "reason should tell the user what was detected: {stdout}"
+    );
+    assert!(
+        !reason.contains("admin@example.com"),
+        "reason must not leak the raw value: {stdout}"
+    );
     assert_eq!(
         stdout["hookSpecificOutput"]["hookEventName"],
         "UserPromptSubmit"
     );
-    assert_eq!(stdout["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert_eq!(
+        stdout["hookSpecificOutput"]["suppressOriginalPrompt"], true,
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -3227,7 +3242,8 @@ fn hook_mode_log_blocked_user_prompt_writes_log() {
             c.wait_with_output()
         })
         .expect("log-blocked user prompt");
-    assert_eq!(out.status.code(), Some(2));
+    // Claude Code user-prompt blocks exit 0 (decision:block travels via stdout).
+    assert_eq!(out.status.code(), Some(0));
     let log = std::fs::read_to_string(repo.join(".shk/audit.log")).unwrap();
     let entry: serde_json::Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
     assert_eq!(entry["event"], "blocked");
