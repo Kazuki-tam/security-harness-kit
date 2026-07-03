@@ -1,0 +1,10 @@
+[advisories]
+# Transitive quick-xml 0.39.4 pulled in by plist 1.9.0 <- tauri. The latest
+# published plist still requires quick-xml 0.39.x, so there is no upstream fix
+# we can pull via a dependency bump. Our direct dependency is already on
+# quick-xml 0.41.0 (unaffected). Re-evaluate and remove these ignores once
+# plist releases a version depending on quick-xml >= 0.41.0.
+ignore = [
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+]
