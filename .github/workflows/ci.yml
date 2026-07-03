@@ -102,7 +102,7 @@ jobs:
           cache-bin: false
 
       - name: install cargo-llvm-cov
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
+        uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2
         with:
           tool: cargo-llvm-cov@0.6.21
 
@@ -126,12 +126,12 @@ jobs:
           cache-bin: false
 
       - name: install cargo-audit
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
+        uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2
         with:
           tool: cargo-audit@0.22.1
 
       - name: install cargo-deny
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
+        uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2
         with:
           tool: cargo-deny@0.19.7
 
