@@ -37,7 +37,7 @@ dirs = "6"
 tempfile = "3"
 zeroize = "1.8"
 dialoguer = "0.12"
-quick-xml = "0.40"
+quick-xml = "0.41"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 pdf-extract = "0.12.0"
 dotenvx = "0.2.2"
