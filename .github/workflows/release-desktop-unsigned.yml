@@ -34,7 +34,7 @@ jobs:
       release_tag: ${{ steps.resolve.outputs.release_tag }}
       source_sha: ${{ steps.source.outputs.source_sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -89,7 +89,7 @@ jobs:
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
           ref: ${{ needs.prepare.outputs.source_sha }}
@@ -179,7 +179,7 @@ jobs:
         needs.build-desktop-artifacts.result == 'success'
       }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
           ref: ${{ needs.prepare.outputs.source_sha }}

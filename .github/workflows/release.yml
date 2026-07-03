@@ -47,7 +47,7 @@ jobs:
       release_tag: ${{ steps.resolve.outputs.release_tag }}
       make_latest: ${{ steps.resolve.outputs.make_latest }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -92,7 +92,7 @@ jobs:
     env:
       SHK_ALLOW_MISSING_UPDATER_PUBKEY: "1"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -180,7 +180,7 @@ jobs:
       TAURI_WINDOWS_TIMESTAMP_URL: ${{ secrets.TAURI_WINDOWS_TIMESTAMP_URL }}
       TAURI_WINDOWS_TSP: ${{ secrets.TAURI_WINDOWS_TSP }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -266,7 +266,7 @@ jobs:
     needs: [prepare, build-local-artifacts]
     if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.prepare.outputs.build_cli == 'true' && needs.build-local-artifacts.result == 'success' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -321,7 +321,7 @@ jobs:
         )
       }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -430,7 +430,7 @@ jobs:
       RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - name: checkout tap
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: Kazuki-tam/homebrew-tap
           persist-credentials: false
