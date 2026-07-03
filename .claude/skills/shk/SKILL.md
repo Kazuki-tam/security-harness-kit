@@ -199,6 +199,8 @@ and `.windsurf/hooks.json` (Windsurf; global installs use
 
 Each hook runs `shk scan --hook-mode <tool>` on the payload before AI tool execution.
 Pre-hooks and user-prompt hooks block on findings (exit 2); post-hooks warn only (exit 0).
+Exception: Claude Code user-prompt blocks exit 0 with a `decision: "block"` stdout JSON
+whose `reason` (rule ids, prompt line numbers, fix hint) is displayed to the user.
 Cursor gets blocking `before*` hooks plus non-blocking post scans on
 `afterShellExecution` and `afterMCPExecution`.
 Managed user-prompt hooks use `--fail-on medium` so PII is blocked before it enters
@@ -255,7 +257,7 @@ shk ci init github                      # write .github/workflows/shk.yml
 shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
-shk ci init github --shk-version v0.4.8
+shk ci init github --shk-version v0.4.9
 shk ci init github --output .github/workflows/security.yml --force
 ```
 

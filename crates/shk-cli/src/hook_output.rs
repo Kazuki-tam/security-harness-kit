@@ -86,6 +86,27 @@ fn codex_deny_stdout(event: HookEvent, reason: &str) -> String {
     }
 }
 
+/// Claude Code deny payloads per event.
+///
+/// `UserPromptSubmit` cannot use `permissionDecision` (PreToolUse-only); the
+/// block travels via `decision: "block"` on exit 0, where `reason` is shown
+/// to the user and `suppressOriginalPrompt` keeps the sensitive prompt text
+/// out of the block message. Exit 2 would discard this stdout JSON entirely.
+fn claude_deny_stdout(event: HookEvent, reason: &str) -> String {
+    match event {
+        HookEvent::UserPromptSubmit => json!({
+            "decision": "block",
+            "reason": reason,
+            "hookSpecificOutput": {
+                "hookEventName": event.json_name(),
+                "suppressOriginalPrompt": true,
+            }
+        })
+        .to_string(),
+        _ => permission_output(event, "deny", reason).to_string(),
+    }
+}
+
 fn mask_replacement_message(finding_count: usize, content: &str) -> String {
     format!(
         "shk security: {finding_count} sensitive value(s) detected and sanitized. \
@@ -154,7 +175,7 @@ pub fn deny_stdout_for_event(tool: AiTool, event: HookEvent, reason: &str) -> St
         })
         .to_string(),
         AiTool::Codex => codex_deny_stdout(event, reason),
-        AiTool::ClaudeCode => permission_output(event, "deny", reason).to_string(),
+        AiTool::ClaudeCode => claude_deny_stdout(event, reason),
         // Cascade (Windsurf) does not parse hook stdout for
         // decisions; a block travels via exit code 2 + the stderr message.
         AiTool::Windsurf => "{}".to_string(),
@@ -176,6 +197,10 @@ pub fn allow_stdout_for_event(tool: AiTool, event: HookEvent, info: Option<&str>
             .to_string()
         }
         AiTool::Codex => codex_message_allow(info),
+        // UserPromptSubmit has no permissionDecision schema; on exit 0 an
+        // empty object is the schema-valid no-op (plain text or
+        // additionalContext would be injected into Claude's context).
+        AiTool::ClaudeCode if event == HookEvent::UserPromptSubmit => "{}".to_string(),
         AiTool::ClaudeCode => {
             let reason = info.unwrap_or("shk: OK");
             permission_output(event, "allow", reason).to_string()
@@ -376,20 +401,65 @@ mod tests {
     fn claude_allow_uses_hook_specific_permission_output() {
         let output = allow_stdout_for_event(
             AiTool::ClaudeCode,
-            HookEvent::UserPromptSubmit,
+            HookEvent::PreToolUse,
             Some("looks good"),
         );
         let value = parse_json(&output);
 
-        assert_eq!(
-            value["hookSpecificOutput"]["hookEventName"],
-            "UserPromptSubmit"
-        );
+        assert_eq!(value["hookSpecificOutput"]["hookEventName"], "PreToolUse");
         assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "allow");
         assert_eq!(
             value["hookSpecificOutput"]["permissionDecisionReason"],
             "looks good"
         );
+    }
+
+    #[test]
+    fn claude_user_prompt_allow_is_empty_object() {
+        // Anything else (plain text or additionalContext) would be injected
+        // into Claude's context on exit 0.
+        for info in [None, Some("shk audit: non-blocking")] {
+            let output =
+                allow_stdout_for_event(AiTool::ClaudeCode, HookEvent::UserPromptSubmit, info);
+            assert_eq!(parse_json(&output), json!({}));
+        }
+    }
+
+    #[test]
+    fn claude_user_prompt_deny_uses_block_decision_and_suppresses_prompt() {
+        let output = deny_stdout_for_event(
+            AiTool::ClaudeCode,
+            HookEvent::UserPromptSubmit,
+            "blocked prompt",
+        );
+        let value = parse_json(&output);
+
+        assert_eq!(value["decision"], "block");
+        assert_eq!(value["reason"], "blocked prompt");
+        assert_eq!(
+            value["hookSpecificOutput"]["hookEventName"],
+            "UserPromptSubmit"
+        );
+        assert_eq!(value["hookSpecificOutput"]["suppressOriginalPrompt"], true);
+        assert!(
+            value["hookSpecificOutput"]
+                .get("permissionDecision")
+                .is_none(),
+            "permissionDecision is PreToolUse-only: {value}"
+        );
+    }
+
+    #[test]
+    fn claude_pre_tool_deny_keeps_permission_decision_shape() {
+        let output = deny_stdout_for_event(AiTool::ClaudeCode, HookEvent::PreToolUse, "blocked");
+        let value = parse_json(&output);
+
+        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(
+            value["hookSpecificOutput"]["permissionDecisionReason"],
+            "blocked"
+        );
+        assert!(value.get("decision").is_none());
     }
 
     #[test]
