@@ -55,7 +55,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          SHK_VERSION=v0.4.9
+          SHK_VERSION=v0.4.10
           REPO=Kazuki-tam/security-harness-kit
           mkdir -p "$HOME/.cargo/bin"
           case "$(uname -s)-$(uname -m)" in
@@ -64,7 +64,7 @@ jobs:
             *) echo "unsupported runner" >&2; exit 1 ;;
           esac
           ASSET="shk-cli-${TARGET}.tar.xz"
-          gh release download v0.4.9 -R "$REPO" -p "$ASSET" -p "${ASSET}.sha256"
+          gh release download v0.4.10 -R "$REPO" -p "$ASSET" -p "${ASSET}.sha256"
           sha256sum -c "${ASSET}.sha256"
           gh attestation verify "$ASSET" -R "$REPO"
           TMP="$(mktemp -d)"
