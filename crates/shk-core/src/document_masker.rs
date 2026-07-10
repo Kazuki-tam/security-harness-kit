@@ -1,4 +1,5 @@
 use crate::finding::Finding;
+use crate::fs_atomic::persist_named_temp_file;
 use crate::masker;
 use crate::policy::Policy;
 use anyhow::{Context, Result, bail};
@@ -8,9 +9,33 @@ use quick_xml::{Reader, Writer};
 use std::fs::File;
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
+use tempfile::NamedTempFile;
 use zeroize::Zeroize;
 use zip::write::FileOptions;
 use zip::{ZipArchive, ZipWriter};
+
+const MAX_OOXML_ENTRIES: usize = 10_000;
+const MIN_OOXML_ENTRY_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_OOXML_ENTRY_BYTES: u64 = 32 * 1024 * 1024;
+const MIN_OOXML_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_OOXML_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct OoxmlReadLimits {
+    entry_bytes: u64,
+    total_bytes: u64,
+}
+
+fn ooxml_read_limits(max_file_size_bytes: u64) -> OoxmlReadLimits {
+    OoxmlReadLimits {
+        entry_bytes: max_file_size_bytes
+            .saturating_mul(16)
+            .clamp(MIN_OOXML_ENTRY_BYTES, MAX_OOXML_ENTRY_BYTES),
+        total_bytes: max_file_size_bytes
+            .saturating_mul(64)
+            .clamp(MIN_OOXML_TOTAL_BYTES, MAX_OOXML_TOTAL_BYTES),
+    }
+}
 
 #[derive(Debug)]
 pub struct DocumentMaskResult {
@@ -127,10 +152,23 @@ fn mask_ooxml(
         );
     }
 
-    let output_file = File::create(output)
-        .with_context(|| format!("create output document {}", output.display()))?;
+    ensure_archive_entry_limit(archive.len())?;
+    let limits = ooxml_read_limits(policy.scan.max_file_size_bytes);
+
+    let output_parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let output_file = NamedTempFile::new_in(output_parent)
+        .with_context(|| format!("create temporary output in {}", output_parent.display()))?;
+    if let Ok(metadata) = std::fs::metadata(output) {
+        std::fs::set_permissions(output_file.path(), metadata.permissions())
+            .with_context(|| format!("preserve output permissions for {}", output.display()))?;
+    }
     let mut writer = ZipWriter::new(output_file);
     let mut findings = Vec::new();
+    let mut declared_total = 0u64;
+    let mut actual_total = 0u64;
 
     for idx in 0..archive.len() {
         let mut entry = archive
@@ -139,6 +177,16 @@ fn mask_ooxml(
         let name = entry.name().to_string();
         let options = entry_options(&entry);
 
+        declared_total = declared_total
+            .checked_add(entry.size())
+            .context("Office document expanded size overflow")?;
+        if declared_total > limits.total_bytes {
+            bail!(
+                "Office document expanded size exceeds limit ({} bytes)",
+                limits.total_bytes
+            );
+        }
+
         if entry.is_dir() {
             writer
                 .add_directory(&name, options)
@@ -146,16 +194,17 @@ fn mask_ooxml(
             continue;
         }
 
-        let mut bytes = Vec::new();
-        entry
-            .read_to_end(&mut bytes)
-            .with_context(|| format!("read zip entry {name}"))?;
-
         writer
             .start_file(&name, options)
             .with_context(|| format!("write zip entry {name}"))?;
 
         if (format.should_mask_entry)(&name) {
+            let remaining = limits.total_bytes.saturating_sub(actual_total);
+            let mut bytes =
+                read_entry_bounded(&mut entry, limits.entry_bytes.min(remaining), &name)?;
+            actual_total = actual_total
+                .checked_add(bytes.len() as u64)
+                .context("Office document expanded size overflow")?;
             let rel_label = format!("{}:{name}", input.display());
             let mask_result = mask_xml_text(&bytes, policy, &rel_label, format.text_group)
                 .with_context(|| format!("mask XML entry {name}"));
@@ -168,17 +217,24 @@ fn mask_ooxml(
             write_result?;
             findings.append(&mut entry_findings);
         } else {
-            let write_result = writer
-                .write_all(&bytes)
-                .with_context(|| format!("copy zip entry {name}"));
-            bytes.zeroize();
-            write_result?;
+            copy_entry_bounded(
+                &mut entry,
+                &mut writer,
+                &mut actual_total,
+                limits.total_bytes,
+                &name,
+            )?;
         }
     }
 
-    writer
+    let output_file = writer
         .finish()
         .with_context(|| format!("finish output {} zip container", format.label))?;
+    output_file
+        .as_file()
+        .sync_all()
+        .with_context(|| format!("sync output document {}", output.display()))?;
+    persist_named_temp_file(output_file, output)?;
 
     Ok(DocumentMaskResult { findings })
 }
@@ -186,6 +242,7 @@ fn mask_ooxml(
 pub fn extract_ooxml_text_entries(
     scan_rel: &str,
     bytes: &[u8],
+    max_file_size_bytes: u64,
 ) -> Result<Option<Vec<DocumentTextEntry>>> {
     let Some(format) = OoxmlFormat::from_path(scan_rel) else {
         return Ok(None);
@@ -201,7 +258,11 @@ pub fn extract_ooxml_text_entries(
         );
     }
 
+    ensure_archive_entry_limit(archive.len())?;
+    let limits = ooxml_read_limits(max_file_size_bytes);
+
     let mut entries = Vec::new();
+    let mut actual_total = 0u64;
     for idx in 0..archive.len() {
         let mut entry = archive
             .by_index(idx)
@@ -211,10 +272,12 @@ pub fn extract_ooxml_text_entries(
             continue;
         }
 
-        let mut entry_bytes = Vec::new();
-        entry
-            .read_to_end(&mut entry_bytes)
-            .with_context(|| format!("read zip entry {name}"))?;
+        let remaining = limits.total_bytes.saturating_sub(actual_total);
+        let mut entry_bytes =
+            read_entry_bounded(&mut entry, limits.entry_bytes.min(remaining), &name)?;
+        actual_total = actual_total
+            .checked_add(entry_bytes.len() as u64)
+            .context("Office document expanded size overflow")?;
         let text_result = extract_xml_text(&entry_bytes, format.text_group)
             .with_context(|| format!("extract XML text from {name}"));
         entry_bytes.zeroize();
@@ -231,14 +294,54 @@ pub fn extract_ooxml_text_entries(
 pub fn extract_document_text_entries(
     scan_rel: &str,
     bytes: &[u8],
+    max_file_size_bytes: u64,
 ) -> Result<Option<Vec<DocumentTextEntry>>> {
-    if let Some(entries) = extract_ooxml_text_entries(scan_rel, bytes)? {
+    if let Some(entries) = extract_ooxml_text_entries(scan_rel, bytes, max_file_size_bytes)? {
         return Ok(Some(entries));
     }
     if is_pdf_path(scan_rel) {
         return extract_pdf_text_entry(bytes).map(Some);
     }
     Ok(None)
+}
+
+fn ensure_archive_entry_limit(entries: usize) -> Result<()> {
+    if entries > MAX_OOXML_ENTRIES {
+        bail!("Office document contains too many zip entries ({entries})");
+    }
+    Ok(())
+}
+
+fn read_entry_bounded(reader: &mut impl Read, limit: u64, name: &str) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read zip entry {name}"))?;
+    if bytes.len() as u64 > limit {
+        bytes.zeroize();
+        bail!("Office zip entry {name} exceeds expanded size limit ({limit} bytes)");
+    }
+    Ok(bytes)
+}
+
+fn copy_entry_bounded<W: Write>(
+    reader: &mut impl Read,
+    writer: &mut W,
+    actual_total: &mut u64,
+    total_limit: u64,
+    name: &str,
+) -> Result<()> {
+    let remaining = total_limit.saturating_sub(*actual_total);
+    let copied = std::io::copy(&mut reader.take(remaining.saturating_add(1)), writer)
+        .with_context(|| format!("copy zip entry {name}"))?;
+    if copied > remaining {
+        bail!("Office document expanded size exceeds limit ({total_limit} bytes)");
+    }
+    *actual_total = actual_total
+        .checked_add(copied)
+        .context("Office document expanded size overflow")?;
+    Ok(())
 }
 
 fn is_pdf_path(path: &str) -> bool {
@@ -289,7 +392,10 @@ fn paths_refer_to_same_target(input: &Path, output: &Path) -> Result<bool> {
             .canonicalize()
             .with_context(|| format!("resolve output document {}", output.display()))?
     } else {
-        let parent = output.parent().unwrap_or_else(|| Path::new("."));
+        let parent = output
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
         let parent_abs = parent
             .canonicalize()
             .with_context(|| format!("resolve output directory {}", parent.display()))?;
@@ -878,5 +984,36 @@ mod tests {
         let policy = Policy::default();
         let err = mask_docx(&input, &output, &policy).unwrap_err();
         assert!(err.to_string().contains("word/document.xml"), "{err}");
+    }
+
+    #[test]
+    fn bounded_entry_read_rejects_expansion_past_limit() {
+        let mut input = Cursor::new(b"12345");
+
+        let err = read_entry_bounded(&mut input, 4, "word/document.xml").unwrap_err();
+
+        assert!(err.to_string().contains("expanded size limit"), "{err}");
+    }
+
+    #[test]
+    fn failed_mask_preserves_existing_output() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("invalid.docx");
+        let output = dir.path().join("existing.docx");
+        {
+            let file = File::create(&input).unwrap();
+            let mut zip = ZipWriter::new(file);
+            zip.start_file("word/document.xml", deflated_zip_options())
+                .unwrap();
+            zip.write_all(b"<w:document><w:t>\xff</w:t></w:document>")
+                .unwrap();
+            zip.finish().unwrap();
+        }
+        std::fs::write(&output, b"existing-output").unwrap();
+
+        let err = mask_docx(&input, &output, &Policy::default()).unwrap_err();
+
+        assert!(err.to_string().contains("mask XML entry"), "{err}");
+        assert_eq!(std::fs::read(&output).unwrap(), b"existing-output");
     }
 }

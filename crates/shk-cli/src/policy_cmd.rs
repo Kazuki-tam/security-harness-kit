@@ -1,6 +1,6 @@
+use crate::{fs_atomic, safety};
 use anyhow::{Result, bail};
 use shk_core::policy::default_policy_toml;
-use std::fs;
 use std::path::Path;
 
 pub fn init(root: &Path, strict: bool, force: bool) -> Result<()> {
@@ -8,7 +8,8 @@ pub fn init(root: &Path, strict: bool, force: bool) -> Result<()> {
     if p.exists() && !force {
         bail!("{} already exists (use --force to overwrite)", p.display());
     }
-    fs::write(&p, default_policy_toml(strict))?;
+    safety::ensure_write_path_within(root, &p)?;
+    fs_atomic::write_atomic(&p, default_policy_toml(strict).as_bytes())?;
     println!("Wrote {}", p.display());
     Ok(())
 }

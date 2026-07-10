@@ -1,6 +1,7 @@
 pub(crate) mod custom_rules;
 pub mod document_masker;
 pub mod finding;
+pub mod fs_atomic;
 pub mod git;
 pub mod masker;
 pub mod policy;

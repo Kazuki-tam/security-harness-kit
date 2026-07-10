@@ -1349,6 +1349,42 @@ fn scan_missing_target_exits_2() {
 }
 
 #[test]
+fn scan_staged_rejects_oversized_blob_before_content_scan() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    init_git_repo(tmp.path());
+    std::fs::write(
+        tmp.path().join("shk.toml"),
+        "[scan]\nmax_file_size_bytes = 8\n",
+    )
+    .expect("write policy");
+    std::fs::write(tmp.path().join("large.txt"), b"123456789").expect("write large blob");
+    let add = Command::new("git")
+        .args(["add", "shk.toml", "large.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("git add");
+    assert!(add.status.success());
+
+    let out = Command::new(shk_bin())
+        .args(["scan", "--staged", "--json", "--fail-on", "critical"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("scan staged oversized blob");
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).expect("scan json");
+    assert!(report["findings"].as_array().is_some_and(|findings| {
+        findings
+            .iter()
+            .any(|finding| finding["rule_id"] == "scan.file_too_large")
+    }));
+}
+
+#[test]
 fn scan_staged_outside_git_exits_2() {
     let dir = tempfile::tempdir().unwrap();
     let out = Command::new(shk_bin())

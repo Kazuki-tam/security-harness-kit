@@ -8,7 +8,7 @@ use dialoguer::Password;
 use dotenvx::{Keypair, decrypt as dotenvx_decrypt, encrypt as dotenvx_encrypt};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::NamedTempFile;
@@ -1265,16 +1265,10 @@ fn write_output(path: &Path, body: &[u8], force: bool) -> Result<()> {
     tmp.flush()
         .with_context(|| format!("flush temp output for {}", path.display()))?;
 
-    match tmp.persist(path) {
-        Ok(_) => Ok(()),
-        Err(err) if force && err.error.kind() == ErrorKind::AlreadyExists => {
-            let tmp = err.file;
-            std::fs::remove_file(path).with_context(|| format!("replace {}", path.display()))?;
-            tmp.persist(path)
-                .map(|_| ())
-                .map_err(|err| anyhow!("write {}: {}", path.display(), err.error))
-        }
-        Err(err) => Err(anyhow!("write {}: {}", path.display(), err.error)),
+    if force {
+        shk_core::fs_atomic::persist_named_temp_file(tmp, path)
+    } else {
+        shk_core::fs_atomic::persist_named_temp_file_noclobber(tmp, path)
     }
 }
 
@@ -1283,6 +1277,29 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn write_output_noclobber_preserves_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("output.env");
+        std::fs::write(&path, b"old").unwrap();
+
+        let err = write_output(&path, b"new", false).unwrap_err();
+
+        assert!(err.to_string().contains("--force"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+    }
+
+    #[test]
+    fn write_output_force_replaces_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("output.env");
+        std::fs::write(&path, b"old").unwrap();
+
+        write_output(&path, b"new", true).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    }
 
     #[derive(Default)]
     struct MockSecretStore {

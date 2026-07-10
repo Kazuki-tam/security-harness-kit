@@ -4292,7 +4292,7 @@ checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
 name = "shk-cli"
-version = "0.4.10"
+version = "0.4.11"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4304,6 +4304,7 @@ dependencies = [
  "dotenvx",
  "ignore",
  "keyring",
+ "libc",
  "regex",
  "serde",
  "serde_json",
@@ -4320,7 +4321,7 @@ dependencies = [
 
 [[package]]
 name = "shk-core"
-version = "0.4.10"
+version = "0.4.11"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4345,7 +4346,7 @@ dependencies = [
 
 [[package]]
 name = "shk-desktop"
-version = "0.4.10"
+version = "0.4.11"
 dependencies = [
  "serde",
  "serde_json",
@@ -4362,7 +4363,7 @@ dependencies = [
 
 [[package]]
 name = "shk-integrations"
-version = "0.4.10"
+version = "0.4.11"
 dependencies = [
  "anyhow",
  "serde",
@@ -4373,7 +4374,7 @@ dependencies = [
 
 [[package]]
 name = "shk-rules"
-version = "0.4.10"
+version = "0.4.11"
 dependencies = [
  "once_cell",
  "regex",
@@ -6782,7 +6783,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.4.10"
+version = "0.4.11"
 dependencies = [
  "anyhow",
  "regex",

@@ -265,6 +265,7 @@ impl<'a> PreparedScan<'a> {
 }
 
 struct FindingDeduper {
+    /// Rule-scoped digests, never raw matched values.
     seen: HashSet<(String, String)>,
 }
 
@@ -276,8 +277,8 @@ impl FindingDeduper {
     }
 
     fn insert(&mut self, rule_id: &str, matched_text: &str) -> bool {
-        self.seen
-            .insert((rule_id.to_string(), matched_text.to_string()))
+        let digest = suppression::compute_value_hmac(rule_id, matched_text);
+        self.seen.insert((rule_id.to_string(), digest))
     }
 }
 
@@ -454,10 +455,21 @@ fn scan_one_path(
 fn scan_staged_blob(
     repo: &Path,
     rel_path: &Path,
+    size: u64,
     prepared: &PreparedScan<'_>,
     include_context: bool,
 ) -> Result<ScanChunk> {
     let rel = rel_path.to_string_lossy().replace('\\', "/");
+    if size > prepared.policy.scan.max_file_size_bytes {
+        return Ok(ScanChunk::skipped(vec![skipped_finding(
+            "scan.file_too_large",
+            rel,
+            format!(
+                "Skipped: file exceeds max_file_size_bytes ({})",
+                prepared.policy.scan.max_file_size_bytes
+            ),
+        )]));
+    }
     let bytes = git::staged_file_bytes(repo, rel_path)?;
     scan_bytes(&rel, bytes, prepared, include_context)
 }
@@ -470,6 +482,16 @@ fn scan_history_blob(
 ) -> Result<ScanChunk> {
     let rel = blob.path.to_string_lossy().replace('\\', "/");
     let label = history_display_label(blob);
+    if blob.size > prepared.policy.scan.max_file_size_bytes {
+        return Ok(ScanChunk::skipped(vec![skipped_finding(
+            "scan.file_too_large",
+            label,
+            format!(
+                "Skipped: file exceeds max_file_size_bytes ({})",
+                prepared.policy.scan.max_file_size_bytes
+            ),
+        )]));
+    }
     let bytes = git::history_blob_bytes(repo, &blob.oid)?;
     scan_bytes_with_display(&rel, &label, bytes, prepared, include_context)
 }
@@ -567,7 +589,12 @@ fn scan_document_bytes(
     prepared: &PreparedScan<'_>,
     include_context: bool,
 ) -> Result<Option<ScanChunk>> {
-    let Some(entries) = document_masker::extract_document_text_entries(scan_rel, bytes)? else {
+    let Some(entries) = document_masker::extract_document_text_entries(
+        scan_rel,
+        bytes,
+        prepared.policy.scan.max_file_size_bytes,
+    )?
+    else {
         return Ok(None);
     };
     if entries.is_empty() {
@@ -651,8 +678,24 @@ pub fn scan_staged(cwd: &Path, opts: ScanOptions) -> Result<ScanResult> {
     if !git::is_inside_git_work_tree(&repo) {
         bail!("shk scan --staged requires a Git repository");
     }
-    let paths = git::staged_files(&repo)?;
-    scan_git_rel_paths(&repo, paths, &opts, scan_staged_blob)
+    let blobs = git::staged_blobs(&repo)?;
+    let sizes = blobs
+        .iter()
+        .map(|blob| (blob.path.clone(), blob.size))
+        .collect::<std::collections::HashMap<_, _>>();
+    let paths = blobs.into_iter().map(|blob| blob.path).collect();
+    scan_git_rel_paths(
+        &repo,
+        paths,
+        &opts,
+        |repo, rel, prepared, include_context| {
+            let size = sizes
+                .get(rel)
+                .copied()
+                .context("missing staged blob size")?;
+            scan_staged_blob(repo, rel, size, prepared, include_context)
+        },
+    )
 }
 
 pub fn scan_changed_since(cwd: &Path, base: &str, opts: ScanOptions) -> Result<ScanResult> {
@@ -1008,6 +1051,16 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
 mod tests {
     use super::*;
     use crate::policy::{AllowlistEntry, CustomRule, Policy};
+
+    #[test]
+    fn finding_deduper_keeps_only_rule_scoped_digest() {
+        let raw = "synthetic-secret-value";
+        let mut deduper = FindingDeduper::new();
+
+        assert!(deduper.insert("secret.test", raw));
+        assert!(!deduper.insert("secret.test", raw));
+        assert!(deduper.seen.iter().all(|(_, value)| value != raw));
+    }
 
     #[test]
     fn path_filters_include_glob() {

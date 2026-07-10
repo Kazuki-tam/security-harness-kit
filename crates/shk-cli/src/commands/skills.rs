@@ -1,3 +1,4 @@
+use crate::safety;
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
@@ -180,9 +181,15 @@ pub(crate) fn install_selected_tools_for(
             continue;
         }
 
+        let base = resolve_base_for(root, global)?;
+        safety::ensure_write_path_within(&base, &plan.dest)?;
+        if let Some(legacy) = &plan.legacy {
+            safety::ensure_write_path_within(&base, legacy)?;
+        }
+
         let parent = plan.dest.parent().expect("destination has parent");
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-        std::fs::write(&plan.dest, SKILL_CONTENT)
+        crate::fs_atomic::write_atomic(&plan.dest, SKILL_CONTENT.as_bytes())
             .with_context(|| format!("write {}", plan.dest.display()))?;
         details.push(format!(
             "Installed {} skill -> {}",
@@ -347,5 +354,19 @@ mod tests {
             1,
             "Codex, Cursor, and Antigravity should share one project destination: {details:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_install_rejects_symlinked_skill_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join(".agents")).unwrap();
+
+        let err = install_selected_tools_for(root.path(), &[SkillTool::Codex], false, false, true)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("symbolic link"), "{err}");
+        assert!(!outside.path().join("skills/shk/SKILL.md").exists());
     }
 }
