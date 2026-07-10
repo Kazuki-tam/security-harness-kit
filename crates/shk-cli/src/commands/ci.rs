@@ -1,4 +1,5 @@
 use crate::args::{CiModeArg, GithubCiArgs, SeverityArg};
+use crate::{fs_atomic, safety};
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use std::path::Path;
@@ -40,6 +41,7 @@ pub fn init_github(root: &Path, args: GithubCiArgs) -> Result<()> {
     }
 
     let dest = root.join(&args.output);
+    safety::ensure_write_path_within(root, &dest)?;
     if dest.exists() && !args.force {
         bail!(
             "{} already exists (use --force to overwrite)",
@@ -54,7 +56,8 @@ pub fn init_github(root: &Path, args: GithubCiArgs) -> Result<()> {
         )
     })?;
     std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    std::fs::write(&dest, workflow).with_context(|| format!("write {}", dest.display()))?;
+    fs_atomic::write_atomic(&dest, workflow.as_bytes())
+        .with_context(|| format!("write {}", dest.display()))?;
 
     println!("Wrote GitHub Actions workflow to {}", dest.display());
     Ok(())

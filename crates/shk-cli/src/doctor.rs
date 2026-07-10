@@ -182,6 +182,7 @@ pub fn fix_ignore_patterns(root: &Path, targets: &[String]) -> Result<IgnoreFixR
     for relative_path in normalized {
         let path = root.join(&relative_path);
         safety::ensure_writable_path_allowed(&path)?;
+        safety::ensure_write_path_within(root, &path)?;
         let appended = append_patterns_to_ignore_file(&path, &missing)?;
         if !appended.is_empty() {
             updates.push(IgnoreFileUpdate {
@@ -286,7 +287,7 @@ fn append_patterns_to_ignore_file(path: &Path, patterns: &[String]) -> Result<Ve
         body.push_str(pat);
         body.push('\n');
     }
-    fs::write(path, body)?;
+    crate::fs_atomic::write_atomic(path, body.as_bytes())?;
     Ok(appended)
 }
 

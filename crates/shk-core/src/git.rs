@@ -9,6 +9,13 @@ pub struct GitHistoryBlob {
     pub commit: String,
     pub oid: String,
     pub path: PathBuf,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct StagedBlob {
+    pub path: PathBuf,
+    pub size: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -46,21 +53,55 @@ pub fn is_inside_git_work_tree(cwd: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Staged file paths relative to repo root, normalized with `/`.
+/// Staged file paths and object sizes relative to the repository root.
 ///
 /// Gitlink entries (submodule bumps, mode `160000`) are excluded: their staged
 /// object is a commit in the submodule's object database, so `git show :<path>`
 /// in the superproject would fail with "bad object".
-pub fn staged_files(repo_root: &Path) -> Result<Vec<PathBuf>> {
+pub fn staged_blobs(repo_root: &Path) -> Result<Vec<StagedBlob>> {
     let out = Command::new("git")
-        .args(["diff", "--cached", "--raw", "--diff-filter=ACMR", "-z"])
+        .args([
+            "diff",
+            "--cached",
+            "--raw",
+            "--full-index",
+            "--abbrev=64",
+            "--diff-filter=ACMR",
+            "-z",
+        ])
         .current_dir(repo_root)
         .output()
         .context("failed to run git")?;
     if !out.status.success() {
         bail!("git diff --cached failed");
     }
-    parse_staged_raw_entries(&out.stdout)
+    let entries = parse_staged_raw_entries(&out.stdout)?;
+    let queries = entries
+        .iter()
+        .map(|(_, oid)| oid.clone())
+        .collect::<Vec<_>>();
+    let lines = cat_file_batch_check(repo_root, &queries)?;
+    if lines.len() != entries.len() {
+        bail!("git cat-file returned an unexpected staged blob count");
+    }
+    entries
+        .into_iter()
+        .zip(lines)
+        .map(|((path, expected_oid), line)| {
+            let mut parts = line.split_whitespace();
+            let oid = parts.next().context("missing staged blob object id")?;
+            let kind = parts.next().context("missing staged blob object type")?;
+            let size = parts
+                .next()
+                .context("missing staged blob object size")?
+                .parse::<u64>()
+                .context("invalid staged blob object size")?;
+            if oid != expected_oid || kind != "blob" {
+                bail!("unexpected staged object metadata for {}", path.display());
+            }
+            Ok(StagedBlob { path, size })
+        })
+        .collect()
 }
 
 const GITLINK_MODE: &str = "160000";
@@ -68,8 +109,8 @@ const GITLINK_MODE: &str = "160000";
 /// Parses `git diff --raw -z` output: records of
 /// `:<old-mode> <new-mode> <old-oid> <new-oid> <status>\0<path>\0`, where
 /// rename/copy records carry two path tokens (source, then destination).
-fn parse_staged_raw_entries(stdout: &[u8]) -> Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
+fn parse_staged_raw_entries(stdout: &[u8]) -> Result<Vec<(PathBuf, String)>> {
+    let mut entries = Vec::new();
     let mut tokens = stdout.split(|&b| b == 0);
     while let Some(meta) = tokens.next() {
         if meta.is_empty() {
@@ -80,7 +121,7 @@ fn parse_staged_raw_entries(stdout: &[u8]) -> Result<Vec<PathBuf>> {
         let _old_mode = fields.next();
         let new_mode = fields.next().unwrap_or("");
         let _old_oid = fields.next();
-        let _new_oid = fields.next();
+        let new_oid = fields.next().unwrap_or("");
         let status = fields.next().unwrap_or("");
 
         let path_tokens = if status.starts_with('R') || status.starts_with('C') {
@@ -99,11 +140,11 @@ fn parse_staged_raw_entries(stdout: &[u8]) -> Result<Vec<PathBuf>> {
             continue;
         }
         let s = std::str::from_utf8(dest).context("git path utf-8")?;
-        if !s.is_empty() {
-            paths.push(PathBuf::from(s));
+        if !s.is_empty() && is_full_hex_oid(new_oid) {
+            entries.push((PathBuf::from(s), new_oid.to_string()));
         }
     }
-    Ok(paths)
+    Ok(entries)
 }
 
 pub fn staged_file_bytes(repo_root: &Path, rel_path: &Path) -> Result<Vec<u8>> {
@@ -247,8 +288,51 @@ fn resolve_history_blobs(
     repo_root: &Path,
     candidates: Vec<(String, PathBuf)>,
 ) -> Result<Vec<GitHistoryBlob>> {
+    let queries = candidates
+        .iter()
+        .map(|(commit, path)| format!("{}:{}", commit, path.to_string_lossy().replace('\\', "/")))
+        .collect::<Vec<_>>();
+    let lines = cat_file_batch_check(repo_root, &queries)?;
+
+    let mut seen_oids = HashSet::new();
+    let mut blobs = Vec::new();
+    for ((commit, path), line) in candidates.into_iter().zip(lines) {
+        let mut parts = line.split_whitespace();
+        let Some(oid) = parts.next() else {
+            continue;
+        };
+        let Some(kind) = parts.next() else {
+            continue;
+        };
+        let Some(size) = parts.next().and_then(|value| value.parse::<u64>().ok()) else {
+            continue;
+        };
+        if kind != "blob" {
+            continue;
+        }
+        // History scanning is content-oriented: scan each unique blob once, while
+        // retaining one representative commit/path label for the emitted finding.
+        if seen_oids.insert(oid.to_string()) {
+            blobs.push(GitHistoryBlob {
+                commit,
+                oid: oid.to_string(),
+                path,
+                size,
+            });
+        }
+    }
+    Ok(blobs)
+}
+
+fn cat_file_batch_check(repo_root: &Path, queries: &[String]) -> Result<Vec<String>> {
+    if queries.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut child = Command::new("git")
-        .args(["cat-file", "--batch-check=%(objectname) %(objecttype)"])
+        .args([
+            "cat-file",
+            "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+        ])
         .current_dir(repo_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -259,12 +343,10 @@ fn resolve_history_blobs(
     // Writing everything before reading would deadlock once the queries and
     // responses both exceed the OS pipe buffer (large histories).
     let mut stdin = child.stdin.take().context("git cat-file stdin")?;
-    let queries: String = candidates
-        .iter()
-        .map(|(commit, path)| format!("{}:{}\n", commit, path.to_string_lossy().replace('\\', "/")))
-        .collect();
+    let mut query_body = queries.join("\n");
+    query_body.push('\n');
     let writer = std::thread::spawn(move || -> std::io::Result<()> {
-        stdin.write_all(queries.as_bytes())?;
+        stdin.write_all(query_body.as_bytes())?;
         // Drop stdin to close the pipe so git can finish.
         Ok(())
     });
@@ -280,35 +362,15 @@ fn resolve_history_blobs(
     }
     write_result.context("write git cat-file query")?;
 
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut seen_oids = HashSet::new();
-    let mut blobs = Vec::new();
-    for ((commit, path), line) in candidates.into_iter().zip(stdout.lines()) {
-        let mut parts = line.split_whitespace();
-        let Some(oid) = parts.next() else {
-            continue;
-        };
-        let Some(kind) = parts.next() else {
-            continue;
-        };
-        if kind != "blob" {
-            continue;
-        }
-        // History scanning is content-oriented: scan each unique blob once, while
-        // retaining one representative commit/path label for the emitted finding.
-        if seen_oids.insert(oid.to_string()) {
-            blobs.push(GitHistoryBlob {
-                commit,
-                oid: oid.to_string(),
-                path,
-            });
-        }
-    }
-    Ok(blobs)
+    Ok(String::from_utf8(out.stdout)
+        .context("git cat-file output was not UTF-8")?
+        .lines()
+        .map(ToOwned::to_owned)
+        .collect())
 }
 
 fn is_full_hex_oid(s: &str) -> bool {
-    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+    matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 pub fn history_blob_bytes(repo_root: &Path, oid: &str) -> Result<Vec<u8>> {
@@ -350,6 +412,7 @@ mod tests {
             commit: "1234567890abcdef".into(),
             oid: "abc".into(),
             path: PathBuf::from("secret.txt"),
+            size: 1,
         };
 
         assert_eq!(blob.short_commit(), "1234567890ab");
@@ -361,6 +424,7 @@ mod tests {
             commit: "abc123".into(),
             oid: "abc".into(),
             path: PathBuf::from("secret.txt"),
+            size: 1,
         };
 
         assert_eq!(blob.short_commit(), "abc123");
@@ -416,14 +480,24 @@ mod tests {
 
     #[test]
     fn parse_staged_raw_entries_skips_gitlinks() {
-        let raw = concat!(
-            ":100644 100644 1111111 2222222 M\0src/app.rs\0",
-            ":160000 160000 3333333 4444444 M\0vendor/submodule\0",
-            ":000000 160000 0000000 5555555 A\0vendor/new-submodule\0",
-            ":000000 100644 0000000 6666666 A\0new.txt\0",
+        let raw = format!(
+            ":100644 100644 {old} {app} M\0src/app.rs\0\
+             :160000 160000 {old} {submodule} M\0vendor/submodule\0\
+             :000000 160000 {zero} {new_submodule} A\0vendor/new-submodule\0\
+             :000000 100644 {zero} {new_file} A\0new.txt\0",
+            old = "1".repeat(40),
+            app = "2".repeat(40),
+            submodule = "3".repeat(40),
+            new_submodule = "4".repeat(40),
+            new_file = "5".repeat(40),
+            zero = "0".repeat(40),
         );
 
-        let paths = parse_staged_raw_entries(raw.as_bytes()).unwrap();
+        let entries = parse_staged_raw_entries(raw.as_bytes()).unwrap();
+        let paths = entries
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect::<Vec<_>>();
 
         assert_eq!(
             paths,
@@ -433,12 +507,18 @@ mod tests {
 
     #[test]
     fn parse_staged_raw_entries_uses_rename_destination() {
-        let raw = concat!(
-            ":100644 100644 1111111 1111111 R100\0old/name.txt\0new/name.txt\0",
-            ":100644 100644 2222222 2222222 C75\0base.txt\0copy.txt\0",
+        let raw = format!(
+            ":100644 100644 {one} {one} R100\0old/name.txt\0new/name.txt\0\
+             :100644 100644 {two} {two} C75\0base.txt\0copy.txt\0",
+            one = "1".repeat(40),
+            two = "2".repeat(40),
         );
 
-        let paths = parse_staged_raw_entries(raw.as_bytes()).unwrap();
+        let entries = parse_staged_raw_entries(raw.as_bytes()).unwrap();
+        let paths = entries
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect::<Vec<_>>();
 
         assert_eq!(
             paths,
@@ -449,7 +529,31 @@ mod tests {
     #[test]
     fn is_full_hex_oid_requires_forty_hex_chars() {
         assert!(is_full_hex_oid("abcdefabcdefabcdefabcdefabcdefabcdefabcd"));
+        assert!(is_full_hex_oid(&"a".repeat(64)));
         assert!(!is_full_hex_oid("abcdef"));
         assert!(!is_full_hex_oid("gggggggggggggggggggggggggggggggggggggggg"));
+    }
+
+    #[test]
+    fn staged_blobs_include_object_size_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let init = Command::new("git")
+            .arg("init")
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+        std::fs::write(dir.path().join("large.txt"), b"123456789").unwrap();
+        let add = Command::new("git")
+            .args(["add", "large.txt"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(add.status.success());
+
+        let blobs = staged_blobs(dir.path()).unwrap();
+        assert_eq!(blobs.len(), 1);
+        assert_eq!(blobs[0].path, Path::new("large.txt"));
+        assert_eq!(blobs[0].size, 9);
     }
 }

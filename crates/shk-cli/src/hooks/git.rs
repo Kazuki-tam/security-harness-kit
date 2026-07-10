@@ -1,6 +1,6 @@
+use crate::safety;
 use anyhow::{Context, Result, bail};
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 
 const MANAGED_START: &str = "# shk-managed-start\n";
@@ -25,6 +25,7 @@ pub fn install_pre_commit(repo_root: &Path) -> Result<()> {
         );
     }
     let hook_path = hooks_dir.join("pre-commit");
+    safety::ensure_write_path_within(&repo_root, &hook_path)?;
     let block = format!("{MANAGED_START}{HOOK_BODY}{MANAGED_END}");
     if hook_path.exists() {
         let meta = fs::metadata(&hook_path)
@@ -37,7 +38,7 @@ pub fn install_pre_commit(repo_root: &Path) -> Result<()> {
         if existing.contains(MANAGED_START) && existing.contains(MANAGED_END) {
             let updated = replace_managed_block(&existing, &block);
             if updated != existing {
-                fs::write(&hook_path, updated)?;
+                crate::fs_atomic::write_atomic(&hook_path, updated.as_bytes())?;
             }
             ensure_executable(&hook_path)?;
             return Ok(());
@@ -50,18 +51,20 @@ pub fn install_pre_commit(repo_root: &Path) -> Result<()> {
                 existing.lines().next().unwrap_or("").trim()
             );
         }
-        let mut f = fs::OpenOptions::new().append(true).open(&hook_path)?;
-        if !existing.ends_with('\n') {
-            writeln!(f)?;
+        let needs_newline = !existing.ends_with('\n');
+        let mut updated = existing;
+        if needs_newline {
+            updated.push('\n');
         }
-        f.write_all(block.as_bytes())?;
+        updated.push_str(&block);
+        crate::fs_atomic::write_atomic(&hook_path, updated.as_bytes())?;
         ensure_executable(&hook_path)?;
         return Ok(());
     }
     let mut script = String::new();
     script.push_str("#!/bin/sh\n");
     script.push_str(&block);
-    fs::write(&hook_path, script)?;
+    crate::fs_atomic::write_atomic(&hook_path, script.as_bytes())?;
     ensure_executable(&hook_path)?;
     Ok(())
 }

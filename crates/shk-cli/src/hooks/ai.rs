@@ -1,4 +1,5 @@
 use crate::args::AiTool;
+use crate::safety;
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde_json::{Value, json};
@@ -177,6 +178,14 @@ pub fn install_ai_with_summaries(
 
     for t in tools {
         let path = resolve_ai_config_path(t, &cwd, opts.global)?;
+        if !opts.dry_run {
+            let base = if opts.global {
+                dirs::home_dir().context("home directory not found")?
+            } else {
+                cwd.clone()
+            };
+            safety::ensure_write_path_within(&base, &path)?;
+        }
         let summary = apply_tool(&path, t, opts, !opts.global)?;
         summaries.push(format!("{}: {}", path.display(), summary.trim()));
     }
@@ -205,6 +214,14 @@ pub fn configure_ai_with_summaries(cwd: &Path, opts: ConfigureAiOptions) -> Resu
         AiTool::Windsurf,
     ] {
         let path = resolve_ai_config_path(tool, &cwd, opts.global)?;
+        if !opts.dry_run {
+            let base = if opts.global {
+                dirs::home_dir().context("home directory not found")?
+            } else {
+                cwd.clone()
+            };
+            safety::ensure_write_path_within(&base, &path)?;
+        }
         if scan_hooks_enabled_for(&opts, tool) {
             let summary = apply_tool(&path, tool, install_opts, !opts.global)?;
             summaries.push(format!("{}: {}", path.display(), summary.trim()));

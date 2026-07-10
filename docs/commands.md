@@ -246,6 +246,8 @@ file path (`shk mask prompt.txt`).
 
 Office document masking supports `.docx`, `.xlsx`, and `.pptx` files and always requires `--output` so the original document is left unchanged. JSON output reports `[DOCUMENT_WRITTEN]` as `masked_content` and includes findings from the rewritten document. PDF masking is not supported; use `shk scan` to detect text-layer PDF findings and convert or redact PDFs with a dedicated PDF tool.
 
+Office output is transactional: `shk` finalizes and syncs a sibling temporary archive before replacing `--output`. ZIP entry count and expanded sizes are bounded to prevent compressed documents from exhausting memory or disk.
+
 ## `shk clipboard`
 
 Scan or mask the OS clipboard text. The clipboard is treated like any other untrusted input: `clipboard scan` never prints raw matched values, and `clipboard mask` only outputs redacted text.

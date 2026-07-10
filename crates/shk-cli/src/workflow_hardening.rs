@@ -91,11 +91,11 @@ pub fn scan_workflows(root: &Path) -> Vec<WorkflowFileStatus> {
 }
 
 /// Apply `persist-credentials: false` hardening to one workflow file in place.
-pub fn fix_file(path: &Path) -> std::io::Result<usize> {
+pub fn fix_file(path: &Path) -> anyhow::Result<usize> {
     let content = fs::read_to_string(path)?;
     let (fixed, count) = fix_content(&content);
     if count > 0 {
-        fs::write(path, fixed)?;
+        crate::fs_atomic::write_atomic(path, fixed.as_bytes())?;
     }
     Ok(count)
 }
@@ -116,6 +116,7 @@ pub fn fix_all(root: &Path) -> anyhow::Result<Vec<WorkflowFixResult>> {
         }
         let file_path = root.join(&status.relative_path);
         crate::safety::ensure_writable_path_allowed(&file_path)?;
+        crate::safety::ensure_write_path_within(root, &file_path)?;
         let fixed_steps = fix_file(&file_path)?;
         if fixed_steps > 0 {
             fixes.push(WorkflowFixResult {

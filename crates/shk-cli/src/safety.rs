@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
-use std::path::{Path, PathBuf};
+use std::io::ErrorKind;
+use std::path::{Component, Path, PathBuf};
 
 const POLICY_FILE: &str = "shk.toml";
 
@@ -67,6 +68,66 @@ pub fn ensure_writable_path_allowed(path: &Path) -> Result<()> {
             "refusing to write protected home configuration file `{}`",
             path.display()
         );
+    }
+    Ok(())
+}
+
+/// Rejects project/global managed writes that would traverse a symlink or leave
+/// their declared base directory. Call this immediately before creating parent
+/// directories or replacing the destination.
+pub fn ensure_write_path_within(base: &Path, path: &Path) -> Result<()> {
+    let base_input = if base.is_absolute() {
+        base.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("current directory for managed write check")?
+            .join(base)
+    };
+    let base = std::fs::canonicalize(&base_input)
+        .with_context(|| format!("canonicalize write base {}", base_input.display()))?;
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_input.join(path)
+    };
+    let rel = candidate
+        .strip_prefix(&base_input)
+        .or_else(|_| candidate.strip_prefix(&base))
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "refusing to write outside managed root {}: {}",
+                base.display(),
+                candidate.display()
+            )
+        })?;
+
+    let mut current = base.clone();
+    for component in rel.components() {
+        match component {
+            Component::Normal(name) => current.push(name),
+            Component::CurDir => continue,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                bail!(
+                    "refusing write path with traversal outside managed root {}: {}",
+                    base.display(),
+                    candidate.display()
+                );
+            }
+        }
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                bail!(
+                    "refusing to write through symbolic link {}",
+                    current.display()
+                );
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("inspect write path {}", current.display()));
+            }
+        }
     }
     Ok(())
 }
@@ -231,5 +292,35 @@ mod tests {
             .expect("canonicalize missing leaf");
 
         assert!(path.ends_with("existing/missing.txt"));
+    }
+
+    #[test]
+    fn ensure_write_path_within_accepts_missing_descendant() {
+        let root = tempdir().expect("temp dir");
+        let path = root.path().join(".agents/skills/shk/SKILL.md");
+
+        ensure_write_path_within(root.path(), &path).expect("managed descendant");
+    }
+
+    #[test]
+    fn ensure_write_path_within_rejects_parent_traversal() {
+        let root = tempdir().expect("temp dir");
+        let path = root.path().join("../outside.txt");
+
+        let err = ensure_write_path_within(root.path(), &path).expect_err("outside path");
+        assert!(err.to_string().contains("refusing"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_write_path_within_rejects_symlink_component() {
+        let root = tempdir().expect("temp dir");
+        let outside = tempdir().expect("outside dir");
+        std::os::unix::fs::symlink(outside.path(), root.path().join(".agents"))
+            .expect("create symlink");
+        let path = root.path().join(".agents/skills/shk/SKILL.md");
+
+        let err = ensure_write_path_within(root.path(), &path).expect_err("symlink path");
+        assert!(err.to_string().contains("symbolic link"));
     }
 }

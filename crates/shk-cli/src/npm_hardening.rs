@@ -1,3 +1,4 @@
+use crate::{fs_atomic, safety};
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::ffi::OsStr;
@@ -237,14 +238,14 @@ pub fn apply(root: &Path) -> Result<Option<NpmHardeningStatus>> {
         let existing = fs::read_to_string(&before.npmrc_path).unwrap_or_default();
         let updated = upsert_npmrc_settings(&existing, &before.package_managers);
         if updated != existing {
-            fs::write(&before.npmrc_path, updated)?;
+            write_managed(root, &before.npmrc_path, updated.as_bytes())?;
         }
     }
     if before.package_managers.contains(&PackageManager::Pnpm) {
         let existing = fs::read_to_string(&before.pnpm_workspace_path).unwrap_or_default();
         let updated = upsert_pnpm_workspace_settings(&existing);
         if updated != existing {
-            fs::write(&before.pnpm_workspace_path, updated)?;
+            write_managed(root, &before.pnpm_workspace_path, updated.as_bytes())?;
         }
     }
     if before.package_managers.contains(&PackageManager::Yarn) {
@@ -255,7 +256,7 @@ pub fn apply(root: &Path) -> Result<Option<NpmHardeningStatus>> {
             &YARN_MIN_RELEASE_AGE_MINUTES.to_string(),
         );
         if updated != existing {
-            fs::write(&before.yarnrc_path, updated)?;
+            write_managed(root, &before.yarnrc_path, updated.as_bytes())?;
         }
     }
     if before.package_managers.contains(&PackageManager::Bun) {
@@ -263,7 +264,7 @@ pub fn apply(root: &Path) -> Result<Option<NpmHardeningStatus>> {
         let updated = upsert_bunfig_min_release_age(&existing)
             .with_context(|| format!("update {}", before.bunfig_path.display()))?;
         if updated != existing {
-            fs::write(&before.bunfig_path, updated)?;
+            write_managed(root, &before.bunfig_path, updated.as_bytes())?;
         }
     }
 
@@ -284,7 +285,7 @@ pub fn unapply(root: &Path) -> Result<Option<NpmHardeningStatus>> {
         let existing = fs::read_to_string(&before.npmrc_path).unwrap_or_default();
         let updated = remove_npmrc_settings(&existing, &before.package_managers);
         if updated != existing {
-            fs::write(&before.npmrc_path, updated)?;
+            write_managed(root, &before.npmrc_path, updated.as_bytes())?;
         }
     }
     if before.package_managers.contains(&PackageManager::Pnpm) {
@@ -292,9 +293,9 @@ pub fn unapply(root: &Path) -> Result<Option<NpmHardeningStatus>> {
         let updated = remove_pnpm_workspace_settings(&existing);
         if updated != existing {
             if updated.trim().is_empty() {
-                fs::remove_file(&before.pnpm_workspace_path)?;
+                remove_managed(root, &before.pnpm_workspace_path)?;
             } else {
-                fs::write(&before.pnpm_workspace_path, updated)?;
+                write_managed(root, &before.pnpm_workspace_path, updated.as_bytes())?;
             }
         }
     }
@@ -302,18 +303,30 @@ pub fn unapply(root: &Path) -> Result<Option<NpmHardeningStatus>> {
         let existing = fs::read_to_string(&before.yarnrc_path).unwrap_or_default();
         let updated = remove_yaml_line(&existing, YARN_MIN_RELEASE_AGE_KEY);
         if updated != existing {
-            fs::write(&before.yarnrc_path, updated)?;
+            write_managed(root, &before.yarnrc_path, updated.as_bytes())?;
         }
     }
     if before.package_managers.contains(&PackageManager::Bun) {
         let existing = fs::read_to_string(&before.bunfig_path).unwrap_or_default();
         let updated = remove_toml_table_key(&existing, "install", "minimumReleaseAge");
         if updated != existing {
-            fs::write(&before.bunfig_path, updated)?;
+            write_managed(root, &before.bunfig_path, updated.as_bytes())?;
         }
     }
 
     Ok(Some(status(root)))
+}
+
+fn write_managed(root: &Path, path: &Path, body: &[u8]) -> Result<()> {
+    safety::ensure_writable_path_allowed(path)?;
+    safety::ensure_write_path_within(root, path)?;
+    fs_atomic::write_atomic(path, body)
+}
+
+fn remove_managed(root: &Path, path: &Path) -> Result<()> {
+    safety::ensure_writable_path_allowed(path)?;
+    safety::ensure_write_path_within(root, path)?;
+    fs::remove_file(path).with_context(|| format!("remove {}", path.display()))
 }
 
 fn upsert_npmrc_settings(input: &str, package_managers: &[PackageManager]) -> String {
