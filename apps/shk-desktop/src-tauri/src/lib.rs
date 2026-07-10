@@ -1,7 +1,8 @@
 use shk_cli::desktop_api::{
     self, ActionResult, ApplyAiHookSettingsOptions, ApplyNpmHardeningOptions,
-    ApplyRecommendedFixesOptions, AuditReportOptions, FixDoctorIgnoreOptions, InitPolicyOptions,
-    InstallAiHooksOptions, InstallSkillsOptions, ProjectStatus,
+    ApplyRecommendedFixesOptions, AuditReportOptions, CloneRepositoryResult,
+    FixDoctorIgnoreOptions, InitPolicyOptions, InstallAiHooksOptions, InstallSkillsOptions,
+    ProjectStatus,
 };
 use shk_core::ScanJsonReport;
 use shk_core::policy::ColorMode;
@@ -137,6 +138,17 @@ async fn audit_report(
     options: AuditReportOptions,
 ) -> Result<desktop_api::AuditReport, AppError> {
     run_blocking(move || desktop_api::audit_report(&path, options).map_err(map_err)).await
+}
+
+#[tauri::command]
+async fn clone_repository(
+    remote_url: String,
+    destination_parent: String,
+) -> Result<CloneRepositoryResult, AppError> {
+    run_blocking(move || {
+        desktop_api::clone_repository(&remote_url, &destination_parent).map_err(map_err)
+    })
+    .await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -354,6 +366,7 @@ pub fn run() {
             apply_npm_hardening,
             install_skills,
             audit_report,
+            clone_repository,
             open_in_ide,
         ])
         .run(tauri::generate_context!())

@@ -1,4 +1,4 @@
-import { Copy, FolderOpen, MoreHorizontal, Pencil, Plus, ShieldCheck, Trash2 } from "lucide-react";
+import { Copy, FolderOpen, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
@@ -11,12 +11,14 @@ import { useI18n } from "../i18n";
 import type { Project } from "../types";
 import { actionableCount } from "../scan";
 import { formatRelativeTime, shortenPath } from "../utils";
+import { BrandLogo } from "./BrandLogo";
 import { Button } from "./Button";
 
 type Props = {
   projects: Project[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onShowWelcome: () => void;
   onAdd: () => void;
   onRemove: (id: string) => void;
   onRename: (id: string, name: string) => void;
@@ -27,6 +29,7 @@ export function Sidebar({
   projects,
   selectedId,
   onSelect,
+  onShowWelcome,
   onAdd,
   onRemove,
   onRename,
@@ -38,14 +41,19 @@ export function Sidebar({
   return (
     <aside className="flex h-full w-[268px] shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)]/80 backdrop-blur">
       <div className="shk-drag h-11 shrink-0" aria-hidden="true" />
-      <div className="shk-drag flex items-center gap-3 px-5 pt-3 pb-5">
-        <div className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-sky-400/30 to-violet-400/20 text-sky-200 ring-1 ring-inset ring-sky-300/30">
-          <ShieldCheck size={18} aria-hidden="true" />
-        </div>
-        <div className="leading-tight">
-          <h1 className="text-[15px] font-semibold tracking-tight text-white">shk</h1>
-          <p className="text-[11px] text-[var(--color-muted)]">Security Harness Kit</p>
-        </div>
+      <div className="shk-drag px-3 pt-1 pb-3">
+        <button
+          type="button"
+          onClick={onShowWelcome}
+          aria-label={messages.topBar.welcome}
+          className="shk-no-drag flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left transition hover:bg-surface-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
+        >
+          <BrandLogo className="h-9 w-9" />
+          <span className="leading-tight">
+            <span className="block text-[15px] font-semibold tracking-tight text-white">shk</span>
+            <span className="text-muted block text-[11px]">Security Harness Kit</span>
+          </span>
+        </button>
       </div>
 
       {projects.length > 0 && (

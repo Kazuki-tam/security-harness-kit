@@ -6,6 +6,7 @@ export type Messages = {
   app: {
     selectFolder: string;
     selectFolderForIde: string;
+    selectCloneDestination: string;
   };
   common: {
     close: string;
@@ -55,6 +56,18 @@ export type Messages = {
     recentProjects: string;
     showAll: string;
   };
+  cloneRepository: {
+    action: string;
+    title: string;
+    description: string;
+    urlLabel: string;
+    urlPlaceholder: string;
+    destinationHint: string;
+    clone: string;
+    cloning: string;
+    invalidUrl: string;
+    failed: string;
+  };
   scan: {
     project: string;
     scanning: string;
@@ -101,6 +114,7 @@ export type Messages = {
     shortcuts: string;
     shortcutOpen: string;
     shortcutRescan: string;
+    shortcutWelcome: string;
     shortcutClose: string;
     footer: string;
   };
@@ -136,6 +150,19 @@ export type Messages = {
     openFindings: string;
     moreEvents: string;
     moreEventsHint: string;
+    reasonBreakdown: string;
+    actionCategoryBreakdown: string;
+    ruleBreakdown: string;
+    ruleBreakdownHint: string;
+    showDetails: string;
+    hideDetails: string;
+    detailHook: string;
+    detailRuleIds: string;
+    detailKinds: string;
+    detailSuppressed: string;
+    detailDeduplicated: string;
+    hookLabels: Record<string, string>;
+    kindLabels: Record<string, string>;
     reasonLabels: Record<string, string>;
     toolNames: Record<string, string>;
     actionCategories: Record<string, string>;

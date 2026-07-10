@@ -14,6 +14,7 @@ import {
   applyAiHookSettings,
   applyNpmHardening,
   applyRecommendedFixes,
+  cloneRepository,
   fetchProjectStatus,
   fixDoctorIgnore,
   initPolicy,
@@ -39,12 +40,16 @@ function App() {
     renameProject,
   } = useProjects();
 
+  const [currentView, setCurrentView] = useState<"welcome" | "project">(() =>
+    selectedProject ? "project" : "welcome",
+  );
   const [scanStates, setScanStates] = useState<Record<string, ScanState>>({});
   const [projectStatusStates, setProjectStatusStates] = useState<
     Record<string, ProjectStatusState>
   >({});
   const [actionState, setActionState] = useState<ActionState>({ status: "idle" });
   const { preferredIde, setPreferredIde } = usePreferredIde();
+  const activeProject = currentView === "project" ? selectedProject : null;
 
   const currentScanState: ScanState = selectedId
     ? (scanStates[selectedId] ?? { status: "idle" })
@@ -78,9 +83,9 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!selectedProject) return;
-    void refreshProjectStatus(selectedProject.id, selectedProject.path);
-  }, [selectedProject?.id, selectedProject?.path, refreshProjectStatus]);
+    if (!activeProject) return;
+    void refreshProjectStatus(activeProject.id, activeProject.path);
+  }, [activeProject?.id, activeProject?.path, refreshProjectStatus]);
 
   const dismissActionFeedback = useCallback(() => {
     setActionState({ status: "idle" });
@@ -88,12 +93,12 @@ function App() {
 
   const runSetupAction = useCallback(
     async (runner: () => Promise<{ success: boolean; message: string; details: string[] }>) => {
-      if (!selectedProject) return;
+      if (!activeProject) return;
       setActionState({ status: "running" });
       try {
         const result = await runner();
         setActionState({ status: "done", result });
-        await refreshProjectStatus(selectedProject.id, selectedProject.path);
+        await refreshProjectStatus(activeProject.id, activeProject.path);
       } catch (error) {
         setActionState({
           status: "error",
@@ -101,7 +106,19 @@ function App() {
         });
       }
     },
-    [refreshProjectStatus, selectedProject],
+    [activeProject, refreshProjectStatus],
+  );
+
+  const showWelcome = useCallback(() => {
+    setCurrentView("welcome");
+  }, []);
+
+  const showProject = useCallback(
+    (id: string) => {
+      selectProject(id);
+      setCurrentView("project");
+    },
+    [selectProject],
   );
 
   const openFolder = useCallback(async () => {
@@ -113,17 +130,35 @@ function App() {
       });
       if (typeof path === "string" && path) {
         addProject(path);
+        setCurrentView("project");
       }
     } catch (error) {
       console.error("failed to open folder:", error);
     }
   }, [addProject, messages.app.selectFolder]);
 
+  const cloneGitRepository = useCallback(
+    async (remoteUrl: string): Promise<boolean> => {
+      const destinationParent = await open({
+        directory: true,
+        multiple: false,
+        title: messages.app.selectCloneDestination,
+      });
+      if (typeof destinationParent !== "string" || !destinationParent) return false;
+
+      const result = await cloneRepository(remoteUrl, destinationParent);
+      addProject(result.path);
+      setCurrentView("project");
+      return true;
+    },
+    [addProject, messages.app.selectCloneDestination],
+  );
+
   const openProjectInIde = useCallback(
     async (ide: PreferredIde) => {
       setPreferredIde(ide);
       try {
-        let path = selectedProject?.path;
+        let path = activeProject?.path;
         if (!path) {
           const picked = await open({
             directory: true,
@@ -133,20 +168,21 @@ function App() {
           if (typeof picked !== "string" || !picked) return;
           path = picked;
           addProject(path);
+          setCurrentView("project");
         }
         await openInIde(path, ide);
       } catch (error) {
         console.error("failed to open project in IDE:", error);
       }
     },
-    [addProject, messages.app.selectFolderForIde, selectedProject?.path, setPreferredIde],
+    [activeProject?.path, addProject, messages.app.selectFolderForIde, setPreferredIde],
   );
 
   const runScan = useCallback(async () => {
-    if (!selectedProject) return;
+    if (!activeProject) return;
     if (currentScanState.status === "running") return;
 
-    const projectId = selectedProject.id;
+    const projectId = activeProject.id;
     const previousResult =
       currentScanState.status === "done"
         ? { report: currentScanState.report, finishedAt: currentScanState.finishedAt }
@@ -160,7 +196,7 @@ function App() {
     });
     try {
       const report = await invoke<ScanReport>("scan_path", {
-        path: selectedProject.path,
+        path: activeProject.path,
       });
       const finishedAt = new Date().toISOString();
       setScanStateFor(projectId, { status: "done", report, finishedAt });
@@ -181,10 +217,20 @@ function App() {
         previous: previousResult,
       });
     }
-  }, [currentScanState, selectedProject, setScanStateFor, updateProjectSummary]);
+  }, [activeProject, currentScanState, setScanStateFor, updateProjectSummary]);
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      const isEditing =
+        target?.isContentEditable ||
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT";
+      if (event.defaultPrevented || isEditing || document.querySelector('[aria-modal="true"]')) {
+        return;
+      }
+
       const cmdOrCtrl = event.metaKey || event.ctrlKey;
       if (cmdOrCtrl && event.key.toLowerCase() === "o") {
         event.preventDefault();
@@ -194,10 +240,14 @@ function App() {
         event.preventDefault();
         void runScan();
       }
+      if (cmdOrCtrl && event.shiftKey && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        showWelcome();
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [openFolder, runScan]);
+  }, [openFolder, runScan, showWelcome]);
 
   const handleRemove = useCallback(
     (id: string) => {
@@ -218,11 +268,11 @@ function App() {
     [removeProject],
   );
 
-  const setupHandlers = selectedProject
+  const setupHandlers = activeProject
     ? {
         onQuickSetup: (fixIds: string[], ignoreTargets: string[]) =>
           runSetupAction(async (): Promise<ActionResult> => {
-            const path = selectedProject.path;
+            const path = activeProject.path;
             let status = await fetchProjectStatus(path);
             const hadPolicy = Boolean(status?.policy.exists);
 
@@ -244,17 +294,17 @@ function App() {
             return applyRecommendedFixes(path, { fixIds: ids, ignoreTargets });
           }),
         onInitPolicy: (request: { strict: boolean; force: boolean }) =>
-          runSetupAction(() => initPolicy(selectedProject.path, request)),
+          runSetupAction(() => initPolicy(activeProject.path, request)),
         onFixDoctorIgnore: (targets: string[]) =>
-          runSetupAction(() => fixDoctorIgnore(selectedProject.path, { targets })),
-        onInstallPreCommit: () => runSetupAction(() => installPreCommitHook(selectedProject.path)),
+          runSetupAction(() => fixDoctorIgnore(activeProject.path, { targets })),
+        onInstallPreCommit: () => runSetupAction(() => installPreCommitHook(activeProject.path)),
         onInstallAiHooks: (selection: AiHookSetupSelection) =>
-          runSetupAction(() => applyAiHookSettings(selectedProject.path, selection)),
+          runSetupAction(() => applyAiHookSettings(activeProject.path, selection)),
         onApplyNpmHardening: (enabled: boolean) =>
-          runSetupAction(() => applyNpmHardening(selectedProject.path, { enabled })),
+          runSetupAction(() => applyNpmHardening(activeProject.path, { enabled })),
         onInstallSkills: () =>
           runSetupAction(() =>
-            installSkills(selectedProject.path, {
+            installSkills(activeProject.path, {
               global: false,
               dryRun: false,
               force: true,
@@ -271,8 +321,9 @@ function App() {
       {showSidebar && (
         <Sidebar
           projects={projects}
-          selectedId={selectedId}
-          onSelect={selectProject}
+          selectedId={activeProject?.id ?? null}
+          onSelect={showProject}
+          onShowWelcome={showWelcome}
           onAdd={openFolder}
           onRemove={handleRemove}
           onRename={renameProject}
@@ -282,16 +333,16 @@ function App() {
 
       <main className="flex min-w-0 flex-1 flex-col">
         <TopBar
-          project={selectedProject}
+          project={activeProject}
           reserveWindowControls={!showSidebar}
           preferredIde={preferredIde}
           onOpenInIde={openProjectInIde}
         />
 
-        {selectedProject ? (
+        {activeProject ? (
           <ScanWorkspace
-            key={selectedProject.id}
-            project={selectedProject}
+            key={activeProject.id}
+            project={activeProject}
             scanState={currentScanState}
             projectStatus={currentProjectStatus}
             actionState={actionState}
@@ -304,7 +355,8 @@ function App() {
             recentProjects={recentForWelcome}
             totalProjects={projects.length}
             onOpenFolder={openFolder}
-            onSelect={selectProject}
+            onCloneRepository={cloneGitRepository}
+            onSelect={showProject}
           />
         )}
       </main>

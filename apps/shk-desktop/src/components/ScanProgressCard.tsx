@@ -22,7 +22,7 @@ export function ScanProgressCard({ startedAt, hasPreviousResults }: Props) {
   }, [startedAt]);
 
   return (
-    <section className="overflow-hidden rounded-xl border border-sky-400/30 bg-sky-500/10 text-sky-100 shadow-[0_18px_70px_rgba(56,189,248,0.08)]">
+    <section className="overflow-hidden rounded-xl border border-sky-400/30 bg-sky-500/10 text-sky-100 shadow-[0_18px_70px_rgba(44,202,251,0.08)]">
       <div role="status" aria-live="polite" className="sr-only">
         {m.progressTitle}
       </div>

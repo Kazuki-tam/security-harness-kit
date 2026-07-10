@@ -70,6 +70,7 @@ export function HelpModal({ open, onClose }: Props) {
           <dl className="mt-3 grid gap-1.5">
             <Shortcut label={m.shortcutOpen} keys={["⌘", "O"]} />
             <Shortcut label={m.shortcutRescan} keys={["⌘", "R"]} />
+            <Shortcut label={m.shortcutWelcome} keys={["⌘", "⇧", "N"]} />
             <Shortcut label={m.shortcutClose} keys={["Esc"]} />
           </dl>
         </section>

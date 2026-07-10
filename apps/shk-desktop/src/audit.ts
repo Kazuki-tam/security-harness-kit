@@ -1,5 +1,11 @@
 import { asSeverity, type Severity } from "./scan";
-import type { AuditRecentRow, AuditReport, AuditReportOptions, AuditState } from "./types";
+import type {
+  AuditCountRow,
+  AuditRecentRow,
+  AuditReport,
+  AuditReportOptions,
+  AuditState,
+} from "./types";
 import { fetchAuditReport } from "./project";
 
 export const DEFAULT_AUDIT_REPORT_LIMIT = 10;
@@ -12,8 +18,97 @@ export function isBlockedAuditReason(reason: string | undefined): reason is Bloc
   return reason !== undefined && BLOCKED_AUDIT_REASONS.has(reason);
 }
 
+export type BlockedBreakdowns = {
+  reasons: AuditCountRow[];
+  actionCategories: AuditCountRow[];
+  rules: AuditCountRow[];
+};
+
+export type AuditDetailField = {
+  label: string;
+  value: string;
+};
+
+export type AuditDetailLabels = {
+  detailHook: string;
+  detailRuleIds: string;
+  detailKinds: string;
+  detailSuppressed: string;
+  detailDeduplicated: string;
+  hookLabels: Record<string, string>;
+  kindLabels: Record<string, string>;
+};
+
 export function blockedRecentRows(report: AuditReport): AuditRecentRow[] {
   return report.recent.filter((row) => isBlockedAuditReason(row.reason));
+}
+
+export function blockedBreakdowns(report: AuditReport): BlockedBreakdowns {
+  return {
+    reasons: report.by_reason.filter((row) => isBlockedAuditReason(row.label)),
+    actionCategories: report.by_action_category,
+    rules: report.by_rule,
+  };
+}
+
+export function blockedRowDetailFields(
+  row: AuditRecentRow,
+  labels: AuditDetailLabels,
+): AuditDetailField[] {
+  const fields: AuditDetailField[] = [];
+
+  if (row.hook) {
+    fields.push({
+      label: labels.detailHook,
+      value: labels.hookLabels[row.hook] ?? row.hook,
+    });
+  }
+  if (row.rule_ids?.length) {
+    fields.push({
+      label: labels.detailRuleIds,
+      value: row.rule_ids.join(", "),
+    });
+  }
+  if (row.kinds?.length) {
+    fields.push({
+      label: labels.detailKinds,
+      value: row.kinds.map((kind) => labels.kindLabels[kind] ?? kind).join(", "),
+    });
+  }
+  if (row.suppressed_total != null) {
+    fields.push({
+      label: labels.detailSuppressed,
+      value: String(row.suppressed_total),
+    });
+  }
+  if (row.deduplicated_total != null) {
+    fields.push({
+      label: labels.detailDeduplicated,
+      value: String(row.deduplicated_total),
+    });
+  }
+
+  return fields;
+}
+
+export function blockedRowHasDetails(row: AuditRecentRow): boolean {
+  return (
+    Boolean(row.hook) ||
+    Boolean(row.rule_ids?.length) ||
+    Boolean(row.kinds?.length) ||
+    row.suppressed_total != null ||
+    row.deduplicated_total != null
+  );
+}
+
+export function formatBlockedRowSummary(
+  row: AuditRecentRow,
+  actionCategories: Record<string, string>,
+): string {
+  if (row.reason === "action_guard") {
+    return formatActionCategory(row.action_category, actionCategories);
+  }
+  return row.display_path ?? "—";
 }
 
 export function formatAuditTimestamp(ts: string, locale = "en-US"): string {

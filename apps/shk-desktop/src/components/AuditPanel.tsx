@@ -1,9 +1,19 @@
-import { AlertTriangle, ArrowRight, RefreshCcw, ShieldAlert, ShieldCheck } from "lucide-react";
-import type { ReactNode } from "react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  ChevronDown,
+  ChevronUp,
+  RefreshCcw,
+  ShieldAlert,
+  ShieldCheck,
+} from "lucide-react";
+import { useId, useState, type ReactNode } from "react";
 import {
   auditHasBlockedEvents,
+  blockedBreakdowns,
   blockedRecentRows,
-  formatActionCategory,
+  blockedRowDetailFields,
+  formatBlockedRowSummary,
   formatAuditTimestamp,
   formatToolName,
   hiddenBlockedCount,
@@ -11,7 +21,7 @@ import {
 } from "../audit";
 import { useI18n } from "../i18n";
 import { asSeverity, severityBadge, severityDot, type Severity } from "../scan";
-import type { AuditRecentRow, AuditState } from "../types";
+import type { AuditCountRow, AuditRecentRow, AuditState } from "../types";
 import { formatRelativeTime } from "../utils";
 import { Button } from "./Button";
 
@@ -64,6 +74,7 @@ export function AuditPanel({ auditState, onRefresh, onOpenSetup, onOpenFindings 
   const blockedRecent = blockedRecentRows(report);
   const hasBlocked = auditHasBlockedEvents(report);
   const hidden = hiddenBlockedCount(report);
+  const breakdowns = blockedBreakdowns(report);
   const maxSeverity = report.summary.max_severity
     ? asSeverity(report.summary.max_severity)
     : undefined;
@@ -118,35 +129,17 @@ export function AuditPanel({ auditState, onRefresh, onOpenSetup, onOpenFindings 
               <span>{m.noBlockedYet}</span>
             </div>
           ) : (
-            <div className="mt-4">
-              <h4 className="text-[11px] font-semibold tracking-[0.14em] text-faint uppercase">
-                {m.recentBlocked}
-              </h4>
-              {blockedRecent.length > 0 && (
-                <ul className="mt-2 grid gap-2" aria-label={m.recentBlocked}>
-                  {blockedRecent.map((row, index) => (
-                    <BlockedRowCard
-                      key={`${row.ts}:${row.tool ?? ""}:${row.reason ?? ""}:${index}`}
-                      row={row}
-                      locale={locale}
-                      onOpenFindings={onOpenFindings}
-                    />
-                  ))}
-                </ul>
-              )}
-              {hidden > 0 && blockedRecent.length > 0 && (
-                <p className="mt-3 text-[11px] text-muted">
-                  {t(m.moreEvents, { count: hidden })} · {m.moreEventsHint}
-                </p>
-              )}
-              {blockedRecent.length === 0 && (
-                <p className="mt-2 rounded-lg border border-border bg-surface-3/40 px-3 py-2 text-[11px] text-muted">
-                  {t(m.moreEvents, { count: report.summary.blocked_events })} · {m.moreEventsHint}
-                </p>
-              )}
-              <p className="mt-2 text-[11px] text-faint">
-                {m.updated} {formatRelativeTime(auditState.loadedAt, messages.time)}
-              </p>
+            <div className="mt-4 grid gap-4">
+              <BlockedBreakdownSections breakdowns={breakdowns} />
+
+              <RecentBlockedSection
+                blockedRecent={blockedRecent}
+                hidden={hidden}
+                loadedAt={auditState.loadedAt}
+                blockedEvents={report.summary.blocked_events}
+                locale={locale}
+                onOpenFindings={onOpenFindings}
+              />
             </div>
           )}
         </>
@@ -203,6 +196,109 @@ function PanelShell({
   );
 }
 
+function BlockedBreakdownSections({
+  breakdowns,
+}: {
+  breakdowns: ReturnType<typeof blockedBreakdowns>;
+}) {
+  const { messages } = useI18n();
+  const m = messages.audit;
+  const sections = [
+    {
+      key: "reasons",
+      title: m.reasonBreakdown,
+      rows: breakdowns.reasons,
+      formatLabel: (label: string) => m.reasonLabels[label] ?? label,
+    },
+    {
+      key: "actionCategories",
+      title: m.actionCategoryBreakdown,
+      rows: breakdowns.actionCategories,
+      formatLabel: (label: string) => m.actionCategories[label] ?? label,
+    },
+    {
+      key: "rules",
+      title: m.ruleBreakdown,
+      rows: breakdowns.rules,
+      hint: m.ruleBreakdownHint,
+    },
+  ].filter((section) => section.rows.length > 0);
+
+  if (sections.length === 0) {
+    return null;
+  }
+
+  return (
+    <>
+      {sections.map((section) => (
+        <BreakdownSection
+          key={section.key}
+          title={section.title}
+          rows={section.rows}
+          hint={section.hint}
+          formatLabel={section.formatLabel}
+        />
+      ))}
+    </>
+  );
+}
+
+function RecentBlockedSection({
+  blockedRecent,
+  hidden,
+  loadedAt,
+  blockedEvents,
+  locale,
+  onOpenFindings,
+}: {
+  blockedRecent: AuditRecentRow[];
+  hidden: number;
+  loadedAt: string;
+  blockedEvents: number;
+  locale: string;
+  onOpenFindings?: () => void;
+}) {
+  const { messages, t } = useI18n();
+  const m = messages.audit;
+
+  return (
+    <div>
+      <SectionHeading title={m.recentBlocked} />
+      {blockedRecent.length > 0 && (
+        <ul className="mt-2 grid gap-2" aria-label={m.recentBlocked}>
+          {blockedRecent.map((row, index) => (
+            <BlockedRowCard
+              key={`${row.ts}:${row.tool ?? ""}:${row.reason ?? ""}:${index}`}
+              row={row}
+              locale={locale}
+              onOpenFindings={onOpenFindings}
+            />
+          ))}
+        </ul>
+      )}
+      {hidden > 0 && blockedRecent.length > 0 && (
+        <p className="mt-3 text-[11px] text-muted">
+          {t(m.moreEvents, { count: hidden })} · {m.moreEventsHint}
+        </p>
+      )}
+      {blockedRecent.length === 0 && (
+        <p className="mt-2 rounded-lg border border-border bg-surface-3/40 px-3 py-2 text-[11px] text-muted">
+          {t(m.moreEvents, { count: blockedEvents })} · {m.moreEventsHint}
+        </p>
+      )}
+      <p className="mt-2 text-[11px] text-faint">
+        {m.updated} {formatRelativeTime(loadedAt, messages.time)}
+      </p>
+    </div>
+  );
+}
+
+function SectionHeading({ title }: { title: string }) {
+  return (
+    <h4 className="text-[11px] font-semibold tracking-[0.14em] text-faint uppercase">{title}</h4>
+  );
+}
+
 function BlockedRowCard({
   row,
   locale,
@@ -214,6 +310,8 @@ function BlockedRowCard({
 }) {
   const { messages, t } = useI18n();
   const m = messages.audit;
+  const [expanded, setExpanded] = useState(false);
+  const detailsId = useId();
   const severity: Severity | undefined =
     row.reason === "finding_threshold" && row.max_severity
       ? asSeverity(row.max_severity)
@@ -222,56 +320,131 @@ function BlockedRowCard({
   const toolLabel = formatToolName(row.tool, m.toolNames);
   const isFindingThreshold = rowLinksToFindings(row);
   const showOpenFindings = isFindingThreshold && Boolean(onOpenFindings);
-  const detail =
-    row.reason === "action_guard"
-      ? formatActionCategory(row.action_category, m.actionCategories)
-      : (row.display_path ?? "—");
+  const detailFields = blockedRowDetailFields(row, m);
+  const hasDetails = detailFields.length > 0;
+  const detail = formatBlockedRowSummary(row, m.actionCategories);
 
   return (
-    <li className="flex flex-col gap-2 rounded-lg border border-border bg-surface-3/40 px-3 py-3 sm:flex-row sm:items-start sm:justify-between">
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
-          {severity && (
-            <span
-              className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${severityBadge[severity]}`}
-            >
+    <li className="rounded-lg border border-border bg-surface-3/40 px-3 py-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            {severity && (
               <span
-                className={`h-1.5 w-1.5 rounded-full ${severityDot[severity]}`}
-                aria-hidden="true"
-              />
-              {m.severityLabels[severity] ?? severity}
-            </span>
-          )}
-          <span className="text-[12px] font-medium text-white">{reasonLabel}</span>
-          <span className="text-[11px] text-faint">·</span>
-          <span className="text-[11px] text-muted">{toolLabel}</span>
+                className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${severityBadge[severity]}`}
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${severityDot[severity]}`}
+                  aria-hidden="true"
+                />
+                {m.severityLabels[severity] ?? severity}
+              </span>
+            )}
+            <span className="text-[12px] font-medium text-white">{reasonLabel}</span>
+            <span className="text-[11px] text-faint">·</span>
+            <span className="text-[11px] text-muted">{toolLabel}</span>
+          </div>
+          <p className="mt-1 truncate text-[12px] text-muted" title={detail}>
+            {detail}
+            {row.finding_count != null && row.finding_count > 0 && (
+              <>
+                {" "}
+                <span className="text-faint">·</span>{" "}
+                {t(m.findingsCount, { count: row.finding_count })}
+              </>
+            )}
+          </p>
+          <p className="mt-0.5 text-[11px] text-faint" title={row.ts}>
+            {formatAuditTimestamp(row.ts, locale)}
+          </p>
         </div>
-        <p className="mt-1 truncate text-[12px] text-muted" title={detail}>
-          {detail}
-          {row.finding_count != null && row.finding_count > 0 && (
-            <>
-              {" "}
-              <span className="text-faint">·</span>{" "}
-              {t(m.findingsCount, { count: row.finding_count })}
-            </>
+        <div className="flex shrink-0 items-center gap-2 self-start">
+          {hasDetails && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setExpanded((open) => !open)}
+              aria-expanded={expanded}
+              aria-controls={detailsId}
+              icon={
+                expanded ? (
+                  <ChevronUp size={12} aria-hidden="true" />
+                ) : (
+                  <ChevronDown size={12} aria-hidden="true" />
+                )
+              }
+            >
+              {expanded ? m.hideDetails : m.showDetails}
+            </Button>
           )}
-        </p>
-        <p className="mt-0.5 text-[11px] text-faint" title={row.ts}>
-          {formatAuditTimestamp(row.ts, locale)}
-        </p>
+          {showOpenFindings && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={onOpenFindings}
+              icon={<ArrowRight size={12} aria-hidden="true" />}
+            >
+              {m.openFindings}
+            </Button>
+          )}
+        </div>
       </div>
-      {showOpenFindings && (
-        <Button
-          variant="secondary"
-          size="sm"
-          className="shrink-0 self-start"
-          onClick={onOpenFindings}
-          icon={<ArrowRight size={12} aria-hidden="true" />}
+      {expanded && hasDetails && (
+        <dl
+          id={detailsId}
+          className="mt-3 grid gap-2 rounded-lg border border-border/70 bg-surface-2/60 px-3 py-2 text-[11px]"
         >
-          {m.openFindings}
-        </Button>
+          {detailFields.map((field) => (
+            <DetailRow
+              key={`${field.label}:${field.value}`}
+              label={field.label}
+              value={field.value}
+            />
+          ))}
+        </dl>
       )}
     </li>
+  );
+}
+
+function DetailRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid gap-0.5 sm:grid-cols-[minmax(8rem,30%)_1fr] sm:gap-2">
+      <dt className="text-faint">{label}</dt>
+      <dd className="break-all text-muted">{value}</dd>
+    </div>
+  );
+}
+
+function BreakdownSection({
+  title,
+  rows,
+  hint,
+  formatLabel = (label) => label,
+}: {
+  title: string;
+  rows: AuditCountRow[];
+  hint?: string;
+  formatLabel?: (label: string) => string;
+}) {
+  return (
+    <section aria-label={title}>
+      <SectionHeading title={title} />
+      {hint && <p className="mt-1 text-[11px] text-muted">{hint}</p>}
+      <ul className="mt-2 grid gap-1.5">
+        {rows.map((row) => (
+          <li
+            key={row.label}
+            className="flex items-center justify-between gap-3 rounded-lg border border-border bg-surface-3/40 px-3 py-2 text-[12px]"
+          >
+            <span className="min-w-0 truncate text-muted" title={formatLabel(row.label)}>
+              {formatLabel(row.label)}
+            </span>
+            <span className="shrink-0 font-semibold text-white">{row.count}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

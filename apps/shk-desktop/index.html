@@ -5,16 +5,48 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#0a0c12" />
+    <link rel="icon" type="image/png" href="/src/assets/app-logo.png" />
     <title>shk — Security Harness Kit</title>
     <style>
       html,
       body {
         background-color: #0a0c12;
       }
+
+      /* Stay invisible for fast startups; fade in only when mounting takes a while. */
+      .shk-boot-splash {
+        display: grid;
+        min-height: 100%;
+        place-items: center;
+        opacity: 0;
+        animation: shk-boot-fade-in 200ms ease-out 300ms forwards;
+      }
+
+      @keyframes shk-boot-fade-in {
+        to {
+          opacity: 1;
+        }
+      }
+
+      .shk-boot-logo {
+        display: block;
+        width: 80px;
+        height: 80px;
+      }
     </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="shk-boot-splash" aria-label="shk">
+        <img
+          class="shk-boot-logo"
+          src="/src/assets/app-logo.png"
+          width="80"
+          height="80"
+          alt="shk"
+        />
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

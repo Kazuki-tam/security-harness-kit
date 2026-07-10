@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   auditEventDetail,
   auditHasBlockedEvents,
+  blockedBreakdowns,
   blockedRecentRows,
+  blockedRowDetailFields,
+  blockedRowHasDetails,
   formatActionCategory,
   formatAuditTimestamp,
+  formatBlockedRowSummary,
   formatToolName,
   hiddenBlockedCount,
   highestBlockedSeverity,
@@ -29,10 +33,13 @@ function sampleReport(overrides: Partial<AuditReport> = {}): AuditReport {
       hook_audit_events: 1,
       secrets_push_events: 0,
     },
-    by_rule: [],
+    by_rule: [{ label: "secret.generic_api_key", count: 2 }],
     by_tool: [],
-    by_reason: [],
-    by_action_category: [],
+    by_reason: [
+      { label: "finding_threshold", count: 2 },
+      { label: "hook_audit", count: 1 },
+    ],
+    by_action_category: [{ label: "environment_dump", count: 1 }],
     recent: [
       {
         ts: "2026-05-23T02:31:00Z",
@@ -247,6 +254,152 @@ describe("rowLinksToFindings", () => {
     expect(rowLinksToFindings({ ts: "x", reason: "finding_threshold" })).toBe(true);
     expect(rowLinksToFindings({ ts: "x", reason: "action_guard" })).toBe(false);
     expect(rowLinksToFindings({ ts: "x" })).toBe(false);
+  });
+});
+
+describe("blockedBreakdowns", () => {
+  it("returns blocked-only reason rows with category and rule aggregates", () => {
+    expect(blockedBreakdowns(sampleReport())).toEqual({
+      reasons: [{ label: "finding_threshold", count: 2 }],
+      actionCategories: [{ label: "environment_dump", count: 1 }],
+      rules: [{ label: "secret.generic_api_key", count: 2 }],
+    });
+  });
+
+  it("omits empty breakdown sections", () => {
+    expect(
+      blockedBreakdowns(
+        sampleReport({
+          by_reason: [{ label: "hook_audit", count: 1 }],
+          by_action_category: [],
+          by_rule: [],
+        }),
+      ),
+    ).toEqual({
+      reasons: [],
+      actionCategories: [],
+      rules: [],
+    });
+  });
+});
+
+describe("blockedRowDetailFields", () => {
+  const labels = {
+    detailHook: "Hook phase",
+    detailRuleIds: "Rule IDs",
+    detailKinds: "Detection kinds",
+    detailSuppressed: "Suppressed findings",
+    detailDeduplicated: "Deduplicated findings",
+    hookLabels: { pre: "Pre-tool" },
+    kindLabels: { secret: "Secret" },
+  };
+
+  it("builds localized detail rows from blocked metadata", () => {
+    expect(
+      blockedRowDetailFields(
+        {
+          ts: "2026-05-23T02:31:00Z",
+          hook: "pre",
+          rule_ids: ["secret.a"],
+          kinds: ["secret"],
+          suppressed_total: 1,
+          deduplicated_total: 2,
+        },
+        labels,
+      ),
+    ).toEqual([
+      { label: "Hook phase", value: "Pre-tool" },
+      { label: "Rule IDs", value: "secret.a" },
+      { label: "Detection kinds", value: "Secret" },
+      { label: "Suppressed findings", value: "1" },
+      { label: "Deduplicated findings", value: "2" },
+    ]);
+  });
+
+  it("returns an empty list when no detail fields are present", () => {
+    expect(
+      blockedRowDetailFields(
+        {
+          ts: "2026-05-23T02:31:00Z",
+          reason: "action_guard",
+          action_category: "environment_dump",
+        },
+        labels,
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("formatBlockedRowSummary", () => {
+  it("localizes action-guard categories", () => {
+    expect(
+      formatBlockedRowSummary(
+        {
+          ts: "2026-05-23T02:31:00Z",
+          reason: "action_guard",
+          action_category: "environment_dump",
+        },
+        { environment_dump: "Environment dump" },
+      ),
+    ).toBe("Environment dump");
+  });
+
+  it("falls back to display path for finding-threshold blocks", () => {
+    expect(
+      formatBlockedRowSummary(
+        {
+          ts: "2026-05-23T02:31:00Z",
+          reason: "finding_threshold",
+          display_path: "secret.txt",
+        },
+        {},
+      ),
+    ).toBe("secret.txt");
+  });
+});
+
+describe("blockedRowHasDetails", () => {
+  it("detects expandable metadata on blocked rows", () => {
+    expect(
+      blockedRowHasDetails({
+        ts: "2026-05-23T02:31:00Z",
+        hook: "pre",
+        rule_ids: ["secret.a"],
+        kinds: ["secret"],
+        suppressed_total: 1,
+        deduplicated_total: 2,
+      }),
+    ).toBe(true);
+  });
+
+  it("returns false when no detail fields are present", () => {
+    expect(
+      blockedRowHasDetails({
+        ts: "2026-05-23T02:31:00Z",
+        reason: "action_guard",
+        action_category: "environment_dump",
+      }),
+    ).toBe(false);
+  });
+
+  it("stays aligned with blockedRowDetailFields presence checks", () => {
+    const row = {
+      ts: "2026-05-23T02:31:00Z",
+      hook: "pre",
+      rule_ids: ["secret.a"],
+    };
+    const labels = {
+      detailHook: "Hook phase",
+      detailRuleIds: "Rule IDs",
+      detailKinds: "Detection kinds",
+      detailSuppressed: "Suppressed findings",
+      detailDeduplicated: "Deduplicated findings",
+      hookLabels: { pre: "Pre-tool" },
+      kindLabels: {},
+    };
+
+    expect(blockedRowHasDetails(row)).toBe(true);
+    expect(blockedRowDetailFields(row, labels).length > 0).toBe(true);
   });
 });
 

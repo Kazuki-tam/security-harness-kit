@@ -23,6 +23,7 @@ use shk_core::git;
 use shk_integrations::{MANAGED_MARKER_JSON, MANAGED_MARKER_SH};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 /// Desktop setup installs blocking scan hooks that append metadata-only block entries.
 const DESKTOP_AI_HOOK_LOG_BLOCKED: bool = true;
@@ -165,6 +166,120 @@ pub struct ActionResult {
     pub success: bool,
     pub message: String,
     pub details: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneRepositoryResult {
+    pub path: String,
+}
+
+pub fn clone_repository(
+    remote_url: &str,
+    destination_parent: &str,
+) -> Result<CloneRepositoryResult> {
+    let remote_url = validate_git_remote_url(remote_url)?;
+    let parent = resolve_clone_parent(destination_parent)?;
+    let repository_name = repository_name_from_remote(remote_url)?;
+    let destination = parent.join(repository_name);
+
+    safety::ensure_writable_path_allowed(&destination)?;
+    safety::ensure_write_path_within(&parent, &destination)?;
+    if destination.exists() {
+        anyhow::bail!(
+            "clone destination already exists: {}",
+            destination.display()
+        );
+    }
+
+    let status = Command::new("git")
+        .arg("clone")
+        .arg("--")
+        .arg(remote_url)
+        .arg(&destination)
+        .current_dir(&parent)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("failed to start git; install Git and ensure it is available on PATH")?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "Git clone failed. Check the repository URL, network connection, and Git credentials"
+        );
+    }
+
+    let path = fs::canonicalize(&destination).unwrap_or(destination);
+    Ok(CloneRepositoryResult {
+        path: path.display().to_string(),
+    })
+}
+
+fn validate_git_remote_url(remote_url: &str) -> Result<&str> {
+    let remote_url = remote_url.trim();
+    if remote_url.is_empty() {
+        anyhow::bail!("repository URL is empty");
+    }
+    if remote_url.starts_with('-')
+        || remote_url.chars().any(char::is_whitespace)
+        || remote_url.contains(['\0', '\n', '\r'])
+        || remote_url.contains(['?', '#'])
+    {
+        anyhow::bail!("repository URL is invalid");
+    }
+
+    let has_allowed_scheme = ["https://", "ssh://"]
+        .iter()
+        .any(|scheme| remote_url.starts_with(scheme));
+    let is_scp_style = remote_url
+        .split_once(':')
+        .is_some_and(|(host, path)| host.contains('@') && !path.is_empty());
+    if !has_allowed_scheme && !is_scp_style {
+        anyhow::bail!("use an HTTPS or SSH repository URL");
+    }
+
+    if let Some(authority) = remote_url
+        .strip_prefix("https://")
+        .and_then(|rest| rest.split('/').next())
+        && authority.contains('@')
+    {
+        anyhow::bail!("repository URLs containing credentials are not allowed");
+    }
+
+    Ok(remote_url)
+}
+
+fn resolve_clone_parent(path: &str) -> Result<PathBuf> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("clone destination is empty");
+    }
+    let parent = PathBuf::from(trimmed);
+    if !parent.is_dir() {
+        anyhow::bail!("clone destination is not a directory: {}", parent.display());
+    }
+    let parent = fs::canonicalize(&parent).unwrap_or(parent);
+    if parent.parent().is_none() {
+        anyhow::bail!("cloning directly into a filesystem root is not allowed");
+    }
+    Ok(parent)
+}
+
+fn repository_name_from_remote(remote_url: &str) -> Result<&str> {
+    let without_slash = remote_url.trim_end_matches('/');
+    let name = without_slash
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or_default()
+        .strip_suffix(".git")
+        .unwrap_or_else(|| without_slash.rsplit(['/', ':']).next().unwrap_or_default());
+
+    if name.is_empty() || name == "." || name == ".." || Path::new(name).components().count() != 1 {
+        anyhow::bail!("repository URL does not contain a valid repository name");
+    }
+    Ok(name)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1300,6 +1415,57 @@ fn parse_skill_tool(value: &str) -> Result<SkillTool> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn clone_remote_validation_accepts_https_and_ssh() {
+        assert_eq!(
+            validate_git_remote_url("https://github.com/example/project.git").unwrap(),
+            "https://github.com/example/project.git"
+        );
+        assert_eq!(
+            validate_git_remote_url("git@github.com:example/project.git").unwrap(),
+            "git@github.com:example/project.git"
+        );
+    }
+
+    #[test]
+    fn clone_remote_validation_rejects_local_and_option_urls() {
+        for remote in [
+            "",
+            "--upload-pack=evil",
+            "file:///tmp/repo.git",
+            "../repo",
+            "http://example.com/repo.git",
+            "git://example.com/repo.git",
+            "https://user:token@example.com/repo.git",
+            "https://example.com/repo.git?token=secret",
+        ] {
+            assert!(validate_git_remote_url(remote).is_err(), "{remote}");
+        }
+    }
+
+    #[test]
+    fn clone_repository_name_is_derived_from_remote() {
+        assert_eq!(
+            repository_name_from_remote("https://github.com/example/project.git").unwrap(),
+            "project"
+        );
+        assert_eq!(
+            repository_name_from_remote("git@github.com:example/project").unwrap(),
+            "project"
+        );
+    }
+
+    #[test]
+    fn clone_parent_must_be_an_existing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        assert!(resolve_clone_parent(missing.to_str().unwrap()).is_err());
+        assert_eq!(
+            resolve_clone_parent(dir.path().to_str().unwrap()).unwrap(),
+            fs::canonicalize(dir.path()).unwrap()
+        );
+    }
 
     #[test]
     fn doctor_status_reports_mixed_encrypted_env_files() {
