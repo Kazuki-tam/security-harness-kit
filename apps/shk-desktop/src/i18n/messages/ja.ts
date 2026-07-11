@@ -3,7 +3,7 @@ import type { Messages } from "../types";
 export const ja: Messages = {
   app: {
     selectFolder: "スキャンするフォルダを選択",
-    selectFolderForIde: "エディターで開くフォルダを選択",
+    selectFolderForApp: "アプリで開くフォルダを選択",
     selectCloneDestination: "リポジトリの保存先を選択",
   },
   common: {
@@ -33,9 +33,11 @@ export const ja: Messages = {
     welcome: "ようこそ",
     maskWorkspace: "AI向けマスク",
     openFolder: "フォルダを開く",
-    openInIde: "IDEで開く",
-    openInIdeWith: "{{ide}} で開く",
-    preferredIde: "エディターを選択",
+    openInApp: "アプリで開く",
+    openInAppWith: "{{app}} で開く",
+    preferredApp: "アプリを選択",
+    editorSection: "エディター",
+    aiAppSection: "AIアプリ",
     updates: {
       check: "更新確認",
       checking: "確認中…",
@@ -44,10 +46,12 @@ export const ja: Messages = {
       available: "バージョン {{version}} が利用できます。ダウンロードして再起動しますか？",
       failed: "更新確認に失敗しました: {{message}}",
     },
-    ideNames: {
+    appNames: {
       cursor: "Cursor",
       vscode: "VS Code",
       antigravity: "Antigravity",
+      "claude-desktop": "Claude Desktop",
+      "chatgpt-desktop": "ChatGPT",
     },
   },
   welcome: {
@@ -64,8 +68,12 @@ export const ja: Messages = {
   mask: {
     title: "AI向けマスク",
     subtitle: "AIツールへ渡す前にテキストやファイルをマスクし、安全な内容だけをコピーできます。",
-    policyProject: "プロジェクトのポリシー (shk.toml) を使用中",
-    policyDefault: "既定のマスクポリシーを使用中",
+    policyProject: "shk.toml を使用中",
+    policyProjectFallback: "既定を使用",
+    policyChecking: "確認中…",
+    policyError: "確認できません",
+    policySelectLabel: "適用するマスクポリシー",
+    policyDefaultOption: "既定ポリシー（プロジェクトを使用しない）",
     steps: {
       input: "内容を追加",
       mask: "マスク",
@@ -91,7 +99,6 @@ export const ja: Messages = {
     removeFile: "ファイルを外す",
     useTextInstead: "テキスト貼り付けに切り替え",
     runMask: "マスクする",
-    runMaskHint: "⌘↵",
     masking: "マスク中…",
     copyMasked: "マスク済みをコピー",
     copied: "コピーしました",
@@ -118,6 +125,7 @@ export const ja: Messages = {
     fileKinds: {
       text: "テキストファイル",
       office: "Office 文書",
+      pdf: "PDF 文書（マスク結果はテキスト出力のみ）",
     },
   },
   cloneRepository: {
@@ -198,6 +206,12 @@ export const ja: Messages = {
     subtitle: "メタデータのみを表示します（秘密値・プロンプト本文・コマンドは保存されません）。",
     loading: "ブロック履歴を読み込み中…",
     refresh: "更新",
+    resetLog: "ログをリセット",
+    resetConfirmTitle: "ブロック履歴をリセットしますか？",
+    resetConfirmBody:
+      "このプロジェクトのローカル監査ログ（ローテーション済みファイル含む）を完全に削除します。以降のブロックは引き続き記録されます。",
+    resetConfirm: "リセットする",
+    resetFailed: "監査ログをリセットできませんでした。",
     noLog: "履歴はまだありません。セットアップで AI セーフティフックを適用すると記録が始まります。",
     openSetup: "セットアップを開く",
     parseErrors: "ログの読み込み中に無効な行を {{count}} 件スキップしました。",
@@ -220,6 +234,10 @@ export const ja: Messages = {
     ruleBreakdownHint: "各ルールを含むブロックイベント数です。",
     showDetails: "詳細を表示",
     hideDetails: "詳細を隠す",
+    detailWhen: "日時",
+    detailTool: "AI ツール",
+    detailReason: "ブロック理由",
+    detailOperation: "ブロックされた操作",
     detailHook: "フック段階",
     detailRuleIds: "ルール ID",
     detailKinds: "検出種別",

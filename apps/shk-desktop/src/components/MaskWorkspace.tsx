@@ -2,40 +2,70 @@ import {
   ArrowRight,
   Check,
   CheckCircle2,
+  ChevronDown,
   Copy,
+  Eraser,
   ExternalLink,
   FileText,
   FileUp,
   Loader2,
   Save,
-  Shield,
-  ShieldAlert,
+  TriangleAlert,
   X,
 } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { useEffect, useState, type DragEvent } from "react";
+import { useEffect, useId, useState, type DragEvent } from "react";
 import { AI_TOOL_OPTIONS, type PreferredAiTool } from "../aiTool";
 import { useMaskWorkspace, type MaskInputMode } from "../hooks/useMaskWorkspace";
-import { maskFileBasename, type MaskState } from "../mask";
+import {
+  fetchMaskPolicyStatus,
+  maskFileBasename,
+  maskFileKind,
+  type MaskPolicyStatus,
+  type MaskState,
+} from "../mask";
 import type { Messages } from "../i18n/types";
 import { severityOrder, type Severity } from "../scan";
+import type { Project } from "../types";
 import { shortenPath } from "../utils";
 import { Button } from "./Button";
 import { FindingList } from "./FindingList";
 import { SeveritySummary } from "./SeveritySummary";
 
 type Props = {
-  projectPath: string | null;
+  projects: Project[];
+  initialPolicyProjectId: string | null;
   preferredAiTool: PreferredAiTool;
   onPreferredAiToolChange: (tool: PreferredAiTool) => void;
 };
 
-export function MaskWorkspace({ projectPath, preferredAiTool, onPreferredAiToolChange }: Props) {
+type PolicyStatusState =
+  | { status: "loading"; projectPath: string }
+  | { status: "done"; projectPath: string | null; data: MaskPolicyStatus }
+  | { status: "error"; projectPath: string; message: string };
+
+export function MaskWorkspace({
+  projects,
+  initialPolicyProjectId,
+  preferredAiTool,
+  onPreferredAiToolChange,
+}: Props) {
+  const [policyProjectId, setPolicyProjectId] = useState<string | null>(() =>
+    projects.some((project) => project.id === initialPolicyProjectId)
+      ? initialPolicyProjectId
+      : null,
+  );
+  const policyProject = projects.find((project) => project.id === policyProjectId);
+  const projectPath = policyProject?.path ?? null;
+  const [policyStatus, setPolicyStatus] = useState<PolicyStatusState>({
+    status: "done",
+    projectPath: null,
+    data: { usesProjectPolicy: false },
+  });
   const workspace = useMaskWorkspace({ projectPath, preferredAiTool, onPreferredAiToolChange });
   const {
     messages: m,
     t,
-    policyLabel,
     inputMode,
     inputText,
     setInputText,
@@ -67,6 +97,76 @@ export function MaskWorkspace({ projectPath, preferredAiTool, onPreferredAiToolC
   } = workspace;
 
   const [findingFilter, setFindingFilter] = useState<Severity | "all">("all");
+
+  useEffect(() => {
+    if (policyProjectId && !policyProject) {
+      setPolicyProjectId(null);
+      resetResult();
+    }
+  }, [policyProject, policyProjectId, resetResult]);
+
+  useEffect(() => {
+    if (!projectPath) {
+      setPolicyStatus({
+        status: "done",
+        projectPath: null,
+        data: { usesProjectPolicy: false },
+      });
+      return;
+    }
+
+    let disposed = false;
+    setPolicyStatus({ status: "loading", projectPath });
+    void fetchMaskPolicyStatus(projectPath)
+      .then((data) => {
+        if (!disposed) {
+          setPolicyStatus({ status: "done", projectPath, data });
+        }
+      })
+      .catch((error) => {
+        if (!disposed) {
+          setPolicyStatus({
+            status: "error",
+            projectPath,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [projectPath]);
+
+  const currentPolicyStatus: PolicyStatusState =
+    policyStatus.projectPath === projectPath
+      ? policyStatus
+      : projectPath
+        ? ({ status: "loading", projectPath } as const)
+        : ({
+            status: "done",
+            projectPath: null,
+            data: { usesProjectPolicy: false },
+          } as const);
+  const policyLabel = !policyProject
+    ? undefined
+    : currentPolicyStatus.status === "loading"
+      ? t(m.policyChecking, { project: policyProject.name })
+      : currentPolicyStatus.status === "error"
+        ? t(m.policyError, { project: policyProject.name })
+        : currentPolicyStatus.data.usesProjectPolicy
+          ? t(m.policyProject, { project: policyProject.name })
+          : t(m.policyProjectFallback, { project: policyProject.name });
+  const policyPath =
+    currentPolicyStatus.status === "done" ? currentPolicyStatus.data.policyPath : undefined;
+  const policyTone = !policyProject
+    ? "default"
+    : currentPolicyStatus.status === "loading"
+      ? "loading"
+      : currentPolicyStatus.status === "error"
+        ? "error"
+        : currentPolicyStatus.data.usesProjectPolicy
+          ? "project"
+          : "default";
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
@@ -154,6 +254,18 @@ export function MaskWorkspace({ projectPath, preferredAiTool, onPreferredAiToolC
           title={m.title}
           subtitle={m.subtitle}
           policyLabel={policyLabel}
+          policyPath={policyPath}
+          policyTone={policyTone}
+          policySelectLabel={m.policySelectLabel}
+          policyDefaultOption={m.policyDefaultOption}
+          projects={projects}
+          selectedPolicyProjectId={policyProjectId}
+          policySelectionDisabled={isLoading}
+          onPolicyProjectChange={(projectId) => {
+            setPolicyProjectId(projectId);
+            setFindingFilter("all");
+            resetResult();
+          }}
           currentStep={currentStep}
           steps={m.steps}
         />
@@ -262,15 +374,32 @@ function MaskHeader({
   title,
   subtitle,
   policyLabel,
+  policyPath,
+  policyTone,
+  policySelectLabel,
+  policyDefaultOption,
+  projects,
+  selectedPolicyProjectId,
+  policySelectionDisabled,
+  onPolicyProjectChange,
   currentStep,
   steps,
 }: {
   title: string;
   subtitle: string;
-  policyLabel: string;
+  policyLabel?: string;
+  policyPath?: string;
+  policyTone: "default" | "loading" | "error" | "project";
+  policySelectLabel: string;
+  policyDefaultOption: string;
+  projects: Project[];
+  selectedPolicyProjectId: string | null;
+  policySelectionDisabled: boolean;
+  onPolicyProjectChange: (projectId: string | null) => void;
   currentStep: 1 | 2 | 3;
   steps: { input: string; mask: string; transfer: string };
 }) {
+  const policySelectId = useId();
   const stepItems = [
     { id: 1 as const, label: steps.input },
     { id: 2 as const, label: steps.mask },
@@ -280,18 +409,67 @@ function MaskHeader({
   return (
     <header className="grid gap-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="flex items-start gap-3">
-          <div className="grid h-11 w-11 place-items-center rounded-2xl bg-sky-400/15 text-sky-200 ring-1 ring-inset ring-sky-400/25">
-            <Shield size={20} aria-hidden="true" />
+        <div className="min-w-0">
+          <h1 className="text-lg font-semibold text-white">{title}</h1>
+          <p className="mt-1 max-w-2xl text-[13px] leading-relaxed text-muted">{subtitle}</p>
+        </div>
+        <div className="grid w-full gap-2 self-start rounded-xl border border-border bg-surface-2/70 p-3 sm:w-72">
+          <div className="flex items-center justify-between gap-3">
+            <label
+              htmlFor={policySelectId}
+              className="text-[10px] font-semibold tracking-[0.12em] text-white/70 uppercase"
+            >
+              {policySelectLabel}
+            </label>
+            {policyLabel && (
+              <span
+                className={`inline-flex min-w-0 items-center gap-1.5 text-[10px] ${
+                  policyTone === "project"
+                    ? "text-emerald-200"
+                    : policyTone === "error"
+                      ? "text-red-200"
+                      : "text-muted"
+                }`}
+                title={policyPath ?? policyLabel}
+              >
+                <span
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                    policyTone === "project"
+                      ? "bg-emerald-400"
+                      : policyTone === "error"
+                        ? "bg-red-400"
+                        : policyTone === "loading"
+                          ? "animate-pulse bg-sky-300"
+                          : "bg-slate-400"
+                  }`}
+                  aria-hidden="true"
+                />
+                <span className="truncate">{policyLabel}</span>
+              </span>
+            )}
           </div>
-          <div>
-            <h1 className="text-lg font-semibold text-white">{title}</h1>
-            <p className="mt-1 max-w-2xl text-[13px] leading-relaxed text-muted">{subtitle}</p>
+          <div className="relative">
+            <select
+              id={policySelectId}
+              value={selectedPolicyProjectId ?? ""}
+              disabled={policySelectionDisabled}
+              onChange={(event) => onPolicyProjectChange(event.target.value || null)}
+              className="w-full appearance-none rounded-lg border border-border-strong bg-canvas/70 py-2 pr-9 pl-3 text-[12px] font-medium text-white outline-none transition hover:border-sky-400/40 focus:border-sky-300/70 focus:ring-2 focus:ring-sky-300/20 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <option value="">{policyDefaultOption}</option>
+              {projects.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name}
+                </option>
+              ))}
+            </select>
+            <ChevronDown
+              size={14}
+              className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-muted"
+              aria-hidden="true"
+            />
           </div>
         </div>
-        <p className="self-start rounded-full border border-sky-400/25 bg-sky-500/10 px-3 py-1 text-[11px] font-medium text-sky-100">
-          {policyLabel}
-        </p>
       </div>
 
       <ol className="grid grid-cols-3 gap-2 sm:gap-3" aria-label={title}>
@@ -393,12 +571,16 @@ function MaskInputPanel({
   }
 
   const fileLabel = selectedFilePath ? maskFileBasename(selectedFilePath) : "";
+  const selectedFileKind =
+    fileMeta?.fileKind ?? (selectedFilePath ? maskFileKind(selectedFilePath) : null);
   const fileKindLabel =
-    fileMeta?.fileKind === "office"
+    selectedFileKind === "office"
       ? m.fileKinds.office
-      : selectedFilePath
-        ? m.fileKinds.text
-        : null;
+      : selectedFileKind === "pdf"
+        ? m.fileKinds.pdf
+        : selectedFilePath
+          ? m.fileKinds.text
+          : null;
 
   return (
     <section className="grid gap-3 rounded-xl border border-border bg-surface-2/70 p-4 ring-1 ring-inset ring-white/5">
@@ -512,13 +694,11 @@ function MaskInputPanel({
           onClick={onRunMask}
           loading={isLoading}
           disabled={isLoading || !hasInput}
+          icon={<Eraser size={14} aria-hidden="true" />}
         >
           {isLoading ? m.masking : m.runMask}
         </Button>
-        <kbd className="rounded border border-border bg-canvas px-1.5 py-0.5 font-mono text-[10px] text-muted">
-          {m.runMaskHint}
-        </kbd>
-        <Button variant="secondary" size="sm" onClick={onClear} disabled={!hasInput && !inputText}>
+        <Button variant="secondary" onClick={onClear} disabled={!hasInput && !inputText}>
           {m.clearInput}
         </Button>
         {inputMode === "file" && (
@@ -610,14 +790,14 @@ function MaskOutputPanel({
         <div className="grid min-h-[300px] place-items-center gap-3 rounded-lg border border-dashed border-border bg-canvas/40 px-6 py-10 text-center">
           {maskState.status === "idle" ? (
             <>
-              <Shield size={28} className="text-muted" aria-hidden="true" />
+              <Eraser size={28} className="text-muted" aria-hidden="true" />
               <p className="max-w-xs text-[13px] leading-relaxed text-muted">
                 {m.outputPlaceholder}
               </p>
             </>
           ) : (
             <>
-              <ShieldAlert size={28} className="text-amber-300" aria-hidden="true" />
+              <TriangleAlert size={28} className="text-amber-300" aria-hidden="true" />
               <p className="max-w-xs text-[13px] leading-relaxed text-muted">
                 {m.outputPlaceholder}
               </p>

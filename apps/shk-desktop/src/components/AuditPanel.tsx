@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronUp,
   RefreshCcw,
+  RotateCcw,
   ShieldAlert,
   ShieldCheck,
 } from "lucide-react";
@@ -19,20 +20,75 @@ import {
   hiddenBlockedCount,
   rowLinksToFindings,
 } from "../audit";
+import { useAuditLogReset } from "../hooks/useAuditLogReset";
 import { useI18n } from "../i18n";
 import { asSeverity, severityBadge, severityDot, type Severity } from "../scan";
 import type { AuditCountRow, AuditRecentRow, AuditState } from "../types";
 import { formatRelativeTime } from "../utils";
 import { Button } from "./Button";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 type Props = {
+  projectPath: string;
   auditState: AuditState;
-  onRefresh: () => void;
+  onRefresh: (options?: { silent?: boolean }) => void;
   onOpenSetup?: () => void;
   onOpenFindings?: () => void;
 };
 
-export function AuditPanel({ auditState, onRefresh, onOpenSetup, onOpenFindings }: Props) {
+export function AuditPanel({
+  projectPath,
+  auditState,
+  onRefresh,
+  onOpenSetup,
+  onOpenFindings,
+}: Props) {
+  const { messages } = useI18n();
+  const m = messages.audit;
+  const reset = useAuditLogReset(projectPath, m.resetFailed);
+
+  async function handleResetConfirm() {
+    const ok = await reset.confirmAndReset();
+    if (ok) {
+      onRefresh({ silent: true });
+    }
+  }
+
+  return (
+    <>
+      <AuditPanelBody
+        auditState={auditState}
+        onRefresh={onRefresh}
+        onOpenSetup={onOpenSetup}
+        onOpenFindings={onOpenFindings}
+        reset={reset}
+      />
+      <ConfirmDialog
+        open={reset.confirming}
+        title={m.resetConfirmTitle}
+        description={m.resetConfirmBody}
+        confirmLabel={m.resetConfirm}
+        variant="danger"
+        onCancel={reset.cancelConfirm}
+        onConfirm={() => void handleResetConfirm()}
+      />
+    </>
+  );
+}
+
+function AuditPanelBody({
+  auditState,
+  onRefresh,
+  onOpenSetup,
+  onOpenFindings,
+  reset,
+}: {
+  auditState: AuditState;
+  onRefresh: (options?: { silent?: boolean }) => void;
+  onOpenSetup?: () => void;
+  onOpenFindings?: () => void;
+  reset: ReturnType<typeof useAuditLogReset>;
+}) {
   const { locale, messages, t } = useI18n();
   const m = messages.audit;
   const loading = auditState.status === "loading";
@@ -42,8 +98,8 @@ export function AuditPanel({ auditState, onRefresh, onOpenSetup, onOpenFindings 
       <PanelShell
         title={m.title}
         subtitle={m.subtitle}
-        loading={loading}
-        onRefresh={onRefresh}
+        busy={loading}
+        onRefresh={() => onRefresh()}
         refreshLabel={m.refresh}
       >
         {loading && <p className="mt-3 text-[12px] text-muted">{m.loading}</p>}
@@ -62,7 +118,7 @@ export function AuditPanel({ auditState, onRefresh, onOpenSetup, onOpenFindings 
             <h3 className="text-sm font-semibold text-red-100">{m.title}</h3>
             <p className="mt-1 text-[12px] text-red-200/90">{auditState.message}</p>
           </div>
-          <Button variant="secondary" size="sm" onClick={onRefresh}>
+          <Button variant="secondary" size="sm" onClick={() => onRefresh()}>
             {m.refresh}
           </Button>
         </div>
@@ -84,9 +140,18 @@ export function AuditPanel({ auditState, onRefresh, onOpenSetup, onOpenFindings 
       title={m.title}
       subtitle={m.subtitle}
       tone={hasBlocked ? "warn" : "calm"}
-      onRefresh={onRefresh}
+      busy={loading || reset.busy}
+      onRefresh={() => onRefresh()}
       refreshLabel={m.refresh}
+      onReset={report.log_exists ? reset.requestConfirm : undefined}
+      resetLabel={m.resetLog}
+      resetBusy={reset.busy}
     >
+      {reset.error && (
+        <div className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-[12px] text-red-100">
+          {reset.error}
+        </div>
+      )}
       {!report.log_exists ? (
         <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-3 text-[12px] text-amber-100">
           <p>{m.noLog}</p>
@@ -131,7 +196,6 @@ export function AuditPanel({ auditState, onRefresh, onOpenSetup, onOpenFindings 
           ) : (
             <div className="mt-4 grid gap-4">
               <BlockedBreakdownSections breakdowns={breakdowns} />
-
               <RecentBlockedSection
                 blockedRecent={blockedRecent}
                 hidden={hidden}
@@ -152,17 +216,23 @@ function PanelShell({
   title,
   subtitle,
   tone = "calm",
-  loading,
+  busy,
   onRefresh,
   refreshLabel,
+  onReset,
+  resetLabel,
+  resetBusy,
   children,
 }: {
   title: string;
   subtitle: string;
   tone?: "warn" | "calm";
-  loading?: boolean;
+  busy?: boolean;
   onRefresh: () => void;
   refreshLabel: string;
+  onReset?: () => void;
+  resetLabel?: string;
+  resetBusy?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -179,17 +249,30 @@ function PanelShell({
           </h3>
           <p className="mt-1 text-[12px] text-muted">{subtitle}</p>
         </div>
-        <Button
-          variant="secondary"
-          size="sm"
-          className="shrink-0 self-start"
-          onClick={onRefresh}
-          disabled={loading}
-          loading={loading}
-          icon={!loading ? <RefreshCcw size={14} aria-hidden="true" /> : undefined}
-        >
-          {refreshLabel}
-        </Button>
+        <div className="flex shrink-0 flex-wrap items-center gap-2 self-start">
+          {onReset && resetLabel && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={onReset}
+              disabled={busy}
+              loading={resetBusy}
+              icon={!resetBusy ? <RotateCcw size={14} aria-hidden="true" /> : undefined}
+            >
+              {resetLabel}
+            </Button>
+          )}
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={onRefresh}
+            disabled={busy}
+            loading={busy && !resetBusy}
+            icon={!(busy && !resetBusy) ? <RefreshCcw size={14} aria-hidden="true" /> : undefined}
+          >
+            {refreshLabel}
+          </Button>
+        </div>
       </div>
       {children}
     </section>
@@ -295,7 +378,7 @@ function RecentBlockedSection({
 
 function SectionHeading({ title }: { title: string }) {
   return (
-    <h4 className="text-[11px] font-semibold tracking-[0.14em] text-faint uppercase">{title}</h4>
+    <h4 className="text-[11px] font-semibold tracking-[0.14em] text-white/90 uppercase">{title}</h4>
   );
 }
 
@@ -318,10 +401,8 @@ function BlockedRowCard({
       : undefined;
   const reasonLabel = row.reason ? (m.reasonLabels[row.reason] ?? row.reason) : "—";
   const toolLabel = formatToolName(row.tool, m.toolNames);
-  const isFindingThreshold = rowLinksToFindings(row);
-  const showOpenFindings = isFindingThreshold && Boolean(onOpenFindings);
-  const detailFields = blockedRowDetailFields(row, m);
-  const hasDetails = detailFields.length > 0;
+  const showOpenFindings = rowLinksToFindings(row) && Boolean(onOpenFindings);
+  const whenLabel = formatAuditTimestamp(row.ts, locale);
   const detail = formatBlockedRowSummary(row, m.actionCategories);
 
   return (
@@ -341,42 +422,40 @@ function BlockedRowCard({
               </span>
             )}
             <span className="text-[12px] font-medium text-white">{reasonLabel}</span>
-            <span className="text-[11px] text-faint">·</span>
-            <span className="text-[11px] text-muted">{toolLabel}</span>
+            <span className="text-[11px] text-white/40">·</span>
+            <span className="text-[11px] text-white/75">{toolLabel}</span>
           </div>
-          <p className="mt-1 truncate text-[12px] text-muted" title={detail}>
+          <p className="mt-1 truncate text-[12px] text-white/80" title={detail}>
             {detail}
             {row.finding_count != null && row.finding_count > 0 && (
               <>
                 {" "}
-                <span className="text-faint">·</span>{" "}
+                <span className="text-white/40">·</span>{" "}
                 {t(m.findingsCount, { count: row.finding_count })}
               </>
             )}
           </p>
-          <p className="mt-0.5 text-[11px] text-faint" title={row.ts}>
-            {formatAuditTimestamp(row.ts, locale)}
+          <p className="mt-1 text-[12px] tabular-nums text-white/90" title={row.ts}>
+            {whenLabel}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2 self-start">
-          {hasDetails && (
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setExpanded((open) => !open)}
-              aria-expanded={expanded}
-              aria-controls={detailsId}
-              icon={
-                expanded ? (
-                  <ChevronUp size={12} aria-hidden="true" />
-                ) : (
-                  <ChevronDown size={12} aria-hidden="true" />
-                )
-              }
-            >
-              {expanded ? m.hideDetails : m.showDetails}
-            </Button>
-          )}
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setExpanded((open) => !open)}
+            aria-expanded={expanded}
+            aria-controls={detailsId}
+            icon={
+              expanded ? (
+                <ChevronUp size={12} aria-hidden="true" />
+              ) : (
+                <ChevronDown size={12} aria-hidden="true" />
+              )
+            }
+          >
+            {expanded ? m.hideDetails : m.showDetails}
+          </Button>
           {showOpenFindings && (
             <Button
               variant="secondary"
@@ -389,12 +468,12 @@ function BlockedRowCard({
           )}
         </div>
       </div>
-      {expanded && hasDetails && (
+      {expanded && (
         <dl
           id={detailsId}
           className="mt-3 grid gap-2 rounded-lg border border-border/70 bg-surface-2/60 px-3 py-2 text-[11px]"
         >
-          {detailFields.map((field) => (
+          {blockedRowDetailFields(row, m, locale).map((field) => (
             <DetailRow
               key={`${field.label}:${field.value}`}
               label={field.label}
@@ -410,8 +489,8 @@ function BlockedRowCard({
 function DetailRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="grid gap-0.5 sm:grid-cols-[minmax(8rem,30%)_1fr] sm:gap-2">
-      <dt className="text-faint">{label}</dt>
-      <dd className="break-all text-muted">{value}</dd>
+      <dt className="text-white/50">{label}</dt>
+      <dd className="break-all text-white/90">{value}</dd>
     </div>
   );
 }
@@ -429,18 +508,20 @@ function BreakdownSection({
 }) {
   return (
     <section aria-label={title}>
-      <SectionHeading title={title} />
-      {hint && <p className="mt-1 text-[11px] text-muted">{hint}</p>}
+      <h4 className="text-[11px] font-semibold tracking-[0.14em] text-white/90 uppercase">
+        {title}
+      </h4>
+      {hint && <p className="mt-1 text-[11px] text-white/55">{hint}</p>}
       <ul className="mt-2 grid gap-1.5">
         {rows.map((row) => (
           <li
             key={row.label}
             className="flex items-center justify-between gap-3 rounded-lg border border-border bg-surface-3/40 px-3 py-2 text-[12px]"
           >
-            <span className="min-w-0 truncate text-muted" title={formatLabel(row.label)}>
+            <span className="min-w-0 truncate text-white/90" title={formatLabel(row.label)}>
               {formatLabel(row.label)}
             </span>
-            <span className="shrink-0 font-semibold text-white">{row.count}</span>
+            <span className="shrink-0 tabular-nums font-semibold text-white">{row.count}</span>
           </li>
         ))}
       </ul>

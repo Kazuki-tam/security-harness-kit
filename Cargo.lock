@@ -4302,6 +4302,7 @@ dependencies = [
  "dialoguer",
  "dirs 6.0.0",
  "dotenvx",
+ "encoding_rs",
  "ignore",
  "keyring",
  "libc",
@@ -4348,6 +4349,7 @@ dependencies = [
 name = "shk-desktop"
 version = "0.4.11"
 dependencies = [
+ "percent-encoding",
  "serde",
  "serde_json",
  "shk-cli",

@@ -5,7 +5,7 @@ export type Locale = "en" | "ja";
 export type Messages = {
   app: {
     selectFolder: string;
-    selectFolderForIde: string;
+    selectFolderForApp: string;
     selectCloneDestination: string;
   };
   common: {
@@ -35,9 +35,11 @@ export type Messages = {
     welcome: string;
     maskWorkspace: string;
     openFolder: string;
-    openInIde: string;
-    openInIdeWith: string;
-    preferredIde: string;
+    openInApp: string;
+    openInAppWith: string;
+    preferredApp: string;
+    editorSection: string;
+    aiAppSection: string;
     updates: {
       check: string;
       checking: string;
@@ -46,7 +48,10 @@ export type Messages = {
       available: string;
       failed: string;
     };
-    ideNames: Record<"cursor" | "vscode" | "antigravity", string>;
+    appNames: Record<
+      "cursor" | "vscode" | "antigravity" | "claude-desktop" | "chatgpt-desktop",
+      string
+    >;
   };
   welcome: {
     title: string;
@@ -63,7 +68,11 @@ export type Messages = {
     title: string;
     subtitle: string;
     policyProject: string;
-    policyDefault: string;
+    policyProjectFallback: string;
+    policyChecking: string;
+    policyError: string;
+    policySelectLabel: string;
+    policyDefaultOption: string;
     steps: {
       input: string;
       mask: string;
@@ -88,7 +97,6 @@ export type Messages = {
     removeFile: string;
     useTextInstead: string;
     runMask: string;
-    runMaskHint: string;
     masking: string;
     copyMasked: string;
     copied: string;
@@ -110,6 +118,7 @@ export type Messages = {
     fileKinds: {
       text: string;
       office: string;
+      pdf: string;
     };
   };
   cloneRepository: {
@@ -190,6 +199,11 @@ export type Messages = {
     subtitle: string;
     loading: string;
     refresh: string;
+    resetLog: string;
+    resetConfirmTitle: string;
+    resetConfirmBody: string;
+    resetConfirm: string;
+    resetFailed: string;
     noLog: string;
     openSetup: string;
     parseErrors: string;
@@ -212,6 +226,10 @@ export type Messages = {
     ruleBreakdownHint: string;
     showDetails: string;
     hideDetails: string;
+    detailWhen: string;
+    detailTool: string;
+    detailReason: string;
+    detailOperation: string;
     detailHook: string;
     detailRuleIds: string;
     detailKinds: string;

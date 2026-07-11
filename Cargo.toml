@@ -41,9 +41,30 @@ dialoguer = "0.12"
 quick-xml = "0.41"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 pdf-extract = "0.12.0"
+encoding_rs = "0.8"
 dotenvx = "0.2.2"
 # Text-only clipboard access; image-data is intentionally disabled.
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
+
+# Tauri development builds execute scans in-process. Optimize only the scanner
+# and regex hot path so scans stay fast without rebuilding the whole app stack.
+[profile.dev.package.shk-core]
+opt-level = 2
+
+[profile.dev.package.shk-rules]
+opt-level = 2
+
+[profile.dev.package.regex]
+opt-level = 2
+
+[profile.dev.package.regex-automata]
+opt-level = 2
+
+[profile.dev.package.regex-syntax]
+opt-level = 2
+
+[profile.dev.package.aho-corasick]
+opt-level = 2
 
 # The profile that 'dist' will build with
 [profile.dist]

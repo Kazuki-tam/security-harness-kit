@@ -7,12 +7,19 @@ export type MaskJsonOutput = {
   findings: Finding[];
 };
 
+export type MaskFileKind = "text" | "office" | "pdf";
+
 export type MaskFileResult = {
   maskedContent: string;
   findings: Finding[];
-  fileKind: "text" | "office" | string;
+  fileKind: MaskFileKind;
   sourceLabel: string;
   outputPath?: string;
+};
+
+export type MaskPolicyStatus = {
+  usesProjectPolicy: boolean;
+  policyPath?: string;
 };
 
 export type MaskState =
@@ -23,13 +30,17 @@ export type MaskState =
 
 export type MaskFileMeta = {
   inputPath: string;
-  fileKind: "text" | "office" | string;
+  fileKind: MaskFileKind;
   sourceLabel: string;
   outputPath?: string;
 };
 
 export function maskContent(projectPath: string | null, content: string): Promise<MaskJsonOutput> {
   return invoke<MaskJsonOutput>("mask_content", { projectPath, content });
+}
+
+export function fetchMaskPolicyStatus(projectPath: string | null): Promise<MaskPolicyStatus> {
+  return invoke<MaskPolicyStatus>("mask_policy_status", { projectPath });
 }
 
 export function maskFile(
@@ -46,6 +57,13 @@ export function maskFile(
 
 export function maskFileBasename(path: string): string {
   return path.split(/[/\\]/).pop() ?? path;
+}
+
+export function maskFileKind(path: string): MaskFileKind {
+  const basename = maskFileBasename(path).toLowerCase();
+  if (basename.endsWith(".pdf")) return "pdf";
+  if (/\.(docx|xlsx|pptx)$/.test(basename)) return "office";
+  return "text";
 }
 
 export function maskOfficeSuggestedName(sourceLabel: string): string {

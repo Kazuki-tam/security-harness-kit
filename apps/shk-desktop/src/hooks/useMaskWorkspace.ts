@@ -25,6 +25,7 @@ const MASK_FILE_EXTENSIONS = [
   "docx",
   "xlsx",
   "pptx",
+  "pdf",
 ] as const;
 
 type UseMaskWorkspaceOptions = {
@@ -50,7 +51,6 @@ export function useMaskWorkspace({
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
 
-  const policyLabel = projectPath ? m.policyProject : m.policyDefault;
   const maskedOutput = maskState.status === "done" ? maskState.result.masked_content : "";
   const findings = maskState.status === "done" ? maskState.result.findings : [];
   const severityCounts = useMemo(() => findingsBySeverity(findings), [findings]);
@@ -220,7 +220,6 @@ export function useMaskWorkspace({
   return {
     messages: m,
     t,
-    policyLabel,
     inputMode,
     inputText,
     setInputText,

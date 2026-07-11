@@ -5,7 +5,6 @@ import {
   blockedBreakdowns,
   blockedRecentRows,
   blockedRowDetailFields,
-  blockedRowHasDetails,
   formatActionCategory,
   formatAuditTimestamp,
   formatBlockedRowSummary,
@@ -113,8 +112,10 @@ describe("auditEventDetail", () => {
 });
 
 describe("formatAuditTimestamp", () => {
-  it("formats valid RFC3339 timestamps", () => {
-    expect(formatAuditTimestamp("2026-05-23T02:31:00Z", "en-US")).toMatch(/May/);
+  it("formats valid RFC3339 timestamps with full date and time", () => {
+    const formatted = formatAuditTimestamp("2026-05-23T02:31:00Z", "en-US");
+    expect(formatted).toMatch(/2026/);
+    expect(formatted).toMatch(/May/);
   });
 
   it("truncates invalid timestamps", () => {
@@ -285,6 +286,10 @@ describe("blockedBreakdowns", () => {
 
 describe("blockedRowDetailFields", () => {
   const labels = {
+    detailWhen: "When",
+    detailTool: "AI tool",
+    detailReason: "Block reason",
+    detailOperation: "What was blocked",
     detailHook: "Hook phase",
     detailRuleIds: "Rule IDs",
     detailKinds: "Detection kinds",
@@ -292,13 +297,24 @@ describe("blockedRowDetailFields", () => {
     detailDeduplicated: "Deduplicated findings",
     hookLabels: { pre: "Pre-tool" },
     kindLabels: { secret: "Secret" },
+    reasonLabels: {
+      finding_threshold: "Secret/PII blocked",
+      action_guard: "Risky action blocked",
+    },
+    toolNames: { cursor: "Cursor" },
+    actionCategories: { environment_dump: "Environment dump" },
   };
+  const ts = "2026-05-23T02:31:00Z";
+  const when = formatAuditTimestamp(ts, "en-US");
 
   it("builds localized detail rows from blocked metadata", () => {
     expect(
       blockedRowDetailFields(
         {
-          ts: "2026-05-23T02:31:00Z",
+          ts,
+          tool: "cursor",
+          reason: "finding_threshold",
+          display_path: "secret.txt",
           hook: "pre",
           rule_ids: ["secret.a"],
           kinds: ["secret"],
@@ -306,8 +322,13 @@ describe("blockedRowDetailFields", () => {
           deduplicated_total: 2,
         },
         labels,
+        "en-US",
       ),
     ).toEqual([
+      { label: "When", value: when },
+      { label: "AI tool", value: "Cursor" },
+      { label: "Block reason", value: "Secret/PII blocked" },
+      { label: "What was blocked", value: "secret.txt" },
       { label: "Hook phase", value: "Pre-tool" },
       { label: "Rule IDs", value: "secret.a" },
       { label: "Detection kinds", value: "Secret" },
@@ -316,17 +337,23 @@ describe("blockedRowDetailFields", () => {
     ]);
   });
 
-  it("returns an empty list when no detail fields are present", () => {
+  it("always includes when and tool even without extra metadata", () => {
     expect(
       blockedRowDetailFields(
         {
-          ts: "2026-05-23T02:31:00Z",
+          ts,
           reason: "action_guard",
           action_category: "environment_dump",
         },
         labels,
+        "en-US",
       ),
-    ).toEqual([]);
+    ).toEqual([
+      { label: "When", value: when },
+      { label: "AI tool", value: "—" },
+      { label: "Block reason", value: "Risky action blocked" },
+      { label: "What was blocked", value: "Environment dump" },
+    ]);
   });
 });
 
@@ -355,51 +382,6 @@ describe("formatBlockedRowSummary", () => {
         {},
       ),
     ).toBe("secret.txt");
-  });
-});
-
-describe("blockedRowHasDetails", () => {
-  it("detects expandable metadata on blocked rows", () => {
-    expect(
-      blockedRowHasDetails({
-        ts: "2026-05-23T02:31:00Z",
-        hook: "pre",
-        rule_ids: ["secret.a"],
-        kinds: ["secret"],
-        suppressed_total: 1,
-        deduplicated_total: 2,
-      }),
-    ).toBe(true);
-  });
-
-  it("returns false when no detail fields are present", () => {
-    expect(
-      blockedRowHasDetails({
-        ts: "2026-05-23T02:31:00Z",
-        reason: "action_guard",
-        action_category: "environment_dump",
-      }),
-    ).toBe(false);
-  });
-
-  it("stays aligned with blockedRowDetailFields presence checks", () => {
-    const row = {
-      ts: "2026-05-23T02:31:00Z",
-      hook: "pre",
-      rule_ids: ["secret.a"],
-    };
-    const labels = {
-      detailHook: "Hook phase",
-      detailRuleIds: "Rule IDs",
-      detailKinds: "Detection kinds",
-      detailSuppressed: "Suppressed findings",
-      detailDeduplicated: "Deduplicated findings",
-      hookLabels: { pre: "Pre-tool" },
-      kindLabels: {},
-    };
-
-    expect(blockedRowHasDetails(row)).toBe(true);
-    expect(blockedRowDetailFields(row, labels).length > 0).toBe(true);
   });
 });
 
@@ -453,6 +435,33 @@ describe("loadAuditReport", () => {
       tool: "cursor",
       hidePaths: true,
     });
+  });
+
+  it("fetches blocked rows separately when newer audit events displaced them", async () => {
+    const blockedRow = sampleReport().recent[0];
+    const requests: AuditReportOptions[] = [];
+    const state = await loadAuditReport("/tmp/project", {}, async (_path, options) => {
+      requests.push(options);
+      if (options.reason === "blocked") {
+        return sampleReport({ recent: [blockedRow] });
+      }
+      return sampleReport({
+        recent: [
+          {
+            ts: "2026-05-23T02:32:00Z",
+            tool: "cursor",
+            hook: "post",
+            reason: "hook_audit",
+          },
+        ],
+      });
+    });
+
+    expect(requests).toEqual([{ limit: 10 }, { limit: 10, reason: "blocked" }]);
+    expect(state.status).toBe("done");
+    if (state.status === "done") {
+      expect(blockedRecentRows(state.data)).toEqual([blockedRow]);
+    }
   });
 
   it("returns error state when fetch fails", async () => {

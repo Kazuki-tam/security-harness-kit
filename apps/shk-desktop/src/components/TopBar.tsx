@@ -1,17 +1,17 @@
 import { CircleHelp } from "lucide-react";
 import { useI18n } from "../i18n";
-import type { PreferredIde } from "../ide";
+import type { ProjectApp } from "../projectApp";
 import type { Project } from "../types";
 import { LanguageSwitcher } from "./LanguageSwitcher";
-import { OpenInIdeMenu } from "./OpenInIdeMenu";
+import { OpenInAppMenu } from "./OpenInAppMenu";
 import { UpdateButton } from "./UpdateButton";
 
 type Props = {
   view: "welcome" | "project" | "mask";
   project: Project | null;
   reserveWindowControls?: boolean;
-  preferredIde: PreferredIde;
-  onOpenInIde: (ide: PreferredIde) => void;
+  preferredApp: ProjectApp;
+  onOpenInApp: (app: ProjectApp) => void;
   onShowHelp: () => void;
 };
 
@@ -19,8 +19,8 @@ export function TopBar({
   view,
   project,
   reserveWindowControls = false,
-  preferredIde,
-  onOpenInIde,
+  preferredApp,
+  onOpenInApp,
   onShowHelp,
 }: Props) {
   const { messages } = useI18n();
@@ -56,7 +56,7 @@ export function TopBar({
         </button>
         <UpdateButton />
         <LanguageSwitcher />
-        <OpenInIdeMenu preferredIde={preferredIde} onSelect={onOpenInIde} />
+        <OpenInAppMenu preferredApp={preferredApp} onSelect={onOpenInApp} />
       </div>
     </div>
   );

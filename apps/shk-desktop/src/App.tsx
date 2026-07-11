@@ -8,9 +8,9 @@ import { TopBar } from "./components/TopBar";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ScanWorkspace } from "./components/ScanWorkspace";
 import { usePreferredAiTool } from "./hooks/usePreferredAiTool";
-import { usePreferredIde } from "./hooks/usePreferredIde";
+import { usePreferredProjectApp } from "./hooks/usePreferredProjectApp";
 import { useProjects } from "./hooks/useProjects";
-import { openInIde, type PreferredIde } from "./ide";
+import { openProjectInApp, type ProjectApp } from "./projectApp";
 import { useI18n } from "./i18n";
 import packageInfo from "../package.json";
 import {
@@ -52,10 +52,9 @@ function App() {
   >({});
   const [actionState, setActionState] = useState<ActionState>({ status: "idle" });
   const [helpOpen, setHelpOpen] = useState(false);
-  const { preferredIde, setPreferredIde } = usePreferredIde();
+  const { preferredProjectApp, setPreferredProjectApp } = usePreferredProjectApp();
   const { preferredAiTool, setPreferredAiTool } = usePreferredAiTool();
   const activeProject = currentView === "project" ? selectedProject : null;
-  const maskProjectPath = selectedProject?.path ?? null;
 
   const currentScanState: ScanState = selectedId
     ? (scanStates[selectedId] ?? { status: "idle" })
@@ -164,28 +163,28 @@ function App() {
     [addProject, messages.app.selectCloneDestination],
   );
 
-  const openProjectInIde = useCallback(
-    async (ide: PreferredIde) => {
-      setPreferredIde(ide);
+  const openProjectInAppHandler = useCallback(
+    async (app: ProjectApp) => {
+      setPreferredProjectApp(app);
       try {
         let path = activeProject?.path;
         if (!path) {
           const picked = await open({
             directory: true,
             multiple: false,
-            title: messages.app.selectFolderForIde,
+            title: messages.app.selectFolderForApp,
           });
           if (typeof picked !== "string" || !picked) return;
           path = picked;
           addProject(path);
           setCurrentView("project");
         }
-        await openInIde(path, ide);
+        await openProjectInApp(path, app);
       } catch (error) {
-        console.error("failed to open project in IDE:", error);
+        console.error("failed to open project in app:", error);
       }
     },
-    [activeProject?.path, addProject, messages.app.selectFolderForIde, setPreferredIde],
+    [activeProject?.path, addProject, messages.app.selectFolderForApp, setPreferredProjectApp],
   );
 
   const runScan = useCallback(async () => {
@@ -352,14 +351,15 @@ function App() {
           view={currentView}
           project={activeProject}
           reserveWindowControls={!showSidebar}
-          preferredIde={preferredIde}
-          onOpenInIde={openProjectInIde}
+          preferredApp={preferredProjectApp}
+          onOpenInApp={openProjectInAppHandler}
           onShowHelp={() => setHelpOpen(true)}
         />
 
         {currentView === "mask" ? (
           <MaskWorkspace
-            projectPath={maskProjectPath}
+            projects={projects}
+            initialPolicyProjectId={selectedId}
             preferredAiTool={preferredAiTool}
             onPreferredAiToolChange={setPreferredAiTool}
           />

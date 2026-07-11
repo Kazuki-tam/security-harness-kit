@@ -51,6 +51,8 @@ export function ScanWorkspace({
   const [tab, setTab] = useState<WorkspaceTab>("overview");
   const [filter, setFilter] = useState<Severity | "all">("all");
   const autoOpenedSetupRef = useRef(false);
+  const previousScanStatusRef = useRef(scanState.status);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const projectStatusLoadedAt = projectStatus.status === "done" ? projectStatus.loadedAt : null;
   const { auditState, refreshAudit } = useAuditReport(project.path, projectStatusLoadedAt);
   const isScanning = scanState.status === "running";
@@ -76,8 +78,30 @@ export function ScanWorkspace({
     autoOpenedSetupRef.current = true;
   }, [projectStatus.status, setupPendingCount, scanState.status]);
 
+  useEffect(() => {
+    const previousStatus = previousScanStatusRef.current;
+    previousScanStatusRef.current = scanState.status;
+
+    if (scanState.status === "running" && previousStatus !== "running") {
+      scrollContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+      return;
+    }
+
+    if (previousStatus === "running" && scanState.status === "done") {
+      setTab("findings");
+      const frame = requestAnimationFrame(() => {
+        scrollContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+      });
+      return () => cancelAnimationFrame(frame);
+    }
+
+    if (previousStatus === "running" && scanState.status === "error") {
+      scrollContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  }, [scanState.status]);
+
   return (
-    <div className="shk-scroll shk-fade-in min-h-0 flex-1 overflow-y-auto">
+    <div ref={scrollContainerRef} className="shk-scroll shk-fade-in min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto flex max-w-5xl flex-col gap-5 px-8 pt-6 pb-10">
         <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
@@ -131,6 +155,17 @@ export function ScanWorkspace({
                   {t(messages.audit.overviewTabBadge, { count: blockedCount })}
                 </span>
               )}
+              {key === "findings" && report && (
+                <span
+                  className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset ${
+                    report.summary.total > 0
+                      ? "bg-red-500/20 text-red-100 ring-red-400/35"
+                      : "bg-emerald-500/15 text-emerald-100 ring-emerald-400/30"
+                  }`}
+                >
+                  {report.summary.total}
+                </span>
+              )}
               {key === "setup" && showSetupBadge && (
                 <span className="rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-amber-100 ring-1 ring-inset ring-amber-400/35">
                   {w.setupTabBadge}
@@ -161,6 +196,19 @@ export function ScanWorkspace({
 
         {tab === "overview" && (
           <>
+            {report && (
+              <>
+                <StatusBanner actionable={actionable} report={report} />
+                <SeveritySummary
+                  report={report}
+                  filter={filter}
+                  onFilterChange={(next) => {
+                    setFilter(next);
+                    setTab("findings");
+                  }}
+                />
+              </>
+            )}
             {projectStatus.status === "loading" && <SetupLoadingCard label={w.loadingStatus} />}
             {projectStatus.status === "error" && (
               <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-[12px] text-red-100">
@@ -188,8 +236,9 @@ export function ScanWorkspace({
                 />
                 <div id="audit-panel">
                   <AuditPanel
+                    projectPath={project.path}
                     auditState={auditState}
-                    onRefresh={() => void refreshAudit()}
+                    onRefresh={(options) => void refreshAudit(options)}
                     onOpenSetup={() => setTab("setup")}
                     onOpenFindings={report ? () => setTab("findings") : undefined}
                   />
@@ -202,12 +251,6 @@ export function ScanWorkspace({
                     </Button>
                   </div>
                 )}
-              </>
-            )}
-            {report && (
-              <>
-                <StatusBanner actionable={actionable} report={report} />
-                <SeveritySummary report={report} filter={filter} onFilterChange={setFilter} />
               </>
             )}
           </>

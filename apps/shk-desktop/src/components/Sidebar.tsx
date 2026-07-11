@@ -1,4 +1,4 @@
-import { Copy, FolderOpen, MoreHorizontal, Pencil, Plus, Shield, Trash2 } from "lucide-react";
+import { Copy, Eraser, FolderOpen, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
@@ -72,7 +72,7 @@ export function Sidebar({
             }`}
           >
             <span className="grid h-6 w-6 place-items-center rounded-md bg-sky-400/15 text-sky-300 transition group-hover:bg-sky-400/25">
-              <Shield size={14} aria-hidden="true" />
+              <Eraser size={14} aria-hidden="true" />
             </span>
             <span>{m.maskWorkspace}</span>
             <kbd className="ml-auto rounded border border-[var(--color-border)] bg-[var(--color-canvas)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--color-muted)]">

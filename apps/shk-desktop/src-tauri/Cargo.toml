@@ -27,6 +27,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 thiserror.workspace = true
 tauri-plugin-process = "2"
+percent-encoding = "2.3"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"

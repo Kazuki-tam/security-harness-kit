@@ -30,6 +30,10 @@ export type AuditDetailField = {
 };
 
 export type AuditDetailLabels = {
+  detailWhen: string;
+  detailTool: string;
+  detailReason: string;
+  detailOperation: string;
   detailHook: string;
   detailRuleIds: string;
   detailKinds: string;
@@ -37,6 +41,9 @@ export type AuditDetailLabels = {
   detailDeduplicated: string;
   hookLabels: Record<string, string>;
   kindLabels: Record<string, string>;
+  reasonLabels: Record<string, string>;
+  toolNames: Record<string, string>;
+  actionCategories: Record<string, string>;
 };
 
 export function blockedRecentRows(report: AuditReport): AuditRecentRow[] {
@@ -54,8 +61,24 @@ export function blockedBreakdowns(report: AuditReport): BlockedBreakdowns {
 export function blockedRowDetailFields(
   row: AuditRecentRow,
   labels: AuditDetailLabels,
+  locale = "en-US",
 ): AuditDetailField[] {
-  const fields: AuditDetailField[] = [];
+  const fields: AuditDetailField[] = [
+    { label: labels.detailWhen, value: formatAuditTimestamp(row.ts, locale) },
+    { label: labels.detailTool, value: formatToolName(row.tool, labels.toolNames) },
+  ];
+
+  if (row.reason) {
+    fields.push({
+      label: labels.detailReason,
+      value: labels.reasonLabels[row.reason] ?? row.reason,
+    });
+  }
+
+  const operation = formatBlockedRowSummary(row, labels.actionCategories);
+  if (operation !== "—") {
+    fields.push({ label: labels.detailOperation, value: operation });
+  }
 
   if (row.hook) {
     fields.push({
@@ -91,16 +114,6 @@ export function blockedRowDetailFields(
   return fields;
 }
 
-export function blockedRowHasDetails(row: AuditRecentRow): boolean {
-  return (
-    Boolean(row.hook) ||
-    Boolean(row.rule_ids?.length) ||
-    Boolean(row.kinds?.length) ||
-    row.suppressed_total != null ||
-    row.deduplicated_total != null
-  );
-}
-
 export function formatBlockedRowSummary(
   row: AuditRecentRow,
   actionCategories: Record<string, string>,
@@ -114,13 +127,15 @@ export function formatBlockedRowSummary(
 export function formatAuditTimestamp(ts: string, locale = "en-US"): string {
   const parsed = Date.parse(ts);
   if (Number.isNaN(parsed)) {
-    return ts.slice(0, 16);
+    return ts.slice(0, 19) || ts;
   }
   return new Intl.DateTimeFormat(locale, {
+    year: "numeric",
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+    second: "2-digit",
   }).format(parsed);
 }
 
@@ -205,7 +220,24 @@ export async function loadAuditReport(
   fetcher: (path: string, options: AuditReportOptions) => Promise<AuditReport> = fetchAuditReport,
 ): Promise<Extract<AuditState, { status: "done" }> | Extract<AuditState, { status: "error" }>> {
   try {
-    const data = await fetcher(projectPath, { limit: DEFAULT_AUDIT_REPORT_LIMIT, ...options });
+    const requestOptions = { limit: DEFAULT_AUDIT_REPORT_LIMIT, ...options };
+    let data = await fetcher(projectPath, requestOptions);
+
+    // The general audit report truncates all event types before the desktop
+    // filters to blocked rows. Fetch a blocked-only page when newer hook audit
+    // events displaced blocks, so the details affordance remains available.
+    const expectedBlockedRows = Math.min(
+      data.summary.blocked_events,
+      requestOptions.limit ?? DEFAULT_AUDIT_REPORT_LIMIT,
+    );
+    if (!options.reason && blockedRecentRows(data).length < expectedBlockedRows) {
+      const blockedData = await fetcher(projectPath, {
+        ...requestOptions,
+        reason: "blocked",
+      });
+      data = { ...data, recent: blockedRecentRows(blockedData) };
+    }
+
     return { status: "done", data, loadedAt: new Date().toISOString() };
   } catch (error) {
     return {

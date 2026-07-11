@@ -3,7 +3,7 @@ import type { Messages } from "../types";
 export const en: Messages = {
   app: {
     selectFolder: "Select folder to scan",
-    selectFolderForIde: "Select a folder to open in your editor",
+    selectFolderForApp: "Select a folder to open in your app",
     selectCloneDestination: "Select where to clone the repository",
   },
   common: {
@@ -33,9 +33,11 @@ export const en: Messages = {
     welcome: "Welcome",
     maskWorkspace: "Mask for AI",
     openFolder: "Open folder",
-    openInIde: "Open in IDE",
-    openInIdeWith: "Open in {{ide}}",
-    preferredIde: "Open with",
+    openInApp: "Open in app",
+    openInAppWith: "Open in {{app}}",
+    preferredApp: "Choose app",
+    editorSection: "Editors",
+    aiAppSection: "AI apps",
     updates: {
       check: "Check updates",
       checking: "Checking…",
@@ -44,10 +46,12 @@ export const en: Messages = {
       available: "Version {{version}} is available. Download and restart now?",
       failed: "Update check failed: {{message}}",
     },
-    ideNames: {
+    appNames: {
       cursor: "Cursor",
       vscode: "VS Code",
       antigravity: "Antigravity",
+      "claude-desktop": "Claude Desktop",
+      "chatgpt-desktop": "ChatGPT",
     },
   },
   welcome: {
@@ -64,8 +68,12 @@ export const en: Messages = {
   mask: {
     title: "Mask for AI",
     subtitle: "Paste or upload content, mask secrets and PII, then copy into your AI tool.",
-    policyProject: "Using project policy (shk.toml)",
-    policyDefault: "Using default mask policy",
+    policyProject: "Using shk.toml",
+    policyProjectFallback: "Using default",
+    policyChecking: "Checking…",
+    policyError: "Unavailable",
+    policySelectLabel: "Mask policy",
+    policyDefaultOption: "Default policy (no project)",
     steps: {
       input: "Add content",
       mask: "Mask",
@@ -91,7 +99,6 @@ export const en: Messages = {
     removeFile: "Remove file",
     useTextInstead: "Switch to pasted text",
     runMask: "Mask",
-    runMaskHint: "⌘↵",
     masking: "Masking…",
     copyMasked: "Copy masked text",
     copied: "Copied",
@@ -118,6 +125,7 @@ export const en: Messages = {
     fileKinds: {
       text: "Text file",
       office: "Office document",
+      pdf: "PDF document (masked text output only)",
     },
   },
   cloneRepository: {
@@ -200,6 +208,12 @@ export const en: Messages = {
     subtitle: "Metadata only — raw secrets, prompts, and commands are never stored.",
     loading: "Loading blocked history…",
     refresh: "Refresh",
+    resetLog: "Reset log",
+    resetConfirmTitle: "Reset blocked history?",
+    resetConfirmBody:
+      "This permanently deletes the local audit log for this project (including rotated archives). New blocks will still be recorded afterward.",
+    resetConfirm: "Reset log",
+    resetFailed: "Could not reset the audit log.",
     noLog:
       "Nothing recorded yet. Apply AI safety hooks in Setup to start logging blocked activity.",
     openSetup: "Open setup",
@@ -223,6 +237,10 @@ export const en: Messages = {
     ruleBreakdownHint: "Counts blocked events that included each rule.",
     showDetails: "Show details",
     hideDetails: "Hide details",
+    detailWhen: "When",
+    detailTool: "AI tool",
+    detailReason: "Block reason",
+    detailOperation: "What was blocked",
     detailHook: "Hook phase",
     detailRuleIds: "Rule IDs",
     detailKinds: "Detection kinds",

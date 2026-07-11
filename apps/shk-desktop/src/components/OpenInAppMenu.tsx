@@ -1,18 +1,18 @@
 import { Check, ChevronDown, FolderOpen } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
-import { IDE_OPTIONS, type PreferredIde } from "../ide";
+import { PROJECT_APP_SECTIONS, type ProjectApp } from "../projectApp";
 
 type Props = {
-  preferredIde: PreferredIde;
-  onSelect: (ide: PreferredIde) => void;
+  preferredApp: ProjectApp;
+  onSelect: (app: ProjectApp) => void;
   disabled?: boolean;
 };
 
-export function OpenInIdeMenu({ preferredIde, onSelect, disabled = false }: Props) {
+export function OpenInAppMenu({ preferredApp, onSelect, disabled = false }: Props) {
   const { messages, t } = useI18n();
   const m = messages.topBar;
-  const triggerLabel = t(m.openInIdeWith, { ide: m.ideNames[preferredIde] });
+  const triggerLabel = t(m.openInAppWith, { app: m.appNames[preferredApp] });
   const [open, setOpen] = useState(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
@@ -34,9 +34,9 @@ export function OpenInIdeMenu({ preferredIde, onSelect, disabled = false }: Prop
     };
   }, [open]);
 
-  function handleSelect(ide: PreferredIde) {
+  function handleSelect(app: ProjectApp) {
     setOpen(false);
-    onSelect(ide);
+    onSelect(app);
   }
 
   return (
@@ -62,34 +62,42 @@ export function OpenInIdeMenu({ preferredIde, onSelect, disabled = false }: Prop
       {open && (
         <div
           role="menu"
-          className="shk-fade-in absolute right-0 top-[calc(100%+4px)] z-30 w-48 overflow-hidden rounded-lg border border-border bg-surface-3 py-1 shadow-xl shadow-black/40"
+          className="shk-fade-in absolute right-0 top-[calc(100%+4px)] z-30 w-52 overflow-hidden rounded-lg border border-border bg-surface-3 py-1 shadow-xl shadow-black/40"
         >
           <div className="px-3 pt-1.5 pb-1 text-[10px] font-semibold tracking-[0.14em] text-muted uppercase">
-            {m.preferredIde}
+            {m.preferredApp}
           </div>
           <div className="mx-2 mb-1 h-px bg-border" aria-hidden="true" />
-          {IDE_OPTIONS.map((id) => {
-            const active = id === preferredIde;
-            return (
-              <button
-                key={id}
-                type="button"
-                role="menuitemradio"
-                aria-checked={active}
-                onClick={() => handleSelect(id)}
-                className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition ${
-                  active
-                    ? "bg-sky-500/10 text-white"
-                    : "text-text hover:bg-surface/60 hover:text-white"
-                }`}
-              >
-                <span className="grid h-4 w-4 shrink-0 place-items-center text-sky-300">
-                  {active ? <Check size={12} aria-hidden="true" /> : null}
-                </span>
-                <span className="flex-1 truncate">{m.ideNames[id]}</span>
-              </button>
-            );
-          })}
+          {PROJECT_APP_SECTIONS.map((section, index) => (
+            <div key={section.labelKey}>
+              {index > 0 ? <div className="mx-2 my-1 h-px bg-border" aria-hidden="true" /> : null}
+              <div className="px-3 pt-1 pb-0.5 text-[10px] font-medium tracking-[0.08em] text-faint uppercase">
+                {m[section.labelKey]}
+              </div>
+              {section.options.map((app) => {
+                const active = app === preferredApp;
+                return (
+                  <button
+                    key={app}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={active}
+                    onClick={() => handleSelect(app)}
+                    className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition ${
+                      active
+                        ? "bg-sky-500/10 text-white"
+                        : "text-text hover:bg-surface/60 hover:text-white"
+                    }`}
+                  >
+                    <span className="grid h-4 w-4 shrink-0 place-items-center text-sky-300">
+                      {active ? <Check size={12} aria-hidden="true" /> : null}
+                    </span>
+                    <span className="flex-1 truncate">{m.appNames[app]}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </div>
       )}
     </div>

@@ -78,3 +78,7 @@ export function fetchAuditReport(
 ): Promise<AuditReport> {
   return invoke<AuditReport>("audit_report", { path, options });
 }
+
+export function clearAuditLog(path: string): Promise<ActionResult> {
+  return invoke<ActionResult>("clear_audit_log", { path });
+}

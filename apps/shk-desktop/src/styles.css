@@ -7,9 +7,10 @@
   --color-surface-3: #1d2230;
   --color-border: #232a3a;
   --color-border-strong: #2f3850;
-  --color-text: #e7ebf5;
-  --color-muted: #8c95ac;
-  --color-faint: #5b6478;
+  /* Keep all semantic text levels legible on the darkest app surfaces. */
+  --color-text: #f2f4fa;
+  --color-muted: #b6bed0;
+  --color-faint: #8993aa;
 
   /* Keep Tailwind's sky utilities aligned with the cyan/blue logo gradient. */
   --color-sky-50: #eafaff;

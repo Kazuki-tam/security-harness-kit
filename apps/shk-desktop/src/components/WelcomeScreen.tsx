@@ -1,4 +1,4 @@
-import { FolderOpen, GitFork, Shield } from "lucide-react";
+import { Eraser, FolderOpen, GitFork } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useI18n } from "../i18n";
 import type { Project } from "../types";
@@ -39,23 +39,22 @@ export function WelcomeScreen({
           <p className="mt-2 max-w-md text-[12.5px] text-[var(--color-muted)]">{m.subtitle}</p>
         </section>
 
-        <section className="grid grid-cols-1 gap-3 sm:grid-cols-2" aria-label={m.actions}>
+        <section className="grid grid-cols-1 gap-3 sm:grid-cols-3" aria-label={m.actions}>
           <ActionCard
             icon={<FolderOpen size={18} aria-hidden="true" />}
             label={m.openProject}
             onClick={onOpenFolder}
             primary
-            fullWidth
-          />
-          <ActionCard
-            icon={<Shield size={18} aria-hidden="true" />}
-            label={m.maskWorkspace}
-            onClick={onShowMask}
           />
           <ActionCard
             icon={<GitFork size={18} aria-hidden="true" />}
             label={messages.cloneRepository.action}
             onClick={() => setCloneOpen(true)}
+          />
+          <ActionCard
+            icon={<Eraser size={18} aria-hidden="true" />}
+            label={m.maskWorkspace}
+            onClick={onShowMask}
           />
         </section>
 
@@ -94,13 +93,11 @@ function ActionCard({
   label,
   onClick,
   primary,
-  fullWidth,
 }: {
   icon: ReactNode;
   label: string;
   onClick: () => void;
   primary?: boolean;
-  fullWidth?: boolean;
 }) {
   return (
     <button
@@ -110,7 +107,7 @@ function ActionCard({
         primary
           ? "border-sky-400/30 hover:border-sky-400/60 hover:bg-sky-500/10"
           : "border-[var(--color-border)] hover:border-[var(--color-border-strong)] hover:bg-[var(--color-surface-3)]"
-      } ${fullWidth ? "sm:col-span-2" : ""}`}
+      }`}
     >
       <span
         className={`grid h-8 w-8 place-items-center rounded-lg transition ${

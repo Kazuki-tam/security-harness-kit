@@ -8,6 +8,9 @@ use shk_core::ScanJsonReport;
 use shk_core::masker::MaskJsonOutput;
 use shk_core::policy::ColorMode;
 use shk_core::scanner::{ScanOptions, scan_path as scan_target_path};
+mod project_launcher;
+
+use project_launcher::{ProjectAppKind, open_project_in_app_path};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tauri::async_runtime::spawn_blocking;
@@ -55,7 +58,10 @@ async fn scan_path(path: String) -> Result<ScanJsonReport, AppError> {
             git_history_ref: None,
             git_history_since: None,
             git_history_max_commits: None,
-            json: true,
+            // The desktop renders the structured report directly and does not
+            // display neighboring source lines. Keeping JSON context disabled
+            // avoids rescanning and redacting context around every finding.
+            json: false,
             fail_on_override: None,
             use_pre_commit_threshold: false,
             include_context: false,
@@ -142,12 +148,31 @@ async fn audit_report(
 }
 
 #[tauri::command]
+async fn clear_audit_log(path: String) -> Result<ActionResult, AppError> {
+    run_blocking(move || desktop_api::clear_audit_log(&path).map_err(map_err)).await
+}
+
+#[tauri::command]
 async fn clone_repository(
     remote_url: String,
     destination_parent: String,
 ) -> Result<CloneRepositoryResult, AppError> {
     run_blocking(move || {
         desktop_api::clone_repository(&remote_url, &destination_parent).map_err(map_err)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn mask_policy_status(
+    project_path: Option<String>,
+) -> Result<desktop_api::DesktopMaskPolicyStatus, AppError> {
+    run_blocking(move || {
+        let project_root = project_path
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty());
+        desktop_api::mask_policy_status(project_root.as_deref()).map_err(map_err)
     })
     .await
 }
@@ -366,188 +391,20 @@ async fn open_ai_tool(tool: String) -> Result<(), AppError> {
     run_blocking(move || launch_ai_tool(tool)).await
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IdeKind {
-    Cursor,
-    Vscode,
-    Antigravity,
-}
-
-impl IdeKind {
-    fn parse(raw: &str) -> Result<Self, AppError> {
-        match raw {
-            "cursor" => Ok(Self::Cursor),
-            "vscode" => Ok(Self::Vscode),
-            "antigravity" => Ok(Self::Antigravity),
-            other => Err(AppError::Message(format!("unsupported IDE: {other}"))),
-        }
-    }
-
-    fn display_name(self) -> &'static str {
-        match self {
-            Self::Cursor => "Cursor",
-            Self::Vscode => "VS Code",
-            Self::Antigravity => "Antigravity",
-        }
-    }
-
-    fn cli_command(self) -> &'static str {
-        match self {
-            Self::Cursor => "cursor",
-            Self::Vscode => "code",
-            Self::Antigravity => "antigravity",
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    fn mac_app_names(self) -> &'static [&'static str] {
-        match self {
-            Self::Cursor => &["Cursor"],
-            Self::Vscode => &["Visual Studio Code", "Code"],
-            Self::Antigravity => &["Antigravity", "Antigravity IDE", "Google Antigravity"],
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    fn windows_candidates(self) -> Vec<PathBuf> {
-        let local = std::env::var("LOCALAPPDATA").ok();
-        let program_files = std::env::var("ProgramFiles").ok();
-        match self {
-            Self::Cursor => {
-                let mut paths = Vec::new();
-                if let Some(local) = local {
-                    paths.push(
-                        PathBuf::from(local)
-                            .join("Programs")
-                            .join("cursor")
-                            .join("Cursor.exe"),
-                    );
-                }
-                paths
-            }
-            Self::Vscode => {
-                let mut paths = Vec::new();
-                if let Some(local) = local {
-                    paths.push(
-                        PathBuf::from(local)
-                            .join("Programs")
-                            .join("Microsoft VS Code")
-                            .join("Code.exe"),
-                    );
-                }
-                if let Some(program_files) = program_files {
-                    paths.push(
-                        PathBuf::from(program_files)
-                            .join("Microsoft VS Code")
-                            .join("Code.exe"),
-                    );
-                }
-                paths
-            }
-            Self::Antigravity => {
-                let mut paths = Vec::new();
-                if let Some(local) = local {
-                    paths.push(
-                        PathBuf::from(local)
-                            .join("Programs")
-                            .join("Antigravity")
-                            .join("Antigravity.exe"),
-                    );
-                }
-                if let Some(program_files) = program_files {
-                    paths.push(
-                        PathBuf::from(program_files)
-                            .join("Antigravity")
-                            .join("Antigravity.exe"),
-                    );
-                }
-                paths
-            }
-        }
-    }
-}
-
-fn run_command(mut command: Command) -> Result<(), AppError> {
-    let status = command
-        .status()
-        .map_err(|err| AppError::Message(format!("failed to launch editor: {err}")))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(AppError::Message(format!(
-            "editor process exited with status {status}"
-        )))
-    }
-}
-
-fn editor_command(program: impl AsRef<std::ffi::OsStr>, path: &Path) -> Command {
-    let mut command = Command::new(program);
-    command
-        .arg(path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    command
-}
-
-fn launch_with_cli(path: &Path, ide: IdeKind) -> Result<(), AppError> {
-    run_command(editor_command(ide.cli_command(), path))
-}
-
-fn open_in_ide_path(path: &Path, ide: IdeKind) -> Result<(), AppError> {
-    if !path.exists() {
-        return Err(AppError::Message(format!(
-            "path does not exist: {}",
-            path.display()
-        )));
-    }
-
-    let mut errors = Vec::new();
-
-    #[cfg(target_os = "macos")]
-    for app_name in ide.mac_app_names() {
-        let mut command = Command::new("open");
-        command.arg("-a").arg(app_name).arg(path);
-        match command.status() {
-            Ok(status) if status.success() => return Ok(()),
-            Ok(status) => errors.push(format!("open -a {app_name} exited with {status}")),
-            Err(err) => errors.push(format!("open -a {app_name} failed: {err}")),
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    for candidate in ide.windows_candidates() {
-        if !candidate.is_file() {
-            continue;
-        }
-        match run_command(editor_command(&candidate, path)) {
-            Ok(()) => return Ok(()),
-            Err(err) => errors.push(format!("{}: {err}", candidate.display())),
-        }
-    }
-
-    match launch_with_cli(path, ide) {
-        Ok(()) => return Ok(()),
-        Err(err) => errors.push(err.to_string()),
-    }
-
-    Err(AppError::Message(format!(
-        "could not open {} in {}. {}",
-        path.display(),
-        ide.display_name(),
-        errors.join("; ")
-    )))
+#[tauri::command]
+async fn open_in_ide(path: String, ide: String) -> Result<(), AppError> {
+    open_project_in_app(path, ide).await
 }
 
 #[tauri::command]
-async fn open_in_ide(path: String, ide: String) -> Result<(), AppError> {
-    let ide = IdeKind::parse(ide.trim())?;
+async fn open_project_in_app(path: String, app: String) -> Result<(), AppError> {
+    let app = ProjectAppKind::parse(app.trim())?;
     if path.trim().is_empty() {
         return Err(AppError::Message("path is empty".to_string()));
     }
 
     let path = PathBuf::from(path);
-    run_blocking(move || open_in_ide_path(&path, ide)).await
+    run_blocking(move || open_project_in_app_path(&path, app)).await
 }
 
 fn compile_time_updater_pubkey() -> Option<&'static str> {
@@ -581,8 +438,11 @@ pub fn run() {
             apply_npm_hardening,
             install_skills,
             audit_report,
+            clear_audit_log,
             clone_repository,
             open_in_ide,
+            open_project_in_app,
+            mask_policy_status,
             mask_content,
             mask_file,
             open_ai_tool,
@@ -611,39 +471,9 @@ mod tests {
     }
 
     #[test]
-    fn ide_kind_parse_and_display() {
-        assert_eq!(IdeKind::parse("cursor").unwrap(), IdeKind::Cursor);
-        assert_eq!(IdeKind::parse("vscode").unwrap(), IdeKind::Vscode);
-        assert_eq!(IdeKind::parse("antigravity").unwrap(), IdeKind::Antigravity);
-        assert!(IdeKind::parse("emacs").is_err());
-        assert_eq!(IdeKind::Cursor.display_name(), "Cursor");
-        assert_eq!(IdeKind::Vscode.cli_command(), "code");
-    }
-
-    #[test]
     fn app_error_serializes_to_string() {
         let err = AppError::Message("scan path is empty".into());
         let json = serde_json::to_string(&err).unwrap();
         assert!(json.contains("scan path is empty"));
-    }
-
-    #[test]
-    fn open_in_ide_path_requires_existing_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("missing.txt");
-        let err = open_in_ide_path(&missing, IdeKind::Cursor).unwrap_err();
-        assert!(err.to_string().contains("path does not exist"));
-    }
-
-    #[test]
-    fn editor_command_passes_path_to_program() {
-        let path = Path::new("/tmp/example-project");
-        let command = editor_command("cursor", path);
-
-        assert_eq!(command.get_program(), "cursor");
-        assert_eq!(
-            command.get_args().collect::<Vec<_>>(),
-            vec![path.as_os_str()]
-        );
     }
 }

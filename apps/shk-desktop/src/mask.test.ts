@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { maskFileBasename, maskOfficeSuggestedName, findingsBySeverity } from "./mask";
+import {
+  maskFileBasename,
+  maskFileKind,
+  maskOfficeSuggestedName,
+  findingsBySeverity,
+} from "./mask";
 import type { Finding } from "./scan";
 
 function finding(severity: Finding["severity"]): Finding {
@@ -25,6 +30,12 @@ describe("mask helpers", () => {
   it("builds masked office filename", () => {
     expect(maskOfficeSuggestedName("notes.docx")).toBe("notes.masked.docx");
     expect(maskOfficeSuggestedName("DATA.XLSX")).toBe("DATA.masked.XLSX");
+  });
+
+  it("classifies supported document paths", () => {
+    expect(maskFileKind("/tmp/report.PDF")).toBe("pdf");
+    expect(maskFileKind("C:\\docs\\report.docx")).toBe("office");
+    expect(maskFileKind("/tmp/contacts.csv")).toBe("text");
   });
 });
 
