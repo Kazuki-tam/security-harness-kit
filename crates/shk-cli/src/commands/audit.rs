@@ -69,6 +69,14 @@ pub struct AuditRecentRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_path: Option<String>,
     pub finding_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kinds: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppressed_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deduplicated_total: Option<u64>,
 }
 
 pub fn build_audit_report(root: &Path, inv: &AuditInvocation) -> Result<AuditReport> {
@@ -322,6 +330,29 @@ fn to_recent_row(entry: &serde_json::Value, hide_paths: bool) -> AuditRecentRow 
             .get("finding_count")
             .and_then(serde_json::Value::as_u64)
             .map(|n| n as usize),
+        rule_ids: string_array_field(entry, "rule_ids"),
+        kinds: string_array_field(entry, "kinds"),
+        suppressed_total: optional_u64_field(entry, "suppressed_total"),
+        deduplicated_total: optional_u64_field(entry, "deduplicated_total"),
+    }
+}
+
+fn optional_u64_field(entry: &serde_json::Value, field: &str) -> Option<u64> {
+    entry.get(field).and_then(serde_json::Value::as_u64)
+}
+
+fn string_array_field(entry: &serde_json::Value, field: &str) -> Option<Vec<String>> {
+    let values = entry
+        .get(field)
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
     }
 }
 
@@ -622,5 +653,52 @@ mod tests {
         }))];
         let rows = recent_rows(&entries, 5, true);
         assert!(rows[0].display_path.is_none());
+    }
+
+    #[test]
+    fn to_recent_row_preserves_blocked_metadata_fields() {
+        let row = to_recent_row(
+            &entry(serde_json::json!({
+                "event":"blocked",
+                "ts":"2026-05-23T02:31:00Z",
+                "tool":"cursor",
+                "hook":"pre",
+                "reason":"finding_threshold",
+                "display_path":"secret.txt",
+                "finding_count":2,
+                "rule_ids":["secret.a","pii.email"],
+                "kinds":["secret","pii"],
+                "suppressed_total":1,
+                "deduplicated_total":3,
+            })),
+            false,
+        );
+        assert_eq!(
+            row.rule_ids.as_deref(),
+            Some(["secret.a".to_string(), "pii.email".to_string()].as_slice())
+        );
+        assert_eq!(
+            row.kinds.as_deref(),
+            Some(["secret".to_string(), "pii".to_string()].as_slice())
+        );
+        assert_eq!(row.suppressed_total, Some(1));
+        assert_eq!(row.deduplicated_total, Some(3));
+    }
+
+    #[test]
+    fn to_recent_row_omits_missing_metadata_fields() {
+        let row = to_recent_row(
+            &entry(serde_json::json!({
+                "event":"blocked",
+                "ts":"2026-05-23T02:31:00Z",
+                "reason":"action_guard",
+                "action_category":"environment_dump",
+            })),
+            false,
+        );
+        assert!(row.rule_ids.is_none());
+        assert!(row.kinds.is_none());
+        assert!(row.suppressed_total.is_none());
+        assert!(row.deduplicated_total.is_none());
     }
 }

@@ -1,19 +1,25 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { AppNotice } from "./components/AppNotice";
+import { HelpModal } from "./components/HelpModal";
+import { MaskWorkspace } from "./components/MaskWorkspace";
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ScanWorkspace } from "./components/ScanWorkspace";
-import { usePreferredIde } from "./hooks/usePreferredIde";
+import { usePreferredAiTool } from "./hooks/usePreferredAiTool";
+import { usePreferredProjectApp } from "./hooks/usePreferredProjectApp";
 import { useProjects } from "./hooks/useProjects";
-import { openInIde, type PreferredIde } from "./ide";
+import { openProjectInApp, type ProjectApp } from "./projectApp";
 import { useI18n } from "./i18n";
+import { operationErrorMessage } from "./i18n/interpolate";
 import packageInfo from "../package.json";
 import {
   applyAiHookSettings,
   applyNpmHardening,
   applyRecommendedFixes,
+  cloneRepository,
   fetchProjectStatus,
   fixDoctorIgnore,
   initPolicy,
@@ -23,6 +29,7 @@ import {
 import { defaultRecommendedFixIds } from "./setup/plan";
 import { asSeverity, type ScanReport, type ScanState, type Severity } from "./scan";
 import type { ActionResult, ActionState, AiHookSetupSelection, ProjectStatusState } from "./types";
+import { createRequestTracker } from "./utils/requestTracker";
 
 const APP_VERSION = packageInfo.version;
 
@@ -39,12 +46,20 @@ function App() {
     renameProject,
   } = useProjects();
 
+  const [currentView, setCurrentView] = useState<"welcome" | "project" | "mask">(() =>
+    selectedProject ? "project" : "welcome",
+  );
   const [scanStates, setScanStates] = useState<Record<string, ScanState>>({});
   const [projectStatusStates, setProjectStatusStates] = useState<
     Record<string, ProjectStatusState>
   >({});
-  const [actionState, setActionState] = useState<ActionState>({ status: "idle" });
-  const { preferredIde, setPreferredIde } = usePreferredIde();
+  const [actionStates, setActionStates] = useState<Record<string, ActionState>>({});
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [appNotice, setAppNotice] = useState<string | null>(null);
+  const requestTrackerRef = useRef(createRequestTracker());
+  const { preferredProjectApp, setPreferredProjectApp } = usePreferredProjectApp();
+  const { preferredAiTool, setPreferredAiTool } = usePreferredAiTool();
+  const activeProject = currentView === "project" ? selectedProject : null;
 
   const currentScanState: ScanState = selectedId
     ? (scanStates[selectedId] ?? { status: "idle" })
@@ -54,19 +69,37 @@ function App() {
     ? (projectStatusStates[selectedId] ?? { status: "idle" })
     : { status: "idle" };
 
+  const actionState: ActionState = activeProject
+    ? (actionStates[activeProject.id] ?? { status: "idle" })
+    : { status: "idle" };
+
   const setScanStateFor = useCallback((id: string, state: ScanState) => {
     setScanStates((prev) => ({ ...prev, [id]: state }));
   }, []);
 
+  const showOperationError = useCallback(
+    (error: unknown) => {
+      setAppNotice(operationErrorMessage(messages.app.operationFailed, error));
+    },
+    [messages.app.operationFailed],
+  );
+
+  const setActionStateFor = useCallback((projectId: string, state: ActionState) => {
+    setActionStates((prev) => ({ ...prev, [projectId]: state }));
+  }, []);
+
   const refreshProjectStatus = useCallback(async (projectId: string, path: string) => {
+    const requestId = requestTrackerRef.current.begin(`status:${projectId}`);
     setProjectStatusStates((prev) => ({ ...prev, [projectId]: { status: "loading" } }));
     try {
       const data = await fetchProjectStatus(path);
+      if (!requestTrackerRef.current.isLatest(`status:${projectId}`, requestId)) return;
       setProjectStatusStates((prev) => ({
         ...prev,
         [projectId]: { status: "done", data, loadedAt: new Date().toISOString() },
       }));
     } catch (error) {
+      if (!requestTrackerRef.current.isLatest(`status:${projectId}`, requestId)) return;
       setProjectStatusStates((prev) => ({
         ...prev,
         [projectId]: {
@@ -78,30 +111,58 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!selectedProject) return;
-    void refreshProjectStatus(selectedProject.id, selectedProject.path);
-  }, [selectedProject?.id, selectedProject?.path, refreshProjectStatus]);
+    if (!activeProject) return;
+    void refreshProjectStatus(activeProject.id, activeProject.path);
+  }, [activeProject?.id, activeProject?.path, refreshProjectStatus]);
+
+  useEffect(() => {
+    if (projects.length === 0 && currentView !== "welcome") {
+      setCurrentView("welcome");
+    }
+  }, [currentView, projects.length]);
 
   const dismissActionFeedback = useCallback(() => {
-    setActionState({ status: "idle" });
-  }, []);
+    if (!activeProject) return;
+    setActionStateFor(activeProject.id, { status: "idle" });
+  }, [activeProject, setActionStateFor]);
 
   const runSetupAction = useCallback(
     async (runner: () => Promise<{ success: boolean; message: string; details: string[] }>) => {
-      if (!selectedProject) return;
-      setActionState({ status: "running" });
+      if (!activeProject) return;
+      const projectId = activeProject.id;
+      const projectPath = activeProject.path;
+      const requestId = requestTrackerRef.current.begin(`setup:${projectId}`);
+      setActionStateFor(projectId, { status: "running" });
       try {
         const result = await runner();
-        setActionState({ status: "done", result });
-        await refreshProjectStatus(selectedProject.id, selectedProject.path);
+        if (!requestTrackerRef.current.isLatest(`setup:${projectId}`, requestId)) return;
+        setActionStateFor(projectId, { status: "done", result });
+        await refreshProjectStatus(projectId, projectPath);
       } catch (error) {
-        setActionState({
+        if (!requestTrackerRef.current.isLatest(`setup:${projectId}`, requestId)) return;
+        setActionStateFor(projectId, {
           status: "error",
           message: error instanceof Error ? error.message : String(error),
         });
       }
     },
-    [refreshProjectStatus, selectedProject],
+    [activeProject, refreshProjectStatus, setActionStateFor],
+  );
+
+  const showWelcome = useCallback(() => {
+    setCurrentView("welcome");
+  }, []);
+
+  const showMask = useCallback(() => {
+    setCurrentView("mask");
+  }, []);
+
+  const showProject = useCallback(
+    (id: string) => {
+      selectProject(id);
+      setCurrentView("project");
+    },
+    [selectProject],
   );
 
   const openFolder = useCallback(async () => {
@@ -113,40 +174,71 @@ function App() {
       });
       if (typeof path === "string" && path) {
         addProject(path);
+        setCurrentView("project");
       }
     } catch (error) {
-      console.error("failed to open folder:", error);
+      showOperationError(error);
     }
-  }, [addProject, messages.app.selectFolder]);
+  }, [addProject, messages.app.selectFolder, showOperationError]);
 
-  const openProjectInIde = useCallback(
-    async (ide: PreferredIde) => {
-      setPreferredIde(ide);
+  const cloneGitRepository = useCallback(
+    async (remoteUrl: string): Promise<boolean> => {
       try {
-        let path = selectedProject?.path;
+        const destinationParent = await open({
+          directory: true,
+          multiple: false,
+          title: messages.app.selectCloneDestination,
+        });
+        if (typeof destinationParent !== "string" || !destinationParent) return false;
+
+        const result = await cloneRepository(remoteUrl, destinationParent);
+        addProject(result.path);
+        setCurrentView("project");
+        return true;
+      } catch (error) {
+        showOperationError(error);
+        return false;
+      }
+    },
+    [addProject, messages.app.selectCloneDestination, showOperationError],
+  );
+
+  const openProjectInAppHandler = useCallback(
+    async (app: ProjectApp) => {
+      setPreferredProjectApp(app);
+      try {
+        let path = activeProject?.path;
         if (!path) {
           const picked = await open({
             directory: true,
             multiple: false,
-            title: messages.app.selectFolderForIde,
+            title: messages.app.selectFolderForApp,
           });
           if (typeof picked !== "string" || !picked) return;
           path = picked;
           addProject(path);
+          setCurrentView("project");
         }
-        await openInIde(path, ide);
+        await openProjectInApp(path, app);
       } catch (error) {
-        console.error("failed to open project in IDE:", error);
+        showOperationError(error);
       }
     },
-    [addProject, messages.app.selectFolderForIde, selectedProject?.path, setPreferredIde],
+    [
+      activeProject?.path,
+      addProject,
+      messages.app.selectFolderForApp,
+      setPreferredProjectApp,
+      showOperationError,
+    ],
   );
 
   const runScan = useCallback(async () => {
-    if (!selectedProject) return;
+    if (!activeProject) return;
     if (currentScanState.status === "running") return;
 
-    const projectId = selectedProject.id;
+    const projectId = activeProject.id;
+    const requestId = requestTrackerRef.current.begin(`scan:${projectId}`);
     const previousResult =
       currentScanState.status === "done"
         ? { report: currentScanState.report, finishedAt: currentScanState.finishedAt }
@@ -160,8 +252,9 @@ function App() {
     });
     try {
       const report = await invoke<ScanReport>("scan_path", {
-        path: selectedProject.path,
+        path: activeProject.path,
       });
+      if (!requestTrackerRef.current.isLatest(`scan:${projectId}`, requestId)) return;
       const finishedAt = new Date().toISOString();
       setScanStateFor(projectId, { status: "done", report, finishedAt });
 
@@ -175,16 +268,27 @@ function App() {
         scannedAt: finishedAt,
       });
     } catch (error) {
+      if (!requestTrackerRef.current.isLatest(`scan:${projectId}`, requestId)) return;
       setScanStateFor(projectId, {
         status: "error",
         message: error instanceof Error ? error.message : String(error),
         previous: previousResult,
       });
     }
-  }, [currentScanState, selectedProject, setScanStateFor, updateProjectSummary]);
+  }, [activeProject, currentScanState, setScanStateFor, updateProjectSummary]);
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      const isEditing =
+        target?.isContentEditable ||
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT";
+      if (event.defaultPrevented || isEditing || document.querySelector('[aria-modal="true"]')) {
+        return;
+      }
+
       const cmdOrCtrl = event.metaKey || event.ctrlKey;
       if (cmdOrCtrl && event.key.toLowerCase() === "o") {
         event.preventDefault();
@@ -194,13 +298,22 @@ function App() {
         event.preventDefault();
         void runScan();
       }
+      if (cmdOrCtrl && event.shiftKey && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        showWelcome();
+      }
+      if (cmdOrCtrl && event.key.toLowerCase() === "m") {
+        event.preventDefault();
+        showMask();
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [openFolder, runScan]);
+  }, [openFolder, runScan, showMask, showWelcome]);
 
   const handleRemove = useCallback(
     (id: string) => {
+      setAppNotice(null);
       setScanStates((prev) => {
         if (!(id in prev)) return prev;
         const next = { ...prev };
@@ -213,16 +326,22 @@ function App() {
         delete next[id];
         return next;
       });
+      setActionStates((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       removeProject(id);
     },
     [removeProject],
   );
 
-  const setupHandlers = selectedProject
+  const setupHandlers = activeProject
     ? {
         onQuickSetup: (fixIds: string[], ignoreTargets: string[]) =>
           runSetupAction(async (): Promise<ActionResult> => {
-            const path = selectedProject.path;
+            const path = activeProject.path;
             let status = await fetchProjectStatus(path);
             const hadPolicy = Boolean(status?.policy.exists);
 
@@ -244,17 +363,17 @@ function App() {
             return applyRecommendedFixes(path, { fixIds: ids, ignoreTargets });
           }),
         onInitPolicy: (request: { strict: boolean; force: boolean }) =>
-          runSetupAction(() => initPolicy(selectedProject.path, request)),
+          runSetupAction(() => initPolicy(activeProject.path, request)),
         onFixDoctorIgnore: (targets: string[]) =>
-          runSetupAction(() => fixDoctorIgnore(selectedProject.path, { targets })),
-        onInstallPreCommit: () => runSetupAction(() => installPreCommitHook(selectedProject.path)),
+          runSetupAction(() => fixDoctorIgnore(activeProject.path, { targets })),
+        onInstallPreCommit: () => runSetupAction(() => installPreCommitHook(activeProject.path)),
         onInstallAiHooks: (selection: AiHookSetupSelection) =>
-          runSetupAction(() => applyAiHookSettings(selectedProject.path, selection)),
+          runSetupAction(() => applyAiHookSettings(activeProject.path, selection)),
         onApplyNpmHardening: (enabled: boolean) =>
-          runSetupAction(() => applyNpmHardening(selectedProject.path, { enabled })),
+          runSetupAction(() => applyNpmHardening(activeProject.path, { enabled })),
         onInstallSkills: () =>
           runSetupAction(() =>
-            installSkills(selectedProject.path, {
+            installSkills(activeProject.path, {
               global: false,
               dryRun: false,
               force: true,
@@ -271,27 +390,43 @@ function App() {
       {showSidebar && (
         <Sidebar
           projects={projects}
-          selectedId={selectedId}
-          onSelect={selectProject}
+          selectedId={activeProject?.id ?? null}
+          maskActive={currentView === "mask"}
+          onSelect={showProject}
+          onShowWelcome={showWelcome}
+          onShowMask={showMask}
           onAdd={openFolder}
           onRemove={handleRemove}
           onRename={renameProject}
           appVersion={APP_VERSION}
+          onNotice={setAppNotice}
         />
       )}
 
       <main className="flex min-w-0 flex-1 flex-col">
         <TopBar
-          project={selectedProject}
+          view={currentView}
+          project={activeProject}
           reserveWindowControls={!showSidebar}
-          preferredIde={preferredIde}
-          onOpenInIde={openProjectInIde}
+          preferredApp={preferredProjectApp}
+          onOpenInApp={openProjectInAppHandler}
+          onShowHelp={() => setHelpOpen(true)}
         />
 
-        {selectedProject ? (
+        {appNotice && <AppNotice message={appNotice} onDismiss={() => setAppNotice(null)} />}
+
+        {currentView === "mask" ? (
+          <MaskWorkspace
+            projects={projects}
+            initialPolicyProjectId={selectedId}
+            preferredAiTool={preferredAiTool}
+            onPreferredAiToolChange={setPreferredAiTool}
+            onNotice={setAppNotice}
+          />
+        ) : activeProject ? (
           <ScanWorkspace
-            key={selectedProject.id}
-            project={selectedProject}
+            key={activeProject.id}
+            project={activeProject}
             scanState={currentScanState}
             projectStatus={currentProjectStatus}
             actionState={actionState}
@@ -304,10 +439,13 @@ function App() {
             recentProjects={recentForWelcome}
             totalProjects={projects.length}
             onOpenFolder={openFolder}
-            onSelect={selectProject}
+            onCloneRepository={cloneGitRepository}
+            onSelect={showProject}
+            onShowMask={showMask}
           />
         )}
       </main>
+      <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
   );
 }

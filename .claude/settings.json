@@ -106,5 +106,19 @@
       "Bash(pacman:*)",
       "Bash(brew:*)"
     ]
+  },
+  "sandbox": {
+    "allowUnsandboxedCommands": false,
+    "autoAllowBashIfSandboxed": true,
+    "enabled": true,
+    "failIfUnavailable": true,
+    "filesystem": {
+      "allowRead": [
+        "."
+      ],
+      "denyRead": [
+        "~/"
+      ]
+    }
   }
 }

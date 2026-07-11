@@ -33,6 +33,16 @@ With `shk`, you can:
 - Generate a GitHub Actions workflow that runs `shk scan` on every pull request.
 - Diagnose ignore file and `.env` safety coverage.
 - Deploy AI agent skills to Claude Code, Codex, Cursor, GitHub Copilot, Antigravity, and Windsurf project directories.
+- Use the **shk Desktop** app for local scanning, masking, setup, and audit review with a GUI.
+
+## Desktop App
+
+The **shk Desktop** app (`apps/shk-desktop`) provides a local GUI for project
+scanning, AI-oriented masking, setup automation, and audit review. Early access
+builds are published as unsigned installers from GitHub Releases.
+
+- Download and install: [Installation → Desktop App](docs/installation.md#desktop-app-unsigned-early-access)
+- Maintainer release process: [Desktop Release](docs/desktop-release.md)
 
 ## Installation
 
@@ -201,7 +211,7 @@ shk hooks install-ai --tool windsurf
 shk ci init github
 shk ci init github --dry-run
 shk ci init github --mode audit
-shk ci init github --shk-version v0.4.11
+shk ci init github --shk-version v0.5.0
 
 shk skills install
 shk skills install --tool claude-code --global

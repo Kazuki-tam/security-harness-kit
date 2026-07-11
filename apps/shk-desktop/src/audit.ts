@@ -1,5 +1,11 @@
 import { asSeverity, type Severity } from "./scan";
-import type { AuditRecentRow, AuditReport, AuditReportOptions, AuditState } from "./types";
+import type {
+  AuditCountRow,
+  AuditRecentRow,
+  AuditReport,
+  AuditReportOptions,
+  AuditState,
+} from "./types";
 import { fetchAuditReport } from "./project";
 
 export const DEFAULT_AUDIT_REPORT_LIMIT = 10;
@@ -12,20 +18,124 @@ export function isBlockedAuditReason(reason: string | undefined): reason is Bloc
   return reason !== undefined && BLOCKED_AUDIT_REASONS.has(reason);
 }
 
+export type BlockedBreakdowns = {
+  reasons: AuditCountRow[];
+  actionCategories: AuditCountRow[];
+  rules: AuditCountRow[];
+};
+
+export type AuditDetailField = {
+  label: string;
+  value: string;
+};
+
+export type AuditDetailLabels = {
+  detailWhen: string;
+  detailTool: string;
+  detailReason: string;
+  detailOperation: string;
+  detailHook: string;
+  detailRuleIds: string;
+  detailKinds: string;
+  detailSuppressed: string;
+  detailDeduplicated: string;
+  hookLabels: Record<string, string>;
+  kindLabels: Record<string, string>;
+  reasonLabels: Record<string, string>;
+  toolNames: Record<string, string>;
+  actionCategories: Record<string, string>;
+};
+
 export function blockedRecentRows(report: AuditReport): AuditRecentRow[] {
   return report.recent.filter((row) => isBlockedAuditReason(row.reason));
+}
+
+export function blockedBreakdowns(report: AuditReport): BlockedBreakdowns {
+  return {
+    reasons: report.by_reason.filter((row) => isBlockedAuditReason(row.label)),
+    actionCategories: report.by_action_category,
+    rules: report.by_rule,
+  };
+}
+
+export function blockedRowDetailFields(
+  row: AuditRecentRow,
+  labels: AuditDetailLabels,
+  locale = "en-US",
+): AuditDetailField[] {
+  const fields: AuditDetailField[] = [
+    { label: labels.detailWhen, value: formatAuditTimestamp(row.ts, locale) },
+    { label: labels.detailTool, value: formatToolName(row.tool, labels.toolNames) },
+  ];
+
+  if (row.reason) {
+    fields.push({
+      label: labels.detailReason,
+      value: labels.reasonLabels[row.reason] ?? row.reason,
+    });
+  }
+
+  const operation = formatBlockedRowSummary(row, labels.actionCategories);
+  if (operation !== "—") {
+    fields.push({ label: labels.detailOperation, value: operation });
+  }
+
+  if (row.hook) {
+    fields.push({
+      label: labels.detailHook,
+      value: labels.hookLabels[row.hook] ?? row.hook,
+    });
+  }
+  if (row.rule_ids?.length) {
+    fields.push({
+      label: labels.detailRuleIds,
+      value: row.rule_ids.join(", "),
+    });
+  }
+  if (row.kinds?.length) {
+    fields.push({
+      label: labels.detailKinds,
+      value: row.kinds.map((kind) => labels.kindLabels[kind] ?? kind).join(", "),
+    });
+  }
+  if (row.suppressed_total != null) {
+    fields.push({
+      label: labels.detailSuppressed,
+      value: String(row.suppressed_total),
+    });
+  }
+  if (row.deduplicated_total != null) {
+    fields.push({
+      label: labels.detailDeduplicated,
+      value: String(row.deduplicated_total),
+    });
+  }
+
+  return fields;
+}
+
+export function formatBlockedRowSummary(
+  row: AuditRecentRow,
+  actionCategories: Record<string, string>,
+): string {
+  if (row.reason === "action_guard") {
+    return formatActionCategory(row.action_category, actionCategories);
+  }
+  return row.display_path ?? "—";
 }
 
 export function formatAuditTimestamp(ts: string, locale = "en-US"): string {
   const parsed = Date.parse(ts);
   if (Number.isNaN(parsed)) {
-    return ts.slice(0, 16);
+    return ts.slice(0, 19) || ts;
   }
   return new Intl.DateTimeFormat(locale, {
+    year: "numeric",
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+    second: "2-digit",
   }).format(parsed);
 }
 
@@ -110,7 +220,24 @@ export async function loadAuditReport(
   fetcher: (path: string, options: AuditReportOptions) => Promise<AuditReport> = fetchAuditReport,
 ): Promise<Extract<AuditState, { status: "done" }> | Extract<AuditState, { status: "error" }>> {
   try {
-    const data = await fetcher(projectPath, { limit: DEFAULT_AUDIT_REPORT_LIMIT, ...options });
+    const requestOptions = { limit: DEFAULT_AUDIT_REPORT_LIMIT, ...options };
+    let data = await fetcher(projectPath, requestOptions);
+
+    // The general audit report truncates all event types before the desktop
+    // filters to blocked rows. Fetch a blocked-only page when newer hook audit
+    // events displaced blocks, so the details affordance remains available.
+    const expectedBlockedRows = Math.min(
+      data.summary.blocked_events,
+      requestOptions.limit ?? DEFAULT_AUDIT_REPORT_LIMIT,
+    );
+    if (!options.reason && blockedRecentRows(data).length < expectedBlockedRows) {
+      const blockedData = await fetcher(projectPath, {
+        ...requestOptions,
+        reason: "blocked",
+      });
+      data = { ...data, recent: blockedRecentRows(blockedData) };
+    }
+
     return { status: "done", data, loadedAt: new Date().toISOString() };
   } catch (error) {
     return {

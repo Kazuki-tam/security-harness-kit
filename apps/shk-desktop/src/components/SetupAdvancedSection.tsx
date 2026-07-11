@@ -19,7 +19,7 @@ export function SetupAdvancedSection({ open, onToggle, pendingHint, children }: 
         type="button"
         onClick={onToggle}
         aria-expanded={open}
-        className="flex w-full items-center justify-between gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)] px-4 py-3 text-left transition hover:bg-[var(--color-surface-3)]/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
+        className="flex w-full items-center justify-between gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)] px-4 py-3 text-left transition hover:bg-[var(--color-surface-3)]/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70"
       >
         <div className="min-w-0">
           <h3 className="text-sm font-semibold text-white">{m.title}</h3>

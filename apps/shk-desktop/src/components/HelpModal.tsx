@@ -45,7 +45,7 @@ export function HelpModal({ open, onClose }: Props) {
             type="button"
             onClick={onClose}
             aria-label={messages.common.close}
-            className="grid h-7 w-7 place-items-center rounded-md text-[var(--color-muted)] transition hover:bg-[var(--color-surface-3)] hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
+            className="grid h-7 w-7 place-items-center rounded-md text-[var(--color-muted)] transition hover:bg-[var(--color-surface-3)] hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70"
           >
             <X size={14} aria-hidden="true" />
           </button>
@@ -70,6 +70,7 @@ export function HelpModal({ open, onClose }: Props) {
           <dl className="mt-3 grid gap-1.5">
             <Shortcut label={m.shortcutOpen} keys={["⌘", "O"]} />
             <Shortcut label={m.shortcutRescan} keys={["⌘", "R"]} />
+            <Shortcut label={m.shortcutWelcome} keys={["⌘", "⇧", "N"]} />
             <Shortcut label={m.shortcutClose} keys={["Esc"]} />
           </dl>
         </section>

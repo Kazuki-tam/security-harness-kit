@@ -14,7 +14,7 @@ function DismissButton({ onDismiss, label }: { onDismiss: () => void; label: str
       type="button"
       onClick={onDismiss}
       aria-label={label}
-      className="grid h-6 w-6 shrink-0 place-items-center rounded-md opacity-70 transition hover:bg-white/10 hover:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
+      className="grid h-6 w-6 shrink-0 place-items-center rounded-md opacity-70 transition hover:bg-white/10 hover:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70"
     >
       <X size={14} aria-hidden="true" />
     </button>

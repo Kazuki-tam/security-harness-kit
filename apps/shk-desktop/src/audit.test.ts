@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   auditEventDetail,
   auditHasBlockedEvents,
+  blockedBreakdowns,
   blockedRecentRows,
+  blockedRowDetailFields,
   formatActionCategory,
   formatAuditTimestamp,
+  formatBlockedRowSummary,
   formatToolName,
   hiddenBlockedCount,
   highestBlockedSeverity,
@@ -29,10 +32,13 @@ function sampleReport(overrides: Partial<AuditReport> = {}): AuditReport {
       hook_audit_events: 1,
       secrets_push_events: 0,
     },
-    by_rule: [],
+    by_rule: [{ label: "secret.generic_api_key", count: 2 }],
     by_tool: [],
-    by_reason: [],
-    by_action_category: [],
+    by_reason: [
+      { label: "finding_threshold", count: 2 },
+      { label: "hook_audit", count: 1 },
+    ],
+    by_action_category: [{ label: "environment_dump", count: 1 }],
     recent: [
       {
         ts: "2026-05-23T02:31:00Z",
@@ -106,8 +112,10 @@ describe("auditEventDetail", () => {
 });
 
 describe("formatAuditTimestamp", () => {
-  it("formats valid RFC3339 timestamps", () => {
-    expect(formatAuditTimestamp("2026-05-23T02:31:00Z", "en-US")).toMatch(/May/);
+  it("formats valid RFC3339 timestamps with full date and time", () => {
+    const formatted = formatAuditTimestamp("2026-05-23T02:31:00Z", "en-US");
+    expect(formatted).toMatch(/2026/);
+    expect(formatted).toMatch(/May/);
   });
 
   it("truncates invalid timestamps", () => {
@@ -250,6 +258,133 @@ describe("rowLinksToFindings", () => {
   });
 });
 
+describe("blockedBreakdowns", () => {
+  it("returns blocked-only reason rows with category and rule aggregates", () => {
+    expect(blockedBreakdowns(sampleReport())).toEqual({
+      reasons: [{ label: "finding_threshold", count: 2 }],
+      actionCategories: [{ label: "environment_dump", count: 1 }],
+      rules: [{ label: "secret.generic_api_key", count: 2 }],
+    });
+  });
+
+  it("omits empty breakdown sections", () => {
+    expect(
+      blockedBreakdowns(
+        sampleReport({
+          by_reason: [{ label: "hook_audit", count: 1 }],
+          by_action_category: [],
+          by_rule: [],
+        }),
+      ),
+    ).toEqual({
+      reasons: [],
+      actionCategories: [],
+      rules: [],
+    });
+  });
+});
+
+describe("blockedRowDetailFields", () => {
+  const labels = {
+    detailWhen: "When",
+    detailTool: "AI tool",
+    detailReason: "Block reason",
+    detailOperation: "What was blocked",
+    detailHook: "Hook phase",
+    detailRuleIds: "Rule IDs",
+    detailKinds: "Detection kinds",
+    detailSuppressed: "Suppressed findings",
+    detailDeduplicated: "Deduplicated findings",
+    hookLabels: { pre: "Pre-tool" },
+    kindLabels: { secret: "Secret" },
+    reasonLabels: {
+      finding_threshold: "Secret/PII blocked",
+      action_guard: "Risky action blocked",
+    },
+    toolNames: { cursor: "Cursor" },
+    actionCategories: { environment_dump: "Environment dump" },
+  };
+  const ts = "2026-05-23T02:31:00Z";
+  const when = formatAuditTimestamp(ts, "en-US");
+
+  it("builds localized detail rows from blocked metadata", () => {
+    expect(
+      blockedRowDetailFields(
+        {
+          ts,
+          tool: "cursor",
+          reason: "finding_threshold",
+          display_path: "secret.txt",
+          hook: "pre",
+          rule_ids: ["secret.a"],
+          kinds: ["secret"],
+          suppressed_total: 1,
+          deduplicated_total: 2,
+        },
+        labels,
+        "en-US",
+      ),
+    ).toEqual([
+      { label: "When", value: when },
+      { label: "AI tool", value: "Cursor" },
+      { label: "Block reason", value: "Secret/PII blocked" },
+      { label: "What was blocked", value: "secret.txt" },
+      { label: "Hook phase", value: "Pre-tool" },
+      { label: "Rule IDs", value: "secret.a" },
+      { label: "Detection kinds", value: "Secret" },
+      { label: "Suppressed findings", value: "1" },
+      { label: "Deduplicated findings", value: "2" },
+    ]);
+  });
+
+  it("always includes when and tool even without extra metadata", () => {
+    expect(
+      blockedRowDetailFields(
+        {
+          ts,
+          reason: "action_guard",
+          action_category: "environment_dump",
+        },
+        labels,
+        "en-US",
+      ),
+    ).toEqual([
+      { label: "When", value: when },
+      { label: "AI tool", value: "—" },
+      { label: "Block reason", value: "Risky action blocked" },
+      { label: "What was blocked", value: "Environment dump" },
+    ]);
+  });
+});
+
+describe("formatBlockedRowSummary", () => {
+  it("localizes action-guard categories", () => {
+    expect(
+      formatBlockedRowSummary(
+        {
+          ts: "2026-05-23T02:31:00Z",
+          reason: "action_guard",
+          action_category: "environment_dump",
+        },
+        { environment_dump: "Environment dump" },
+      ),
+    ).toBe("Environment dump");
+  });
+
+  it("falls back to display path for finding-threshold blocks", () => {
+    expect(
+      formatBlockedRowSummary(
+        {
+          ts: "2026-05-23T02:31:00Z",
+          reason: "finding_threshold",
+          display_path: "secret.txt",
+        },
+        {},
+      ),
+    ).toBe("secret.txt");
+  });
+});
+
 describe("hiddenBlockedCount", () => {
   it("returns positive count when summary exceeds visible rows", () => {
     expect(
@@ -300,6 +435,33 @@ describe("loadAuditReport", () => {
       tool: "cursor",
       hidePaths: true,
     });
+  });
+
+  it("fetches blocked rows separately when newer audit events displaced them", async () => {
+    const blockedRow = sampleReport().recent[0];
+    const requests: AuditReportOptions[] = [];
+    const state = await loadAuditReport("/tmp/project", {}, async (_path, options) => {
+      requests.push(options);
+      if (options.reason === "blocked") {
+        return sampleReport({ recent: [blockedRow] });
+      }
+      return sampleReport({
+        recent: [
+          {
+            ts: "2026-05-23T02:32:00Z",
+            tool: "cursor",
+            hook: "post",
+            reason: "hook_audit",
+          },
+        ],
+      });
+    });
+
+    expect(requests).toEqual([{ limit: 10 }, { limit: 10, reason: "blocked" }]);
+    expect(state.status).toBe("done");
+    if (state.status === "done") {
+      expect(blockedRecentRows(state.data)).toEqual([blockedRow]);
+    }
   });
 
   it("returns error state when fetch fails", async () => {

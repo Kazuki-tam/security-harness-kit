@@ -7,13 +7,28 @@
   --color-surface-3: #1d2230;
   --color-border: #232a3a;
   --color-border-strong: #2f3850;
-  --color-text: #e7ebf5;
-  --color-muted: #8c95ac;
-  --color-faint: #5b6478;
+  /* Keep all semantic text levels legible on the darkest app surfaces. */
+  --color-text: #f2f4fa;
+  --color-muted: #b6bed0;
+  --color-faint: #8993aa;
 
-  --color-accent: #7dd3fc;
-  --color-accent-strong: #38bdf8;
-  --color-accent-soft: rgba(56, 189, 248, 0.12);
+  /* Keep Tailwind's sky utilities aligned with the cyan/blue logo gradient. */
+  --color-sky-50: #eafaff;
+  --color-sky-100: #d6f7ff;
+  --color-sky-200: #afeefe;
+  --color-sky-300: #7de3fd;
+  --color-sky-400: #2ccafb;
+  --color-sky-500: #0e97f7;
+  --color-sky-600: #036df0;
+  --color-sky-700: #0758cf;
+  --color-sky-800: #0b47a5;
+  --color-sky-900: #0d3d82;
+  --color-sky-950: #023171;
+
+  /* Sampled from app-logo.png: left arm #0370f8, right arm #27c7fb. */
+  --color-accent: #27c7fb;
+  --color-accent-strong: #0370f8;
+  --color-accent-soft: rgba(39, 199, 251, 0.12);
 
   --color-success: #4ade80;
   --color-warn: #fbbf24;
@@ -49,8 +64,8 @@ body,
 body {
   margin: 0;
   background:
-    radial-gradient(1200px 600px at 100% -10%, rgba(56, 189, 248, 0.08), transparent 60%),
-    radial-gradient(900px 500px at -10% 110%, rgba(168, 85, 247, 0.06), transparent 55%),
+    radial-gradient(1200px 600px at 100% -10%, rgba(44, 202, 251, 0.08), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, rgba(3, 109, 240, 0.06), transparent 55%),
     var(--color-canvas);
   color: var(--color-text);
   overflow: hidden;
@@ -61,7 +76,7 @@ button {
 }
 
 ::selection {
-  background: rgba(56, 189, 248, 0.35);
+  background: rgba(44, 202, 251, 0.35);
   color: #fff;
 }
 

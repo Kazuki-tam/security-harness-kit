@@ -3,5 +3,11 @@
   "identifier": "default",
   "description": "Default desktop app permissions",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open", "process:allow-restart", "updater:default"]
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "process:allow-restart",
+    "updater:default"
+  ]
 }

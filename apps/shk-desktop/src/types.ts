@@ -127,6 +127,10 @@ export type ActionResult = {
   details: string[];
 };
 
+export type CloneRepositoryResult = {
+  path: string;
+};
+
 export type InitPolicyOptions = {
   strict: boolean;
   force: boolean;
@@ -203,6 +207,10 @@ export type AuditRecentRow = {
   action_category?: string;
   display_path?: string;
   finding_count?: number;
+  rule_ids?: string[];
+  kinds?: string[];
+  suppressed_total?: number;
+  deduplicated_total?: number;
 };
 
 export type AuditReport = {

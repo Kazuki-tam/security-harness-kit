@@ -394,4 +394,29 @@ jq -e \
   "$tmpdir/latest.json" >/dev/null
 echo "ok: Tauri latest.json generated"
 
+unsigned_assets="$tmpdir/unsigned-assets"
+mkdir -p "$unsigned_assets"
+for target in \
+  "x86_64-unknown-linux-gnu" \
+  "aarch64-unknown-linux-gnu" \
+  "x86_64-apple-darwin" \
+  "aarch64-apple-darwin" \
+  "x86_64-pc-windows-msvc"; do
+  case "$target" in
+    *linux*)
+      printf 'linux\n' > "$unsigned_assets/shk-desktop_${current_version}_${target}_shk.AppImage"
+      printf 'linux\n' > "$unsigned_assets/shk-desktop_${current_version}_${target}_shk.deb"
+      ;;
+    *apple-darwin)
+      printf 'mac\n' > "$unsigned_assets/shk-desktop_${current_version}_${target}_shk.app.tar.gz"
+      ;;
+    *windows*)
+      printf 'windows\n' > "$unsigned_assets/shk-desktop_${current_version}_${target}_shk-setup.exe"
+      ;;
+  esac
+done
+RELEASE_VERSION="$current_version" \
+  ./.github/scripts/release/verify-unsigned-desktop-assets.sh "$unsigned_assets" >/dev/null
+echo "ok: unsigned desktop asset verification"
+
 echo "release script tests passed"

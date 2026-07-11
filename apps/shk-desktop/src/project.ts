@@ -6,6 +6,7 @@ import type {
   ApplyRecommendedFixesOptions,
   AuditReport,
   AuditReportOptions,
+  CloneRepositoryResult,
   FixDoctorIgnoreOptions,
   InstallAiHooksOptions,
   InstallSkillsOptions,
@@ -15,6 +16,13 @@ import type {
 
 export function fetchProjectStatus(path: string): Promise<ProjectStatus> {
   return invoke<ProjectStatus>("project_status", { path });
+}
+
+export function cloneRepository(
+  remoteUrl: string,
+  destinationParent: string,
+): Promise<CloneRepositoryResult> {
+  return invoke<CloneRepositoryResult>("clone_repository", { remoteUrl, destinationParent });
 }
 
 export function initPolicy(path: string, options: InitPolicyOptions): Promise<ActionResult> {
@@ -69,4 +77,8 @@ export function fetchAuditReport(
   options: AuditReportOptions = {},
 ): Promise<AuditReport> {
   return invoke<AuditReport>("audit_report", { path, options });
+}
+
+export function clearAuditLog(path: string): Promise<ActionResult> {
+  return invoke<ActionResult>("clear_audit_log", { path });
 }

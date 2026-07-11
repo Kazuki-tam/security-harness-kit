@@ -22,7 +22,7 @@ export function ScanProgressCard({ startedAt, hasPreviousResults }: Props) {
   }, [startedAt]);
 
   return (
-    <section className="overflow-hidden rounded-xl border border-sky-400/30 bg-sky-500/10 text-sky-100 shadow-[0_18px_70px_rgba(56,189,248,0.08)]">
+    <section className="overflow-hidden rounded-xl border border-sky-400/30 bg-sky-500/10 text-sky-100 shadow-[0_18px_70px_rgba(44,202,251,0.08)]">
       <div role="status" aria-live="polite" className="sr-only">
         {m.progressTitle}
       </div>
@@ -57,7 +57,7 @@ export function ScanProgressCard({ startedAt, hasPreviousResults }: Props) {
           <span>{m.scanning}</span>
         </div>
         <div className="h-1.5 overflow-hidden rounded-full bg-sky-950/70">
-          <div className="shk-indeterminate-progress h-full w-1/2 rounded-full bg-linear-to-r from-sky-300 via-cyan-200 to-emerald-200" />
+          <div className="shk-indeterminate-progress h-full w-1/2 rounded-full bg-sky-400" />
         </div>
       </div>
     </section>

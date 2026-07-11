@@ -6,7 +6,7 @@ export function LanguageSwitcher() {
   const { locale, setLocale, messages } = useI18n();
 
   return (
-    <label className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-[11px] font-medium text-[var(--color-text)] transition hover:border-sky-400/40 hover:text-white focus-within:border-sky-400/40 focus-within:ring-2 focus-within:ring-sky-400/60">
+    <label className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-[11px] font-medium text-[var(--color-text)] transition hover:border-sky-300/60 hover:text-white focus-within:border-sky-300/60 focus-within:ring-2 focus-within:ring-sky-300/70">
       <Languages size={12} aria-hidden="true" className="shrink-0 text-[var(--color-muted)]" />
       <span className="sr-only">{messages.common.language}</span>
       <select

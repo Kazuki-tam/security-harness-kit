@@ -1,22 +1,27 @@
+import { CircleHelp } from "lucide-react";
 import { useI18n } from "../i18n";
-import type { PreferredIde } from "../ide";
+import type { ProjectApp } from "../projectApp";
 import type { Project } from "../types";
 import { LanguageSwitcher } from "./LanguageSwitcher";
-import { OpenInIdeMenu } from "./OpenInIdeMenu";
+import { OpenInAppMenu } from "./OpenInAppMenu";
 import { UpdateButton } from "./UpdateButton";
 
 type Props = {
+  view: "welcome" | "project" | "mask";
   project: Project | null;
   reserveWindowControls?: boolean;
-  preferredIde: PreferredIde;
-  onOpenInIde: (ide: PreferredIde) => void;
+  preferredApp: ProjectApp;
+  onOpenInApp: (app: ProjectApp) => void;
+  onShowHelp: () => void;
 };
 
 export function TopBar({
+  view,
   project,
   reserveWindowControls = false,
-  preferredIde,
-  onOpenInIde,
+  preferredApp,
+  onOpenInApp,
+  onShowHelp,
 }: Props) {
   const { messages } = useI18n();
   const m = messages.topBar;
@@ -28,7 +33,9 @@ export function TopBar({
           reserveWindowControls ? "pl-16" : ""
         }`}
       >
-        {project ? (
+        {view === "mask" ? (
+          <span className="font-medium text-text">{m.maskWorkspace}</span>
+        ) : project ? (
           <>
             <span className="text-faint">{m.projectBreadcrumb}</span>
             <span className="truncate font-medium text-text">{project.name}</span>
@@ -38,9 +45,18 @@ export function TopBar({
         )}
       </div>
       <div className="shk-no-drag flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={onShowHelp}
+          aria-label={messages.help.title}
+          title={messages.help.title}
+          className="grid h-7 w-7 place-items-center rounded-md text-muted transition hover:bg-surface-2 hover:text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70"
+        >
+          <CircleHelp size={15} aria-hidden="true" />
+        </button>
         <UpdateButton />
         <LanguageSwitcher />
-        <OpenInIdeMenu preferredIde={preferredIde} onSelect={onOpenInIde} />
+        <OpenInAppMenu preferredApp={preferredApp} onSelect={onOpenInApp} />
       </div>
     </div>
   );

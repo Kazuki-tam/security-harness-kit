@@ -18,7 +18,7 @@
       {
         "_shk_managed": true,
         "command": "shk scan --hook-mode cursor --log-blocked",
-        "failClosed": false,
+        "failClosed": true,
         "timeout": 30
       }
     ],
@@ -26,7 +26,7 @@
       {
         "_shk_managed": true,
         "command": "shk scan --hook-mode cursor --log-blocked",
-        "failClosed": false,
+        "failClosed": true,
         "timeout": 30
       }
     ],
@@ -34,7 +34,7 @@
       {
         "_shk_managed": true,
         "command": "shk scan --hook-mode cursor --log-blocked",
-        "failClosed": false,
+        "failClosed": true,
         "timeout": 30
       }
     ],
@@ -42,7 +42,7 @@
       {
         "_shk_managed": true,
         "command": "shk scan --hook-mode cursor --log-blocked --fail-on medium",
-        "failClosed": false,
+        "failClosed": true,
         "timeout": 30
       }
     ]

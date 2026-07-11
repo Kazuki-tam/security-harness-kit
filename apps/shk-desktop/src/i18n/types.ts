@@ -5,15 +5,25 @@ export type Locale = "en" | "ja";
 export type Messages = {
   app: {
     selectFolder: string;
-    selectFolderForIde: string;
+    selectFolderForApp: string;
+    selectCloneDestination: string;
+    operationFailed: string;
+    clipboardFailed: string;
   };
   common: {
     close: string;
     cancel: string;
+    dismiss: string;
     language: string;
+  };
+  errorBoundary: {
+    title: string;
+    description: string;
+    reload: string;
   };
   sidebar: {
     newProject: string;
+    maskWorkspace: string;
     projects: string;
     projectsAria: string;
     runsLocally: string;
@@ -31,29 +41,109 @@ export type Messages = {
   topBar: {
     projectBreadcrumb: string;
     welcome: string;
+    maskWorkspace: string;
     openFolder: string;
-    openInIde: string;
-    openInIdeWith: string;
-    preferredIde: string;
+    openInApp: string;
+    openInAppWith: string;
+    preferredApp: string;
+    editorSection: string;
+    aiAppSection: string;
     updates: {
       check: string;
       checking: string;
       installing: string;
+      upToDateTitle: string;
       upToDate: string;
+      availableTitle: string;
       available: string;
+      confirmInstall: string;
+      failedTitle: string;
       failed: string;
     };
-    ideNames: Record<"cursor" | "vscode" | "antigravity", string>;
+    appNames: Record<
+      "cursor" | "vscode" | "antigravity" | "claude-desktop" | "chatgpt-desktop",
+      string
+    >;
   };
   welcome: {
     title: string;
     subtitle: string;
     actions: string;
     openProject: string;
+    maskWorkspace: string;
     shortcuts: string;
     viewGuide: string;
     recentProjects: string;
     showAll: string;
+  };
+  mask: {
+    title: string;
+    subtitle: string;
+    policyProject: string;
+    policyProjectFallback: string;
+    policyChecking: string;
+    policyError: string;
+    policySelectLabel: string;
+    policyDefaultOption: string;
+    steps: {
+      input: string;
+      mask: string;
+      transfer: string;
+    };
+    inputModeText: string;
+    inputModeFile: string;
+    inputTitle: string;
+    inputHint: string;
+    inputPlaceholder: string;
+    dropHint: string;
+    dropActive: string;
+    charCount: string;
+    outputTitle: string;
+    outputHint: string;
+    outputPlaceholder: string;
+    outputReady: string;
+    outputSafe: string;
+    outputNeedsReview: string;
+    selectFile: string;
+    clearInput: string;
+    removeFile: string;
+    useTextInstead: string;
+    runMask: string;
+    masking: string;
+    copyMasked: string;
+    copied: string;
+    copyAndOpen: string;
+    transferTitle: string;
+    transferHint: string;
+    saveMaskedFile: string;
+    saving: string;
+    savedTo: string;
+    findingsTitle: string;
+    findingsEmpty: string;
+    findingsCount: string;
+    severitySummary: string;
+    unsupportedFile: string;
+    emptyInput: string;
+    failed: string;
+    preferredTool: string;
+    toolNames: Record<"claude-desktop" | "chatgpt-desktop" | "cursor" | "vscode", string>;
+    fileKinds: {
+      text: string;
+      office: string;
+      pdf: string;
+    };
+  };
+  cloneRepository: {
+    action: string;
+    title: string;
+    description: string;
+    urlLabel: string;
+    urlPlaceholder: string;
+    destinationHint: string;
+    clone: string;
+    cloning: string;
+    invalidUrl: string;
+    failed: string;
   };
   scan: {
     project: string;
@@ -101,10 +191,12 @@ export type Messages = {
     shortcuts: string;
     shortcutOpen: string;
     shortcutRescan: string;
+    shortcutWelcome: string;
     shortcutClose: string;
     footer: string;
   };
   workspace: {
+    tabsLabel: string;
     tabs: {
       overview: string;
       findings: string;
@@ -120,6 +212,11 @@ export type Messages = {
     subtitle: string;
     loading: string;
     refresh: string;
+    resetLog: string;
+    resetConfirmTitle: string;
+    resetConfirmBody: string;
+    resetConfirm: string;
+    resetFailed: string;
     noLog: string;
     openSetup: string;
     parseErrors: string;
@@ -136,6 +233,23 @@ export type Messages = {
     openFindings: string;
     moreEvents: string;
     moreEventsHint: string;
+    reasonBreakdown: string;
+    actionCategoryBreakdown: string;
+    ruleBreakdown: string;
+    ruleBreakdownHint: string;
+    showDetails: string;
+    hideDetails: string;
+    detailWhen: string;
+    detailTool: string;
+    detailReason: string;
+    detailOperation: string;
+    detailHook: string;
+    detailRuleIds: string;
+    detailKinds: string;
+    detailSuppressed: string;
+    detailDeduplicated: string;
+    hookLabels: Record<string, string>;
+    kindLabels: Record<string, string>;
     reasonLabels: Record<string, string>;
     toolNames: Record<string, string>;
     actionCategories: Record<string, string>;

@@ -19,10 +19,15 @@ use crate::safety;
 use crate::workflow_hardening;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use shk_core::finding::Finding;
 use shk_core::git;
+use shk_core::masker::MaskJsonOutput;
+use shk_core::policy::Policy;
 use shk_integrations::{MANAGED_MARKER_JSON, MANAGED_MARKER_SH};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use zeroize::Zeroize;
 
 /// Desktop setup installs blocking scan hooks that append metadata-only block entries.
 const DESKTOP_AI_HOOK_LOG_BLOCKED: bool = true;
@@ -165,6 +170,453 @@ pub struct ActionResult {
     pub success: bool,
     pub message: String,
     pub details: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneRepositoryResult {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopMaskFileResult {
+    pub masked_content: String,
+    pub findings: Vec<Finding>,
+    pub file_kind: String,
+    pub source_label: String,
+    pub output_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopMaskPolicyStatus {
+    pub uses_project_policy: bool,
+    pub policy_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopOfficeFormat {
+    Docx,
+    Xlsx,
+    Pptx,
+}
+
+pub fn mask_text_for_desktop(
+    project_root: Option<&Path>,
+    content: &str,
+    label: &str,
+) -> Result<MaskJsonOutput> {
+    if content.trim().is_empty() {
+        anyhow::bail!("mask input is empty");
+    }
+    let policy = load_mask_policy(project_root)?;
+    ensure_mask_content_size_allowed(content, policy.scan.max_file_size_bytes)?;
+    let (masked_content, findings) = shk_core::masker::mask_from_policy(content, &policy, label)?;
+    Ok(MaskJsonOutput {
+        masked_content,
+        findings,
+    })
+}
+
+pub fn mask_policy_status(project_root: Option<&Path>) -> Result<DesktopMaskPolicyStatus> {
+    let policy_path = if let Some(root) = project_root {
+        let (_, path) = Policy::load_from_dir(root)?;
+        path.map(|path| path.display().to_string())
+    } else {
+        None
+    };
+    Ok(DesktopMaskPolicyStatus {
+        uses_project_policy: policy_path.is_some(),
+        policy_path,
+    })
+}
+
+pub fn mask_file_for_desktop(
+    project_root: Option<&Path>,
+    input_path: &Path,
+    output_path: Option<&Path>,
+) -> Result<DesktopMaskFileResult> {
+    if !input_path.is_file() {
+        anyhow::bail!("input file does not exist: {}", input_path.display());
+    }
+
+    let policy = load_mask_policy(project_root)?;
+    let source_label = input_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| input_path.display().to_string());
+
+    ensure_input_file_size_allowed(input_path, policy.scan.max_file_size_bytes)?;
+
+    if let Some(format) = desktop_office_format(input_path) {
+        return mask_office_file_for_desktop(
+            project_root,
+            &policy,
+            input_path,
+            output_path,
+            format,
+            &source_label,
+        );
+    }
+
+    if is_pdf_file(input_path) {
+        return mask_pdf_file_for_desktop(&policy, input_path, output_path, &source_label);
+    }
+
+    let mut bytes = fs::read(input_path)?;
+    let decoded = decode_desktop_text_file(&bytes, input_path, policy.scan.binary_detection_bytes);
+    bytes.zeroize();
+    let mut content = decoded?;
+    let mask_result = shk_core::masker::mask_from_policy(&content, &policy, &source_label);
+    content.zeroize();
+    let (masked_content, findings) = mask_result?;
+
+    let written_output = if let Some(outp) = output_path {
+        ensure_mask_output_path_allowed(project_root, outp)?;
+        crate::fs_atomic::write_atomic(outp, masked_content.as_bytes())?;
+        Some(outp.display().to_string())
+    } else {
+        None
+    };
+
+    Ok(DesktopMaskFileResult {
+        masked_content,
+        findings,
+        file_kind: "text".into(),
+        source_label,
+        output_path: written_output,
+    })
+}
+
+fn ensure_mask_content_size_allowed(content: &str, max_bytes: u64) -> Result<()> {
+    let size = content.len() as u64;
+    if size > max_bytes {
+        anyhow::bail!("mask input exceeds the configured size limit ({size} > {max_bytes} bytes)");
+    }
+    Ok(())
+}
+
+fn ensure_input_file_size_allowed(input_path: &Path, max_bytes: u64) -> Result<()> {
+    let file_size = fs::metadata(input_path)?.len();
+    if file_size > max_bytes {
+        anyhow::bail!(
+            "file exceeds the configured file size limit ({file_size} > {max_bytes} bytes)"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_mask_output_path_allowed(project_root: Option<&Path>, output_path: &Path) -> Result<()> {
+    safety::ensure_writable_path_allowed(output_path)?;
+    // When a project is selected, keep masked outputs inside that project tree.
+    // Without a project, only protected-path checks apply so dialog-chosen save
+    // locations outside the workspace remain available.
+    if let Some(root) = project_root {
+        safety::ensure_write_path_within(root, output_path)?;
+    }
+    Ok(())
+}
+
+fn load_mask_policy(project_root: Option<&Path>) -> Result<Policy> {
+    if let Some(root) = project_root {
+        let (policy, _) = Policy::load_from_dir(root)?;
+        Ok(policy)
+    } else {
+        Ok(Policy::default())
+    }
+}
+
+fn desktop_office_format(path: &Path) -> Option<DesktopOfficeFormat> {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("docx") => Some(DesktopOfficeFormat::Docx),
+        Some(ext) if ext.eq_ignore_ascii_case("xlsx") => Some(DesktopOfficeFormat::Xlsx),
+        Some(ext) if ext.eq_ignore_ascii_case("pptx") => Some(DesktopOfficeFormat::Pptx),
+        _ => None,
+    }
+}
+
+fn is_pdf_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+}
+
+fn mask_pdf_file_for_desktop(
+    policy: &Policy,
+    input_path: &Path,
+    output_path: Option<&Path>,
+    source_label: &str,
+) -> Result<DesktopMaskFileResult> {
+    if output_path.is_some() {
+        anyhow::bail!("writing a masked PDF is not supported; copy the masked text output instead");
+    }
+
+    let file_size = fs::metadata(input_path)?.len();
+    if file_size > policy.scan.max_file_size_bytes {
+        anyhow::bail!(
+            "PDF exceeds the configured file size limit ({} > {} bytes)",
+            file_size,
+            policy.scan.max_file_size_bytes
+        );
+    }
+
+    let mut bytes = fs::read(input_path)?;
+    let header_len = bytes.len().min(1024);
+    if !bytes[..header_len]
+        .windows(b"%PDF-".len())
+        .any(|window| window == b"%PDF-")
+    {
+        bytes.zeroize();
+        anyhow::bail!("file has a .pdf extension but no PDF header");
+    }
+
+    let extracted = shk_core::document_masker::extract_document_text_entries(
+        source_label,
+        &bytes,
+        policy.scan.max_file_size_bytes,
+    );
+    bytes.zeroize();
+    let entries =
+        extracted?.ok_or_else(|| anyhow::anyhow!("unable to extract text from PDF document"))?;
+    if entries.is_empty() {
+        anyhow::bail!("PDF has no extractable text layer (scanned/image-only PDFs are scan-only)");
+    }
+
+    let mut combined = entries
+        .iter()
+        .map(|entry| entry.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mask_result = shk_core::masker::mask_from_policy(&combined, policy, source_label);
+    combined.zeroize();
+    let (masked_content, findings) = mask_result?;
+
+    Ok(DesktopMaskFileResult {
+        masked_content,
+        findings,
+        file_kind: "pdf".into(),
+        source_label: source_label.into(),
+        output_path: None,
+    })
+}
+
+fn decode_desktop_text_file(
+    bytes: &[u8],
+    path: &Path,
+    binary_detection_bytes: usize,
+) -> Result<String> {
+    if let Some(without_bom) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
+        return String::from_utf8(without_bom.to_vec()).context("decode UTF-8 text file");
+    }
+
+    if let Some(without_bom) = bytes.strip_prefix(&[0xff, 0xfe]) {
+        return decode_legacy_text(without_bom, encoding_rs::UTF_16LE, "UTF-16LE");
+    }
+    if let Some(without_bom) = bytes.strip_prefix(&[0xfe, 0xff]) {
+        return decode_legacy_text(without_bom, encoding_rs::UTF_16BE, "UTF-16BE");
+    }
+
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return Ok(text.to_owned());
+    }
+
+    let take = binary_detection_bytes.min(bytes.len());
+    if bytes[..take].contains(&0) || !is_legacy_text_path(path) {
+        anyhow::bail!(
+            "binary or unsupported text encoding; use UTF-8, UTF-16 with BOM, or Shift_JIS"
+        );
+    }
+
+    decode_legacy_text(bytes, encoding_rs::SHIFT_JIS, "Shift_JIS")
+}
+
+fn decode_legacy_text(
+    bytes: &[u8],
+    encoding: &'static encoding_rs::Encoding,
+    encoding_name: &str,
+) -> Result<String> {
+    let (decoded, had_errors) = encoding.decode_without_bom_handling(bytes);
+    if had_errors {
+        anyhow::bail!("invalid {encoding_name} text");
+    }
+    Ok(decoded.into_owned())
+}
+
+fn is_legacy_text_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            ["txt", "md", "json", "yaml", "yml", "csv", "log"]
+                .iter()
+                .any(|supported| ext.eq_ignore_ascii_case(supported))
+        })
+}
+
+fn mask_office_file_for_desktop(
+    project_root: Option<&Path>,
+    policy: &Policy,
+    input_path: &Path,
+    output_path: Option<&Path>,
+    format: DesktopOfficeFormat,
+    source_label: &str,
+) -> Result<DesktopMaskFileResult> {
+    let mut bytes = fs::read(input_path)?;
+    let extracted = shk_core::document_masker::extract_ooxml_text_entries(
+        source_label,
+        &bytes,
+        policy.scan.max_file_size_bytes,
+    );
+    bytes.zeroize();
+    let entries =
+        extracted?.ok_or_else(|| anyhow::anyhow!("unable to extract text from Office document"))?;
+
+    let mut combined = entries
+        .iter()
+        .map(|entry| entry.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mask_result = shk_core::masker::mask_from_policy(&combined, policy, source_label);
+    combined.zeroize();
+    let (masked_content, preview_findings) = mask_result?;
+    let mut findings = preview_findings;
+
+    let written_output = if let Some(outp) = output_path {
+        ensure_mask_output_path_allowed(project_root, outp)?;
+        let doc_result = match format {
+            DesktopOfficeFormat::Docx => {
+                shk_core::document_masker::mask_docx(input_path, outp, policy)?
+            }
+            DesktopOfficeFormat::Xlsx => {
+                shk_core::document_masker::mask_xlsx(input_path, outp, policy)?
+            }
+            DesktopOfficeFormat::Pptx => {
+                shk_core::document_masker::mask_pptx(input_path, outp, policy)?
+            }
+        };
+        findings = doc_result.findings;
+        Some(outp.display().to_string())
+    } else {
+        None
+    };
+
+    Ok(DesktopMaskFileResult {
+        masked_content,
+        findings,
+        file_kind: "office".into(),
+        source_label: source_label.into(),
+        output_path: written_output,
+    })
+}
+
+pub fn clone_repository(
+    remote_url: &str,
+    destination_parent: &str,
+) -> Result<CloneRepositoryResult> {
+    let remote_url = validate_git_remote_url(remote_url)?;
+    let parent = resolve_clone_parent(destination_parent)?;
+    let repository_name = repository_name_from_remote(remote_url)?;
+    let destination = parent.join(repository_name);
+
+    safety::ensure_writable_path_allowed(&destination)?;
+    safety::ensure_write_path_within(&parent, &destination)?;
+    if destination.exists() {
+        anyhow::bail!(
+            "clone destination already exists: {}",
+            destination.display()
+        );
+    }
+
+    let status = Command::new("git")
+        .arg("clone")
+        .arg("--")
+        .arg(remote_url)
+        .arg(&destination)
+        .current_dir(&parent)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("failed to start git; install Git and ensure it is available on PATH")?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "Git clone failed. Check the repository URL, network connection, and Git credentials"
+        );
+    }
+
+    let path = fs::canonicalize(&destination).unwrap_or(destination);
+    Ok(CloneRepositoryResult {
+        path: path.display().to_string(),
+    })
+}
+
+fn validate_git_remote_url(remote_url: &str) -> Result<&str> {
+    let remote_url = remote_url.trim();
+    if remote_url.is_empty() {
+        anyhow::bail!("repository URL is empty");
+    }
+    if remote_url.starts_with('-')
+        || remote_url.chars().any(char::is_whitespace)
+        || remote_url.contains(['\0', '\n', '\r'])
+        || remote_url.contains(['?', '#'])
+    {
+        anyhow::bail!("repository URL is invalid");
+    }
+
+    let has_allowed_scheme = ["https://", "ssh://"]
+        .iter()
+        .any(|scheme| remote_url.starts_with(scheme));
+    let is_scp_style = remote_url
+        .split_once(':')
+        .is_some_and(|(host, path)| host.contains('@') && !path.is_empty());
+    if !has_allowed_scheme && !is_scp_style {
+        anyhow::bail!("use an HTTPS or SSH repository URL");
+    }
+
+    if let Some(authority) = remote_url
+        .strip_prefix("https://")
+        .and_then(|rest| rest.split('/').next())
+        && authority.contains('@')
+    {
+        anyhow::bail!("repository URLs containing credentials are not allowed");
+    }
+
+    Ok(remote_url)
+}
+
+fn resolve_clone_parent(path: &str) -> Result<PathBuf> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("clone destination is empty");
+    }
+    let parent = PathBuf::from(trimmed);
+    if !parent.is_dir() {
+        anyhow::bail!("clone destination is not a directory: {}", parent.display());
+    }
+    let parent = fs::canonicalize(&parent).unwrap_or(parent);
+    if parent.parent().is_none() {
+        anyhow::bail!("cloning directly into a filesystem root is not allowed");
+    }
+    Ok(parent)
+}
+
+fn repository_name_from_remote(remote_url: &str) -> Result<&str> {
+    let without_slash = remote_url.trim_end_matches('/');
+    let name = without_slash
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or_default()
+        .strip_suffix(".git")
+        .unwrap_or_else(|| without_slash.rsplit(['/', ':']).next().unwrap_or_default());
+
+    if name.is_empty() || name == "." || name == ".." || Path::new(name).components().count() != 1 {
+        anyhow::bail!("repository URL does not contain a valid repository name");
+    }
+    Ok(name)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -348,6 +800,21 @@ pub fn audit_report(path: &str, options: AuditReportOptions) -> Result<AuditRepo
         .transpose()
         .context("invalid audit reason filter")?;
     audit::build_audit_report(&root, &audit_invocation(&root, &options, tool, reason))
+}
+
+pub fn clear_audit_log(path: &str) -> Result<ActionResult> {
+    let root = resolve_project_root(path)?;
+    ensure_desktop_project_root_allowed(&root)?;
+    let removed = crate::audit_log::clear_log(&root)?;
+    Ok(ActionResult {
+        success: true,
+        message: if removed == 0 {
+            "No audit log files to clear".to_string()
+        } else {
+            format!("Cleared {removed} audit log file(s)")
+        },
+        details: vec![],
+    })
 }
 
 pub fn init_policy(path: &str, options: InitPolicyOptions) -> Result<ActionResult> {
@@ -1300,6 +1767,339 @@ fn parse_skill_tool(value: &str) -> Result<SkillTool> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn desktop_mask_text_uses_default_policy_without_project() {
+        let out =
+            mask_text_for_desktop(None, "contact test.user@example.com\n", "<input>").unwrap(); // shk-ignore pii.email
+        assert!(
+            out.masked_content.contains("[REDACTED]"),
+            "{}",
+            out.masked_content
+        );
+        assert!(out.findings.iter().any(|f| f.rule_id == "pii.email"));
+    }
+
+    #[test]
+    fn desktop_mask_policy_status_distinguishes_project_and_default_policy() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let default_status = mask_policy_status(None).unwrap();
+        assert!(!default_status.uses_project_policy);
+        assert!(default_status.policy_path.is_none());
+
+        let missing_status = mask_policy_status(Some(dir.path())).unwrap();
+        assert!(!missing_status.uses_project_policy);
+        assert!(missing_status.policy_path.is_none());
+
+        fs::write(dir.path().join("shk.toml"), "").unwrap();
+        let project_status = mask_policy_status(Some(dir.path())).unwrap();
+        assert!(project_status.uses_project_policy);
+        assert_eq!(
+            project_status.policy_path.as_deref(),
+            Some(dir.path().join("shk.toml").to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn desktop_mask_text_rejects_empty_input() {
+        let err = mask_text_for_desktop(None, "   ", "<input>").unwrap_err();
+        assert!(err.to_string().contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn desktop_mask_file_masks_utf8_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("prompt.txt");
+        fs::write(&input, "contact test.user@example.com\n").unwrap(); // shk-ignore pii.email
+
+        let out = mask_file_for_desktop(None, &input, None).unwrap();
+        assert_eq!(out.file_kind, "text");
+        assert!(out.masked_content.contains("[REDACTED]"));
+        assert!(out.findings.iter().any(|f| f.rule_id == "pii.email"));
+        assert!(out.output_path.is_none());
+    }
+
+    #[test]
+    fn desktop_mask_file_masks_csv_as_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("contacts.csv");
+        fs::write(&input, "name,email\nalice,test.user@example.com\n").unwrap(); // shk-ignore pii.email
+
+        let out = mask_file_for_desktop(None, &input, None).unwrap();
+        assert_eq!(out.file_kind, "text");
+        assert!(out.masked_content.contains("[REDACTED]"));
+        assert!(out.findings.iter().any(|f| f.rule_id == "pii.email"));
+    }
+
+    #[test]
+    fn desktop_mask_file_masks_shift_jis_csv() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("contacts.csv");
+        let (encoded, _, had_errors) =
+            encoding_rs::SHIFT_JIS.encode("名前,メール\n山田,test.user@example.com\n"); // shk-ignore pii.email
+        assert!(!had_errors);
+        fs::write(&input, encoded.as_ref()).unwrap();
+
+        let out = mask_file_for_desktop(None, &input, None).unwrap();
+        assert_eq!(out.file_kind, "text");
+        assert!(
+            out.masked_content.contains("山田"),
+            "{}",
+            out.masked_content
+        );
+        assert!(out.masked_content.contains("[REDACTED]"));
+        assert!(out.findings.iter().any(|f| f.rule_id == "pii.email"));
+    }
+
+    #[test]
+    fn desktop_mask_file_masks_utf8_bom_csv() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("contacts.csv");
+        let mut encoded = vec![0xef, 0xbb, 0xbf];
+        encoded.extend_from_slice(b"name,email\nalice,test.user@example.com\n"); // shk-ignore pii.email
+        fs::write(&input, encoded).unwrap();
+
+        let out = mask_file_for_desktop(None, &input, None).unwrap();
+        assert!(!out.masked_content.starts_with('\u{feff}'));
+        assert!(out.masked_content.contains("[REDACTED]"));
+        assert!(out.findings.iter().any(|f| f.rule_id == "pii.email"));
+    }
+
+    #[test]
+    fn desktop_mask_file_masks_utf16le_csv() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("contacts.csv");
+        let mut encoded = vec![0xff, 0xfe];
+        // shk-ignore-next-line pii.email
+        for unit in "名前,メール\n山田,test.user@example.com\n".encode_utf16() {
+            encoded.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(&input, encoded).unwrap();
+
+        let out = mask_file_for_desktop(None, &input, None).unwrap();
+        assert_eq!(out.file_kind, "text");
+        assert!(
+            out.masked_content.contains("山田"),
+            "{}",
+            out.masked_content
+        );
+        assert!(out.masked_content.contains("[REDACTED]"));
+        assert!(out.findings.iter().any(|f| f.rule_id == "pii.email"));
+    }
+
+    #[test]
+    fn desktop_mask_file_masks_pdf_text_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("report.pdf");
+        create_minimal_pdf(&input, "contact test.user@example.com"); // shk-ignore pii.email
+
+        let out = mask_file_for_desktop(None, &input, None).unwrap();
+        assert_eq!(out.file_kind, "pdf");
+        assert!(
+            out.masked_content.contains("[REDACTED]"),
+            "{}",
+            out.masked_content
+        );
+        assert!(out.findings.iter().any(|f| f.rule_id == "pii.email"));
+        assert!(out.output_path.is_none());
+    }
+
+    #[test]
+    fn desktop_mask_file_rejects_pdf_without_text_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("empty.pdf");
+        create_minimal_pdf(&input, "");
+
+        let err = mask_file_for_desktop(None, &input, None).unwrap_err();
+        assert!(err.to_string().contains("no extractable text"), "{err}");
+    }
+
+    #[test]
+    fn desktop_mask_text_rejects_content_over_configured_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("shk.toml");
+        fs::write(&policy_path, "[scan]\nmax_file_size_bytes = 8\n").unwrap();
+        let err = mask_text_for_desktop(Some(dir.path()), "0123456789", "stdin").unwrap_err();
+        assert!(err.to_string().contains("size limit"), "{err}");
+    }
+
+    #[test]
+    fn desktop_mask_file_rejects_text_over_configured_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("shk.toml"),
+            "[scan]\nmax_file_size_bytes = 8\n",
+        )
+        .unwrap();
+        let input = project.join("large.txt");
+        fs::write(&input, "012345678901234567890").unwrap();
+
+        let err = mask_file_for_desktop(Some(&project), &input, None).unwrap_err();
+        assert!(err.to_string().contains("file size limit"), "{err}");
+    }
+
+    #[test]
+    fn desktop_mask_file_rejects_output_outside_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("shk.toml"), "[scan]\n").unwrap();
+        let input = project.join("input.txt");
+        fs::write(&input, "contact test.user@example.com").unwrap(); // shk-ignore pii.email
+        let output = dir.path().join("outside.txt");
+
+        let err = mask_file_for_desktop(Some(&project), &input, Some(&output)).unwrap_err();
+        assert!(err.to_string().contains("outside"), "{err}");
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn desktop_mask_file_rejects_pdf_output_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("report.pdf");
+        let output = dir.path().join("masked.pdf");
+        create_minimal_pdf(&input, "contact test.user@example.com"); // shk-ignore pii.email
+
+        let err = mask_file_for_desktop(None, &input, Some(&output)).unwrap_err();
+        assert!(err.to_string().contains("not supported"), "{err}");
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn desktop_mask_file_rejects_pdf_over_configured_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("report.pdf");
+        create_minimal_pdf(&input, "contact test.user@example.com"); // shk-ignore pii.email
+        let mut policy = Policy::default();
+        policy.scan.max_file_size_bytes = 16;
+
+        let err = mask_pdf_file_for_desktop(&policy, &input, None, "report.pdf").unwrap_err();
+        assert!(err.to_string().contains("file size limit"), "{err}");
+    }
+
+    #[test]
+    fn desktop_mask_file_rejects_fake_pdf_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("report.pdf");
+        fs::write(&input, "contact test.user@example.com").unwrap(); // shk-ignore pii.email
+
+        let err = mask_file_for_desktop(None, &input, None).unwrap_err();
+        assert!(err.to_string().contains("no PDF header"), "{err}");
+    }
+
+    fn create_minimal_pdf(path: &std::path::Path, text: &str) {
+        let escaped = text
+            .replace('\\', r"\\")
+            .replace('(', r"\(")
+            .replace(')', r"\)");
+        let stream = format!("BT /F1 12 Tf 72 720 Td ({escaped}) Tj ET\n");
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_string(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+            format!("<< /Length {} >>\nstream\n{stream}endstream", stream.len()),
+        ];
+
+        let mut body = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (idx, object) in objects.iter().enumerate() {
+            offsets.push(body.len());
+            body.push_str(&format!("{} 0 obj\n{object}\nendobj\n", idx + 1));
+        }
+
+        let xref_offset = body.len();
+        body.push_str("xref\n0 6\n0000000000 65535 f \n");
+        for offset in offsets {
+            body.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        body.push_str(&format!(
+            "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
+        ));
+
+        fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn desktop_mask_file_rejects_binary_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("data.bin");
+        fs::write(&input, [0, 1, 2, 3, 0xff]).unwrap();
+
+        let err = mask_file_for_desktop(None, &input, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("binary or unsupported text encoding"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn desktop_mask_file_writes_text_output_when_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("prompt.txt");
+        let output = dir.path().join("masked.txt");
+        fs::write(&input, "contact test.user@example.com\n").unwrap(); // shk-ignore pii.email
+
+        let out = mask_file_for_desktop(None, &input, Some(&output)).unwrap();
+        assert_eq!(out.output_path.as_deref(), Some(output.to_str().unwrap()));
+        let written = fs::read_to_string(&output).unwrap();
+        assert!(written.contains("[REDACTED]"), "{written}");
+    }
+
+    #[test]
+    fn clone_remote_validation_accepts_https_and_ssh() {
+        assert_eq!(
+            validate_git_remote_url("https://github.com/example/project.git").unwrap(),
+            "https://github.com/example/project.git"
+        );
+        assert_eq!(
+            validate_git_remote_url("git@github.com:example/project.git").unwrap(), // shk-ignore pii.email
+            "git@github.com:example/project.git" // shk-ignore pii.email
+        );
+    }
+
+    #[test]
+    fn clone_remote_validation_rejects_local_and_option_urls() {
+        for remote in [
+            "",
+            "--upload-pack=evil",
+            "file:///tmp/repo.git",
+            "../repo",
+            "http://example.com/repo.git",
+            "git://example.com/repo.git",
+            "https://user:token@example.com/repo.git", // shk-ignore pii.email
+            "https://example.com/repo.git?token=secret",
+        ] {
+            assert!(validate_git_remote_url(remote).is_err(), "{remote}");
+        }
+    }
+
+    #[test]
+    fn clone_repository_name_is_derived_from_remote() {
+        assert_eq!(
+            repository_name_from_remote("https://github.com/example/project.git").unwrap(),
+            "project"
+        );
+        assert_eq!(
+            repository_name_from_remote("git@github.com:example/project").unwrap(), // shk-ignore pii.email
+            "project"
+        );
+    }
+
+    #[test]
+    fn clone_parent_must_be_an_existing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        assert!(resolve_clone_parent(missing.to_str().unwrap()).is_err());
+        assert_eq!(
+            resolve_clone_parent(dir.path().to_str().unwrap()).unwrap(),
+            fs::canonicalize(dir.path()).unwrap()
+        );
+    }
 
     #[test]
     fn doctor_status_reports_mixed_encrypted_env_files() {
@@ -2270,5 +3070,40 @@ mod tests {
         assert_eq!(report.summary.blocked_events, 1);
         assert_eq!(report.summary.hook_audit_events, 1);
         assert!(!report.recent.is_empty());
+    }
+
+    #[test]
+    fn desktop_clear_audit_log_removes_entries() {
+        use crate::audit_log;
+
+        let dir = tempfile::tempdir().unwrap();
+        audit_log::append_line(
+            dir.path(),
+            serde_json::json!({
+                "event": "blocked",
+                "reason": "finding_threshold",
+                "tool": "cursor",
+            }),
+        )
+        .unwrap();
+        assert!(dir.path().join(".shk/audit.log").is_file());
+
+        let result = clear_audit_log(dir.path().to_str().unwrap()).unwrap();
+        assert!(result.success);
+        assert!(!dir.path().join(".shk/audit.log").exists());
+
+        let report = audit_report(
+            dir.path().to_str().unwrap(),
+            AuditReportOptions {
+                limit: 10,
+                since: None,
+                tool: None,
+                reason: None,
+                hide_paths: false,
+            },
+        )
+        .unwrap();
+        assert!(!report.log_exists);
+        assert_eq!(report.summary.blocked_events, 0);
     }
 }

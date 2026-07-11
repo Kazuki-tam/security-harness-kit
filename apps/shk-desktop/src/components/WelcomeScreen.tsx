@@ -1,30 +1,38 @@
-import { BookOpen, Command, FolderOpen, ShieldCheck } from "lucide-react";
+import { Eraser, FolderOpen, GitFork } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useI18n } from "../i18n";
 import type { Project } from "../types";
 import { actionableCount } from "../scan";
 import { formatRelativeTime, shortenPath } from "../utils";
-import { HelpModal } from "./HelpModal";
+import { BrandLogo } from "./BrandLogo";
+import { CloneRepositoryModal } from "./CloneRepositoryModal";
 
 type Props = {
   recentProjects: Project[];
   totalProjects: number;
   onOpenFolder: () => void;
+  onCloneRepository: (remoteUrl: string) => Promise<boolean>;
   onSelect: (id: string) => void;
+  onShowMask: () => void;
 };
 
-export function WelcomeScreen({ recentProjects, totalProjects, onOpenFolder, onSelect }: Props) {
+export function WelcomeScreen({
+  recentProjects,
+  totalProjects,
+  onOpenFolder,
+  onCloneRepository,
+  onSelect,
+  onShowMask,
+}: Props) {
   const { messages, t } = useI18n();
   const m = messages.welcome;
-  const [helpOpen, setHelpOpen] = useState(false);
+  const [cloneOpen, setCloneOpen] = useState(false);
 
   return (
     <div className="shk-scroll shk-fade-in min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto flex min-h-full w-full max-w-[640px] flex-col justify-center px-8 py-12">
         <section className="mb-10 flex flex-col items-center text-center" aria-label={m.title}>
-          <div className="grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-sky-400/30 via-violet-400/20 to-emerald-400/20 text-sky-200 ring-1 ring-inset ring-sky-400/30">
-            <ShieldCheck size={28} aria-hidden="true" />
-          </div>
+          <BrandLogo className="h-20 w-20 drop-shadow-[0_14px_32px_rgba(3,112,248,0.28)]" />
           <h1 className="mt-4 max-w-sm text-[26px] leading-tight font-semibold tracking-tight text-white">
             {m.title}
           </h1>
@@ -39,14 +47,14 @@ export function WelcomeScreen({ recentProjects, totalProjects, onOpenFolder, onS
             primary
           />
           <ActionCard
-            icon={<Command size={18} aria-hidden="true" />}
-            label={m.shortcuts}
-            onClick={() => setHelpOpen(true)}
+            icon={<GitFork size={18} aria-hidden="true" />}
+            label={messages.cloneRepository.action}
+            onClick={() => setCloneOpen(true)}
           />
           <ActionCard
-            icon={<BookOpen size={18} aria-hidden="true" />}
-            label={m.viewGuide}
-            onClick={() => setHelpOpen(true)}
+            icon={<Eraser size={18} aria-hidden="true" />}
+            label={m.maskWorkspace}
+            onClick={onShowMask}
           />
         </section>
 
@@ -71,7 +79,11 @@ export function WelcomeScreen({ recentProjects, totalProjects, onOpenFolder, onS
         )}
       </div>
 
-      <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
+      <CloneRepositoryModal
+        open={cloneOpen}
+        onClose={() => setCloneOpen(false)}
+        onClone={onCloneRepository}
+      />
     </div>
   );
 }
@@ -91,7 +103,7 @@ function ActionCard({
     <button
       type="button"
       onClick={onClick}
-      className={`group flex flex-col items-start gap-3 rounded-xl border bg-[var(--color-surface-2)] px-4 py-4 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 ${
+      className={`group flex flex-col items-start gap-3 rounded-xl border bg-[var(--color-surface-2)] px-4 py-4 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70 ${
         primary
           ? "border-sky-400/30 hover:border-sky-400/60 hover:bg-sky-500/10"
           : "border-[var(--color-border)] hover:border-[var(--color-border-strong)] hover:bg-[var(--color-surface-3)]"

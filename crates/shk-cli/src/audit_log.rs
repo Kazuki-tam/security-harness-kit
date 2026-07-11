@@ -57,6 +57,11 @@ fn rotated_log_path(log: &Path, index: usize) -> PathBuf {
 }
 
 fn ensure_append_target_safe(log: &Path) -> Result<()> {
+    ensure_regular_audit_file(log)
+}
+
+/// Refuse to mutate non-regular / hard-linked audit log targets.
+fn ensure_regular_audit_file(log: &Path) -> Result<()> {
     let metadata = match std::fs::symlink_metadata(log) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -64,7 +69,7 @@ fn ensure_append_target_safe(log: &Path) -> Result<()> {
     };
     if !metadata.file_type().is_file() {
         bail!(
-            "refusing to append audit data to non-regular file {}",
+            "refusing to mutate non-regular audit log file {}",
             log.display()
         );
     }
@@ -73,12 +78,21 @@ fn ensure_append_target_safe(log: &Path) -> Result<()> {
         use std::os::unix::fs::MetadataExt;
         if metadata.nlink() > 1 {
             bail!(
-                "refusing to append audit data to hard-linked file {}",
+                "refusing to mutate hard-linked audit log file {}",
                 log.display()
             );
         }
     }
     Ok(())
+}
+
+fn rotated_and_current_log_paths(log: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = (1..=AUDIT_LOG_ROTATIONS)
+        .rev()
+        .map(|index| rotated_log_path(log, index))
+        .collect();
+    paths.push(log.to_path_buf());
+    paths
 }
 
 fn rotate_if_needed(
@@ -124,16 +138,30 @@ pub struct ReadAuditLogResult {
     pub parse_errors: usize,
 }
 
+/// Remove `.shk/audit.log` and any rotated archives (`.1` … `.N`).
+///
+/// Returns the number of files removed. Missing files are ignored.
+pub fn clear_log(repo_root: &Path) -> Result<usize> {
+    let path = log_path(repo_root);
+    let mut removed = 0usize;
+    for target in rotated_and_current_log_paths(&path) {
+        if !target.exists() {
+            continue;
+        }
+        safety::ensure_write_path_within(repo_root, &target)?;
+        ensure_regular_audit_file(&target)?;
+        std::fs::remove_file(&target).with_context(|| format!("remove {}", target.display()))?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
 /// Read all parseable NDJSON lines from `.shk/audit.log`.
 pub fn read_entries(repo_root: &Path) -> Result<ReadAuditLogResult> {
     let path = log_path(repo_root);
     let mut entries = Vec::new();
     let mut parse_errors = 0;
-    let paths = (1..=AUDIT_LOG_ROTATIONS)
-        .rev()
-        .map(|index| rotated_log_path(&path, index))
-        .chain(std::iter::once(path.clone()));
-    for path in paths {
+    for path in rotated_and_current_log_paths(&path) {
         if !path.is_file() {
             continue;
         }
@@ -177,6 +205,21 @@ mod tests {
         let result = read_entries(dir.path()).unwrap();
         assert_eq!(result.entries.len(), 2);
         assert_eq!(result.parse_errors, 1);
+    }
+
+    #[test]
+    fn clear_log_removes_current_and_rotated_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".shk")).unwrap();
+        let log = log_path(dir.path());
+        std::fs::write(&log, "{\"seq\":1}\n").unwrap();
+        std::fs::write(rotated_log_path(&log, 1), "{\"seq\":0}\n").unwrap();
+
+        let removed = clear_log(dir.path()).unwrap();
+        assert_eq!(removed, 2);
+        assert!(!log.exists());
+        assert!(!rotated_log_path(&log, 1).exists());
+        assert_eq!(clear_log(dir.path()).unwrap(), 0);
     }
 
     #[test]
