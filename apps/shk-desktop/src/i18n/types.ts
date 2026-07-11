@@ -15,6 +15,7 @@ export type Messages = {
   };
   sidebar: {
     newProject: string;
+    maskWorkspace: string;
     projects: string;
     projectsAria: string;
     runsLocally: string;
@@ -32,6 +33,7 @@ export type Messages = {
   topBar: {
     projectBreadcrumb: string;
     welcome: string;
+    maskWorkspace: string;
     openFolder: string;
     openInIde: string;
     openInIdeWith: string;
@@ -51,10 +53,64 @@ export type Messages = {
     subtitle: string;
     actions: string;
     openProject: string;
+    maskWorkspace: string;
     shortcuts: string;
     viewGuide: string;
     recentProjects: string;
     showAll: string;
+  };
+  mask: {
+    title: string;
+    subtitle: string;
+    policyProject: string;
+    policyDefault: string;
+    steps: {
+      input: string;
+      mask: string;
+      transfer: string;
+    };
+    inputModeText: string;
+    inputModeFile: string;
+    inputTitle: string;
+    inputHint: string;
+    inputPlaceholder: string;
+    dropHint: string;
+    dropActive: string;
+    charCount: string;
+    outputTitle: string;
+    outputHint: string;
+    outputPlaceholder: string;
+    outputReady: string;
+    outputSafe: string;
+    outputNeedsReview: string;
+    selectFile: string;
+    clearInput: string;
+    removeFile: string;
+    useTextInstead: string;
+    runMask: string;
+    runMaskHint: string;
+    masking: string;
+    copyMasked: string;
+    copied: string;
+    copyAndOpen: string;
+    transferTitle: string;
+    transferHint: string;
+    saveMaskedFile: string;
+    saving: string;
+    savedTo: string;
+    findingsTitle: string;
+    findingsEmpty: string;
+    findingsCount: string;
+    severitySummary: string;
+    unsupportedFile: string;
+    emptyInput: string;
+    failed: string;
+    preferredTool: string;
+    toolNames: Record<"claude-desktop" | "chatgpt-desktop" | "cursor" | "vscode", string>;
+    fileKinds: {
+      text: string;
+      office: string;
+    };
   };
   cloneRepository: {
     action: string;

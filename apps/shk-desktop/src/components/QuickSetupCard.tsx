@@ -83,7 +83,7 @@ export function QuickSetupCard({ status, running, onQuickSetup, onOpenAdvanced }
   const primaryLabel = !policyExists ? m.applyWithPolicy : allDone ? m.reapply : m.apply;
 
   return (
-    <section className="overflow-hidden rounded-xl border border-sky-400/25 bg-linear-to-br from-sky-500/10 via-surface-2 to-surface-2 p-4 ring-1 ring-inset ring-sky-400/20">
+    <section className="overflow-hidden rounded-xl border border-sky-400/25 bg-sky-500/8 p-4 ring-1 ring-inset ring-sky-400/20">
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
           <h3 className="text-base font-semibold text-white">{m.title}</h3>
@@ -136,7 +136,7 @@ export function QuickSetupCard({ status, running, onQuickSetup, onOpenAdvanced }
           <button
             type="button"
             onClick={() => setCustomizeOpen((open) => !open)}
-            className="inline-flex items-center gap-1.5 text-[11px] font-medium text-sky-200 transition hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
+            className="inline-flex items-center gap-1.5 text-[11px] font-medium text-sky-200 transition hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70"
           >
             {customizeOpen ? (
               <ChevronUp size={14} aria-hidden="true" />

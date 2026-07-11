@@ -119,7 +119,7 @@ export function ScanWorkspace({
               type="button"
               onClick={() => setTab(key)}
               aria-current={tab === key ? "page" : undefined}
-              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 ${
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70 ${
                 tab === key
                   ? "bg-sky-500/12 text-sky-100 ring-1 ring-inset ring-sky-400/35"
                   : "text-muted hover:bg-surface-2 hover:text-white"
@@ -365,7 +365,7 @@ function EmptyHero({ isScanning, onScan }: { isScanning: boolean; onScan: () => 
 
   return (
     <section className="grid place-items-center gap-4 rounded-xl border border-dashed border-border bg-surface-2/40 px-6 py-14 text-center">
-      <div className="grid h-12 w-12 place-items-center rounded-2xl bg-linear-to-br from-sky-400/25 via-sky-500/10 to-emerald-400/10 text-sky-200 ring-1 ring-inset ring-sky-400/25">
+      <div className="grid h-12 w-12 place-items-center rounded-2xl bg-sky-500/15 text-sky-200 ring-1 ring-inset ring-sky-400/25">
         <ShieldCheck size={24} aria-hidden="true" />
       </div>
       <div className="grid gap-1.5">

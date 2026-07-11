@@ -1,4 +1,4 @@
-import { Copy, FolderOpen, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import { Copy, FolderOpen, MoreHorizontal, Pencil, Plus, Shield, Trash2 } from "lucide-react";
 import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
@@ -17,8 +17,10 @@ import { Button } from "./Button";
 type Props = {
   projects: Project[];
   selectedId: string | null;
+  maskActive?: boolean;
   onSelect: (id: string) => void;
   onShowWelcome: () => void;
+  onShowMask: () => void;
   onAdd: () => void;
   onRemove: (id: string) => void;
   onRename: (id: string, name: string) => void;
@@ -28,8 +30,10 @@ type Props = {
 export function Sidebar({
   projects,
   selectedId,
+  maskActive = false,
   onSelect,
   onShowWelcome,
+  onShowMask,
   onAdd,
   onRemove,
   onRename,
@@ -46,7 +50,7 @@ export function Sidebar({
           type="button"
           onClick={onShowWelcome}
           aria-label={messages.topBar.welcome}
-          className="shk-no-drag flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left transition hover:bg-surface-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
+          className="shk-no-drag flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left transition hover:bg-surface-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70"
         >
           <BrandLogo className="h-9 w-9" />
           <span className="leading-tight">
@@ -60,8 +64,25 @@ export function Sidebar({
         <div className="shk-no-drag px-3">
           <button
             type="button"
+            onClick={onShowMask}
+            className={`group mb-2 flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70 ${
+              maskActive
+                ? "border-sky-400/40 bg-sky-500/10 text-white"
+                : "border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-text)] hover:border-sky-300/60 hover:bg-[var(--color-surface-3)] hover:text-white"
+            }`}
+          >
+            <span className="grid h-6 w-6 place-items-center rounded-md bg-sky-400/15 text-sky-300 transition group-hover:bg-sky-400/25">
+              <Shield size={14} aria-hidden="true" />
+            </span>
+            <span>{m.maskWorkspace}</span>
+            <kbd className="ml-auto rounded border border-[var(--color-border)] bg-[var(--color-canvas)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--color-muted)]">
+              ⌘M
+            </kbd>
+          </button>
+          <button
+            type="button"
             onClick={onAdd}
-            className="group flex w-full items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-left text-sm font-medium text-[var(--color-text)] transition hover:border-sky-400/40 hover:bg-[var(--color-surface-3)] hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
+            className="group flex w-full items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-left text-sm font-medium text-[var(--color-text)] transition hover:border-sky-300/60 hover:bg-[var(--color-surface-3)] hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70"
           >
             <span className="grid h-6 w-6 place-items-center rounded-md bg-sky-400/15 text-sky-300 transition group-hover:bg-sky-400/25">
               <Plus size={14} aria-hidden="true" />
@@ -305,7 +326,7 @@ function ProjectRow({ project, active, onSelect, onRemove, onRename }: ProjectRo
               setEditing(false);
             }
           }}
-          className="min-w-0 rounded-md border border-sky-400/50 bg-[var(--color-canvas)] px-2 py-1 text-sm text-white outline-none focus:border-sky-400/80"
+          className="min-w-0 rounded-md border border-sky-400/50 bg-[var(--color-canvas)] px-2 py-1 text-sm text-white outline-none focus:border-sky-300/80"
           aria-label={m.renameAria}
         />
       ) : (
@@ -353,7 +374,7 @@ function ProjectRow({ project, active, onSelect, onRemove, onRename }: ProjectRo
           aria-label={t(m.menuAria, { name: project.name })}
           aria-haspopup="menu"
           aria-expanded={menuOpen}
-          className={`grid h-6 w-6 place-items-center rounded-md text-[var(--color-muted)] transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 ${
+          className={`grid h-6 w-6 place-items-center rounded-md text-[var(--color-muted)] transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70 ${
             menuOpen
               ? "bg-[var(--color-surface-3)] text-white opacity-100"
               : "opacity-60 hover:bg-[var(--color-surface-3)] hover:text-white hover:opacity-100 group-hover:opacity-100"

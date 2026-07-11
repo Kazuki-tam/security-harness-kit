@@ -48,7 +48,7 @@ export function OpenInIdeMenu({ preferredIde, onSelect, disabled = false }: Prop
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={triggerLabel}
-        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface-2 px-2.5 py-1 text-[11px] font-medium text-text transition hover:border-sky-400/40 hover:bg-surface-3 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 disabled:cursor-not-allowed disabled:opacity-50"
+        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface-2 px-2.5 py-1 text-[11px] font-medium text-text transition hover:border-sky-300/60 hover:bg-surface-3 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70 disabled:cursor-not-allowed disabled:opacity-50"
       >
         <FolderOpen size={12} aria-hidden="true" className="shrink-0" />
         <span className="truncate">{triggerLabel}</span>

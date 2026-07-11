@@ -57,7 +57,7 @@ export function ScanProgressCard({ startedAt, hasPreviousResults }: Props) {
           <span>{m.scanning}</span>
         </div>
         <div className="h-1.5 overflow-hidden rounded-full bg-sky-950/70">
-          <div className="shk-indeterminate-progress h-full w-1/2 rounded-full bg-linear-to-r from-sky-300 via-cyan-200 to-emerald-200" />
+          <div className="shk-indeterminate-progress h-full w-1/2 rounded-full bg-sky-400" />
         </div>
       </div>
     </section>

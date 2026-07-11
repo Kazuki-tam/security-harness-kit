@@ -117,7 +117,7 @@ export function CloneRepositoryModal({ open, onClose, onClone }: Props) {
             onClick={onClose}
             disabled={cloning}
             aria-label={messages.common.close}
-            className="grid h-7 w-7 place-items-center rounded-md text-muted transition hover:bg-surface-3 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 disabled:opacity-50"
+            className="grid h-7 w-7 place-items-center rounded-md text-muted transition hover:bg-surface-3 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70 disabled:opacity-50"
           >
             <X size={14} aria-hidden="true" />
           </button>
@@ -144,7 +144,7 @@ export function CloneRepositoryModal({ open, onClose, onClone }: Props) {
               spellCheck={false}
               autoCapitalize="none"
               autoCorrect="off"
-              className="border-border bg-canvas placeholder:text-faint w-full rounded-lg border px-3 py-2 font-mono text-[12px] text-white outline-none transition focus:border-sky-400/60 focus:ring-2 focus:ring-sky-400/15 disabled:opacity-60"
+              className="border-border bg-canvas placeholder:text-faint w-full rounded-lg border px-3 py-2 font-mono text-[12px] text-white outline-none transition focus:border-sky-300/70 focus:ring-2 focus:ring-sky-300/25 disabled:opacity-60"
             />
           </label>
           <p className="text-faint text-[11px]">{m.destinationHint}</p>

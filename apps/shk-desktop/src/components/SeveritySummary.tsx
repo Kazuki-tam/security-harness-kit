@@ -27,7 +27,7 @@ export function SeveritySummary({ report, filter, onFilterChange }: Props) {
             type="button"
             onClick={() => onFilterChange(active ? "all" : severity)}
             aria-pressed={active}
-            className={`group relative overflow-hidden rounded-xl border bg-[var(--color-surface-2)] px-4 py-4 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 ${
+            className={`group relative overflow-hidden rounded-xl border bg-[var(--color-surface-2)] px-4 py-4 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70 ${
               active
                 ? "border-sky-400/50 bg-sky-500/10 shadow-lg shadow-sky-500/10"
                 : "border-[var(--color-border)] hover:border-[var(--color-border-strong)] hover:bg-[var(--color-surface-3)]"

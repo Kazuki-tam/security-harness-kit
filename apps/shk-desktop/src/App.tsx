@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { HelpModal } from "./components/HelpModal";
+import { MaskWorkspace } from "./components/MaskWorkspace";
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ScanWorkspace } from "./components/ScanWorkspace";
+import { usePreferredAiTool } from "./hooks/usePreferredAiTool";
 import { usePreferredIde } from "./hooks/usePreferredIde";
 import { useProjects } from "./hooks/useProjects";
 import { openInIde, type PreferredIde } from "./ide";
@@ -40,7 +43,7 @@ function App() {
     renameProject,
   } = useProjects();
 
-  const [currentView, setCurrentView] = useState<"welcome" | "project">(() =>
+  const [currentView, setCurrentView] = useState<"welcome" | "project" | "mask">(() =>
     selectedProject ? "project" : "welcome",
   );
   const [scanStates, setScanStates] = useState<Record<string, ScanState>>({});
@@ -48,8 +51,11 @@ function App() {
     Record<string, ProjectStatusState>
   >({});
   const [actionState, setActionState] = useState<ActionState>({ status: "idle" });
+  const [helpOpen, setHelpOpen] = useState(false);
   const { preferredIde, setPreferredIde } = usePreferredIde();
+  const { preferredAiTool, setPreferredAiTool } = usePreferredAiTool();
   const activeProject = currentView === "project" ? selectedProject : null;
+  const maskProjectPath = selectedProject?.path ?? null;
 
   const currentScanState: ScanState = selectedId
     ? (scanStates[selectedId] ?? { status: "idle" })
@@ -111,6 +117,10 @@ function App() {
 
   const showWelcome = useCallback(() => {
     setCurrentView("welcome");
+  }, []);
+
+  const showMask = useCallback(() => {
+    setCurrentView("mask");
   }, []);
 
   const showProject = useCallback(
@@ -244,10 +254,14 @@ function App() {
         event.preventDefault();
         showWelcome();
       }
+      if (cmdOrCtrl && event.key.toLowerCase() === "m") {
+        event.preventDefault();
+        showMask();
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [openFolder, runScan, showWelcome]);
+  }, [openFolder, runScan, showMask, showWelcome]);
 
   const handleRemove = useCallback(
     (id: string) => {
@@ -322,8 +336,10 @@ function App() {
         <Sidebar
           projects={projects}
           selectedId={activeProject?.id ?? null}
+          maskActive={currentView === "mask"}
           onSelect={showProject}
           onShowWelcome={showWelcome}
+          onShowMask={showMask}
           onAdd={openFolder}
           onRemove={handleRemove}
           onRename={renameProject}
@@ -333,13 +349,21 @@ function App() {
 
       <main className="flex min-w-0 flex-1 flex-col">
         <TopBar
+          view={currentView}
           project={activeProject}
           reserveWindowControls={!showSidebar}
           preferredIde={preferredIde}
           onOpenInIde={openProjectInIde}
+          onShowHelp={() => setHelpOpen(true)}
         />
 
-        {activeProject ? (
+        {currentView === "mask" ? (
+          <MaskWorkspace
+            projectPath={maskProjectPath}
+            preferredAiTool={preferredAiTool}
+            onPreferredAiToolChange={setPreferredAiTool}
+          />
+        ) : activeProject ? (
           <ScanWorkspace
             key={activeProject.id}
             project={activeProject}
@@ -357,9 +381,11 @@ function App() {
             onOpenFolder={openFolder}
             onCloneRepository={cloneGitRepository}
             onSelect={showProject}
+            onShowMask={showMask}
           />
         )}
       </main>
+      <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
   );
 }

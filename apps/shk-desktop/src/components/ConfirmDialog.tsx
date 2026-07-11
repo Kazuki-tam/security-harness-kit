@@ -66,7 +66,7 @@ export function ConfirmDialog({
             type="button"
             onClick={onCancel}
             aria-label={messages.common.close}
-            className="grid h-7 w-7 place-items-center rounded-md text-[var(--color-muted)] transition hover:bg-[var(--color-surface-3)] hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
+            className="grid h-7 w-7 place-items-center rounded-md text-[var(--color-muted)] transition hover:bg-[var(--color-surface-3)] hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70"
           >
             <X size={14} aria-hidden="true" />
           </button>

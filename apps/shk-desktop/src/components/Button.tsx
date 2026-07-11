@@ -3,9 +3,9 @@ import { type ButtonHTMLAttributes, type ReactNode } from "react";
 
 const variantClasses = {
   primary:
-    "border-sky-400/35 bg-sky-500/12 text-sky-100 hover:border-sky-400/55 hover:bg-sky-500/20 hover:text-white",
+    "border-sky-500/40 bg-sky-600 text-white shadow-[0_6px_20px_rgba(3,109,240,0.2)] hover:border-sky-400/60 hover:bg-sky-500",
   secondary:
-    "border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-text)] hover:border-sky-400/40 hover:bg-[var(--color-surface-3)] hover:text-white",
+    "border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-text)] hover:border-sky-300/60 hover:bg-[var(--color-surface-3)] hover:text-white",
 } as const;
 
 const sizeClasses = {
@@ -36,7 +36,7 @@ export function Button({
     <button
       type="button"
       disabled={isDisabled}
-      className={`inline-flex items-center border font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/50 disabled:cursor-not-allowed disabled:opacity-50 ${variantClasses[variant]} ${sizeClasses[size]} ${className}`}
+      className={`inline-flex items-center border font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70 disabled:cursor-not-allowed disabled:opacity-50 ${variantClasses[variant]} ${sizeClasses[size]} ${className}`}
       {...props}
     >
       {loading ? (

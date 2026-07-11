@@ -19,11 +19,15 @@ use crate::safety;
 use crate::workflow_hardening;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use shk_core::finding::Finding;
 use shk_core::git;
+use shk_core::masker::MaskJsonOutput;
+use shk_core::policy::Policy;
 use shk_integrations::{MANAGED_MARKER_JSON, MANAGED_MARKER_SH};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use zeroize::Zeroize;
 
 /// Desktop setup installs blocking scan hooks that append metadata-only block entries.
 const DESKTOP_AI_HOOK_LOG_BLOCKED: bool = true;
@@ -172,6 +176,171 @@ pub struct ActionResult {
 #[serde(rename_all = "camelCase")]
 pub struct CloneRepositoryResult {
     pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopMaskFileResult {
+    pub masked_content: String,
+    pub findings: Vec<Finding>,
+    pub file_kind: String,
+    pub source_label: String,
+    pub output_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopOfficeFormat {
+    Docx,
+    Xlsx,
+    Pptx,
+}
+
+pub fn mask_text_for_desktop(
+    project_root: Option<&Path>,
+    content: &str,
+    label: &str,
+) -> Result<MaskJsonOutput> {
+    if content.trim().is_empty() {
+        anyhow::bail!("mask input is empty");
+    }
+    let policy = load_mask_policy(project_root)?;
+    let (masked_content, findings) = shk_core::masker::mask_from_policy(content, &policy, label)?;
+    Ok(MaskJsonOutput {
+        masked_content,
+        findings,
+    })
+}
+
+pub fn mask_file_for_desktop(
+    project_root: Option<&Path>,
+    input_path: &Path,
+    output_path: Option<&Path>,
+) -> Result<DesktopMaskFileResult> {
+    if !input_path.is_file() {
+        anyhow::bail!("input file does not exist: {}", input_path.display());
+    }
+
+    let policy = load_mask_policy(project_root)?;
+    let source_label = input_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| input_path.display().to_string());
+
+    if let Some(format) = desktop_office_format(input_path) {
+        return mask_office_file_for_desktop(
+            &policy,
+            input_path,
+            output_path,
+            format,
+            &source_label,
+        );
+    }
+
+    let mut bytes = fs::read(input_path)?;
+    if is_binary_or_non_utf8(&bytes, policy.scan.binary_detection_bytes) {
+        bytes.zeroize();
+        anyhow::bail!(
+            "binary or non-UTF-8 files are not supported in the mask workspace (PDF and images are scan-only)"
+        );
+    }
+
+    let mut content = String::from_utf8(std::mem::take(&mut bytes))?;
+    bytes.zeroize();
+    let (masked_content, findings) =
+        shk_core::masker::mask_from_policy(&content, &policy, &source_label)?;
+    content.zeroize();
+
+    let written_output = if let Some(outp) = output_path {
+        safety::ensure_writable_path_allowed(outp)?;
+        crate::fs_atomic::write_atomic(outp, masked_content.as_bytes())?;
+        Some(outp.display().to_string())
+    } else {
+        None
+    };
+
+    Ok(DesktopMaskFileResult {
+        masked_content,
+        findings,
+        file_kind: "text".into(),
+        source_label,
+        output_path: written_output,
+    })
+}
+
+fn load_mask_policy(project_root: Option<&Path>) -> Result<Policy> {
+    if let Some(root) = project_root {
+        let (policy, _) = Policy::load_from_dir(root)?;
+        Ok(policy)
+    } else {
+        Ok(Policy::default())
+    }
+}
+
+fn desktop_office_format(path: &Path) -> Option<DesktopOfficeFormat> {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("docx") => Some(DesktopOfficeFormat::Docx),
+        Some(ext) if ext.eq_ignore_ascii_case("xlsx") => Some(DesktopOfficeFormat::Xlsx),
+        Some(ext) if ext.eq_ignore_ascii_case("pptx") => Some(DesktopOfficeFormat::Pptx),
+        _ => None,
+    }
+}
+
+fn is_binary_or_non_utf8(bytes: &[u8], binary_detection_bytes: usize) -> bool {
+    let take = binary_detection_bytes.min(bytes.len());
+    bytes[..take].contains(&0) || std::str::from_utf8(bytes).is_err()
+}
+
+fn mask_office_file_for_desktop(
+    policy: &Policy,
+    input_path: &Path,
+    output_path: Option<&Path>,
+    format: DesktopOfficeFormat,
+    source_label: &str,
+) -> Result<DesktopMaskFileResult> {
+    let bytes = fs::read(input_path)?;
+    let entries = shk_core::document_masker::extract_ooxml_text_entries(
+        source_label,
+        &bytes,
+        policy.scan.max_file_size_bytes,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("unable to extract text from Office document"))?;
+
+    let combined = entries
+        .iter()
+        .map(|entry| entry.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let (masked_content, preview_findings) =
+        shk_core::masker::mask_from_policy(&combined, policy, source_label)?;
+    let mut findings = preview_findings;
+
+    let written_output = if let Some(outp) = output_path {
+        safety::ensure_writable_path_allowed(outp)?;
+        let doc_result = match format {
+            DesktopOfficeFormat::Docx => {
+                shk_core::document_masker::mask_docx(input_path, outp, policy)?
+            }
+            DesktopOfficeFormat::Xlsx => {
+                shk_core::document_masker::mask_xlsx(input_path, outp, policy)?
+            }
+            DesktopOfficeFormat::Pptx => {
+                shk_core::document_masker::mask_pptx(input_path, outp, policy)?
+            }
+        };
+        findings = doc_result.findings;
+        Some(outp.display().to_string())
+    } else {
+        None
+    };
+
+    Ok(DesktopMaskFileResult {
+        masked_content,
+        findings,
+        file_kind: "office".into(),
+        source_label: source_label.into(),
+        output_path: written_output,
+    })
 }
 
 pub fn clone_repository(
@@ -1415,6 +1584,60 @@ fn parse_skill_tool(value: &str) -> Result<SkillTool> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn desktop_mask_text_uses_default_policy_without_project() {
+        let out =
+            mask_text_for_desktop(None, "contact test.user@example.com\n", "<input>").unwrap();
+        assert!(
+            out.masked_content.contains("[REDACTED]"),
+            "{}",
+            out.masked_content
+        );
+        assert!(out.findings.iter().any(|f| f.rule_id == "pii.email"));
+    }
+
+    #[test]
+    fn desktop_mask_text_rejects_empty_input() {
+        let err = mask_text_for_desktop(None, "   ", "<input>").unwrap_err();
+        assert!(err.to_string().contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn desktop_mask_file_masks_utf8_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("prompt.txt");
+        fs::write(&input, "contact test.user@example.com\n").unwrap();
+
+        let out = mask_file_for_desktop(None, &input, None).unwrap();
+        assert_eq!(out.file_kind, "text");
+        assert!(out.masked_content.contains("[REDACTED]"));
+        assert!(out.findings.iter().any(|f| f.rule_id == "pii.email"));
+        assert!(out.output_path.is_none());
+    }
+
+    #[test]
+    fn desktop_mask_file_rejects_binary_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("data.bin");
+        fs::write(&input, [0xff, 0xfe, b'a']).unwrap();
+
+        let err = mask_file_for_desktop(None, &input, None).unwrap_err();
+        assert!(err.to_string().contains("binary or non-UTF-8"), "{err}");
+    }
+
+    #[test]
+    fn desktop_mask_file_writes_text_output_when_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("prompt.txt");
+        let output = dir.path().join("masked.txt");
+        fs::write(&input, "contact test.user@example.com\n").unwrap();
+
+        let out = mask_file_for_desktop(None, &input, Some(&output)).unwrap();
+        assert_eq!(out.output_path.as_deref(), Some(output.to_str().unwrap()));
+        let written = fs::read_to_string(&output).unwrap();
+        assert!(written.contains("[REDACTED]"), "{written}");
+    }
 
     #[test]
     fn clone_remote_validation_accepts_https_and_ssh() {

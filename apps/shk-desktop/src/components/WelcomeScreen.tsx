@@ -1,4 +1,4 @@
-import { BookOpen, FolderOpen, GitFork } from "lucide-react";
+import { FolderOpen, GitFork, Shield } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useI18n } from "../i18n";
 import type { Project } from "../types";
@@ -6,7 +6,6 @@ import { actionableCount } from "../scan";
 import { formatRelativeTime, shortenPath } from "../utils";
 import { BrandLogo } from "./BrandLogo";
 import { CloneRepositoryModal } from "./CloneRepositoryModal";
-import { HelpModal } from "./HelpModal";
 
 type Props = {
   recentProjects: Project[];
@@ -14,6 +13,7 @@ type Props = {
   onOpenFolder: () => void;
   onCloneRepository: (remoteUrl: string) => Promise<boolean>;
   onSelect: (id: string) => void;
+  onShowMask: () => void;
 };
 
 export function WelcomeScreen({
@@ -22,39 +22,40 @@ export function WelcomeScreen({
   onOpenFolder,
   onCloneRepository,
   onSelect,
+  onShowMask,
 }: Props) {
   const { messages, t } = useI18n();
   const m = messages.welcome;
-  const [helpOpen, setHelpOpen] = useState(false);
   const [cloneOpen, setCloneOpen] = useState(false);
 
   return (
     <div className="shk-scroll shk-fade-in min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto flex min-h-full w-full max-w-[640px] flex-col justify-center px-8 py-12">
         <section className="mb-10 flex flex-col items-center text-center" aria-label={m.title}>
-          <BrandLogo className="h-20 w-20 drop-shadow-[0_14px_32px_rgba(14,165,233,0.18)]" />
+          <BrandLogo className="h-20 w-20 drop-shadow-[0_14px_32px_rgba(3,112,248,0.28)]" />
           <h1 className="mt-4 max-w-sm text-[26px] leading-tight font-semibold tracking-tight text-white">
             {m.title}
           </h1>
           <p className="mt-2 max-w-md text-[12.5px] text-[var(--color-muted)]">{m.subtitle}</p>
         </section>
 
-        <section className="grid grid-cols-1 gap-3 sm:grid-cols-3" aria-label={m.actions}>
+        <section className="grid grid-cols-1 gap-3 sm:grid-cols-2" aria-label={m.actions}>
           <ActionCard
             icon={<FolderOpen size={18} aria-hidden="true" />}
             label={m.openProject}
             onClick={onOpenFolder}
             primary
+            fullWidth
+          />
+          <ActionCard
+            icon={<Shield size={18} aria-hidden="true" />}
+            label={m.maskWorkspace}
+            onClick={onShowMask}
           />
           <ActionCard
             icon={<GitFork size={18} aria-hidden="true" />}
             label={messages.cloneRepository.action}
             onClick={() => setCloneOpen(true)}
-          />
-          <ActionCard
-            icon={<BookOpen size={18} aria-hidden="true" />}
-            label={m.viewGuide}
-            onClick={() => setHelpOpen(true)}
           />
         </section>
 
@@ -79,7 +80,6 @@ export function WelcomeScreen({
         )}
       </div>
 
-      <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
       <CloneRepositoryModal
         open={cloneOpen}
         onClose={() => setCloneOpen(false)}
@@ -94,21 +94,23 @@ function ActionCard({
   label,
   onClick,
   primary,
+  fullWidth,
 }: {
   icon: ReactNode;
   label: string;
   onClick: () => void;
   primary?: boolean;
+  fullWidth?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`group flex flex-col items-start gap-3 rounded-xl border bg-[var(--color-surface-2)] px-4 py-4 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 ${
+      className={`group flex flex-col items-start gap-3 rounded-xl border bg-[var(--color-surface-2)] px-4 py-4 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70 ${
         primary
           ? "border-sky-400/30 hover:border-sky-400/60 hover:bg-sky-500/10"
           : "border-[var(--color-border)] hover:border-[var(--color-border-strong)] hover:bg-[var(--color-surface-3)]"
-      }`}
+      } ${fullWidth ? "sm:col-span-2" : ""}`}
     >
       <span
         className={`grid h-8 w-8 place-items-center rounded-lg transition ${

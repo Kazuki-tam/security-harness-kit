@@ -24,9 +24,10 @@
   --color-sky-900: #0d3d82;
   --color-sky-950: #023171;
 
-  --color-accent: #50d1fc;
-  --color-accent-strong: #0e97f7;
-  --color-accent-soft: rgba(44, 202, 251, 0.12);
+  /* Sampled from app-logo.png: left arm #0370f8, right arm #27c7fb. */
+  --color-accent: #27c7fb;
+  --color-accent-strong: #0370f8;
+  --color-accent-soft: rgba(39, 199, 251, 0.12);
 
   --color-success: #4ade80;
   --color-warn: #fbbf24;

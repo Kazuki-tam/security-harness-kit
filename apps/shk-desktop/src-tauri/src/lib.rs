@@ -1,14 +1,15 @@
 use shk_cli::desktop_api::{
     self, ActionResult, ApplyAiHookSettingsOptions, ApplyNpmHardeningOptions,
-    ApplyRecommendedFixesOptions, AuditReportOptions, CloneRepositoryResult,
+    ApplyRecommendedFixesOptions, AuditReportOptions, CloneRepositoryResult, DesktopMaskFileResult,
     FixDoctorIgnoreOptions, InitPolicyOptions, InstallAiHooksOptions, InstallSkillsOptions,
     ProjectStatus,
 };
 use shk_core::ScanJsonReport;
+use shk_core::masker::MaskJsonOutput;
 use shk_core::policy::ColorMode;
 use shk_core::scanner::{ScanOptions, scan_path as scan_target_path};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use tauri::async_runtime::spawn_blocking;
 
 #[derive(Debug, thiserror::Error)]
@@ -149,6 +150,220 @@ async fn clone_repository(
         desktop_api::clone_repository(&remote_url, &destination_parent).map_err(map_err)
     })
     .await
+}
+
+#[tauri::command]
+async fn mask_content(
+    project_path: Option<String>,
+    content: String,
+) -> Result<MaskJsonOutput, AppError> {
+    run_blocking(move || {
+        let project_root = project_path
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty());
+        desktop_api::mask_text_for_desktop(project_root.as_deref(), &content, "<input>")
+            .map_err(map_err)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn mask_file(
+    project_path: Option<String>,
+    input_path: String,
+    output_path: Option<String>,
+) -> Result<DesktopMaskFileResult, AppError> {
+    if input_path.trim().is_empty() {
+        return Err(AppError::Message("input path is empty".to_string()));
+    }
+
+    run_blocking(move || {
+        let project_root = project_path
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty());
+        let input = PathBuf::from(&input_path);
+        let output = output_path
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty());
+        desktop_api::mask_file_for_desktop(project_root.as_deref(), &input, output.as_deref())
+            .map_err(map_err)
+    })
+    .await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AiToolKind {
+    ClaudeDesktop,
+    ChatGptDesktop,
+    Cursor,
+    Vscode,
+}
+
+impl AiToolKind {
+    fn parse(raw: &str) -> Result<Self, AppError> {
+        match raw {
+            "claude-desktop" => Ok(Self::ClaudeDesktop),
+            "chatgpt-desktop" => Ok(Self::ChatGptDesktop),
+            "cursor" => Ok(Self::Cursor),
+            "vscode" => Ok(Self::Vscode),
+            other => Err(AppError::Message(format!("unsupported AI tool: {other}"))),
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::ClaudeDesktop => "Claude Desktop",
+            Self::ChatGptDesktop => "ChatGPT",
+            Self::Cursor => "Cursor",
+            Self::Vscode => "VS Code",
+        }
+    }
+
+    fn cli_command(self) -> Option<&'static str> {
+        match self {
+            Self::ClaudeDesktop | Self::ChatGptDesktop => None,
+            Self::Cursor => Some("cursor"),
+            Self::Vscode => Some("code"),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn mac_app_names(self) -> &'static [&'static str] {
+        match self {
+            Self::ClaudeDesktop => &["Claude"],
+            Self::ChatGptDesktop => &["ChatGPT"],
+            Self::Cursor => &["Cursor"],
+            Self::Vscode => &["Visual Studio Code", "Code"],
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn windows_candidates(self) -> Vec<PathBuf> {
+        let local = std::env::var("LOCALAPPDATA").ok();
+        let program_files = std::env::var("ProgramFiles").ok();
+        match self {
+            Self::ClaudeDesktop => {
+                let mut paths = Vec::new();
+                if let Some(local) = local {
+                    paths.push(
+                        PathBuf::from(local)
+                            .join("Programs")
+                            .join("Claude")
+                            .join("Claude.exe"),
+                    );
+                }
+                paths
+            }
+            Self::ChatGptDesktop => {
+                let mut paths = Vec::new();
+                if let Some(local) = local {
+                    paths.push(
+                        PathBuf::from(local)
+                            .join("Programs")
+                            .join("ChatGPT")
+                            .join("ChatGPT.exe"),
+                    );
+                }
+                paths
+            }
+            Self::Cursor => {
+                let mut paths = Vec::new();
+                if let Some(local) = local {
+                    paths.push(
+                        PathBuf::from(local)
+                            .join("Programs")
+                            .join("cursor")
+                            .join("Cursor.exe"),
+                    );
+                }
+                paths
+            }
+            Self::Vscode => {
+                let mut paths = Vec::new();
+                if let Some(local) = local {
+                    paths.push(
+                        PathBuf::from(local)
+                            .join("Programs")
+                            .join("Microsoft VS Code")
+                            .join("Code.exe"),
+                    );
+                }
+                if let Some(program_files) = program_files {
+                    paths.push(
+                        PathBuf::from(program_files)
+                            .join("Microsoft VS Code")
+                            .join("Code.exe"),
+                    );
+                }
+                paths
+            }
+        }
+    }
+}
+
+fn launch_ai_tool(tool: AiToolKind) -> Result<(), AppError> {
+    let mut errors = Vec::new();
+
+    #[cfg(target_os = "macos")]
+    for app_name in tool.mac_app_names() {
+        let status = Command::new("open")
+            .arg("-a")
+            .arg(app_name)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        match status {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => errors.push(format!("open -a {app_name} exited with {status}")),
+            Err(err) => errors.push(format!("open -a {app_name} failed: {err}")),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    for candidate in tool.windows_candidates() {
+        if !candidate.is_file() {
+            continue;
+        }
+        match Command::new(&candidate)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => errors.push(format!("{} exited with {status}", candidate.display())),
+            Err(err) => errors.push(format!("{} failed: {err}", candidate.display())),
+        }
+    }
+
+    if let Some(cli) = tool.cli_command() {
+        match Command::new(cli)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => errors.push(format!("{cli} exited with {status}")),
+            Err(err) => errors.push(format!("{cli} failed: {err}")),
+        }
+    }
+
+    Err(AppError::Message(format!(
+        "could not open {}. {}",
+        tool.display_name(),
+        errors.join("; ")
+    )))
+}
+
+#[tauri::command]
+async fn open_ai_tool(tool: String) -> Result<(), AppError> {
+    let tool = AiToolKind::parse(tool.trim())?;
+    run_blocking(move || launch_ai_tool(tool)).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -368,6 +583,9 @@ pub fn run() {
             audit_report,
             clone_repository,
             open_in_ide,
+            mask_content,
+            mask_file,
+            open_ai_tool,
         ])
         .run(tauri::generate_context!())
         .expect("error while running shk desktop app");
@@ -376,6 +594,21 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_tool_kind_parse_and_display() {
+        assert_eq!(
+            AiToolKind::parse("claude-desktop").unwrap(),
+            AiToolKind::ClaudeDesktop
+        );
+        assert_eq!(
+            AiToolKind::parse("chatgpt-desktop").unwrap(),
+            AiToolKind::ChatGptDesktop
+        );
+        assert_eq!(AiToolKind::parse("cursor").unwrap(), AiToolKind::Cursor);
+        assert!(AiToolKind::parse("codex").is_err());
+        assert_eq!(AiToolKind::ClaudeDesktop.display_name(), "Claude Desktop");
+    }
 
     #[test]
     fn ide_kind_parse_and_display() {
