@@ -211,6 +211,7 @@ pub fn mask_text_for_desktop(
         anyhow::bail!("mask input is empty");
     }
     let policy = load_mask_policy(project_root)?;
+    ensure_mask_content_size_allowed(content, policy.scan.max_file_size_bytes)?;
     let (masked_content, findings) = shk_core::masker::mask_from_policy(content, &policy, label)?;
     Ok(MaskJsonOutput {
         masked_content,
@@ -246,8 +247,11 @@ pub fn mask_file_for_desktop(
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| input_path.display().to_string());
 
+    ensure_input_file_size_allowed(input_path, policy.scan.max_file_size_bytes)?;
+
     if let Some(format) = desktop_office_format(input_path) {
         return mask_office_file_for_desktop(
+            project_root,
             &policy,
             input_path,
             output_path,
@@ -269,7 +273,7 @@ pub fn mask_file_for_desktop(
     let (masked_content, findings) = mask_result?;
 
     let written_output = if let Some(outp) = output_path {
-        safety::ensure_writable_path_allowed(outp)?;
+        ensure_mask_output_path_allowed(project_root, outp)?;
         crate::fs_atomic::write_atomic(outp, masked_content.as_bytes())?;
         Some(outp.display().to_string())
     } else {
@@ -283,6 +287,35 @@ pub fn mask_file_for_desktop(
         source_label,
         output_path: written_output,
     })
+}
+
+fn ensure_mask_content_size_allowed(content: &str, max_bytes: u64) -> Result<()> {
+    let size = content.len() as u64;
+    if size > max_bytes {
+        anyhow::bail!("mask input exceeds the configured size limit ({size} > {max_bytes} bytes)");
+    }
+    Ok(())
+}
+
+fn ensure_input_file_size_allowed(input_path: &Path, max_bytes: u64) -> Result<()> {
+    let file_size = fs::metadata(input_path)?.len();
+    if file_size > max_bytes {
+        anyhow::bail!(
+            "file exceeds the configured file size limit ({file_size} > {max_bytes} bytes)"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_mask_output_path_allowed(project_root: Option<&Path>, output_path: &Path) -> Result<()> {
+    safety::ensure_writable_path_allowed(output_path)?;
+    // When a project is selected, keep masked outputs inside that project tree.
+    // Without a project, only protected-path checks apply so dialog-chosen save
+    // locations outside the workspace remain available.
+    if let Some(root) = project_root {
+        safety::ensure_write_path_within(root, output_path)?;
+    }
+    Ok(())
 }
 
 fn load_mask_policy(project_root: Option<&Path>) -> Result<Policy> {
@@ -422,6 +455,7 @@ fn is_legacy_text_path(path: &Path) -> bool {
 }
 
 fn mask_office_file_for_desktop(
+    project_root: Option<&Path>,
     policy: &Policy,
     input_path: &Path,
     output_path: Option<&Path>,
@@ -450,7 +484,7 @@ fn mask_office_file_for_desktop(
     let mut findings = preview_findings;
 
     let written_output = if let Some(outp) = output_path {
-        safety::ensure_writable_path_allowed(outp)?;
+        ensure_mask_output_path_allowed(project_root, outp)?;
         let doc_result = match format {
             DesktopOfficeFormat::Docx => {
                 shk_core::document_masker::mask_docx(input_path, outp, policy)?
@@ -1879,6 +1913,47 @@ mod tests {
 
         let err = mask_file_for_desktop(None, &input, None).unwrap_err();
         assert!(err.to_string().contains("no extractable text"), "{err}");
+    }
+
+    #[test]
+    fn desktop_mask_text_rejects_content_over_configured_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("shk.toml");
+        fs::write(&policy_path, "[scan]\nmax_file_size_bytes = 8\n").unwrap();
+        let err = mask_text_for_desktop(Some(dir.path()), "0123456789", "stdin").unwrap_err();
+        assert!(err.to_string().contains("size limit"), "{err}");
+    }
+
+    #[test]
+    fn desktop_mask_file_rejects_text_over_configured_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("shk.toml"),
+            "[scan]\nmax_file_size_bytes = 8\n",
+        )
+        .unwrap();
+        let input = project.join("large.txt");
+        fs::write(&input, "012345678901234567890").unwrap();
+
+        let err = mask_file_for_desktop(Some(&project), &input, None).unwrap_err();
+        assert!(err.to_string().contains("file size limit"), "{err}");
+    }
+
+    #[test]
+    fn desktop_mask_file_rejects_output_outside_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("shk.toml"), "[scan]\n").unwrap();
+        let input = project.join("input.txt");
+        fs::write(&input, "contact test.user@example.com").unwrap(); // shk-ignore pii.email
+        let output = dir.path().join("outside.txt");
+
+        let err = mask_file_for_desktop(Some(&project), &input, Some(&output)).unwrap_err();
+        assert!(err.to_string().contains("outside"), "{err}");
+        assert!(!output.exists());
     }
 
     #[test]

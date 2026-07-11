@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { AppNotice } from "./components/AppNotice";
 import { HelpModal } from "./components/HelpModal";
 import { MaskWorkspace } from "./components/MaskWorkspace";
 import { Sidebar } from "./components/Sidebar";
@@ -12,6 +13,7 @@ import { usePreferredProjectApp } from "./hooks/usePreferredProjectApp";
 import { useProjects } from "./hooks/useProjects";
 import { openProjectInApp, type ProjectApp } from "./projectApp";
 import { useI18n } from "./i18n";
+import { operationErrorMessage } from "./i18n/interpolate";
 import packageInfo from "../package.json";
 import {
   applyAiHookSettings,
@@ -27,6 +29,7 @@ import {
 import { defaultRecommendedFixIds } from "./setup/plan";
 import { asSeverity, type ScanReport, type ScanState, type Severity } from "./scan";
 import type { ActionResult, ActionState, AiHookSetupSelection, ProjectStatusState } from "./types";
+import { createRequestTracker } from "./utils/requestTracker";
 
 const APP_VERSION = packageInfo.version;
 
@@ -50,8 +53,10 @@ function App() {
   const [projectStatusStates, setProjectStatusStates] = useState<
     Record<string, ProjectStatusState>
   >({});
-  const [actionState, setActionState] = useState<ActionState>({ status: "idle" });
+  const [actionStates, setActionStates] = useState<Record<string, ActionState>>({});
   const [helpOpen, setHelpOpen] = useState(false);
+  const [appNotice, setAppNotice] = useState<string | null>(null);
+  const requestTrackerRef = useRef(createRequestTracker());
   const { preferredProjectApp, setPreferredProjectApp } = usePreferredProjectApp();
   const { preferredAiTool, setPreferredAiTool } = usePreferredAiTool();
   const activeProject = currentView === "project" ? selectedProject : null;
@@ -64,19 +69,37 @@ function App() {
     ? (projectStatusStates[selectedId] ?? { status: "idle" })
     : { status: "idle" };
 
+  const actionState: ActionState = activeProject
+    ? (actionStates[activeProject.id] ?? { status: "idle" })
+    : { status: "idle" };
+
   const setScanStateFor = useCallback((id: string, state: ScanState) => {
     setScanStates((prev) => ({ ...prev, [id]: state }));
   }, []);
 
+  const showOperationError = useCallback(
+    (error: unknown) => {
+      setAppNotice(operationErrorMessage(messages.app.operationFailed, error));
+    },
+    [messages.app.operationFailed],
+  );
+
+  const setActionStateFor = useCallback((projectId: string, state: ActionState) => {
+    setActionStates((prev) => ({ ...prev, [projectId]: state }));
+  }, []);
+
   const refreshProjectStatus = useCallback(async (projectId: string, path: string) => {
+    const requestId = requestTrackerRef.current.begin(`status:${projectId}`);
     setProjectStatusStates((prev) => ({ ...prev, [projectId]: { status: "loading" } }));
     try {
       const data = await fetchProjectStatus(path);
+      if (!requestTrackerRef.current.isLatest(`status:${projectId}`, requestId)) return;
       setProjectStatusStates((prev) => ({
         ...prev,
         [projectId]: { status: "done", data, loadedAt: new Date().toISOString() },
       }));
     } catch (error) {
+      if (!requestTrackerRef.current.isLatest(`status:${projectId}`, requestId)) return;
       setProjectStatusStates((prev) => ({
         ...prev,
         [projectId]: {
@@ -92,26 +115,38 @@ function App() {
     void refreshProjectStatus(activeProject.id, activeProject.path);
   }, [activeProject?.id, activeProject?.path, refreshProjectStatus]);
 
+  useEffect(() => {
+    if (projects.length === 0 && currentView !== "welcome") {
+      setCurrentView("welcome");
+    }
+  }, [currentView, projects.length]);
+
   const dismissActionFeedback = useCallback(() => {
-    setActionState({ status: "idle" });
-  }, []);
+    if (!activeProject) return;
+    setActionStateFor(activeProject.id, { status: "idle" });
+  }, [activeProject, setActionStateFor]);
 
   const runSetupAction = useCallback(
     async (runner: () => Promise<{ success: boolean; message: string; details: string[] }>) => {
       if (!activeProject) return;
-      setActionState({ status: "running" });
+      const projectId = activeProject.id;
+      const projectPath = activeProject.path;
+      const requestId = requestTrackerRef.current.begin(`setup:${projectId}`);
+      setActionStateFor(projectId, { status: "running" });
       try {
         const result = await runner();
-        setActionState({ status: "done", result });
-        await refreshProjectStatus(activeProject.id, activeProject.path);
+        if (!requestTrackerRef.current.isLatest(`setup:${projectId}`, requestId)) return;
+        setActionStateFor(projectId, { status: "done", result });
+        await refreshProjectStatus(projectId, projectPath);
       } catch (error) {
-        setActionState({
+        if (!requestTrackerRef.current.isLatest(`setup:${projectId}`, requestId)) return;
+        setActionStateFor(projectId, {
           status: "error",
           message: error instanceof Error ? error.message : String(error),
         });
       }
     },
-    [activeProject, refreshProjectStatus],
+    [activeProject, refreshProjectStatus, setActionStateFor],
   );
 
   const showWelcome = useCallback(() => {
@@ -142,25 +177,30 @@ function App() {
         setCurrentView("project");
       }
     } catch (error) {
-      console.error("failed to open folder:", error);
+      showOperationError(error);
     }
-  }, [addProject, messages.app.selectFolder]);
+  }, [addProject, messages.app.selectFolder, showOperationError]);
 
   const cloneGitRepository = useCallback(
     async (remoteUrl: string): Promise<boolean> => {
-      const destinationParent = await open({
-        directory: true,
-        multiple: false,
-        title: messages.app.selectCloneDestination,
-      });
-      if (typeof destinationParent !== "string" || !destinationParent) return false;
+      try {
+        const destinationParent = await open({
+          directory: true,
+          multiple: false,
+          title: messages.app.selectCloneDestination,
+        });
+        if (typeof destinationParent !== "string" || !destinationParent) return false;
 
-      const result = await cloneRepository(remoteUrl, destinationParent);
-      addProject(result.path);
-      setCurrentView("project");
-      return true;
+        const result = await cloneRepository(remoteUrl, destinationParent);
+        addProject(result.path);
+        setCurrentView("project");
+        return true;
+      } catch (error) {
+        showOperationError(error);
+        return false;
+      }
     },
-    [addProject, messages.app.selectCloneDestination],
+    [addProject, messages.app.selectCloneDestination, showOperationError],
   );
 
   const openProjectInAppHandler = useCallback(
@@ -181,10 +221,16 @@ function App() {
         }
         await openProjectInApp(path, app);
       } catch (error) {
-        console.error("failed to open project in app:", error);
+        showOperationError(error);
       }
     },
-    [activeProject?.path, addProject, messages.app.selectFolderForApp, setPreferredProjectApp],
+    [
+      activeProject?.path,
+      addProject,
+      messages.app.selectFolderForApp,
+      setPreferredProjectApp,
+      showOperationError,
+    ],
   );
 
   const runScan = useCallback(async () => {
@@ -192,6 +238,7 @@ function App() {
     if (currentScanState.status === "running") return;
 
     const projectId = activeProject.id;
+    const requestId = requestTrackerRef.current.begin(`scan:${projectId}`);
     const previousResult =
       currentScanState.status === "done"
         ? { report: currentScanState.report, finishedAt: currentScanState.finishedAt }
@@ -207,6 +254,7 @@ function App() {
       const report = await invoke<ScanReport>("scan_path", {
         path: activeProject.path,
       });
+      if (!requestTrackerRef.current.isLatest(`scan:${projectId}`, requestId)) return;
       const finishedAt = new Date().toISOString();
       setScanStateFor(projectId, { status: "done", report, finishedAt });
 
@@ -220,6 +268,7 @@ function App() {
         scannedAt: finishedAt,
       });
     } catch (error) {
+      if (!requestTrackerRef.current.isLatest(`scan:${projectId}`, requestId)) return;
       setScanStateFor(projectId, {
         status: "error",
         message: error instanceof Error ? error.message : String(error),
@@ -264,6 +313,7 @@ function App() {
 
   const handleRemove = useCallback(
     (id: string) => {
+      setAppNotice(null);
       setScanStates((prev) => {
         if (!(id in prev)) return prev;
         const next = { ...prev };
@@ -271,6 +321,12 @@ function App() {
         return next;
       });
       setProjectStatusStates((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setActionStates((prev) => {
         if (!(id in prev)) return prev;
         const next = { ...prev };
         delete next[id];
@@ -343,6 +399,7 @@ function App() {
           onRemove={handleRemove}
           onRename={renameProject}
           appVersion={APP_VERSION}
+          onNotice={setAppNotice}
         />
       )}
 
@@ -356,12 +413,15 @@ function App() {
           onShowHelp={() => setHelpOpen(true)}
         />
 
+        {appNotice && <AppNotice message={appNotice} onDismiss={() => setAppNotice(null)} />}
+
         {currentView === "mask" ? (
           <MaskWorkspace
             projects={projects}
             initialPolicyProjectId={selectedId}
             preferredAiTool={preferredAiTool}
             onPreferredAiToolChange={setPreferredAiTool}
+            onNotice={setAppNotice}
           />
         ) : activeProject ? (
           <ScanWorkspace

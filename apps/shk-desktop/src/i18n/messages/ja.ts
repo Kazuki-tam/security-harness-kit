@@ -5,11 +5,19 @@ export const ja: Messages = {
     selectFolder: "スキャンするフォルダを選択",
     selectFolderForApp: "アプリで開くフォルダを選択",
     selectCloneDestination: "リポジトリの保存先を選択",
+    operationFailed: "操作に失敗しました: {{message}}",
+    clipboardFailed: "クリップボードへのコピーに失敗しました: {{message}}",
   },
   common: {
     close: "閉じる",
     cancel: "キャンセル",
+    dismiss: "閉じる",
     language: "言語",
+  },
+  errorBoundary: {
+    title: "問題が発生しました",
+    description: "予期しないエラーが発生しました。再読み込みして続行してください。",
+    reload: "アプリを再読み込み",
   },
   sidebar: {
     newProject: "新しいプロジェクト",
@@ -42,8 +50,12 @@ export const ja: Messages = {
       check: "更新確認",
       checking: "確認中…",
       installing: "更新中…",
+      upToDateTitle: "最新版です",
       upToDate: "最新版です。",
+      availableTitle: "更新があります",
       available: "バージョン {{version}} が利用できます。ダウンロードして再起動しますか？",
+      confirmInstall: "ダウンロードして再起動",
+      failedTitle: "更新に失敗しました",
       failed: "更新確認に失敗しました: {{message}}",
     },
     appNames: {
@@ -191,6 +203,7 @@ export const ja: Messages = {
     footer: "スキャン結果は外部に送信されず、すべてローカルで処理されます。",
   },
   workspace: {
+    tabsLabel: "プロジェクトワークスペース",
     tabs: {
       overview: "概要",
       findings: "検出一覧",

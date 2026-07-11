@@ -7,9 +7,10 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { interpolate } from "./interpolate";
+import { detectBrowserLocale, resolveInitialLocale } from "./localeDetection";
 import { en } from "./messages/en";
 import { ja } from "./messages/ja";
-import { isLocale } from "./locales";
 import type { Locale, Messages } from "./types";
 
 const LOCALE_KEY = "shk.desktop.locale.v1";
@@ -21,16 +22,10 @@ function loadLocale(): Locale {
   if (typeof window === "undefined") return DEFAULT_LOCALE;
   try {
     const stored = window.localStorage.getItem(LOCALE_KEY);
-    if (stored && isLocale(stored)) return stored;
+    return resolveInitialLocale(stored);
   } catch {
-    /* ignore */
+    return detectBrowserLocale();
   }
-  return DEFAULT_LOCALE;
-}
-
-function interpolate(template: string, params?: Record<string, string | number>): string {
-  if (!params) return template;
-  return template.replace(/\{\{(\w+)\}\}/g, (_, key: string) => String(params[key] ?? ""));
 }
 
 type I18nContextValue = {

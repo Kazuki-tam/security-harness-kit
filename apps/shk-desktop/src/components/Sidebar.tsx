@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { useI18n } from "../i18n";
+import { operationErrorMessage } from "../i18n/interpolate";
 import type { Project } from "../types";
 import { actionableCount } from "../scan";
 import { formatRelativeTime, shortenPath } from "../utils";
@@ -25,6 +26,7 @@ type Props = {
   onRemove: (id: string) => void;
   onRename: (id: string, name: string) => void;
   appVersion: string;
+  onNotice?: (message: string) => void;
 };
 
 export function Sidebar({
@@ -38,6 +40,7 @@ export function Sidebar({
   onRemove,
   onRename,
   appVersion,
+  onNotice,
 }: Props) {
   const { messages } = useI18n();
   const m = messages.sidebar;
@@ -124,6 +127,7 @@ export function Sidebar({
                   onSelect={() => onSelect(project.id)}
                   onRemove={() => onRemove(project.id)}
                   onRename={(name) => onRename(project.id, name)}
+                  onNotice={onNotice}
                 />
               </li>
             ))}
@@ -174,9 +178,10 @@ type ProjectRowProps = {
   onSelect: () => void;
   onRemove: () => void;
   onRename: (name: string) => void;
+  onNotice?: (message: string) => void;
 };
 
-function ProjectRow({ project, active, onSelect, onRemove, onRename }: ProjectRowProps) {
+function ProjectRow({ project, active, onSelect, onRemove, onRename, onNotice }: ProjectRowProps) {
   const { messages, t } = useI18n();
   const m = messages.sidebar;
   const [menuOpen, setMenuOpen] = useState(false);
@@ -242,7 +247,7 @@ function ProjectRow({ project, active, onSelect, onRemove, onRename }: ProjectRo
     try {
       await navigator.clipboard.writeText(project.path);
     } catch (error) {
-      console.warn("clipboard write failed", error);
+      onNotice?.(operationErrorMessage(messages.app.clipboardFailed, error));
     }
   }
 

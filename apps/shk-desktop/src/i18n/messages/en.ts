@@ -5,11 +5,19 @@ export const en: Messages = {
     selectFolder: "Select folder to scan",
     selectFolderForApp: "Select a folder to open in your app",
     selectCloneDestination: "Select where to clone the repository",
+    operationFailed: "Operation failed: {{message}}",
+    clipboardFailed: "Could not copy to clipboard: {{message}}",
   },
   common: {
     close: "Close",
     cancel: "Cancel",
+    dismiss: "Dismiss",
     language: "Language",
+  },
+  errorBoundary: {
+    title: "Something went wrong",
+    description: "The app hit an unexpected error. Reload to continue.",
+    reload: "Reload app",
   },
   sidebar: {
     newProject: "New project",
@@ -42,8 +50,12 @@ export const en: Messages = {
       check: "Check updates",
       checking: "Checking…",
       installing: "Updating…",
+      upToDateTitle: "Up to date",
       upToDate: "You are up to date.",
+      availableTitle: "Update available",
       available: "Version {{version}} is available. Download and restart now?",
+      confirmInstall: "Download and restart",
+      failedTitle: "Update failed",
       failed: "Update check failed: {{message}}",
     },
     appNames: {
@@ -193,6 +205,7 @@ export const en: Messages = {
     footer: "Scan results are never sent externally; everything runs locally.",
   },
   workspace: {
+    tabsLabel: "Project workspace",
     tabs: {
       overview: "Overview",
       findings: "Findings",

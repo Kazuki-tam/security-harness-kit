@@ -37,6 +37,7 @@ type Props = {
   initialPolicyProjectId: string | null;
   preferredAiTool: PreferredAiTool;
   onPreferredAiToolChange: (tool: PreferredAiTool) => void;
+  onNotice?: (message: string) => void;
 };
 
 type PolicyStatusState =
@@ -49,6 +50,7 @@ export function MaskWorkspace({
   initialPolicyProjectId,
   preferredAiTool,
   onPreferredAiToolChange,
+  onNotice,
 }: Props) {
   const [policyProjectId, setPolicyProjectId] = useState<string | null>(() =>
     projects.some((project) => project.id === initialPolicyProjectId)
@@ -62,7 +64,12 @@ export function MaskWorkspace({
     projectPath: null,
     data: { usesProjectPolicy: false },
   });
-  const workspace = useMaskWorkspace({ projectPath, preferredAiTool, onPreferredAiToolChange });
+  const workspace = useMaskWorkspace({
+    projectPath,
+    preferredAiTool,
+    onPreferredAiToolChange,
+    onNotice,
+  });
   const {
     messages: m,
     t,

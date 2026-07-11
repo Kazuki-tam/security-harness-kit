@@ -357,7 +357,10 @@ mod tests {
 
     #[test]
     fn project_app_kind_parses_editor_ids() {
-        assert_eq!(ProjectAppKind::parse("vscode").unwrap(), ProjectAppKind::Vscode);
+        assert_eq!(
+            ProjectAppKind::parse("vscode").unwrap(),
+            ProjectAppKind::Vscode
+        );
         assert_eq!(
             ProjectAppKind::parse("antigravity").unwrap(),
             ProjectAppKind::Antigravity

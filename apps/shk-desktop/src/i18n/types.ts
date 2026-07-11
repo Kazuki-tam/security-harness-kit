@@ -7,11 +7,19 @@ export type Messages = {
     selectFolder: string;
     selectFolderForApp: string;
     selectCloneDestination: string;
+    operationFailed: string;
+    clipboardFailed: string;
   };
   common: {
     close: string;
     cancel: string;
+    dismiss: string;
     language: string;
+  };
+  errorBoundary: {
+    title: string;
+    description: string;
+    reload: string;
   };
   sidebar: {
     newProject: string;
@@ -44,8 +52,12 @@ export type Messages = {
       check: string;
       checking: string;
       installing: string;
+      upToDateTitle: string;
       upToDate: string;
+      availableTitle: string;
       available: string;
+      confirmInstall: string;
+      failedTitle: string;
       failed: string;
     };
     appNames: Record<
@@ -184,6 +196,7 @@ export type Messages = {
     footer: string;
   };
   workspace: {
+    tabsLabel: string;
     tabs: {
       overview: string;
       findings: string;

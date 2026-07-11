@@ -136,13 +136,21 @@ export function ScanWorkspace({
           </Button>
         </header>
 
-        <nav className="flex flex-wrap gap-2 border-b border-border pb-3">
+        <nav
+          className="flex flex-wrap gap-2 border-b border-border pb-3"
+          role="tablist"
+          aria-label={w.tabsLabel}
+        >
           {(["overview", "findings", "setup"] as const).map((key) => (
             <button
               key={key}
               type="button"
+              role="tab"
+              id={`scan-tab-${key}`}
+              aria-controls={`scan-panel-${key}`}
+              aria-selected={tab === key}
+              tabIndex={tab === key ? 0 : -1}
               onClick={() => setTab(key)}
-              aria-current={tab === key ? "page" : undefined}
               className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70 ${
                 tab === key
                   ? "bg-sky-500/12 text-sky-100 ring-1 ring-inset ring-sky-400/35"
@@ -194,104 +202,119 @@ export function ScanWorkspace({
           </div>
         )}
 
-        {tab === "overview" && (
-          <>
-            {report && (
-              <>
-                <StatusBanner actionable={actionable} report={report} />
-                <SeveritySummary
-                  report={report}
-                  filter={filter}
-                  onFilterChange={(next) => {
-                    setFilter(next);
-                    setTab("findings");
+        <div
+          role="tabpanel"
+          id="scan-panel-overview"
+          aria-labelledby="scan-tab-overview"
+          hidden={tab !== "overview"}
+        >
+          {report && (
+            <>
+              <StatusBanner actionable={actionable} report={report} />
+              <SeveritySummary
+                report={report}
+                filter={filter}
+                onFilterChange={(next) => {
+                  setFilter(next);
+                  setTab("findings");
+                }}
+              />
+            </>
+          )}
+          {projectStatus.status === "loading" && <SetupLoadingCard label={w.loadingStatus} />}
+          {projectStatus.status === "error" && (
+            <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-[12px] text-red-100">
+              {projectStatus.message}
+            </div>
+          )}
+          {projectStatus.status === "done" && (
+            <>
+              {hasBlocked && (
+                <BlockedBanner
+                  count={blockedCount}
+                  onViewDetails={() => {
+                    if (typeof document !== "undefined") {
+                      document
+                        .getElementById("audit-panel")
+                        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                    }
                   }}
                 />
-              </>
-            )}
-            {projectStatus.status === "loading" && <SetupLoadingCard label={w.loadingStatus} />}
-            {projectStatus.status === "error" && (
-              <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-[12px] text-red-100">
-                {projectStatus.message}
-              </div>
-            )}
-            {projectStatus.status === "done" && (
-              <>
-                {hasBlocked && (
-                  <BlockedBanner
-                    count={blockedCount}
-                    onViewDetails={() => {
-                      if (typeof document !== "undefined") {
-                        document
-                          .getElementById("audit-panel")
-                          ?.scrollIntoView({ behavior: "smooth", block: "start" });
-                      }
-                    }}
-                  />
-                )}
-                <DoctorPanel
-                  doctor={projectStatus.data.doctor}
-                  npmApplicable={projectStatus.data.npmHardening.hasProjects}
-                  onOpenSetup={() => setTab("setup")}
-                />
-                <div id="audit-panel">
-                  <AuditPanel
-                    projectPath={project.path}
-                    auditState={auditState}
-                    onRefresh={(options) => void refreshAudit(options)}
-                    onOpenSetup={() => setTab("setup")}
-                    onOpenFindings={report ? () => setTab("findings") : undefined}
-                  />
-                </div>
-                {!projectStatus.data.policy.exists && (
-                  <div className="flex flex-col gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[12px] text-amber-100 sm:flex-row sm:items-center sm:justify-between">
-                    <p>{w.policyRequired}</p>
-                    <Button variant="primary" size="sm" onClick={() => setTab("setup")}>
-                      {w.openSetup}
-                    </Button>
-                  </div>
-                )}
-              </>
-            )}
-          </>
-        )}
-
-        {tab === "findings" && report && (
-          <>
-            <StatusBanner actionable={actionable} report={report} />
-            <SeveritySummary report={report} filter={filter} onFilterChange={setFilter} />
-            <FindingList findings={report.findings} filter={filter} />
-          </>
-        )}
-
-        {tab === "findings" && !report && scanState.status !== "error" && (
-          <EmptyHero isScanning={isScanning} onScan={onScan} />
-        )}
-
-        {tab === "setup" && setupHandlers && (
-          <>
-            {projectStatus.status === "loading" && <SetupLoadingCard label={w.loadingStatus} />}
-            {projectStatus.status === "error" && (
-              <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-[12px] text-red-100">
-                {projectStatus.message}
-              </div>
-            )}
-            {projectStatus.status === "done" && (
-              <ProjectSetupPanel
-                status={projectStatus.data}
-                actionState={actionState}
-                onDismissActionFeedback={onDismissActionFeedback}
-                onQuickSetup={setupHandlers.onQuickSetup}
-                onInitPolicy={setupHandlers.onInitPolicy}
-                onFixDoctorIgnore={setupHandlers.onFixDoctorIgnore}
-                onInstallPreCommit={setupHandlers.onInstallPreCommit}
-                onInstallAiHooks={setupHandlers.onInstallAiHooks}
-                onApplyNpmHardening={setupHandlers.onApplyNpmHardening}
-                onInstallSkills={setupHandlers.onInstallSkills}
+              )}
+              <DoctorPanel
+                doctor={projectStatus.data.doctor}
+                npmApplicable={projectStatus.data.npmHardening.hasProjects}
+                onOpenSetup={() => setTab("setup")}
               />
-            )}
-          </>
-        )}
+              <div id="audit-panel">
+                <AuditPanel
+                  projectPath={project.path}
+                  auditState={auditState}
+                  onRefresh={(options) => void refreshAudit(options)}
+                  onOpenSetup={() => setTab("setup")}
+                  onOpenFindings={report ? () => setTab("findings") : undefined}
+                />
+              </div>
+              {!projectStatus.data.policy.exists && (
+                <div className="flex flex-col gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[12px] text-amber-100 sm:flex-row sm:items-center sm:justify-between">
+                  <p>{w.policyRequired}</p>
+                  <Button variant="primary" size="sm" onClick={() => setTab("setup")}>
+                    {w.openSetup}
+                  </Button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        <div
+          role="tabpanel"
+          id="scan-panel-findings"
+          aria-labelledby="scan-tab-findings"
+          hidden={tab !== "findings"}
+        >
+          {report ? (
+            <>
+              <StatusBanner actionable={actionable} report={report} />
+              <SeveritySummary report={report} filter={filter} onFilterChange={setFilter} />
+              <FindingList findings={report.findings} filter={filter} />
+            </>
+          ) : scanState.status !== "error" ? (
+            <EmptyHero isScanning={isScanning} onScan={onScan} />
+          ) : null}
+        </div>
+
+        <div
+          role="tabpanel"
+          id="scan-panel-setup"
+          aria-labelledby="scan-tab-setup"
+          hidden={tab !== "setup"}
+        >
+          {setupHandlers ? (
+            <>
+              {projectStatus.status === "loading" && <SetupLoadingCard label={w.loadingStatus} />}
+              {projectStatus.status === "error" && (
+                <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-[12px] text-red-100">
+                  {projectStatus.message}
+                </div>
+              )}
+              {projectStatus.status === "done" && (
+                <ProjectSetupPanel
+                  status={projectStatus.data}
+                  actionState={actionState}
+                  onDismissActionFeedback={onDismissActionFeedback}
+                  onQuickSetup={setupHandlers.onQuickSetup}
+                  onInitPolicy={setupHandlers.onInitPolicy}
+                  onFixDoctorIgnore={setupHandlers.onFixDoctorIgnore}
+                  onInstallPreCommit={setupHandlers.onInstallPreCommit}
+                  onInstallAiHooks={setupHandlers.onInstallAiHooks}
+                  onApplyNpmHardening={setupHandlers.onApplyNpmHardening}
+                  onInstallSkills={setupHandlers.onInstallSkills}
+                />
+              )}
+            </>
+          ) : null}
+        </div>
       </div>
     </div>
   );

@@ -2,6 +2,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { useCallback, useMemo, useState } from "react";
 import { openAiTool, type PreferredAiTool } from "../aiTool";
 import { useI18n } from "../i18n";
+import { operationErrorMessage } from "../i18n/interpolate";
 import {
   findingsBySeverity,
   maskContent,
@@ -32,12 +33,14 @@ type UseMaskWorkspaceOptions = {
   projectPath: string | null;
   preferredAiTool: PreferredAiTool;
   onPreferredAiToolChange: (tool: PreferredAiTool) => void;
+  onNotice?: (message: string) => void;
 };
 
 export function useMaskWorkspace({
   projectPath,
   preferredAiTool,
   onPreferredAiToolChange,
+  onNotice,
 }: UseMaskWorkspaceOptions) {
   const { messages, t } = useI18n();
   const m = messages.mask;
@@ -108,9 +111,9 @@ export function useMaskWorkspace({
         applySelectedFile(path);
       }
     } catch (error) {
-      console.error("failed to choose mask file:", error);
+      onNotice?.(operationErrorMessage(messages.app.operationFailed, error));
     }
-  }, [applySelectedFile, m.selectFile]);
+  }, [applySelectedFile, messages.app.operationFailed, m.selectFile, onNotice]);
 
   const runMask = useCallback(async () => {
     if (inputMode === "text" && !inputText.trim()) {

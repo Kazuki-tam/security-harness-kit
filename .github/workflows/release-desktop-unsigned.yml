@@ -190,6 +190,12 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: verify unsigned desktop release assets
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: ./.github/scripts/release/verify-unsigned-desktop-assets.sh release-assets
+
       - name: generate release body
         shell: bash
         env:
