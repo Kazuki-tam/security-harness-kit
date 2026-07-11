@@ -47,8 +47,8 @@ export function Sidebar({
 
   return (
     <aside className="flex h-full w-[268px] shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)]/80 backdrop-blur">
-      <div className="shk-drag h-11 shrink-0" aria-hidden="true" />
-      <div className="shk-drag px-3 pt-1 pb-3">
+      <div data-tauri-drag-region className="shk-drag h-11 shrink-0" aria-hidden="true" />
+      <div data-tauri-drag-region className="shk-drag px-3 pt-1 pb-3">
         <button
           type="button"
           onClick={onShowWelcome}

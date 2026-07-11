@@ -211,7 +211,7 @@ shk hooks install-ai --tool windsurf
 shk ci init github
 shk ci init github --dry-run
 shk ci init github --mode audit
-shk ci init github --shk-version v0.5.0
+shk ci init github --shk-version v0.5.1
 
 shk skills install
 shk skills install --tool claude-code --global
