@@ -243,6 +243,7 @@ jobs:
           body_path: release-body.md
           generate_release_notes: true
           make_latest: false
+          prerelease: true
 
       - name: publish desktop updater endpoint
         shell: bash

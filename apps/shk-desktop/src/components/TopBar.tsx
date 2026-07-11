@@ -27,9 +27,12 @@ export function TopBar({
   const m = messages.topBar;
 
   return (
-    <div className="shk-drag relative z-30 flex h-11 shrink-0 items-center justify-between border-b border-border bg-surface/60 px-4 backdrop-blur">
+    <div
+      data-tauri-drag-region
+      className="shk-drag relative z-30 flex h-11 shrink-0 items-center justify-between border-b border-border bg-surface/60 px-4 backdrop-blur"
+    >
       <div
-        className={`flex min-w-0 items-center gap-2 text-[12px] text-muted ${
+        className={`pointer-events-none flex min-w-0 items-center gap-2 text-[12px] text-muted ${
           reserveWindowControls ? "pl-16" : ""
         }`}
       >
