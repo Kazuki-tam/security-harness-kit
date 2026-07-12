@@ -1,11 +1,16 @@
 // @vitest-environment jsdom
 import { render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import desktopCapability from "../../src-tauri/capabilities/default.json";
 import { I18nProvider } from "../i18n";
 import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
 
 describe("window drag regions", () => {
+  it("allows the native Tauri window dragging command", () => {
+    expect(desktopCapability.permissions).toContain("core:window:allow-start-dragging");
+  });
+
   it("marks the top bar as a Tauri drag region while excluding controls", () => {
     const { container } = render(
       <I18nProvider>
