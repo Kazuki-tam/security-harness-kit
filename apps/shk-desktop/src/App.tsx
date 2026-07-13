@@ -116,7 +116,7 @@ function App() {
   }, [activeProject?.id, activeProject?.path, refreshProjectStatus]);
 
   useEffect(() => {
-    if (projects.length === 0 && currentView !== "welcome") {
+    if (projects.length === 0 && currentView === "project") {
       setCurrentView("welcome");
     }
   }, [currentView, projects.length]);
