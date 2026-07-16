@@ -161,18 +161,35 @@ export function useMaskWorkspace({
   }, [inputMode, inputText, m.emptyInput, projectPath, selectedFilePath]);
 
   const copyMasked = useCallback(async () => {
-    if (!maskedOutput) return;
-    await navigator.clipboard.writeText(maskedOutput);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1800);
-  }, [maskedOutput]);
+    if (!maskedOutput) return false;
+    try {
+      await navigator.clipboard.writeText(maskedOutput);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+      return true;
+    } catch (error) {
+      onNotice?.(operationErrorMessage(messages.app.clipboardFailed, error));
+      return false;
+    }
+  }, [maskedOutput, messages.app.clipboardFailed, onNotice]);
 
   const copyAndOpenTool = useCallback(async () => {
     if (!maskedOutput) return;
-    await copyMasked();
+    if (!(await copyMasked())) return;
     onPreferredAiToolChange(preferredAiTool);
-    await openAiTool(preferredAiTool);
-  }, [copyMasked, maskedOutput, onPreferredAiToolChange, preferredAiTool]);
+    try {
+      await openAiTool(preferredAiTool);
+    } catch (error) {
+      onNotice?.(operationErrorMessage(messages.app.operationFailed, error));
+    }
+  }, [
+    copyMasked,
+    maskedOutput,
+    messages.app.operationFailed,
+    onNotice,
+    onPreferredAiToolChange,
+    preferredAiTool,
+  ]);
 
   const saveMaskedFile = useCallback(async () => {
     if (!fileMeta || fileMeta.fileKind !== "office") return;

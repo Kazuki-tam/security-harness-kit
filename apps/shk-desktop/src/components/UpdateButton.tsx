@@ -96,7 +96,7 @@ export function UpdateButton() {
     <>
       <button
         type="button"
-        className="rounded-md border border-border bg-surface px-2 py-1 text-[12px] font-medium text-muted transition hover:border-accent/50 hover:text-text disabled:cursor-not-allowed disabled:opacity-60"
+        className="inline-flex h-7 items-center rounded-md border border-border bg-surface px-2 text-[11px] font-medium text-muted transition hover:border-accent/50 hover:text-text disabled:cursor-not-allowed disabled:opacity-60"
         disabled={busy}
         onClick={checkForUpdate}
         aria-live="polite"

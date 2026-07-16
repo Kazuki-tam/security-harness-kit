@@ -7,7 +7,7 @@ import {
   ShieldAlert,
   ShieldCheck,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { auditHasBlockedEvents } from "../audit";
 import { useAuditReport } from "../hooks/useAuditReport";
 import { useI18n } from "../i18n";
@@ -202,12 +202,7 @@ export function ScanWorkspace({
           </div>
         )}
 
-        <div
-          role="tabpanel"
-          id="scan-panel-overview"
-          aria-labelledby="scan-tab-overview"
-          hidden={tab !== "overview"}
-        >
+        <TabPanel tab="overview" activeTab={tab}>
           {report && (
             <>
               <StatusBanner actionable={actionable} report={report} />
@@ -265,14 +260,9 @@ export function ScanWorkspace({
               )}
             </>
           )}
-        </div>
+        </TabPanel>
 
-        <div
-          role="tabpanel"
-          id="scan-panel-findings"
-          aria-labelledby="scan-tab-findings"
-          hidden={tab !== "findings"}
-        >
+        <TabPanel tab="findings" activeTab={tab}>
           {report ? (
             <>
               <StatusBanner actionable={actionable} report={report} />
@@ -282,14 +272,9 @@ export function ScanWorkspace({
           ) : scanState.status !== "error" ? (
             <EmptyHero isScanning={isScanning} onScan={onScan} />
           ) : null}
-        </div>
+        </TabPanel>
 
-        <div
-          role="tabpanel"
-          id="scan-panel-setup"
-          aria-labelledby="scan-tab-setup"
-          hidden={tab !== "setup"}
-        >
+        <TabPanel tab="setup" activeTab={tab}>
           {setupHandlers ? (
             <>
               {projectStatus.status === "loading" && <SetupLoadingCard label={w.loadingStatus} />}
@@ -314,8 +299,32 @@ export function ScanWorkspace({
               )}
             </>
           ) : null}
-        </div>
+        </TabPanel>
       </div>
+    </div>
+  );
+}
+
+function TabPanel({
+  tab,
+  activeTab,
+  children,
+}: {
+  tab: WorkspaceTab;
+  activeTab: WorkspaceTab;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      role="tabpanel"
+      id={`scan-panel-${tab}`}
+      aria-labelledby={`scan-tab-${tab}`}
+      hidden={activeTab !== tab}
+      // space-y (margins) instead of flex/grid gap: a display utility would
+      // override the `hidden` attribute's display:none.
+      className="space-y-4"
+    >
+      {children}
     </div>
   );
 }

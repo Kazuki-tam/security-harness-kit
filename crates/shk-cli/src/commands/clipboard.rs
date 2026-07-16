@@ -138,18 +138,9 @@ fn scan_clipboard_text(
     fail_on: Option<SeverityArg>,
 ) -> Result<ScanResult> {
     let opts = ScanOptions {
-        staged: false,
-        changed_since: None,
-        git_history: false,
-        git_history_ref: None,
-        git_history_since: None,
-        git_history_max_commits: None,
         json,
         fail_on_override: fail_on.map(Severity::from),
-        use_pre_commit_threshold: false,
-        include_context: false,
-        include_binary: false,
-        follow_symlinks: false,
+        ..ScanOptions::default()
     };
     scan_string(root, CLIPBOARD_LABEL, text, opts)
 }

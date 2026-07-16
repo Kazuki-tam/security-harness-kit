@@ -591,7 +591,7 @@ pub fn run_env(root: &Path, dotenvx: bool) -> Result<()> {
     } else if !env_files.is_empty() {
         println!("env: plaintext env files detected (review + prefer dotenvx / secret manager):");
         for (name, _path, content) in env_files {
-            let findings = scan_string(root, &name, &content, env_scan_options())?
+            let findings = scan_string(root, &name, &content, ScanOptions::default())?
                 .findings
                 .into_iter()
                 .filter(|f| f.kind != "ignore")
@@ -743,23 +743,6 @@ fn run_dotenvx(root: &Path) {
     }
     if root.join(DOTENVX_VAULT_FILE).is_file() && !root.join(DOTENVX_PRIVATE_KEY_FILE).is_file() {
         println!("  ok: encrypted vault present without local .env.keys");
-    }
-}
-
-fn env_scan_options() -> ScanOptions {
-    ScanOptions {
-        staged: false,
-        changed_since: None,
-        git_history: false,
-        git_history_ref: None,
-        git_history_since: None,
-        git_history_max_commits: None,
-        json: false,
-        fail_on_override: None,
-        use_pre_commit_threshold: false,
-        include_context: false,
-        include_binary: false,
-        follow_symlinks: false,
     }
 }
 

@@ -7,18 +7,9 @@ use std::path::{Path, PathBuf};
 
 fn default_scan_options() -> ScanOptions {
     ScanOptions {
-        staged: false,
-        changed_since: None,
-        git_history: false,
-        git_history_ref: None,
-        git_history_since: None,
-        git_history_max_commits: None,
-        json: false,
         fail_on_override: Some(Severity::Critical),
-        use_pre_commit_threshold: false,
         include_context: true,
-        include_binary: false,
-        follow_symlinks: false,
+        ..ScanOptions::default()
     }
 }
 

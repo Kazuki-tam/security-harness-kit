@@ -106,6 +106,7 @@ export const en: Messages = {
     outputReady: "Ready to copy into your AI tool",
     outputSafe: "No high-risk items detected — safe to copy",
     outputNeedsReview: "{{count}} item(s) need review before sharing",
+    outputMaskedReview: "{{count}} item(s) masked — review the output before sharing",
     selectFile: "Choose file",
     clearInput: "Clear",
     removeFile: "Remove file",

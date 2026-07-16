@@ -1274,7 +1274,7 @@ fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
-fn resolve_project_root(path: &str) -> Result<PathBuf> {
+pub fn resolve_project_root(path: &str) -> Result<PathBuf> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         anyhow::bail!("project path is empty");
@@ -1767,6 +1767,23 @@ fn parse_skill_tool(value: &str) -> Result<SkillTool> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn resolve_project_root_canonicalizes_directories_and_rejects_other_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolved = resolve_project_root(&format!("  {}  ", dir.path().display())).unwrap();
+        assert_eq!(resolved, fs::canonicalize(dir.path()).unwrap());
+
+        let file = dir.path().join("project.txt");
+        fs::write(&file, "not a directory").unwrap();
+        assert!(
+            resolve_project_root(&file.to_string_lossy())
+                .unwrap_err()
+                .to_string()
+                .contains("not a directory")
+        );
+        assert!(resolve_project_root("  ").is_err());
+    }
 
     #[test]
     fn desktop_mask_text_uses_default_policy_without_project() {

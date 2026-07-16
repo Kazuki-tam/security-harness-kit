@@ -312,8 +312,10 @@ export function MaskWorkspace({
             maskState={maskState}
             isLoading={isLoading}
             canCopy={canCopy}
+            copied={copied}
             actionableFindings={actionableFindings}
             findingsCount={findings.length}
+            onCopy={() => void copyMasked()}
             messages={m}
             t={t}
           />
@@ -323,11 +325,9 @@ export function MaskWorkspace({
           <MaskTransferPanel
             preferredAiTool={preferredAiTool}
             onPreferredAiToolChange={onPreferredAiToolChange}
-            copied={copied}
             saving={saving}
             saveMessage={saveMessage}
             showOfficeSave={fileMeta?.fileKind === "office"}
-            onCopy={() => void copyMasked()}
             onCopyAndOpen={() => void copyAndOpenTool()}
             onSave={() => void saveMaskedFile()}
             messages={m}
@@ -727,8 +727,10 @@ function MaskOutputPanel({
   maskState,
   isLoading,
   canCopy,
+  copied,
   actionableFindings,
   findingsCount,
+  onCopy,
   messages: m,
   t,
 }: {
@@ -736,14 +738,16 @@ function MaskOutputPanel({
   maskState: MaskState;
   isLoading: boolean;
   canCopy: boolean;
+  copied: boolean;
   actionableFindings: number;
   findingsCount: number;
+  onCopy: () => void;
   messages: Messages["mask"];
   t: (template: string, vars?: Record<string, string | number>) => string;
 }) {
   const statusTone =
     maskState.status === "done"
-      ? actionableFindings > 0
+      ? findingsCount > 0
         ? "amber"
         : "emerald"
       : isLoading
@@ -765,11 +769,13 @@ function MaskOutputPanel({
       <div className="flex min-h-[52px] items-start justify-between gap-3">
         <div>
           <h2 className="text-sm font-semibold text-white">{m.outputTitle}</h2>
-          <p className="mt-1 text-[12px] text-muted">
+          <p role="status" className="mt-1 text-[12px] text-muted">
             {canCopy
               ? actionableFindings > 0
                 ? t(m.outputNeedsReview, { count: actionableFindings })
-                : m.outputSafe
+                : findingsCount > 0
+                  ? t(m.outputMaskedReview, { count: findingsCount })
+                  : m.outputSafe
               : m.outputHint}
           </p>
         </div>
@@ -786,9 +792,10 @@ function MaskOutputPanel({
       ) : canCopy ? (
         <textarea
           readOnly
+          aria-label={m.outputTitle}
           value={maskedOutput}
           className={`bg-canvas min-h-[300px] w-full resize-y rounded-lg border px-3 py-3 font-mono text-[12px] leading-relaxed text-white outline-none ${
-            actionableFindings > 0
+            findingsCount > 0
               ? "border-amber-400/35 ring-1 ring-inset ring-amber-400/10"
               : "border-emerald-400/35 ring-1 ring-inset ring-emerald-400/10"
           }`}
@@ -814,7 +821,25 @@ function MaskOutputPanel({
       )}
 
       {canCopy && (
-        <p className="text-[11px] text-muted">{t(m.findingsCount, { count: findingsCount })}</p>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-3">
+          <p className="text-[11px] text-muted">{t(m.findingsCount, { count: findingsCount })}</p>
+          <Button
+            variant="secondary"
+            icon={
+              copied ? (
+                <Check size={14} aria-hidden="true" />
+              ) : (
+                <Copy size={14} aria-hidden="true" />
+              )
+            }
+            onClick={onCopy}
+          >
+            {copied ? m.copied : m.copyMasked}
+          </Button>
+          <span aria-live="polite" className="sr-only">
+            {copied ? m.copied : ""}
+          </span>
+        </div>
       )}
     </section>
   );
@@ -823,11 +848,9 @@ function MaskOutputPanel({
 function MaskTransferPanel({
   preferredAiTool,
   onPreferredAiToolChange,
-  copied,
   saving,
   saveMessage,
   showOfficeSave,
-  onCopy,
   onCopyAndOpen,
   onSave,
   messages: m,
@@ -835,11 +858,9 @@ function MaskTransferPanel({
 }: {
   preferredAiTool: PreferredAiTool;
   onPreferredAiToolChange: (tool: PreferredAiTool) => void;
-  copied: boolean;
   saving: boolean;
   saveMessage: string | null;
   showOfficeSave?: boolean;
-  onCopy: () => void;
   onCopyAndOpen: () => void;
   onSave: () => void;
   messages: Messages["mask"];
@@ -854,9 +875,10 @@ function MaskTransferPanel({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <label className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-canvas px-2.5 py-1.5 text-[11px] font-medium text-text">
+          <label className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-border bg-canvas px-3 text-[12px] font-medium text-text transition hover:border-sky-300/60 focus-within:border-sky-300/70 focus-within:ring-2 focus-within:ring-sky-300/25">
             <span className="text-muted">{m.preferredTool}</span>
             <select
+              aria-label={m.preferredTool}
               value={preferredAiTool}
               onChange={(event) => onPreferredAiToolChange(event.target.value as PreferredAiTool)}
               className="bg-transparent text-white outline-none"
@@ -877,25 +899,9 @@ function MaskTransferPanel({
             {t(m.copyAndOpen, { tool: m.toolNames[preferredAiTool] })}
           </Button>
 
-          <Button
-            variant="secondary"
-            size="sm"
-            icon={
-              copied ? (
-                <Check size={14} aria-hidden="true" />
-              ) : (
-                <Copy size={14} aria-hidden="true" />
-              )
-            }
-            onClick={onCopy}
-          >
-            {copied ? m.copied : m.copyMasked}
-          </Button>
-
           {showOfficeSave && (
             <Button
               variant="secondary"
-              size="sm"
               icon={<Save size={14} aria-hidden="true" />}
               onClick={onSave}
               loading={saving}

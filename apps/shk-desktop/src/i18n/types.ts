@@ -104,6 +104,7 @@ export type Messages = {
     outputReady: string;
     outputSafe: string;
     outputNeedsReview: string;
+    outputMaskedReview: string;
     selectFile: string;
     clearInput: string;
     removeFile: string;
