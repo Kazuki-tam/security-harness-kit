@@ -30,8 +30,10 @@ pub struct ScanOptions {
     pub include_context: bool,
     pub include_binary: bool,
     pub follow_symlinks: bool,
-    /// Explicit policy root (where `shk.toml` lives). When `None`, the policy
-    /// is resolved relative to the process working directory (CLI behavior).
+    /// Explicit policy root for filesystem scans (where `shk.toml` lives).
+    /// Git scan modes resolve policy from the repository root. When `None`,
+    /// filesystem scans resolve policy relative to the process working
+    /// directory (CLI behavior).
     /// GUI callers whose working directory is unrelated to the scanned
     /// project (e.g. the desktop app launched from Finder with cwd `/`) must
     /// set this to the project root, otherwise allowlist/exclude entries in
@@ -918,7 +920,12 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
 
     let scan_root = canonical_or_same(&scan_root_for_target(target));
     let policy_root = match &opts.policy_root {
-        Some(root) => canonical_or_same(root),
+        Some(root) => {
+            if !root.is_dir() {
+                bail!("policy root is not a directory: {}", root.display());
+            }
+            canonical_or_same(root)
+        }
         None => policy_root_for_scan(&scan_root),
     };
     let (mut policy, policy_path) = Policy::load_from_dir(&policy_root)?;
@@ -1252,6 +1259,26 @@ mod tests {
         match result {
             Err(err) => assert!(err.to_string().contains("scan target does not exist")),
             Ok(_) => panic!("missing target should fail"),
+        }
+    }
+
+    #[test]
+    fn scan_path_rejects_invalid_explicit_policy_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        fs::write(&target, "nothing here\n").unwrap();
+        let missing_root = dir.path().join("missing");
+        let result = scan_path(
+            &target,
+            ScanOptions {
+                policy_root: Some(missing_root),
+                ..ScanOptions::default()
+            },
+        );
+
+        match result {
+            Err(err) => assert!(err.to_string().contains("policy root is not a directory")),
+            Ok(_) => panic!("invalid policy root should fail"),
         }
     }
 

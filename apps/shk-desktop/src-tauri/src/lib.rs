@@ -11,7 +11,7 @@ use shk_core::scanner::{ScanOptions, scan_path as scan_target_path};
 mod project_launcher;
 
 use project_launcher::{ProjectAppKind, open_project_in_app_path};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use tauri::async_runtime::spawn_blocking;
 
@@ -46,11 +46,8 @@ where
 
 #[tauri::command]
 async fn scan_path(path: String) -> Result<ScanJsonReport, AppError> {
-    if path.trim().is_empty() {
-        return Err(AppError::Message("scan path is empty".to_string()));
-    }
-
     run_blocking(move || {
+        let root = desktop_api::resolve_project_root(&path).map_err(map_err)?;
         // Defaults keep JSON context disabled: the desktop renders the
         // structured report directly and does not display neighboring source
         // lines, so rescanning and redacting context around every finding is
@@ -61,11 +58,11 @@ async fn scan_path(path: String) -> Result<ScanJsonReport, AppError> {
             // project's shk.toml must be resolved from the scanned path
             // itself. Otherwise allowlist/exclude entries are ignored and
             // desktop results diverge from `shk scan` run in the project.
-            policy_root: Some(PathBuf::from(&path)),
+            policy_root: Some(root.clone()),
             ..ScanOptions::default()
         };
 
-        let result = scan_target_path(Path::new(&path), opts).map_err(map_err)?;
+        let result = scan_target_path(&root, opts).map_err(map_err)?;
         Ok(result.to_json_report(ColorMode::Never))
     })
     .await

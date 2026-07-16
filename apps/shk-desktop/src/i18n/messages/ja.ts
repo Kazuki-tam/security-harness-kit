@@ -101,11 +101,12 @@ export const ja: Messages = {
     charCount: "{{count}} 文字",
     outputTitle: "マスク結果",
     outputHint:
-      "マスク済みテキストを確認してから、Claude Desktop や ChatGPT などへコピーしてください。",
+      "マスク済みテキストを確認してから、ClaudeやChatGPTなどのAIツールにコピーしてください。",
     outputPlaceholder: "マスクを実行すると、ここに結果が表示されます。",
     outputReady: "AIツールへコピー可能",
     outputSafe: "高リスク項目は検出されませんでした",
     outputNeedsReview: "共有前に {{count}} 件の確認が必要です",
+    outputMaskedReview: "{{count}} 件をマスクしました — 共有前に結果を確認してください",
     selectFile: "ファイルを選択",
     clearInput: "クリア",
     removeFile: "ファイルを外す",

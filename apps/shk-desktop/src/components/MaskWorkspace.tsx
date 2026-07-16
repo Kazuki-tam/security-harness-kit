@@ -747,7 +747,7 @@ function MaskOutputPanel({
 }) {
   const statusTone =
     maskState.status === "done"
-      ? actionableFindings > 0
+      ? findingsCount > 0
         ? "amber"
         : "emerald"
       : isLoading
@@ -769,11 +769,13 @@ function MaskOutputPanel({
       <div className="flex min-h-[52px] items-start justify-between gap-3">
         <div>
           <h2 className="text-sm font-semibold text-white">{m.outputTitle}</h2>
-          <p className="mt-1 text-[12px] text-muted">
+          <p role="status" className="mt-1 text-[12px] text-muted">
             {canCopy
               ? actionableFindings > 0
                 ? t(m.outputNeedsReview, { count: actionableFindings })
-                : m.outputSafe
+                : findingsCount > 0
+                  ? t(m.outputMaskedReview, { count: findingsCount })
+                  : m.outputSafe
               : m.outputHint}
           </p>
         </div>
@@ -790,9 +792,10 @@ function MaskOutputPanel({
       ) : canCopy ? (
         <textarea
           readOnly
+          aria-label={m.outputTitle}
           value={maskedOutput}
           className={`bg-canvas min-h-[300px] w-full resize-y rounded-lg border px-3 py-3 font-mono text-[12px] leading-relaxed text-white outline-none ${
-            actionableFindings > 0
+            findingsCount > 0
               ? "border-amber-400/35 ring-1 ring-inset ring-amber-400/10"
               : "border-emerald-400/35 ring-1 ring-inset ring-emerald-400/10"
           }`}
@@ -833,6 +836,9 @@ function MaskOutputPanel({
           >
             {copied ? m.copied : m.copyMasked}
           </Button>
+          <span aria-live="polite" className="sr-only">
+            {copied ? m.copied : ""}
+          </span>
         </div>
       )}
     </section>
@@ -872,6 +878,7 @@ function MaskTransferPanel({
           <label className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-border bg-canvas px-3 text-[12px] font-medium text-text transition hover:border-sky-300/60 focus-within:border-sky-300/70 focus-within:ring-2 focus-within:ring-sky-300/25">
             <span className="text-muted">{m.preferredTool}</span>
             <select
+              aria-label={m.preferredTool}
               value={preferredAiTool}
               onChange={(event) => onPreferredAiToolChange(event.target.value as PreferredAiTool)}
               className="bg-transparent text-white outline-none"
