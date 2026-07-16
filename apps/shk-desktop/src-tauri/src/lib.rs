@@ -51,22 +51,18 @@ async fn scan_path(path: String) -> Result<ScanJsonReport, AppError> {
     }
 
     run_blocking(move || {
+        // Defaults keep JSON context disabled: the desktop renders the
+        // structured report directly and does not display neighboring source
+        // lines, so rescanning and redacting context around every finding is
+        // unnecessary.
         let opts = ScanOptions {
-            staged: false,
-            changed_since: None,
-            git_history: false,
-            git_history_ref: None,
-            git_history_since: None,
-            git_history_max_commits: None,
-            // The desktop renders the structured report directly and does not
-            // display neighboring source lines. Keeping JSON context disabled
-            // avoids rescanning and redacting context around every finding.
-            json: false,
-            fail_on_override: None,
-            use_pre_commit_threshold: false,
-            include_context: false,
-            include_binary: false,
-            follow_symlinks: false,
+            // The desktop process working directory is unrelated to the
+            // scanned project (e.g. `/` when launched from Finder), so the
+            // project's shk.toml must be resolved from the scanned path
+            // itself. Otherwise allowlist/exclude entries are ignored and
+            // desktop results diverge from `shk scan` run in the project.
+            policy_root: Some(PathBuf::from(&path)),
+            ..ScanOptions::default()
         };
 
         let result = scan_target_path(Path::new(&path), opts).map_err(map_err)?;

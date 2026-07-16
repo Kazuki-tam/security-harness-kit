@@ -13,6 +13,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroize;
 
+/// All fields default to the plain `shk scan <path>` behavior (no git modes,
+/// no overrides). Construct with struct-update syntax so new options do not
+/// ripple through every call site: `ScanOptions { json: true, ..Default::default() }`.
+#[derive(Default)]
 pub struct ScanOptions {
     pub staged: bool,
     pub changed_since: Option<String>,
@@ -26,6 +30,13 @@ pub struct ScanOptions {
     pub include_context: bool,
     pub include_binary: bool,
     pub follow_symlinks: bool,
+    /// Explicit policy root (where `shk.toml` lives). When `None`, the policy
+    /// is resolved relative to the process working directory (CLI behavior).
+    /// GUI callers whose working directory is unrelated to the scanned
+    /// project (e.g. the desktop app launched from Finder with cwd `/`) must
+    /// set this to the project root, otherwise allowlist/exclude entries in
+    /// the project `shk.toml` are silently ignored.
+    pub policy_root: Option<PathBuf>,
 }
 
 pub struct ScanResult {
@@ -906,7 +917,10 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
     }
 
     let scan_root = canonical_or_same(&scan_root_for_target(target));
-    let policy_root = policy_root_for_scan(&scan_root);
+    let policy_root = match &opts.policy_root {
+        Some(root) => canonical_or_same(root),
+        None => policy_root_for_scan(&scan_root),
+    };
     let (mut policy, policy_path) = Policy::load_from_dir(&policy_root)?;
     apply_scan_flag_overrides(&mut policy, &opts);
     let filters = PathFilters::from_policy(&policy)?;
@@ -1234,44 +1248,55 @@ mod tests {
     fn scan_path_rejects_missing_target() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing.txt");
-        let result = scan_path(
-            &missing,
-            ScanOptions {
-                staged: false,
-                changed_since: None,
-                git_history: false,
-                git_history_ref: None,
-                git_history_since: None,
-                git_history_max_commits: None,
-                json: false,
-                fail_on_override: None,
-                use_pre_commit_threshold: false,
-                include_context: false,
-                include_binary: false,
-                follow_symlinks: false,
-            },
-        );
+        let result = scan_path(&missing, ScanOptions::default());
         match result {
             Err(err) => assert!(err.to_string().contains("scan target does not exist")),
             Ok(_) => panic!("missing target should fail"),
         }
     }
 
-    fn default_scan_options() -> ScanOptions {
-        ScanOptions {
-            staged: false,
-            changed_since: None,
-            git_history: false,
-            git_history_ref: None,
-            git_history_since: None,
-            git_history_max_commits: None,
-            json: false,
-            fail_on_override: None,
-            use_pre_commit_threshold: false,
-            include_context: false,
-            include_binary: false,
-            follow_symlinks: false,
-        }
+    #[test]
+    fn scan_path_uses_explicit_policy_root_over_cwd_heuristic() {
+        let project = tempfile::tempdir().unwrap();
+        // Project policy excludes the fixtures directory entirely.
+        fs::write(
+            project.path().join("shk.toml"),
+            "[scan]\nexclude = [\"fixtures/**\"]\n",
+        )
+        .unwrap();
+        let fixtures = project.path().join("fixtures");
+        fs::create_dir(&fixtures).unwrap();
+        // not real credential: synthetic detector fixture value only
+        fs::write(
+            fixtures.join("secret.txt"),
+            "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
+        )
+        .unwrap();
+
+        // Scanning the subdirectory without an explicit policy root loses the
+        // project policy (neither cwd nor the target dir holds shk.toml).
+        let res = scan_path(&fixtures, ScanOptions::default()).unwrap();
+        assert!(
+            res.findings
+                .iter()
+                .any(|f| f.rule_id.starts_with("secret.")),
+            "without policy_root the project exclude must not apply: {:?}",
+            res.findings
+        );
+
+        // GUI callers pass the project root explicitly and get the same
+        // result as `shk scan` run from the project root.
+        let opts = ScanOptions {
+            policy_root: Some(project.path().to_path_buf()),
+            ..ScanOptions::default()
+        };
+        let res = scan_path(&fixtures, opts).unwrap();
+        assert!(res.policy_path.is_some(), "project shk.toml must be loaded");
+        assert!(
+            res.findings.is_empty(),
+            "excluded fixtures must not produce findings: {:?}",
+            res.findings
+        );
     }
 
     #[cfg(unix)]
@@ -1290,7 +1315,7 @@ mod tests {
         fs::write(root.path().join("clean.txt"), "nothing here\n").unwrap();
         std::os::unix::fs::symlink(&secret_path, root.path().join("link.txt")).unwrap();
 
-        let res = scan_path(root.path(), default_scan_options()).unwrap();
+        let res = scan_path(root.path(), ScanOptions::default()).unwrap();
 
         assert!(
             !res.scanned_paths.iter().any(|p| p.contains("link.txt")),
@@ -1306,7 +1331,7 @@ mod tests {
         // Shift-JIS encoded 「秘密」 — invalid UTF-8 but no NUL bytes.
         fs::write(root.path().join("sjis.txt"), [0x94, 0xe9, 0x96, 0xa7, 0x0a]).unwrap();
 
-        let res = scan_path(root.path(), default_scan_options()).unwrap();
+        let res = scan_path(root.path(), ScanOptions::default()).unwrap();
 
         assert!(
             res.findings

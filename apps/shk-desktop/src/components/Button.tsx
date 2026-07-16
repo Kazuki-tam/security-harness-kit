@@ -9,8 +9,8 @@ const variantClasses = {
 } as const;
 
 const sizeClasses = {
-  sm: "gap-1.5 rounded-md px-2.5 py-1 text-[11px]",
-  md: "gap-2 rounded-lg px-3.5 py-2 text-[13px]",
+  sm: "h-7 gap-1.5 rounded-md px-2.5 text-[11px]",
+  md: "h-9 gap-2 rounded-lg px-3.5 text-[13px]",
 } as const;
 
 type Props = ButtonHTMLAttributes<HTMLButtonElement> & {
@@ -36,7 +36,7 @@ export function Button({
     <button
       type="button"
       disabled={isDisabled}
-      className={`inline-flex items-center border font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70 disabled:cursor-not-allowed disabled:opacity-50 ${variantClasses[variant]} ${sizeClasses[size]} ${className}`}
+      className={`inline-flex items-center justify-center border font-medium whitespace-nowrap transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70 disabled:cursor-not-allowed disabled:opacity-50 ${variantClasses[variant]} ${sizeClasses[size]} ${className}`}
       {...props}
     >
       {loading ? (

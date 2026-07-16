@@ -77,9 +77,9 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
         json: inv.json,
         fail_on_override,
         use_pre_commit_threshold: inv.staged,
-        include_context: false,
         include_binary: inv.include_binary,
         follow_symlinks: inv.follow_symlinks,
+        ..ScanOptions::default()
     };
     if inv.staged && shk_core::git::discover_repo_root(&inv.path).is_none() {
         return Err(CliExit::message(2, "shk scan --staged requires a Git repository").into());
@@ -599,18 +599,9 @@ fn user_prompt_deny_reason(findings: &[shk_core::finding::Finding]) -> String {
 
 fn hook_scan_options(fail_on: Option<SeverityArg>, use_pre_commit_threshold: bool) -> ScanOptions {
     ScanOptions {
-        staged: false,
-        changed_since: None,
-        git_history: false,
-        git_history_ref: None,
-        git_history_since: None,
-        git_history_max_commits: None,
-        json: false,
         fail_on_override: fail_on.map(Severity::from),
         use_pre_commit_threshold,
-        include_context: false,
-        include_binary: false,
-        follow_symlinks: false,
+        ..ScanOptions::default()
     }
 }
 
