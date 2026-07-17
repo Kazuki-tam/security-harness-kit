@@ -4559,6 +4559,7 @@ fn env_key_help_is_registered_without_raw_export() {
     assert!(stdout.contains("list"), "{stdout}");
     assert!(stdout.contains("delete"), "{stdout}");
     assert!(stdout.contains("export"), "{stdout}");
+    assert!(stdout.contains("migrate"), "{stdout}");
 
     let out = Command::new(shk_bin())
         .args(["env", "key", "delete"])
@@ -4582,6 +4583,30 @@ fn env_key_help_is_registered_without_raw_export() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("--instructions"), "{stdout}");
     assert!(!stdout.contains("--print"), "{stdout}");
+}
+
+#[test]
+fn env_key_migrate_rejects_source_deletion_without_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(shk_bin())
+        .args([
+            "env",
+            "key",
+            "migrate",
+            "--to",
+            "1password",
+            "--delete-source",
+            "--yes",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("env key migrate");
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--delete-source requires"), "{stderr}");
+    assert!(stderr.contains("shk.toml"), "{stderr}");
+    assert!(!dir.path().join("shk.toml").exists());
 }
 
 #[test]

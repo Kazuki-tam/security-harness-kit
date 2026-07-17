@@ -273,6 +273,12 @@ pub fn key_migrate(cwd: &Path, args: EnvKeyMigrateArgs) -> Result<()> {
         );
     }
 
+    ensure!(
+        !args.delete_source || policy_path.is_some(),
+        "--delete-source requires a project shk.toml so env.secret_store can be switched \
+         before source keys are deleted; create and configure shk.toml, then retry"
+    );
+
     let mut target_policy = policy.clone();
     target_policy.env.secret_store = args.to.clone();
     target_policy.validate_env_config(&project_root)?;
@@ -337,8 +343,8 @@ pub fn key_migrate(cwd: &Path, args: EnvKeyMigrateArgs) -> Result<()> {
         )
         .with_context(|| {
             "delete migrated keys from source backend after updating shk.toml; \
-             destination already has the keys — fix the error and re-run with --delete-source, \
-             or remove remaining source keys manually"
+             destination already has the keys, but shk.toml now selects the destination backend — \
+             remove any remaining source keys manually"
         })?;
         println!("Deleted migrated key(s) from the source backend.");
     }
