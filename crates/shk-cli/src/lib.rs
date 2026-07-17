@@ -6,6 +6,7 @@ mod color;
 mod commands;
 pub mod desktop_api;
 mod doctor;
+mod env_store;
 mod exit;
 mod fs_atomic;
 mod hook_audit_log;
@@ -298,6 +299,7 @@ pub fn run() -> Result<()> {
                 EnvKeyCmd::List => commands::env::key_list(&cwd)?,
                 EnvKeyCmd::Delete(args) => commands::env::key_delete(&cwd, args)?,
                 EnvKeyCmd::Export(args) => commands::env::key_export(&cwd, args)?,
+                EnvKeyCmd::Migrate(args) => commands::env::key_migrate(&cwd, args)?,
             },
             EnvCmd::Dotenvx { cmd } => match cmd {
                 DotenvxCmd::ImportKeys { file } => commands::env::dotenvx_import_keys(&cwd, &file)?,

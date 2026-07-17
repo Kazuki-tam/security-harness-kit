@@ -618,6 +618,8 @@ pub enum EnvKeyCmd {
     Delete(EnvKeyDeleteArgs),
     /// Show safe local handoff instructions without printing key material
     Export(EnvKeyExportArgs),
+    /// Migrate stored keys between secret store backends
+    Migrate(EnvKeyMigrateArgs),
 }
 
 #[derive(Args)]
@@ -666,6 +668,19 @@ pub struct EnvKeyExportArgs {
     /// Show safe handoff instructions without printing the private key.
     #[arg(long, required = true)]
     pub instructions: bool,
+}
+
+#[derive(Args)]
+pub struct EnvKeyMigrateArgs {
+    /// Destination secret store backend.
+    #[arg(long = "to", value_parser = ["keyring", "1password"])]
+    pub to: String,
+    /// Delete keys from the source backend after a successful migration.
+    #[arg(long)]
+    pub delete_source: bool,
+    /// Skip the confirmation prompt (required for non-TTY use with --delete-source).
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Subcommand)]

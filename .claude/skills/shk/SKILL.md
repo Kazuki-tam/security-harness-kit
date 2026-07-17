@@ -51,6 +51,7 @@ shk env key import                # register the default local decryption key in
 shk env key list                  # show native key names for this project, not values
 shk env key delete --env staging  # remove a native decryption key from the OS store
 shk env key export --instructions # show safe handoff instructions; no raw key output
+shk env key migrate --to 1password  # copy keys to 1Password; updates shk.toml on success
 shk env decrypt .env --output .env.local
 shk env dotenvx import-keys .env.keys # store dotenvx private keys in OS credential store
 shk env dotenvx run -- npm test       # inject stored keys only into child process
@@ -142,6 +143,31 @@ shk clipboard mask --write           # explicitly replace the clipboard with mas
 
 `shk clipboard …` exits 2 when the OS clipboard is unavailable. Non-text clipboard contents are treated as empty text.
 
+## Env secret store backends
+
+`shk env` stores `DOTENV_PRIVATE_KEY*` values outside the repository. Default backend is the **OS keyring**; teams can opt in to **1Password** in `shk.toml`:
+
+```toml
+[env]
+secret_store = "keyring"          # default
+# secret_store = "1password"
+# project_id = "acme/backend-api" # required for 1Password
+# [env.onepassword]
+# vault = "shk-project-keys"      # required for 1Password
+```
+
+```bash
+shk doctor env                    # check plaintext env files + 1Password CLI when configured
+shk env key migrate --to 1password
+shk env key migrate --to 1password --delete-source --yes
+```
+
+Migration notes:
+- Keep `secret_store = "keyring"` until `shk env key migrate --to 1password` succeeds; the command updates `shk.toml` afterward.
+- Migrates indexed keys plus keys referenced by project-root `.env` / `.env.keys` files.
+- Set `SHK_OP_PATH` when `op` is not on PATH. 1Password items are tagged `shk` with titles like `shk:{project_id}:env:DOTENV_PRIVATE_KEY`.
+- 1Password is primarily a team-operations upgrade (distribution, offboarding, audit), not per-command biometric approval on every `shk env run`.
+
 ## Local dotenvx key storage
 
 Use `shk env dotenvx` when a project has `.env.keys` or `DOTENV_PRIVATE_KEY*` values that should not stay in plaintext files.
@@ -161,7 +187,7 @@ shk env dotenvx delete --all
 ```
 
 Important behavior:
-- Keys are stored in the OS credential store through the platform keychain/credential backend.
+- Keys are stored in the env secret store configured by `[env].secret_store` (OS keyring by default, or 1Password when opted in).
 - `run` injects keys only into the child `dotenvx run -- <command>` environment.
 - There is no raw-key export under `shk env dotenvx`; use `shk env key export --instructions` only for handoff guidance.
 - `delete` requires an explicit target: `--all`, `--key <DOTENV_PRIVATE_KEY*>`, or `--env <name>`.

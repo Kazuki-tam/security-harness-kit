@@ -198,6 +198,7 @@ shk env key import
 shk env key list
 shk env key delete --env staging
 shk env key export --instructions
+shk env key migrate --to 1password
 shk env decrypt .env --output .env.local
 
 shk hooks install
@@ -238,6 +239,37 @@ shk init --strict
 When `package.json` is present, `shk init` can also apply package-manager supply-chain hardening such as `ignore-scripts=true`, npm `min-release-age=7`, and equivalent pnpm/Yarn/Bun age gates. Use `--no-npm-hardening` to skip that setup in automated runs.
 
 See [Configuration](docs/configuration.md) for the full `shk.toml` reference, custom rules, and suppression options.
+
+### Env secret store backends
+
+By default, `shk env` stores dotenv private keys in the **OS keyring** (local, zero extra dependencies). Teams can opt in to **1Password** for shared vault distribution, centralized revocation, and Business audit logs:
+
+```toml
+# Keep secret_store = "keyring" until after `shk env key migrate --to 1password`.
+[env]
+secret_store = "keyring"
+project_id = "acme/backend-api"   # required for 1Password; machine-independent
+
+[env.onepassword]
+vault = "shk-project-keys"        # required before migrating to 1Password
+```
+
+Set `SHK_OP_PATH` to an absolute path when the `op` binary is not on PATH. Run `shk doctor env` to verify `op` resolution, version, and sign-in state.
+
+See [Configuration — Env Secret Store](docs/configuration.md#env-secret-store) and [Commands — env key migrate](docs/commands.md#shk-env-key-migrate) for the full reference.
+
+```bash
+# Phase 0 team handoff (no backend change): export instructions → vault → import
+shk env key export --instructions
+shk env key import --stdin
+
+# Migrate keyring keys to 1Password (copies keys, updates shk.toml, optional source cleanup)
+# Migrates indexed keys plus keys referenced by project-root .env / .env.keys files.
+shk env key migrate --to 1password
+shk env key migrate --to 1password --delete-source --yes
+```
+
+**Threat model (honest):** 1Password is primarily a **team operations** upgrade (distribution, offboarding, audit). It also avoids persisting keys in the local keyring. Desktop app authorization can persist for a CLI session, so it is not a guarantee of biometric approval on every `shk env run`. Prefer short vault auto-lock and 1Password Business access logs for visibility.
 
 ## Exit Codes
 

@@ -35,6 +35,7 @@ dialoguer.workspace = true
 ignore.workspace = true
 regex.workspace = true
 toml.workspace = true
+toml_edit.workspace = true
 ureq.workspace = true
 zeroize.workspace = true
 sha2.workspace = true
