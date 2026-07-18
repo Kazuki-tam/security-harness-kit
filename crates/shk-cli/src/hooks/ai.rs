@@ -1513,6 +1513,19 @@ fn parse_toml_string_value(raw: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
+    fn json_string_contains(value: &Value, needle: &str) -> bool {
+        match value {
+            Value::String(value) => value.contains(needle),
+            Value::Array(values) => values
+                .iter()
+                .any(|value| json_string_contains(value, needle)),
+            Value::Object(values) => values
+                .values()
+                .any(|value| json_string_contains(value, needle)),
+            _ => false,
+        }
+    }
+
     #[test]
     fn cursor_managed_entries_are_replaced_on_rerun() {
         let dir = tempfile::tempdir().unwrap();
@@ -1618,7 +1631,7 @@ mod tests {
             apply_deny: false,
             apply_sandbox: false,
         };
-        let quoted_root = project_hook_root_arg(project.path()).unwrap();
+        let project_root = project.path().to_string_lossy();
 
         for tool in [
             AiTool::ClaudeCode,
@@ -1634,7 +1647,11 @@ mod tests {
             if tool == AiTool::Codex {
                 assert!(body.contains(CODEX_GIT_ROOT_ARG), "{tool:?}: {body}");
             } else {
-                assert!(body.contains(&quoted_root), "{tool:?}: {body}");
+                let config: Value = serde_json::from_str(&body).unwrap();
+                assert!(
+                    json_string_contains(&config, &project_root),
+                    "{tool:?}: {body}"
+                );
             }
         }
     }
