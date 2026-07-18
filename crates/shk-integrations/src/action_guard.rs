@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use serde_json::Value;
+use std::collections::HashSet;
 
 const SECRET_PATH_PATTERNS: &[&str] = &[
     ".env",
@@ -286,6 +287,37 @@ pub fn detect_dangerous_action(stdin: &str) -> Result<Option<ActionGuardMatch>> 
     detect_dangerous_action_with_config(stdin, &ActionGuardConfig::default())
 }
 
+/// Path keys in descending priority for repository-hint resolution. Primary
+/// tool-target keys come first so a payload that mentions files in several
+/// repositories resolves to the repository of the operation's actual target.
+const PAYLOAD_PATH_HINT_KEYS: &[&str] = &[
+    "file_path",
+    "filePath",
+    "target_file",
+    "targetPath",
+    "TargetFile",
+    "AbsolutePath",
+    "path",
+    "uri",
+    "fileName",
+];
+
+/// File-path candidates extracted from a hook payload, ordered by target-key
+/// priority (not alphabetically). Callers can use these as repository hints
+/// when the hook process starts outside the repository.
+pub fn payload_path_hints(stdin: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<Value>(stdin) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for key in PAYLOAD_PATH_HINT_KEYS {
+        collect_strings_for_keys(&v, &[key], &mut out);
+    }
+    let mut seen = HashSet::new();
+    out.retain(|path| seen.insert(path.clone()));
+    out
+}
+
 pub fn detect_dangerous_action_with_config(
     stdin: &str,
     config: &ActionGuardConfig,
@@ -395,22 +427,7 @@ fn access_kind_for_path(v: &Value) -> Option<&'static str> {
 
 fn candidate_paths(v: &Value) -> Vec<String> {
     let mut out = Vec::new();
-    collect_strings_for_keys(
-        v,
-        &[
-            "path",
-            "file_path",
-            "filePath",
-            "target_file",
-            "targetPath",
-            "uri",
-            "fileName",
-            // Antigravity PascalCase tool arguments (view_file / write_to_file).
-            "TargetFile",
-            "AbsolutePath",
-        ],
-        &mut out,
-    );
+    collect_strings_for_keys(v, PAYLOAD_PATH_HINT_KEYS, &mut out);
     out.sort();
     out.dedup();
     out
@@ -892,6 +909,31 @@ fn contains_any(hay: &str, needles: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payload_path_hints_prioritize_primary_target_keys() {
+        // `path` (cwd-like metadata) sorts alphabetically before the target
+        // value here; the hint order must still put `file_path` first.
+        let stdin = serde_json::json!({
+            "tool_input": {
+                "path": "/aaa/other-repo/notes.txt",
+                "file_path": "/zzz/target-repo/src/main.rs"
+            }
+        })
+        .to_string();
+        assert_eq!(
+            payload_path_hints(&stdin),
+            vec![
+                "/zzz/target-repo/src/main.rs".to_string(),
+                "/aaa/other-repo/notes.txt".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn payload_path_hints_return_empty_for_invalid_json() {
+        assert!(payload_path_hints("not json").is_empty());
+    }
 
     fn bash_payload(command: &str) -> String {
         serde_json::json!({

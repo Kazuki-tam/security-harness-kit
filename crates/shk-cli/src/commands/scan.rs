@@ -305,16 +305,34 @@ fn format_git_history_preview(preview: &GitHistoryPreview) -> String {
     out
 }
 
-fn resolve_repo_root(cwd: &Path, path_arg: &Path) -> PathBuf {
-    let candidates = [
-        cwd.to_path_buf(),
-        path_arg.to_path_buf(),
-        cwd.join(path_arg),
-    ];
-    for cand in candidates {
-        if let Some(r) = shk_core::git::discover_repo_root(&cand) {
+/// Repo-root resolution for hook mode. AI tools may spawn hook processes with
+/// a working directory outside the target repository (or inside a different
+/// repository). Prefer an explicit scan path, then an absolute target path
+/// from the hook payload, and use the process cwd only as a fallback.
+fn resolve_hook_repo_root(cwd: &Path, path_arg: &Path, stdin: &str) -> PathBuf {
+    if path_arg != Path::new(".") {
+        let explicit_path = if path_arg.is_absolute() {
+            path_arg.to_path_buf()
+        } else {
+            cwd.join(path_arg)
+        };
+        if let Some(r) = shk_core::git::discover_repo_root(&explicit_path) {
             return fs_canonical_or_same(r);
         }
+    }
+
+    for hint in shk_integrations::payload_path_hints(stdin) {
+        let hint = Path::new(hint.trim());
+        if !hint.is_absolute() {
+            continue;
+        }
+        if let Some(r) = shk_core::git::discover_repo_root(hint) {
+            return fs_canonical_or_same(r);
+        }
+    }
+
+    if let Some(r) = shk_core::git::discover_repo_root(cwd) {
+        return fs_canonical_or_same(r);
     }
     fs_canonical_or_same(cwd.to_path_buf())
 }
@@ -341,7 +359,7 @@ fn run_hook_mode(
     }
 
     let hook_event = hook_event_from_stdin(stdin_trim, post);
-    let repo_root = resolve_repo_root(cwd, path_arg.as_path());
+    let repo_root = resolve_hook_repo_root(cwd, path_arg.as_path(), stdin_trim);
     require_hook_log_policy(&repo_root, audit, log_blocked)?;
 
     if hook_event == hook_output::HookEvent::UserPromptSubmit {
@@ -706,6 +724,53 @@ fn fs_canonical_or_same(p: PathBuf) -> PathBuf {
 mod tests {
     use super::*;
     use hook_output::HookEvent;
+
+    fn init_test_repo(path: &Path) {
+        std::fs::create_dir(path.join(".git")).unwrap();
+    }
+
+    #[test]
+    fn hook_repo_root_prefers_payload_target_over_unrelated_cwd_repo() {
+        let cwd_repo = tempfile::tempdir().unwrap();
+        let target_repo = tempfile::tempdir().unwrap();
+        init_test_repo(cwd_repo.path());
+        init_test_repo(target_repo.path());
+        let target = target_repo.path().join("src/lib.rs");
+        let stdin = serde_json::json!({ "tool_input": { "file_path": target } }).to_string();
+
+        assert_eq!(
+            resolve_hook_repo_root(cwd_repo.path(), Path::new("."), &stdin),
+            fs_canonical_or_same(target_repo.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn hook_repo_root_prefers_explicit_path_over_payload_target() {
+        let cwd = tempfile::tempdir().unwrap();
+        let explicit_repo = tempfile::tempdir().unwrap();
+        let payload_repo = tempfile::tempdir().unwrap();
+        init_test_repo(explicit_repo.path());
+        init_test_repo(payload_repo.path());
+        let target = payload_repo.path().join("src/lib.rs");
+        let stdin = serde_json::json!({ "tool_input": { "file_path": target } }).to_string();
+
+        assert_eq!(
+            resolve_hook_repo_root(cwd.path(), explicit_repo.path(), &stdin),
+            fs_canonical_or_same(explicit_repo.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn hook_repo_root_ignores_relative_payload_hints() {
+        let cwd_repo = tempfile::tempdir().unwrap();
+        init_test_repo(cwd_repo.path());
+        let stdin = r#"{"tool_input":{"file_path":"../other/src/lib.rs"}}"#;
+
+        assert_eq!(
+            resolve_hook_repo_root(cwd_repo.path(), Path::new("."), stdin),
+            fs_canonical_or_same(cwd_repo.path().to_path_buf())
+        );
+    }
 
     #[test]
     fn hook_event_post_flag_always_maps_to_post_tool_use() {

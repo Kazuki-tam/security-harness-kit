@@ -69,9 +69,13 @@ profile = "recommended" # minimal | recommended | strict
 allow = [
   "Write(docs/**)",
   "Write(*/docs/**)",
-  # CLI test sources contain synthetic key names / env-file strings that
-  # trip the secret_file_access guard; scan-side allowlist already covers them.
+  # CLI test sources have names/contents that trip the secret_file_access
+  # guard (e.g. `onepassword_op.rs` matches `**/*password*`); the scan-side
+  # allowlist already covers synthetic values in these files.
   "Write(crates/shk-cli/tests/*.rs)",
+  "Write(*/crates/shk-cli/tests/*.rs)",
+  "Read(crates/shk-cli/tests/*.rs)",
+  "Read(*/crates/shk-cli/tests/*.rs)",
 ]
 deny = []
 

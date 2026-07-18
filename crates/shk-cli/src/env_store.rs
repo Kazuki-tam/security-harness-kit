@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 use tempfile::NamedTempFile;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -16,6 +17,8 @@ const SHK_OP_PATH_ENV: &str = "SHK_OP_PATH";
 const MIN_OP_VERSION: &str = "2.24.0";
 const OP_TAG: &str = "shk";
 const OP_CATEGORY: &str = "API_CREDENTIAL";
+const OP_CONFLICT_RETRY_DELAYS: &[Duration] =
+    &[Duration::from_millis(250), Duration::from_millis(750)];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreKind {
@@ -365,6 +368,8 @@ fn validate_op_binary(path: &Path) -> Result<()> {
 
 trait OpRunner: Send + Sync {
     fn run(&self, op_path: &Path, args: &[&str]) -> Result<Output>;
+
+    fn wait_before_retry(&self, _delay: Duration) {}
 }
 
 struct ProcessOpRunner;
@@ -378,6 +383,10 @@ impl OpRunner for ProcessOpRunner {
             .output()
             .with_context(|| format!("run `{}`", command_line(op_path, args)))?;
         Ok(output)
+    }
+
+    fn wait_before_retry(&self, delay: Duration) {
+        std::thread::sleep(delay);
     }
 }
 
@@ -564,20 +573,31 @@ impl OnePasswordSecretStore {
             &item_id,
             "--vault",
             &self.vault,
-            "--fields",
-            "label=credential",
+            "--format",
+            "json",
             "--reveal",
         ];
         let mut output = self.runner.run(&self.op_path, &args)?;
         if output.status.success() {
-            let mut stdout = Zeroizing::new(std::mem::take(&mut output.stdout));
-            let mut value = match String::from_utf8(std::mem::take(&mut *stdout)) {
-                Ok(value) => value,
-                Err(err) => {
-                    let mut bytes = err.into_bytes();
-                    bytes.zeroize();
-                    bail!("1Password returned a non-UTF-8 credential value");
-                }
+            // `op item get --fields label=credential` renders a JSON string
+            // literal when the stored value itself contains JSON. Parse the
+            // complete item instead so the credential is decoded exactly once.
+            let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout);
+            output.stdout.zeroize();
+            let mut item = parsed.context("parse 1Password item JSON")?;
+            let credential = item
+                .get_mut("fields")
+                .and_then(serde_json::Value::as_array_mut)
+                .and_then(|fields| {
+                    fields.iter_mut().find(|field| {
+                        field.get("label").and_then(serde_json::Value::as_str) == Some("credential")
+                    })
+                })
+                .and_then(|field| field.get_mut("value"))
+                .map(serde_json::Value::take);
+            zeroize_json_strings(&mut item);
+            let Some(serde_json::Value::String(mut value)) = credential else {
+                return Ok(None);
             };
             value.truncate(value.trim_end().len());
             if value.is_empty() {
@@ -615,7 +635,21 @@ impl OnePasswordSecretStore {
             return Ok(());
         };
         let args = ["item", "delete", &item_id, "--vault", &self.vault];
-        let output = self.runner.run(&self.op_path, &args)?;
+        let mut output = self.runner.run(&self.op_path, &args)?;
+        for delay in OP_CONFLICT_RETRY_DELAYS {
+            if output.status.success() {
+                return Ok(());
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if is_op_not_found(&stderr) {
+                return Ok(());
+            }
+            if !is_op_conflict(&stderr) {
+                break;
+            }
+            self.runner.wait_before_retry(*delay);
+            output = self.runner.run(&self.op_path, &args)?;
+        }
         if output.status.success() {
             return Ok(());
         }
@@ -639,6 +673,23 @@ fn is_managed_op_item(item: &serde_json::Value) -> bool {
     item.get("tags")
         .and_then(|value| value.as_array())
         .is_some_and(|tags| tags.iter().any(|tag| tag.as_str() == Some(OP_TAG)))
+}
+
+fn zeroize_json_strings(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(value) => value.zeroize(),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                zeroize_json_strings(value);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                zeroize_json_strings(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[derive(Serialize)]
@@ -822,6 +873,10 @@ fn is_op_not_found(stderr: &str) -> bool {
     stderr.contains("isn't an item in this vault")
         || stderr.contains("no item found")
         || stderr.contains("item not found")
+}
+
+fn is_op_conflict(stderr: &str) -> bool {
+    stderr.contains("(409) Conflict") || stderr.contains("Internal server conflict")
 }
 
 pub(crate) fn op_version_meets_minimum(actual: &str, minimum: &str) -> bool {
@@ -1041,6 +1096,37 @@ mod tests {
     }
 
     #[test]
+    fn onepassword_get_decodes_json_credential_once() {
+        let (runner, calls) = RecordingOpRunner::new(vec![
+            Ok(ok_output(
+                r#"[{"id":"item-id","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#,
+            )),
+            Ok(ok_output(
+                r#"{"fields":[{"label":"credential","type":"CONCEALED","value":"{\"private_key\":\"demo-value\"}"}]}"#,
+            )),
+        ]);
+        let store = OnePasswordSecretStore::with_runner(
+            StoreKind::NativeEnv,
+            PathBuf::from("/usr/local/bin/op"),
+            "vault".to_string(),
+            PathBuf::from("/repo"),
+            Box::new(runner),
+        );
+
+        assert_eq!(
+            store.get(&sample_project(), "DOTENV_PRIVATE_KEY").unwrap(),
+            Some(r#"{"private_key":"demo-value"}"#.to_string())
+        );
+        let recorded = calls.lock().unwrap();
+        assert!(
+            recorded[1]
+                .windows(2)
+                .any(|args| args == ["--format", "json"])
+        );
+        assert!(!recorded[1].contains(&"--fields".to_string()));
+    }
+
+    #[test]
     fn onepassword_get_rejects_generic_not_found_errors() {
         let (runner, _calls) = RecordingOpRunner::new(vec![
             Ok(ok_output(
@@ -1207,6 +1293,34 @@ mod tests {
             .unwrap();
         // Only the two `item list` calls; no `item get` / `item delete` reached the runner.
         assert_eq!(calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn onepassword_delete_retries_transient_conflicts() {
+        let listing = r#"[{"id":"item-id","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#;
+        let (runner, calls) = RecordingOpRunner::new(vec![
+            Ok(ok_output(listing)),
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(1),
+                stdout: Vec::new(),
+                stderr: b"(409) Conflict: Internal server conflict".to_vec(),
+            }),
+            Ok(ok_output("")),
+        ]);
+        let store = OnePasswordSecretStore::with_runner(
+            StoreKind::NativeEnv,
+            PathBuf::from("/usr/local/bin/op"),
+            "vault".to_string(),
+            PathBuf::from("/repo"),
+            Box::new(runner),
+        );
+
+        store
+            .delete(&sample_project(), "DOTENV_PRIVATE_KEY")
+            .unwrap();
+        let recorded = calls.lock().unwrap();
+        assert_eq!(recorded.len(), 3);
+        assert_eq!(recorded[1], recorded[2]);
     }
 
     #[test]

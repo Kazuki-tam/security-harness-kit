@@ -101,6 +101,11 @@ cargo run -p shk-cli --bin shk -- doctor workflows --fix
 cargo run -p shk-cli --bin shk -- env key migrate --to 1password
 cargo run -p shk-cli --bin shk -- env key migrate --to 1password --delete-source --yes
 
+# Opt-in integration tests against a real 1Password test vault (not run by default).
+# Requires signed-in op >= 2.24; create the dedicated vault once with:
+# op vault create shk-integration-test
+SHK_OP_TEST_VAULT=shk-integration-test cargo test -p shk-cli --test onepassword_op -- --ignored
+
 # Audit log preview
 cargo run -p shk-cli --bin shk -- audit
 cargo run -p shk-cli --bin shk -- audit --reason action-guard --no-paths
@@ -251,13 +256,6 @@ required_patterns = [".env", ".env.*", "!.env.example", "secrets/**", "*.pem", "
 rule_id = "secret.generic_api_key"
 path = "fixtures/**"
 reason = "Intentional test fixture"
-
-# Native env secret store (default: OS keyring). Opt in to 1Password for team vault sharing.
-# [env]
-# secret_store = "keyring" # keyring | 1password
-# project_id = "acme/backend-api" # required when secret_store = "1password"
-# [env.onepassword]
-# vault = "shk-project-keys" # required when secret_store = "1password"
 
 # Suppress by value hash: HMAC-SHA256(raw_value, rule_id), lowercase hex, prefixed "sha256-hmac:"
 [[allowlist]]

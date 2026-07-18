@@ -2900,6 +2900,76 @@ allow = ["Bash(psql:*)"]
 }
 
 #[test]
+fn hook_mode_outside_repo_cwd_applies_policy_from_payload_path_repo() {
+    use std::io::Write;
+    // The repository containing the hook target file, with a policy that
+    // allows writing password-like test sources.
+    let repo = tempfile::tempdir().unwrap();
+    init_git_repo(repo.path());
+    std::fs::write(
+        repo.path().join("shk.toml"),
+        r#"[action_guard]
+enabled = true
+allow = ["Write(*/tests/*.rs)"]
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(repo.path().join("tests")).unwrap();
+    let target = repo.path().join("tests/onepassword_op.rs");
+
+    // The hook process starts outside the repository.
+    let outside_cwd = tempfile::tempdir().unwrap();
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": target.to_str().unwrap(),
+            "content": "// synthetic"
+        }
+    }))
+    .unwrap();
+
+    let run_from_outside = || {
+        Command::new(shk_bin())
+            .args(["scan", ".", "--hook-mode", "claude-code"])
+            .current_dir(outside_cwd.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut c| {
+                c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+                c.wait_with_output()
+            })
+            .expect("hook scan")
+    };
+
+    // With the payload-path repo hint, the project allow entry applies.
+    let out = run_from_outside();
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        stdout["hookSpecificOutput"]["permissionDecision"], "allow",
+        "{stdout}"
+    );
+
+    // Without the allow entry, the same payload is still blocked, proving the
+    // hint loads the policy rather than disabling the guard.
+    std::fs::write(
+        repo.path().join("shk.toml"),
+        "[action_guard]\nenabled = true\n",
+    )
+    .unwrap();
+    let out = run_from_outside();
+    assert_eq!(out.status.code(), Some(2), "expected blocking exit code");
+}
+
+#[test]
 fn hook_mode_ignores_file_paths_outside_repo_root() {
     use std::io::Write;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
