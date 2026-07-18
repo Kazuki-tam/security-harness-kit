@@ -1,11 +1,9 @@
-use crate::env_store::{
-    OpPathSource, SecretStoreBackend, collect_onepassword_doctor_status, parse_secret_store_backend,
-};
+use crate::env_store::{OpPathSource, collect_onepassword_doctor_status};
 use crate::{npm_hardening, safety, workflow_hardening};
 use anyhow::Result;
 use serde_json::Value;
 use shk_core::git;
-use shk_core::policy::Policy;
+use shk_core::policy::{Policy, SecretStoreBackend};
 use shk_core::scanner::{ScanOptions, scan_string};
 use shk_integrations::{
     CONFIG_REL_PATH, HOOKS_FEATURE_KEY, LEGACY_HOOKS_FEATURE_KEY, MANAGED_MARKER_JSON,
@@ -640,7 +638,7 @@ fn print_secret_store_status(root: &Path, policy: &Policy) -> Result<()> {
         "env secret store: {} (configured in shk.toml [env])",
         policy.env.secret_store
     );
-    match parse_secret_store_backend(&policy.env.secret_store) {
+    match policy.env.secret_store.parse::<SecretStoreBackend>() {
         Ok(SecretStoreBackend::Keyring) => {
             println!("  backend: OS keyring (default)");
             return Ok(());

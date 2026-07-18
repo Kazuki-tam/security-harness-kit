@@ -9,9 +9,12 @@ use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use wait_timeout::ChildExt;
 use zeroize::{Zeroize, Zeroizing};
+
+use shk_core::policy::SecretStoreBackend;
 
 const DOTENVX_SERVICE: &str = "security-harness-kit/dotenvx";
 const DOTENVX_INDEX_KEY: &str = "__index";
@@ -40,29 +43,6 @@ impl StoreKind {
             Self::NativeEnv => "env",
             Self::Dotenvx => "dotenvx",
         }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SecretStoreBackend {
-    Keyring,
-    OnePassword,
-}
-
-impl SecretStoreBackend {
-    pub fn as_config_value(self) -> &'static str {
-        match self {
-            Self::Keyring => "keyring",
-            Self::OnePassword => "1password",
-        }
-    }
-}
-
-pub fn parse_secret_store_backend(raw: &str) -> Result<SecretStoreBackend> {
-    match raw {
-        "keyring" => Ok(SecretStoreBackend::Keyring),
-        "1password" => Ok(SecretStoreBackend::OnePassword),
-        other => bail!("unsupported secret store backend `{other}`; supported: keyring, 1password"),
     }
 }
 
@@ -303,22 +283,17 @@ pub struct EnvStores {
 
 pub fn open_env_stores(project: &ProjectIdentity, policy: &Policy) -> Result<EnvStores> {
     policy.validate_env_config(&project.root)?;
-    let backend = parse_secret_store_backend(&policy.env.secret_store)?;
-    Ok(EnvStores {
-        native: open_store(StoreKind::NativeEnv, backend, project, policy)?,
-        dotenvx: open_store(StoreKind::Dotenvx, backend, project, policy)?,
-        backend,
-    })
-}
-
-fn open_store(
-    kind: StoreKind,
-    backend: SecretStoreBackend,
-    project: &ProjectIdentity,
-    policy: &Policy,
-) -> Result<Box<dyn SecretStore>> {
+    let backend = policy
+        .env
+        .secret_store
+        .parse()
+        .map_err(anyhow::Error::msg)?;
     match backend {
-        SecretStoreBackend::Keyring => Ok(Box::new(KeyringSecretStore::new(kind))),
+        SecretStoreBackend::Keyring => Ok(EnvStores {
+            native: Box::new(KeyringSecretStore::new(StoreKind::NativeEnv)),
+            dotenvx: Box::new(KeyringSecretStore::new(StoreKind::Dotenvx)),
+            backend,
+        }),
         SecretStoreBackend::OnePassword => {
             let vault = policy
                 .env
@@ -327,13 +302,20 @@ fn open_store(
                 .clone()
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| anyhow!("env.onepassword.vault is required"))?;
-            let op_path = resolve_op_path()?;
-            Ok(Box::new(OnePasswordSecretStore::new(
-                kind,
-                op_path,
-                vault,
-                project.root.clone(),
-            )?))
+            let client = Arc::new(OnePasswordClient::new(resolve_op_path()?, vault)?);
+            Ok(EnvStores {
+                native: Box::new(OnePasswordSecretStore::new(
+                    StoreKind::NativeEnv,
+                    Arc::clone(&client),
+                    project.root.clone(),
+                )),
+                dotenvx: Box::new(OnePasswordSecretStore::new(
+                    StoreKind::Dotenvx,
+                    client,
+                    project.root.clone(),
+                )),
+                backend,
+            })
         }
     }
 }
@@ -869,60 +851,54 @@ fn is_transient_exec_busy(err: &std::io::Error) -> bool {
     }
 }
 
-struct OnePasswordSecretStore {
-    kind: StoreKind,
+struct OnePasswordClient {
     op_path: PathBuf,
     vault: String,
-    repo_root: PathBuf,
     runner: Box<dyn OpRunner>,
+    item_cache: Mutex<Option<Arc<[OnePasswordItemSummary]>>>,
 }
 
-impl OnePasswordSecretStore {
-    fn lock_purpose(&self, key: &str) -> String {
-        format!("1password:{}:{}:{key}", self.vault, self.kind.segment())
-    }
+#[derive(Clone, Debug, Deserialize)]
+struct OnePasswordItemSummary {
+    id: Option<String>,
+    title: Option<String>,
+    category: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
 
-    fn new(
-        kind: StoreKind,
-        resolved: ResolvedOpPath,
-        vault: String,
-        repo_root: PathBuf,
-    ) -> Result<Self> {
-        let store = Self {
-            kind,
+impl OnePasswordItemSummary {
+    fn is_managed(&self) -> bool {
+        self.category.as_deref() == Some(OP_CATEGORY) && self.tags.iter().any(|tag| tag == OP_TAG)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ItemCachePolicy {
+    Reuse,
+    Refresh,
+}
+
+impl OnePasswordClient {
+    fn new(resolved: ResolvedOpPath, vault: String) -> Result<Self> {
+        let client = Self {
             op_path: resolved.path,
             vault,
-            repo_root,
             runner: Box::new(ProcessOpRunner),
+            item_cache: Mutex::new(None),
         };
-        store.ensure_op_version()?;
-        Ok(store)
+        client.ensure_op_version()?;
+        Ok(client)
     }
 
     #[cfg(test)]
-    fn with_runner(
-        kind: StoreKind,
-        op_path: PathBuf,
-        vault: String,
-        repo_root: PathBuf,
-        runner: Box<dyn OpRunner>,
-    ) -> Self {
+    fn with_runner(op_path: PathBuf, vault: String, runner: Box<dyn OpRunner>) -> Self {
         Self {
-            kind,
             op_path,
             vault,
-            repo_root,
             runner,
+            item_cache: Mutex::new(None),
         }
-    }
-
-    fn title_prefix(&self, project: &ProjectIdentity) -> Result<String> {
-        let project_id = project.require_project_id()?;
-        Ok(format!("shk:{project_id}:{}:", self.kind.segment()))
-    }
-
-    fn item_title(&self, project: &ProjectIdentity, key: &str) -> Result<String> {
-        Ok(format!("{}{key}", self.title_prefix(project)?))
     }
 
     fn ensure_op_version(&self) -> Result<()> {
@@ -942,27 +918,101 @@ impl OnePasswordSecretStore {
         Ok(())
     }
 
-    fn run_json(&self, args: &[&str]) -> Result<serde_json::Value> {
-        let mut full_args = args.to_vec();
-        full_args.push("--format");
-        full_args.push("json");
-        let output = self.runner.run(&self.op_path, &full_args)?;
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.trim().is_empty() {
-                return Ok(serde_json::Value::Null);
-            }
-            return serde_json::from_str(stdout.trim())
-                .with_context(|| format!("parse 1Password JSON from `{}`", args.join(" ")));
+    fn list_items(&self, policy: ItemCachePolicy) -> Result<Arc<[OnePasswordItemSummary]>> {
+        let mut cache = self
+            .item_cache
+            .lock()
+            .map_err(|_| anyhow!("1Password item cache lock poisoned"))?;
+        if matches!(policy, ItemCachePolicy::Reuse)
+            && let Some(items) = cache.as_ref()
+        {
+            return Ok(Arc::clone(items));
         }
-        Err(map_op_failure(
-            &output,
-            &format!("run `{}`", args.join(" ")),
-        ))
+        let args = [
+            "item",
+            "list",
+            "--tags",
+            OP_TAG,
+            "--vault",
+            &self.vault,
+            "--format",
+            "json",
+        ];
+        let output = self.runner.run(&self.op_path, &args)?;
+        if !output.status.success() {
+            return Err(map_op_failure(&output, "list managed 1Password items"));
+        }
+        let items: Arc<[OnePasswordItemSummary]> =
+            if output.stdout.iter().all(u8::is_ascii_whitespace) {
+                Arc::from([])
+            } else {
+                serde_json::from_slice::<Vec<OnePasswordItemSummary>>(&output.stdout)
+                    .context("parse managed 1Password item list")?
+                    .into()
+            };
+        *cache = Some(Arc::clone(&items));
+        Ok(items)
+    }
+
+    fn invalidate_items(&self) -> Result<()> {
+        let mut cache = self
+            .item_cache
+            .lock()
+            .map_err(|_| anyhow!("1Password item cache lock poisoned"))?;
+        *cache = None;
+        Ok(())
+    }
+}
+
+struct OnePasswordSecretStore {
+    kind: StoreKind,
+    repo_root: PathBuf,
+    client: Arc<OnePasswordClient>,
+}
+
+impl OnePasswordSecretStore {
+    fn lock_purpose(&self, key: &str) -> String {
+        format!(
+            "1password:{}:{}:{key}",
+            self.client.vault,
+            self.kind.segment()
+        )
+    }
+
+    fn new(kind: StoreKind, client: Arc<OnePasswordClient>, repo_root: PathBuf) -> Self {
+        Self {
+            kind,
+            repo_root,
+            client,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_runner(
+        kind: StoreKind,
+        op_path: PathBuf,
+        vault: String,
+        repo_root: PathBuf,
+        runner: Box<dyn OpRunner>,
+    ) -> Self {
+        Self::new(
+            kind,
+            Arc::new(OnePasswordClient::with_runner(op_path, vault, runner)),
+            repo_root,
+        )
+    }
+
+    fn title_prefix(&self, project: &ProjectIdentity) -> Result<String> {
+        let project_id = project.require_project_id()?;
+        Ok(format!("shk:{project_id}:{}:", self.kind.segment()))
+    }
+
+    fn item_title(&self, project: &ProjectIdentity, key: &str) -> Result<String> {
+        Ok(format!("{}{key}", self.title_prefix(project)?))
     }
 
     fn find_item_id(&self, title: &str) -> Result<Option<String>> {
-        let mut matching_ids = self.find_item_ids(title)?;
+        let mut matching_ids = self.find_item_ids(title, ItemCachePolicy::Reuse)?;
         match matching_ids.len() {
             0 => Ok(None),
             1 => Ok(matching_ids.pop()),
@@ -972,24 +1022,21 @@ impl OnePasswordSecretStore {
         }
     }
 
-    fn find_item_ids(&self, title: &str) -> Result<Vec<String>> {
-        let value = self.run_json(&["item", "list", "--tags", OP_TAG, "--vault", &self.vault])?;
-        let Some(items) = value.as_array() else {
-            return Ok(Vec::new());
-        };
+    fn find_item_ids(&self, title: &str, policy: ItemCachePolicy) -> Result<Vec<String>> {
+        let items = self.client.list_items(policy)?;
         let mut matching_ids = Vec::new();
-        for item in items {
-            if item.get("title").and_then(|value| value.as_str()) != Some(title) {
+        for item in &*items {
+            if item.title.as_deref() != Some(title) {
                 continue;
             }
             // Items without the shk-managed category are treated as unmanaged and never
             // read, edited, or deleted, even when the tag and title match.
-            if !is_managed_op_item(item) {
+            if !item.is_managed() {
                 continue;
             }
             let id = item
-                .get("id")
-                .and_then(|value| value.as_str())
+                .id
+                .as_deref()
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| anyhow!("1Password item `{title}` has no item ID"))?;
             matching_ids.push(id.to_string());
@@ -1038,14 +1085,14 @@ impl OnePasswordSecretStore {
             Zeroizing::new(serde_json::to_vec(&template).context("serialize 1Password item JSON")?)
         };
         let args = if let Some(id) = existing_id.as_deref() {
-            vec!["item", "edit", id, "--vault", &self.vault]
+            vec!["item", "edit", id, "--vault", &self.client.vault]
         } else {
             vec![
                 "item",
                 "create",
                 "-",
                 "--vault",
-                &self.vault,
+                &self.client.vault,
                 "--format",
                 "json",
             ]
@@ -1055,9 +1102,10 @@ impl OnePasswordSecretStore {
         } else {
             "create"
         };
-        let mut output = self
-            .runner
-            .run_with_stdin(&self.op_path, &args, &template_json)?;
+        let mut output =
+            self.client
+                .runner
+                .run_with_stdin(&self.client.op_path, &args, &template_json)?;
         if !output.status.success() {
             output.stdout.zeroize();
             return Err(map_op_failure(
@@ -1067,6 +1115,7 @@ impl OnePasswordSecretStore {
         }
         if existing_id.is_some() {
             output.stdout.zeroize();
+            self.client.invalidate_items()?;
             let stored = self.get_item_value(project, key)?;
             match stored {
                 Some(current) if current == value => return Ok(()),
@@ -1091,7 +1140,7 @@ impl OnePasswordSecretStore {
         zeroize_json_strings(&mut created);
         let created_id =
             created_id.ok_or_else(|| anyhow!("created 1Password item `{title}` has no item ID"))?;
-        let mut matching_ids = match self.find_item_ids(&title) {
+        let mut matching_ids = match self.find_item_ids(&title, ItemCachePolicy::Refresh) {
             Ok(ids) => ids,
             Err(err) => {
                 return self.fail_created_item(
@@ -1105,8 +1154,8 @@ impl OnePasswordSecretStore {
             if matching_ids.iter().any(|id| id == &created_id) {
                 break;
             }
-            self.runner.wait_before_retry(*delay);
-            matching_ids = match self.find_item_ids(&title) {
+            self.client.runner.wait_before_retry(*delay);
+            matching_ids = match self.find_item_ids(&title, ItemCachePolicy::Refresh) {
                 Ok(ids) => ids,
                 Err(err) => {
                     return self.fail_created_item(
@@ -1183,7 +1232,7 @@ impl OnePasswordSecretStore {
             &self.repo_root,
             serde_json::json!({
                 "event": "env_secret_read",
-                "backend": "1password",
+                "backend": SecretStoreBackend::OnePassword.as_config_value(),
                 "store": self.kind.segment(),
                 "key": key,
                 "project_id": project.project_id,
@@ -1198,12 +1247,12 @@ impl OnePasswordSecretStore {
             "get",
             item_id,
             "--vault",
-            &self.vault,
+            &self.client.vault,
             "--format",
             "json",
             "--reveal",
         ];
-        let mut output = self.runner.run(&self.op_path, &args)?;
+        let mut output = self.client.runner.run(&self.client.op_path, &args)?;
         if output.status.success() {
             let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout);
             output.stdout.zeroize();
@@ -1214,6 +1263,7 @@ impl OnePasswordSecretStore {
         output.stdout.zeroize();
         let stderr = String::from_utf8_lossy(&output.stderr);
         if is_op_not_found(&stderr) {
+            self.client.invalidate_items()?;
             return Ok(None);
         }
         Err(map_op_failure(
@@ -1231,27 +1281,31 @@ impl OnePasswordSecretStore {
     }
 
     fn delete_item_by_id(&self, item_id: &str, title: &str) -> Result<()> {
-        let args = ["item", "delete", item_id, "--vault", &self.vault];
-        let mut output = self.runner.run(&self.op_path, &args)?;
+        let args = ["item", "delete", item_id, "--vault", &self.client.vault];
+        let mut output = self.client.runner.run(&self.client.op_path, &args)?;
         for delay in OP_CONFLICT_RETRY_DELAYS {
             if output.status.success() {
+                self.client.invalidate_items()?;
                 return Ok(());
             }
             let stderr = String::from_utf8_lossy(&output.stderr);
             if is_op_not_found(&stderr) {
+                self.client.invalidate_items()?;
                 return Ok(());
             }
             if !is_op_conflict(&stderr) {
                 break;
             }
-            self.runner.wait_before_retry(*delay);
-            output = self.runner.run(&self.op_path, &args)?;
+            self.client.runner.wait_before_retry(*delay);
+            output = self.client.runner.run(&self.client.op_path, &args)?;
         }
         if output.status.success() {
+            self.client.invalidate_items()?;
             return Ok(());
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
         if is_op_not_found(&stderr) {
+            self.client.invalidate_items()?;
             return Ok(());
         }
         Err(map_op_failure(
@@ -1259,17 +1313,6 @@ impl OnePasswordSecretStore {
             &format!("delete 1Password item `{title}`"),
         ))
     }
-}
-
-fn is_managed_op_item(item: &serde_json::Value) -> bool {
-    if item.get("category").and_then(|value| value.as_str()) != Some(OP_CATEGORY) {
-        return false;
-    }
-    // `op item list --tags shk` also matches nested sub-tags such as `shk/foo`,
-    // so require an exact `shk` tag in the item's tag list.
-    item.get("tags")
-        .and_then(|value| value.as_array())
-        .is_some_and(|tags| tags.iter().any(|tag| tag.as_str() == Some(OP_TAG)))
 }
 
 fn zeroize_json_strings(value: &mut serde_json::Value) {
@@ -1309,7 +1352,7 @@ impl SecretStore for OnePasswordSecretStore {
     fn put(&self, project: &ProjectIdentity, key: &str, value: &str) -> Result<()> {
         with_secret_store_lock(project, &self.lock_purpose(key), || {
             self.put_item(project, key, value)
-                .with_context(|| format!("store {key} in 1Password vault {}", self.vault))
+                .with_context(|| format!("store {key} in 1Password vault {}", self.client.vault))
         })
     }
 
@@ -1320,22 +1363,19 @@ impl SecretStore for OnePasswordSecretStore {
     fn delete(&self, project: &ProjectIdentity, key: &str) -> Result<()> {
         with_secret_store_lock(project, &self.lock_purpose(key), || {
             self.delete_item(project, key)
-                .with_context(|| format!("delete {key} from 1Password vault {}", self.vault))
+                .with_context(|| format!("delete {key} from 1Password vault {}", self.client.vault))
         })
     }
 
     fn list_keys(&self, project: &ProjectIdentity) -> Result<BTreeSet<String>> {
         let prefix = self.title_prefix(project)?;
-        let value = self.run_json(&["item", "list", "--tags", OP_TAG, "--vault", &self.vault])?;
-        let Some(items) = value.as_array() else {
-            return Ok(BTreeSet::new());
-        };
+        let items = self.client.list_items(ItemCachePolicy::Reuse)?;
         let mut keys = BTreeSet::new();
-        for item in items {
-            if !is_managed_op_item(item) {
+        for item in &*items {
+            if !item.is_managed() {
                 continue;
             }
-            let Some(title) = item.get("title").and_then(|v| v.as_str()) else {
+            let Some(title) = item.title.as_deref() else {
                 continue;
             };
             if let Some(key) = title.strip_prefix(&prefix) {
@@ -1361,8 +1401,9 @@ impl SecretStore for OnePasswordSecretStore {
             if current.as_str() != expected {
                 return Ok(false);
             }
-            self.delete_item(project, key)
-                .with_context(|| format!("roll back {key} from 1Password vault {}", self.vault))?;
+            self.delete_item(project, key).with_context(|| {
+                format!("roll back {key} from 1Password vault {}", self.client.vault)
+            })?;
             Ok(true)
         })
     }
@@ -1370,7 +1411,10 @@ impl SecretStore for OnePasswordSecretStore {
 
 pub fn collect_onepassword_doctor_status(policy: &Policy) -> Result<OnePasswordDoctorStatus> {
     let mut status = OnePasswordDoctorStatus {
-        configured: policy.env.secret_store == "1password",
+        configured: matches!(
+            policy.env.secret_store.parse(),
+            Ok(SecretStoreBackend::OnePassword)
+        ),
         ..Default::default()
     };
     if !status.configured {
@@ -1934,6 +1978,55 @@ mod tests {
     }
 
     #[test]
+    fn onepassword_stores_share_one_cached_item_listing() {
+        let listing = r#"[
+            {"id":"native-id","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]},
+            {"id":"dotenvx-id","title":"shk:acme/backend:dotenvx:DOTENV_PRIVATE_KEY_PRODUCTION","category":"API_CREDENTIAL","tags":["shk"]}
+        ]"#;
+        let (runner, calls) = RecordingOpRunner::new(vec![
+            Ok(ok_output(listing)),
+            Ok(ok_output(
+                r#"{"fields":[{"label":"credential","type":"CONCEALED","value":"native-value"}]}"#,
+            )),
+            Ok(ok_output(
+                r#"{"fields":[{"label":"credential","type":"CONCEALED","value":"dotenvx-value"}]}"#,
+            )),
+        ]);
+        let client = Arc::new(OnePasswordClient::with_runner(
+            PathBuf::from("/usr/local/bin/op"),
+            "vault".to_string(),
+            Box::new(runner),
+        ));
+        let native = OnePasswordSecretStore::new(
+            StoreKind::NativeEnv,
+            Arc::clone(&client),
+            PathBuf::from("/repo"),
+        );
+        let dotenvx =
+            OnePasswordSecretStore::new(StoreKind::Dotenvx, client, PathBuf::from("/repo"));
+
+        assert_eq!(
+            native.get(&sample_project(), "DOTENV_PRIVATE_KEY").unwrap(),
+            Some("native-value".to_string())
+        );
+        assert_eq!(
+            dotenvx
+                .get(&sample_project(), "DOTENV_PRIVATE_KEY_PRODUCTION")
+                .unwrap(),
+            Some("dotenvx-value".to_string())
+        );
+
+        let recorded = calls.lock().unwrap();
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|args| args.starts_with(&["item".to_string(), "list".to_string()]))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn onepassword_get_rejects_missing_or_invalid_credentials() {
         for item_body in [
             r#"{"fields":[]}"#,
@@ -1985,7 +2078,7 @@ mod tests {
 
     #[test]
     fn onepassword_get_maps_not_found_to_none() {
-        let (runner, _calls) = RecordingOpRunner::new(vec![
+        let (runner, calls) = RecordingOpRunner::new(vec![
             Ok(ok_output(
                 r#"[{"id":"item-id","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#,
             )),
@@ -1994,6 +2087,7 @@ mod tests {
                 stdout: Vec::new(),
                 stderr: b"item isn't an item in this vault".to_vec(),
             }),
+            Ok(ok_output("[]")),
         ]);
         let store = OnePasswordSecretStore::with_runner(
             StoreKind::NativeEnv,
@@ -2007,6 +2101,20 @@ mod tests {
                 .get(&sample_project(), "DOTENV_PRIVATE_KEY")
                 .unwrap()
                 .is_none()
+        );
+        assert!(
+            store
+                .get(&sample_project(), "DOTENV_PRIVATE_KEY")
+                .unwrap()
+                .is_none()
+        );
+        let recorded = calls.lock().unwrap();
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|args| args.starts_with(&["item".to_string(), "list".to_string()]))
+                .count(),
+            2
         );
     }
 
@@ -2122,7 +2230,6 @@ mod tests {
             Ok(ok_output(
                 r#"{"fields":[{"label":"credential","type":"CONCEALED","value":"expected"}]}"#,
             )),
-            Ok(ok_output(listing)),
             Ok(ok_output("{}")),
         ]);
         let store = OnePasswordSecretStore::with_runner(
@@ -2139,7 +2246,7 @@ mod tests {
                 .unwrap()
         );
         let recorded = calls.lock().unwrap();
-        assert_eq!(&recorded[3][..3], ["item", "delete", "stable-item-id"]);
+        assert_eq!(&recorded[2][..3], ["item", "delete", "stable-item-id"]);
     }
 
     #[test]
@@ -2244,8 +2351,7 @@ mod tests {
     #[test]
     fn onepassword_get_and_delete_skip_unmanaged_same_title_item() {
         let unmanaged = r#"[{"id":"unrelated-item","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"LOGIN"}]"#;
-        let (runner, calls) =
-            RecordingOpRunner::new(vec![Ok(ok_output(unmanaged)), Ok(ok_output(unmanaged))]);
+        let (runner, calls) = RecordingOpRunner::new(vec![Ok(ok_output(unmanaged))]);
         let store = OnePasswordSecretStore::with_runner(
             StoreKind::NativeEnv,
             PathBuf::from("/usr/local/bin/op"),
@@ -2262,8 +2368,47 @@ mod tests {
         store
             .delete(&sample_project(), "DOTENV_PRIVATE_KEY")
             .unwrap();
-        // Only the two `item list` calls; no `item get` / `item delete` reached the runner.
-        assert_eq!(calls.lock().unwrap().len(), 2);
+        // The cached listing is reused; no `item get` / `item delete` reaches the runner.
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn onepassword_delete_not_found_invalidates_cached_listing() {
+        let listing = r#"[{"id":"item-id","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#;
+        let (runner, calls) = RecordingOpRunner::new(vec![
+            Ok(ok_output(listing)),
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(1),
+                stdout: Vec::new(),
+                stderr: b"item not found".to_vec(),
+            }),
+            Ok(ok_output("[]")),
+        ]);
+        let store = OnePasswordSecretStore::with_runner(
+            StoreKind::NativeEnv,
+            PathBuf::from("/usr/local/bin/op"),
+            "vault".to_string(),
+            PathBuf::from("/repo"),
+            Box::new(runner),
+        );
+
+        store
+            .delete(&sample_project(), "DOTENV_PRIVATE_KEY")
+            .unwrap();
+        assert!(
+            store
+                .get(&sample_project(), "DOTENV_PRIVATE_KEY")
+                .unwrap()
+                .is_none()
+        );
+        let recorded = calls.lock().unwrap();
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|args| args.starts_with(&["item".to_string(), "list".to_string()]))
+                .count(),
+            2
+        );
     }
 
     #[test]

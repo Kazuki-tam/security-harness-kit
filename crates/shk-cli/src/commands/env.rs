@@ -3,8 +3,7 @@ use crate::args::{
     EnvKeyExportArgs, EnvKeyImportArgs, EnvKeyMigrateArgs, EnvRunArgs,
 };
 use crate::env_store::{
-    EnvStores, ProjectIdentity, SecretStore, SecretStoreBackend, open_env_stores,
-    parse_secret_store_backend, with_secret_store_lock,
+    EnvStores, ProjectIdentity, SecretStore, open_env_stores, with_secret_store_lock,
 };
 use crate::exit::CliExit;
 use crate::{fs_atomic, safety};
@@ -12,7 +11,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use dialoguer::Password;
 use dotenvx::{Keypair, decrypt as dotenvx_decrypt, encrypt as dotenvx_encrypt};
 use serde::{Deserialize, Serialize};
-use shk_core::policy::Policy;
+use shk_core::policy::{Policy, SecretStoreBackend};
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -281,8 +280,12 @@ fn key_migrate_locked(
     args: EnvKeyMigrateArgs,
 ) -> Result<()> {
     let (policy, policy_path) = Policy::load_from_dir(&project_root)?;
-    let to_backend = parse_secret_store_backend(&args.to)?;
-    let source_backend = parse_secret_store_backend(&policy.env.secret_store)?;
+    let to_backend = args.to;
+    let source_backend = policy
+        .env
+        .secret_store
+        .parse()
+        .map_err(anyhow::Error::msg)?;
 
     if source_backend == to_backend {
         bail!(
@@ -291,7 +294,7 @@ fn key_migrate_locked(
         );
     }
     let mut target_policy = policy.clone();
-    target_policy.env.secret_store = args.to.clone();
+    target_policy.env.secret_store = to_backend.as_config_value().to_string();
     target_policy.validate_env_config(&project_root)?;
 
     let source_stores = open_env_stores(&project, &policy)?;
@@ -324,7 +327,7 @@ fn key_migrate_locked(
 
     if let Some(path) = policy_path {
         let update_result = safety::ensure_write_path_within(&project_root, &path)
-            .and_then(|()| update_policy_secret_store(&path, &args.to));
+            .and_then(|()| update_policy_secret_store(&path, to_backend.as_config_value()));
         if let Err(err) = update_result {
             if migrated > 0 {
                 let rollback = rollback_migration_copy(

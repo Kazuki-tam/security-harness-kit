@@ -426,7 +426,54 @@ pub struct DoctorSection {
 }
 
 fn default_env_secret_store() -> String {
-    "keyring".to_string()
+    SecretStoreBackend::default().as_config_value().to_string()
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum SecretStoreBackend {
+    #[default]
+    Keyring,
+    OnePassword,
+}
+
+impl SecretStoreBackend {
+    pub const ALL: [Self; 2] = [Self::Keyring, Self::OnePassword];
+
+    pub const fn as_config_value(self) -> &'static str {
+        match self {
+            Self::Keyring => "keyring",
+            Self::OnePassword => "1password",
+        }
+    }
+
+    pub fn supported_config_values() -> String {
+        Self::ALL
+            .iter()
+            .map(|backend| backend.as_config_value())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+impl std::fmt::Display for SecretStoreBackend {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_config_value())
+    }
+}
+
+impl std::str::FromStr for SecretStoreBackend {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
+            "keyring" => Ok(Self::Keyring),
+            "1password" => Ok(Self::OnePassword),
+            other => Err(format!(
+                "unsupported secret store backend `{other}`; supported: {}",
+                Self::supported_config_values()
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -539,9 +586,9 @@ impl Policy {
 
     /// Validate `[env]` settings for the configured secret store backend.
     pub fn validate_env_config(&self, root: &Path) -> Result<()> {
-        match self.env.secret_store.as_str() {
-            "keyring" => Ok(()),
-            "1password" => {
+        match self.env.secret_store.parse::<SecretStoreBackend>() {
+            Ok(SecretStoreBackend::Keyring) => Ok(()),
+            Ok(SecretStoreBackend::OnePassword) => {
                 if self
                     .env
                     .project_id
@@ -588,8 +635,10 @@ impl Policy {
                 }
                 Ok(())
             }
-            other => anyhow::bail!(
-                "unsupported env.secret_store `{other}`; supported: keyring, 1password"
+            Err(_) => anyhow::bail!(
+                "unsupported env.secret_store `{}`; supported: {}",
+                self.env.secret_store,
+                SecretStoreBackend::supported_config_values()
             ),
         }
     }
@@ -1066,6 +1115,22 @@ format = "dotenv"
         assert_eq!(policy.env.secret_store, "keyring");
         assert!(policy.env.project_id.is_none());
         assert!(policy.env.onepassword.vault.is_none());
+    }
+
+    #[test]
+    fn secret_store_backend_defines_supported_config_values() {
+        assert_eq!(
+            SecretStoreBackend::ALL.map(SecretStoreBackend::as_config_value),
+            ["keyring", "1password"]
+        );
+        assert_eq!(
+            "1password".parse::<SecretStoreBackend>().unwrap(),
+            SecretStoreBackend::OnePassword
+        );
+        assert_eq!(
+            "unknown".parse::<SecretStoreBackend>().unwrap_err(),
+            "unsupported secret store backend `unknown`; supported: keyring, 1password"
+        );
     }
 
     #[test]
