@@ -7,6 +7,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use tempfile::NamedTempFile;
+use zeroize::{Zeroize, Zeroizing};
 
 const DOTENVX_SERVICE: &str = "security-harness-kit/dotenvx";
 const DOTENVX_INDEX_KEY: &str = "__index";
@@ -14,6 +15,7 @@ const SHK_ENV_SERVICE: &str = "security-harness-kit/env";
 const SHK_OP_PATH_ENV: &str = "SHK_OP_PATH";
 const MIN_OP_VERSION: &str = "2.24.0";
 const OP_TAG: &str = "shk";
+const OP_CATEGORY: &str = "API_CREDENTIAL";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreKind {
@@ -468,13 +470,18 @@ impl OnePasswordSecretStore {
     }
 
     fn find_item_id(&self, title: &str) -> Result<Option<String>> {
-        let value = self.run_json(&["item", "list", "--vault", &self.vault])?;
+        let value = self.run_json(&["item", "list", "--tags", OP_TAG, "--vault", &self.vault])?;
         let Some(items) = value.as_array() else {
             return Ok(None);
         };
         let mut matching_ids = Vec::new();
         for item in items {
             if item.get("title").and_then(|value| value.as_str()) != Some(title) {
+                continue;
+            }
+            // Items without the shk-managed category are treated as unmanaged and never
+            // read, edited, or deleted, even when the tag and title match.
+            if !is_managed_op_item(item) {
                 continue;
             }
             let id = item
@@ -496,17 +503,17 @@ impl OnePasswordSecretStore {
     fn put_item(&self, project: &ProjectIdentity, key: &str, value: &str) -> Result<()> {
         let title = self.item_title(project, key)?;
         let existing_id = self.find_item_id(&title)?;
-        let template = serde_json::json!({
-            "title": title,
-            "tags": [OP_TAG],
-            "category": "API_CREDENTIAL",
-            "fields": [{
-                "label": "credential",
-                "type": "CONCEALED",
-                "value": value,
+        let template = OnePasswordItemTemplate {
+            title: &title,
+            tags: [OP_TAG],
+            category: OP_CATEGORY,
+            fields: [OnePasswordItemField {
+                label: "credential",
+                field_type: "CONCEALED",
+                value,
             }],
-        });
-        let mut tmp = write_temp_json(&template)?;
+        };
+        let (mut tmp, template_len) = write_temp_json(&template)?;
         let template_path = tmp.path().to_string_lossy().to_string();
         let args = if let Some(id) = existing_id.as_deref() {
             vec![
@@ -534,8 +541,9 @@ impl OnePasswordSecretStore {
             "create"
         };
         let result = self.runner.run(&self.op_path, &args);
-        zero_temp_file(&mut tmp, template.to_string().len())?;
-        let output = result?;
+        zero_temp_file(&mut tmp, template_len)?;
+        let mut output = result?;
+        output.stdout.zeroize();
         if output.status.success() {
             return Ok(());
         }
@@ -560,10 +568,20 @@ impl OnePasswordSecretStore {
             "label=credential",
             "--reveal",
         ];
-        let output = self.runner.run(&self.op_path, &args)?;
+        let mut output = self.runner.run(&self.op_path, &args)?;
         if output.status.success() {
-            let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let mut stdout = Zeroizing::new(std::mem::take(&mut output.stdout));
+            let mut value = match String::from_utf8(std::mem::take(&mut *stdout)) {
+                Ok(value) => value,
+                Err(err) => {
+                    let mut bytes = err.into_bytes();
+                    bytes.zeroize();
+                    bail!("1Password returned a non-UTF-8 credential value");
+                }
+            };
+            value.truncate(value.trim_end().len());
             if value.is_empty() {
+                value.zeroize();
                 return Ok(None);
             }
             let _ = audit_log::append_line(
@@ -578,6 +596,9 @@ impl OnePasswordSecretStore {
             );
             return Ok(Some(value));
         }
+        // `--reveal` may emit (partial) credential output even when the command
+        // ultimately fails; zero it before entering any failure branch.
+        output.stdout.zeroize();
         let stderr = String::from_utf8_lossy(&output.stderr);
         if is_op_not_found(&stderr) {
             return Ok(None);
@@ -609,6 +630,33 @@ impl OnePasswordSecretStore {
     }
 }
 
+fn is_managed_op_item(item: &serde_json::Value) -> bool {
+    if item.get("category").and_then(|value| value.as_str()) != Some(OP_CATEGORY) {
+        return false;
+    }
+    // `op item list --tags shk` also matches nested sub-tags such as `shk/foo`,
+    // so require an exact `shk` tag in the item's tag list.
+    item.get("tags")
+        .and_then(|value| value.as_array())
+        .is_some_and(|tags| tags.iter().any(|tag| tag.as_str() == Some(OP_TAG)))
+}
+
+#[derive(Serialize)]
+struct OnePasswordItemTemplate<'a> {
+    title: &'a str,
+    tags: [&'static str; 1],
+    category: &'static str,
+    fields: [OnePasswordItemField<'a>; 1],
+}
+
+#[derive(Serialize)]
+struct OnePasswordItemField<'a> {
+    label: &'static str,
+    #[serde(rename = "type")]
+    field_type: &'static str,
+    value: &'a str,
+}
+
 impl SecretStore for OnePasswordSecretStore {
     fn put(&self, project: &ProjectIdentity, key: &str, value: &str) -> Result<()> {
         self.put_item(project, key, value)
@@ -632,6 +680,9 @@ impl SecretStore for OnePasswordSecretStore {
         };
         let mut keys = BTreeSet::new();
         for item in items {
+            if !is_managed_op_item(item) {
+                continue;
+            }
             let Some(title) = item.get("title").and_then(|v| v.as_str()) else {
                 continue;
             };
@@ -718,14 +769,16 @@ pub struct OnePasswordDoctorStatus {
     pub op_resolution_error: Option<String>,
 }
 
-fn write_temp_json(value: &serde_json::Value) -> Result<NamedTempFile> {
+fn write_temp_json(value: &impl Serialize) -> Result<(NamedTempFile, usize)> {
     let mut tmp = NamedTempFile::new().context("create temporary 1Password template file")?;
-    let bytes = serde_json::to_vec(value).context("serialize 1Password template JSON")?;
+    let bytes =
+        Zeroizing::new(serde_json::to_vec(value).context("serialize 1Password template JSON")?);
+    let len = bytes.len();
     tmp.write_all(&bytes)
         .context("write temporary 1Password template file")?;
     tmp.flush()
         .context("flush temporary 1Password template file")?;
-    Ok(tmp)
+    Ok((tmp, len))
 }
 
 fn zero_temp_file(tmp: &mut NamedTempFile, len: usize) -> Result<()> {
@@ -991,7 +1044,7 @@ mod tests {
     fn onepassword_get_rejects_generic_not_found_errors() {
         let (runner, _calls) = RecordingOpRunner::new(vec![
             Ok(ok_output(
-                r#"[{"id":"item-id","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY"}]"#,
+                r#"[{"id":"item-id","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#,
             )),
             Ok(Output {
                 status: std::process::ExitStatus::from_raw(1),
@@ -1013,7 +1066,7 @@ mod tests {
     fn onepassword_get_maps_not_found_to_none() {
         let (runner, _calls) = RecordingOpRunner::new(vec![
             Ok(ok_output(
-                r#"[{"id":"item-id","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY"}]"#,
+                r#"[{"id":"item-id","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#,
             )),
             Ok(Output {
                 status: std::process::ExitStatus::from_raw(1),
@@ -1057,6 +1110,11 @@ mod tests {
                 .iter()
                 .all(|call| !call.join(" ").contains("demo-value"))
         );
+        assert!(
+            recorded[0]
+                .windows(2)
+                .any(|args| args == ["--tags", OP_TAG])
+        );
         assert!(recorded[1].contains(&"--template".to_string()));
         assert_eq!(&recorded[1][..2], ["item", "create"]);
     }
@@ -1065,7 +1123,7 @@ mod tests {
     fn onepassword_put_edits_existing_item_by_id() {
         let (runner, calls) = RecordingOpRunner::new(vec![
             Ok(ok_output(
-                r#"[{"id":"stable-item-id","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY"}]"#,
+                r#"[{"id":"stable-item-id","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#,
             )),
             Ok(ok_output("{}")),
         ]);
@@ -1086,7 +1144,7 @@ mod tests {
     #[test]
     fn onepassword_put_rejects_duplicate_titles() {
         let (runner, _calls) = RecordingOpRunner::new(vec![Ok(ok_output(
-            r#"[{"id":"item-a","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY"},{"id":"item-b","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY"}]"#,
+            r#"[{"id":"item-a","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]},{"id":"item-b","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#,
         ))]);
         let store = OnePasswordSecretStore::with_runner(
             StoreKind::NativeEnv,
@@ -1104,9 +1162,137 @@ mod tests {
     }
 
     #[test]
+    fn onepassword_put_never_edits_same_title_item_with_unmanaged_category() {
+        let (runner, calls) = RecordingOpRunner::new(vec![
+            Ok(ok_output(
+                r#"[{"id":"unrelated-item","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"LOGIN"}]"#,
+            )),
+            Ok(ok_output("{}")),
+        ]);
+        let store = OnePasswordSecretStore::with_runner(
+            StoreKind::NativeEnv,
+            PathBuf::from("/usr/local/bin/op"),
+            "vault".to_string(),
+            PathBuf::from("/repo"),
+            Box::new(runner),
+        );
+        store
+            .put(&sample_project(), "DOTENV_PRIVATE_KEY", "demo-value")
+            .unwrap();
+        let recorded = calls.lock().unwrap();
+        assert_eq!(&recorded[1][..2], ["item", "create"]);
+        assert!(!recorded[1].contains(&"unrelated-item".to_string()));
+    }
+
+    #[test]
+    fn onepassword_get_and_delete_skip_unmanaged_same_title_item() {
+        let unmanaged = r#"[{"id":"unrelated-item","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"LOGIN"}]"#;
+        let (runner, calls) =
+            RecordingOpRunner::new(vec![Ok(ok_output(unmanaged)), Ok(ok_output(unmanaged))]);
+        let store = OnePasswordSecretStore::with_runner(
+            StoreKind::NativeEnv,
+            PathBuf::from("/usr/local/bin/op"),
+            "vault".to_string(),
+            PathBuf::from("/repo"),
+            Box::new(runner),
+        );
+        assert!(
+            store
+                .get(&sample_project(), "DOTENV_PRIVATE_KEY")
+                .unwrap()
+                .is_none()
+        );
+        store
+            .delete(&sample_project(), "DOTENV_PRIVATE_KEY")
+            .unwrap();
+        // Only the two `item list` calls; no `item get` / `item delete` reached the runner.
+        assert_eq!(calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn onepassword_ignores_items_with_only_sub_tags() {
+        // `op item list --tags shk` also returns items tagged only `shk/foo`;
+        // those must not be treated as shk-managed.
+        let sub_tag_only = r#"[{"id":"sub-tag-item","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk/foo"]}]"#;
+        let (runner, calls) =
+            RecordingOpRunner::new(vec![Ok(ok_output(sub_tag_only)), Ok(ok_output("{}"))]);
+        let store = OnePasswordSecretStore::with_runner(
+            StoreKind::NativeEnv,
+            PathBuf::from("/usr/local/bin/op"),
+            "vault".to_string(),
+            PathBuf::from("/repo"),
+            Box::new(runner),
+        );
+        store
+            .put(&sample_project(), "DOTENV_PRIVATE_KEY", "demo-value")
+            .unwrap();
+        let recorded = calls.lock().unwrap();
+        assert_eq!(&recorded[1][..2], ["item", "create"]);
+        assert!(!recorded[1].contains(&"sub-tag-item".to_string()));
+    }
+
+    #[test]
+    fn onepassword_get_zeroes_stdout_on_failure_paths() {
+        // Failure after `--reveal` may leave (partial) secret bytes in stdout;
+        // both the not-found and generic-failure branches must complete without
+        // surfacing them (zeroization itself is not observable here, but the
+        // branches must be exercised with non-empty stdout).
+        let listing = r#"[{"id":"item-id","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#;
+        let (runner, _calls) = RecordingOpRunner::new(vec![
+            Ok(ok_output(listing)),
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(1),
+                stdout: b"partial-secret".to_vec(),
+                stderr: b"item isn't an item in this vault".to_vec(),
+            }),
+            Ok(ok_output(listing)),
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(1),
+                stdout: b"partial-secret".to_vec(),
+                stderr: b"vault not found".to_vec(),
+            }),
+        ]);
+        let store = OnePasswordSecretStore::with_runner(
+            StoreKind::NativeEnv,
+            PathBuf::from("/usr/local/bin/op"),
+            "vault".to_string(),
+            PathBuf::from("/repo"),
+            Box::new(runner),
+        );
+        assert!(
+            store
+                .get(&sample_project(), "DOTENV_PRIVATE_KEY")
+                .unwrap()
+                .is_none()
+        );
+        let err = store
+            .get(&sample_project(), "DOTENV_PRIVATE_KEY")
+            .unwrap_err();
+        assert!(!format!("{err:#}").contains("partial-secret"));
+    }
+
+    #[test]
+    fn onepassword_list_keys_skips_unmanaged_categories() {
+        let (runner, _calls) = RecordingOpRunner::new(vec![Ok(ok_output(
+            r#"[{"title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]},{"title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY_STAGING","category":"LOGIN"}]"#,
+        ))]);
+        let store = OnePasswordSecretStore::with_runner(
+            StoreKind::NativeEnv,
+            PathBuf::from("/usr/local/bin/op"),
+            "vault".to_string(),
+            PathBuf::from("/repo"),
+            Box::new(runner),
+        );
+        assert_eq!(
+            store.list_keys(&sample_project()).unwrap(),
+            BTreeSet::from(["DOTENV_PRIVATE_KEY".to_string()])
+        );
+    }
+
+    #[test]
     fn onepassword_list_keys_filters_by_project_prefix() {
         let (runner, _calls) = RecordingOpRunner::new(vec![Ok(ok_output(
-            r#"[{"title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY"},{"title":"shk:other:env:DOTENV_PRIVATE_KEY"}]"#,
+            r#"[{"title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]},{"title":"shk:other:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#,
         ))]);
         let store = OnePasswordSecretStore::with_runner(
             StoreKind::NativeEnv,

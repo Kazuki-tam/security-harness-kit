@@ -576,7 +576,8 @@ pub fn key_export(cwd: &Path, args: EnvKeyExportArgs) -> Result<()> {
             &private_key_name,
             &args.env,
             args.key.as_deref(),
-            status
+            status,
+            stores.backend,
         )
     );
     Ok(())
@@ -922,18 +923,24 @@ fn key_export_instructions(
     env: &str,
     exact_key: Option<&str>,
     status: KeyStoreStatus,
+    backend: SecretStoreBackend,
 ) -> String {
     let import_cmd = match exact_key {
         Some(key) => format!("shk env key import --key {key}"),
         None if env.eq_ignore_ascii_case("default") => "shk env key import".to_string(),
         None => format!("shk env key import --env {env}"),
     };
+    let backend_label = match backend {
+        SecretStoreBackend::Keyring => "shk native OS credential store",
+        SecretStoreBackend::OnePassword => "configured 1Password vault",
+    };
     let status = match status {
-        KeyStoreStatus::Native => "found in the shk native OS credential store",
+        KeyStoreStatus::Native => format!("found in the {backend_label}"),
         KeyStoreStatus::DotenvxImported => {
             "found as an imported dotenvx key; running a native env command can adopt it"
+                .to_string()
         }
-        KeyStoreStatus::Missing => "not found on this machine",
+        KeyStoreStatus::Missing => format!("not found in the {backend_label}"),
     };
 
     format!(
@@ -947,7 +954,7 @@ Local team handoff:\n\
    {import_cmd}\n\n\
 For stdin-based imports from a password manager CLI:\n\n\
    <password-manager-read-command> | {import_cmd} --stdin\n\n\
-If the only copy is in your OS credential store, retrieve it using your approved OS or vault workflow; shk does not print private keys.\n\
+If the only copy is in the {backend_label}, retrieve it using your approved credential-store workflow; shk does not print private keys.\n\
 Avoid committing .env.keys, pasting private keys into issue trackers, or sending keys in public channels.\n\
 This command intentionally does not print raw key material.",
         project_root.display()
@@ -2201,6 +2208,7 @@ mod tests {
             "default",
             None,
             KeyStoreStatus::Missing,
+            SecretStoreBackend::Keyring,
         );
         assert!(
             default_body.contains("shk env key import"),
@@ -2217,12 +2225,15 @@ mod tests {
             "production",
             None,
             KeyStoreStatus::Native,
+            SecretStoreBackend::OnePassword,
         );
 
         assert!(
             body.contains("shk env key import --env production"),
             "{body}"
         );
+        assert!(body.contains("configured 1Password vault"), "{body}");
+        assert!(!body.contains("OS credential store"), "{body}");
         assert!(body.contains("does not print raw key material"), "{body}");
         assert!(!body.contains(&keypair.private_key()), "{body}");
     }
