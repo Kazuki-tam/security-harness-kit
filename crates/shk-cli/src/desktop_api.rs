@@ -2624,8 +2624,9 @@ mod tests {
         assert!(settings.contains("\"permissions\""), "{settings}");
         assert!(settings.contains("--hook-mode claude-code"), "{settings}");
         let parsed: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        let canonical_root = fs::canonicalize(dir.path()).unwrap();
         assert!(
-            json_string_contains(&parsed, &dir.path().to_string_lossy()),
+            json_string_contains(&parsed, &canonical_root.to_string_lossy()),
             "trusted project root missing: {settings}"
         );
     }
