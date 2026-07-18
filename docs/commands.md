@@ -433,6 +433,8 @@ op read "op://Project/prod/DOTENV_PRIVATE_KEY_PRODUCTION" \
 
 Copy env private keys from the backend configured in `shk.toml` to another backend and update `env.secret_store` on success.
 
+Migrating to or using the 1Password backend requires the [1Password CLI (`op`)](https://www.1password.dev/cli/get-started), version `2.24.0` or later, and an authenticated `op` session. Run `op --version`, `op whoami`, and `shk doctor env` to verify the prerequisite before migration. Migrating to the keyring does not require `op` for the destination, but `op` must still be available to read keys when the current source backend is 1Password.
+
 ```bash
 # Typical keyring → 1Password rollout
 # 1. Set project_id and vault in shk.toml while secret_store stays "keyring"
@@ -462,7 +464,7 @@ Flow on success:
 2. Update `shk.toml` to set `env.secret_store` to `--to` when a policy file exists.
 3. With `--delete-source`, delete the migrated keys from the source backend using the already-open source stores.
 
-If `--delete-source` fails after step 2, destination keys remain available and the error message explains how to retry cleanup.
+If `--delete-source` fails after step 2, destination keys remain available and the error message directs you to remove any remaining source keys manually.
 
 See [Configuration](configuration.md#env-secret-store) for `[env]` / `[env.onepassword]` settings and the 1Password threat model notes in the README.
 

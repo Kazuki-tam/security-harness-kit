@@ -188,11 +188,23 @@ The `strict` profile also blocks opaque execution forms such as `bash -c`, `sh -
 
 `shk env` stores dotenv private keys outside the repository. By default it uses the **OS keyring** (macOS Keychain, Windows Credential Manager, or Linux Secret Service / keyutils). Teams can opt in to **1Password** for shared vault distribution, centralized revocation, and Business audit logs.
 
+The 1Password backend requires the [1Password CLI (`op`)](https://www.1password.dev/cli/get-started), version `2.24.0` or later. Install and sign in to `op` before enabling the backend. Confirm the setup with:
+
+```bash
+op --version
+op whoami
+shk doctor env
+```
+
+The default keyring backend does not require the 1Password CLI.
+
 ```toml
 # Default: local OS keyring (no extra dependencies).
 [env]
 secret_store = "keyring"
+```
 
+```toml
 # Opt in to 1Password for team vault sharing.
 # Keep secret_store = "keyring" until `shk env key migrate --to 1password` succeeds.
 [env]

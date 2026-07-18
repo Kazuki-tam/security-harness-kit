@@ -244,6 +244,8 @@ See [Configuration](docs/configuration.md) for the full `shk.toml` reference, cu
 
 By default, `shk env` stores dotenv private keys in the **OS keyring** (local, zero extra dependencies). Teams can opt in to **1Password** for shared vault distribution, centralized revocation, and Business audit logs:
 
+> **Prerequisite:** The 1Password backend requires the [1Password CLI (`op`)](https://www.1password.dev/cli/get-started), version 2.24.0 or later. Install it, connect it to the 1Password app or sign in, then verify it with `op --version` and `op whoami` before enabling this backend. The default keyring backend does not require `op`.
+
 ```toml
 # Keep secret_store = "keyring" until after `shk env key migrate --to 1password`.
 [env]
