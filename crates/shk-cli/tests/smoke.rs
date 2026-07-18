@@ -17,6 +17,13 @@ fn shk_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_shk"))
 }
 
+fn canonical_path_text(path: &Path) -> String {
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn synthetic_openai_key(seed: char) -> String {
     format!("sk-proj-{seed}bcdefghijklmnopqrstuvwxyz0123456789")
 }
@@ -2369,7 +2376,7 @@ fn hooks_install_ai_antigravity_writes_managed_pre_and_post_hooks() {
         pre[0]["hooks"][0]["command"]
             .as_str()
             .unwrap_or_default()
-            .contains(&dir.path().to_string_lossy().to_string()),
+            .contains(&canonical_path_text(dir.path())),
         "trusted project root missing: {pre:?}"
     );
     assert!(
@@ -2397,7 +2404,7 @@ fn hooks_install_ai_antigravity_writes_managed_pre_and_post_hooks() {
     let post_cmd = post[0]["hooks"][0]["command"].as_str().unwrap_or_default();
     assert!(
         post_cmd.contains("--hook-mode antigravity")
-            && post_cmd.contains(&dir.path().to_string_lossy().to_string())
+            && post_cmd.contains(&canonical_path_text(dir.path()))
             && post_cmd.contains("--log-blocked")
             && post_cmd.contains("--post"),
         "{post:?}"
@@ -5403,7 +5410,7 @@ fn hooks_install_ai_windsurf_writes_cascade_hooks_and_is_idempotent() {
         let cmd = arr[0]["command"].as_str().unwrap();
         assert!(cmd.contains("--hook-mode windsurf"), "{key}: {cmd}");
         assert!(
-            cmd.contains(&dir.path().to_string_lossy().to_string()),
+            cmd.contains(&canonical_path_text(dir.path())),
             "trusted project root missing for {key}: {cmd}"
         );
         assert_eq!(arr[0]["show_output"], true, "{key}");
