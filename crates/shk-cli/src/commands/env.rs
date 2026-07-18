@@ -509,17 +509,22 @@ fn rollback_store_migration(
     entries: &[MigrationEntry],
     applied: &[usize],
 ) -> Result<()> {
+    let mut errors = Vec::new();
     for index in applied.iter().rev() {
         let entry = &entries[*index];
-        if !store.delete_if_value(project, &entry.key, entry.source_value.as_str())? {
-            bail!(
-                "destination backend cannot safely roll back key {} or the value changed; \
-                 refusing rollback deletion",
+        match store.delete_if_value(project, &entry.key, entry.source_value.as_str()) {
+            Ok(true) => {}
+            Ok(false) => errors.push(anyhow!(
+                "destination backend cannot safely roll back key {} because the value changed",
                 entry.key
-            );
+            )),
+            Err(err) => errors.push(err.context(format!(
+                "delete destination key {} during rollback",
+                entry.key
+            ))),
         }
     }
-    Ok(())
+    finish_rollback(errors)
 }
 
 fn rollback_migration_copy(
@@ -528,18 +533,37 @@ fn rollback_migration_copy(
     target_native: &dyn SecretStore,
     target_dotenvx: &dyn SecretStore,
 ) -> Result<()> {
-    rollback_store_migration(
+    let dotenvx_result = rollback_store_migration(
         target_dotenvx,
         project,
         &migration.dotenvx,
         &migration.dotenvx_applied,
-    )?;
-    rollback_store_migration(
+    );
+    let native_result = rollback_store_migration(
         target_native,
         project,
         &migration.native,
         &migration.native_applied,
+    );
+    finish_rollback(
+        [dotenvx_result, native_result]
+            .into_iter()
+            .filter_map(Result::err)
+            .collect(),
     )
+}
+
+fn finish_rollback(errors: Vec<anyhow::Error>) -> Result<()> {
+    if errors.is_empty() {
+        return Ok(());
+    }
+    let count = errors.len();
+    let details = errors
+        .into_iter()
+        .map(|err| format!("{err:#}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    bail!("{count} rollback operation(s) failed: {details}")
 }
 
 fn migration_error_with_rollback<T>(error: anyhow::Error, rollback: Result<()>) -> Result<T> {
@@ -1632,6 +1656,7 @@ fn write_output(path: &Path, body: &[u8], force: bool) -> Result<()> {
 mod tests {
     use super::*;
     use crate::env_store::{ProjectIdentity, test_support::MockSecretStore};
+    use std::sync::Mutex;
 
     fn test_project(root: &Path) -> ProjectIdentity {
         ProjectIdentity {
@@ -1691,6 +1716,53 @@ mod tests {
             key: &str,
             expected: &str,
         ) -> Result<bool> {
+            self.inner.delete_if_value(project, key, expected)
+        }
+    }
+
+    struct FailingRollbackSecretStore {
+        inner: MockSecretStore,
+        fail_key: &'static str,
+        attempts: Mutex<Vec<String>>,
+    }
+
+    impl FailingRollbackSecretStore {
+        fn new(fail_key: &'static str) -> Self {
+            Self {
+                inner: MockSecretStore::keyring(),
+                fail_key,
+                attempts: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl SecretStore for FailingRollbackSecretStore {
+        fn put(&self, project: &ProjectIdentity, key: &str, value: &str) -> Result<()> {
+            self.inner.put(project, key, value)
+        }
+
+        fn get(&self, project: &ProjectIdentity, key: &str) -> Result<Option<String>> {
+            self.inner.get(project, key)
+        }
+
+        fn delete(&self, project: &ProjectIdentity, key: &str) -> Result<()> {
+            self.inner.delete(project, key)
+        }
+
+        fn list_keys(&self, project: &ProjectIdentity) -> Result<BTreeSet<String>> {
+            self.inner.list_keys(project)
+        }
+
+        fn delete_if_value(
+            &self,
+            project: &ProjectIdentity,
+            key: &str,
+            expected: &str,
+        ) -> Result<bool> {
+            self.attempts.lock().unwrap().push(key.to_string());
+            if key == self.fail_key {
+                bail!("simulated rollback failure for {key}");
+            }
             self.inner.delete_if_value(project, key, expected)
         }
     }
@@ -2898,6 +2970,83 @@ mod tests {
                 .get(&project, "DOTENV_PRIVATE_KEY")
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn rollback_attempts_every_applied_key_after_a_delete_failure() {
+        let project = test_project(Path::new("/repo/app"));
+        let store = FailingRollbackSecretStore::new("DOTENV_PRIVATE_KEY_PRODUCTION");
+        let entries = [
+            ("DOTENV_PRIVATE_KEY", "value-a"),
+            ("DOTENV_PRIVATE_KEY_PRODUCTION", "value-b"),
+            ("DOTENV_PRIVATE_KEY_STAGING", "value-c"),
+        ]
+        .into_iter()
+        .map(|(key, value)| MigrationEntry {
+            key: key.to_string(),
+            source_value: Zeroizing::new(value.to_string()),
+            needs_write: true,
+        })
+        .collect::<Vec<_>>();
+        for entry in &entries {
+            store
+                .put(&project, &entry.key, entry.source_value.as_str())
+                .unwrap();
+        }
+
+        let err = rollback_store_migration(&store, &project, &entries, &[0, 1, 2]).unwrap_err();
+
+        assert!(err.to_string().contains("DOTENV_PRIVATE_KEY_PRODUCTION"));
+        assert!(!err.to_string().contains("value-b"));
+        assert_eq!(
+            *store.attempts.lock().unwrap(),
+            [
+                "DOTENV_PRIVATE_KEY_STAGING",
+                "DOTENV_PRIVATE_KEY_PRODUCTION",
+                "DOTENV_PRIVATE_KEY",
+            ]
+        );
+        assert_eq!(
+            store.list_keys(&project).unwrap(),
+            BTreeSet::from(["DOTENV_PRIVATE_KEY_PRODUCTION".to_string()])
+        );
+    }
+
+    #[test]
+    fn rollback_attempts_native_store_after_dotenvx_failure() {
+        let project = test_project(Path::new("/repo/app"));
+        let target_native = MockSecretStore::keyring();
+        let target_dotenvx = FailingRollbackSecretStore::new("DOTENV_PRIVATE_KEY_PRODUCTION");
+        target_native
+            .put(&project, "DOTENV_PRIVATE_KEY", "value-a")
+            .unwrap();
+        target_dotenvx
+            .put(&project, "DOTENV_PRIVATE_KEY_PRODUCTION", "value-b")
+            .unwrap();
+        let migration = MigrationCopy {
+            native: vec![MigrationEntry {
+                key: "DOTENV_PRIVATE_KEY".to_string(),
+                source_value: Zeroizing::new("value-a".to_string()),
+                needs_write: true,
+            }],
+            dotenvx: vec![MigrationEntry {
+                key: "DOTENV_PRIVATE_KEY_PRODUCTION".to_string(),
+                source_value: Zeroizing::new("value-b".to_string()),
+                needs_write: true,
+            }],
+            native_applied: vec![0],
+            dotenvx_applied: vec![0],
+        };
+
+        let err = rollback_migration_copy(&migration, &project, &target_native, &target_dotenvx)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("DOTENV_PRIVATE_KEY_PRODUCTION"));
+        assert!(target_native.list_keys(&project).unwrap().is_empty());
+        assert_eq!(
+            target_dotenvx.list_keys(&project).unwrap(),
+            BTreeSet::from(["DOTENV_PRIVATE_KEY_PRODUCTION".to_string()])
         );
     }
 
