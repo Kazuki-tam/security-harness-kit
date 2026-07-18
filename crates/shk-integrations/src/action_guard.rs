@@ -1041,12 +1041,19 @@ fn action_list_matches(action: &str, patterns: &[String]) -> bool {
 }
 
 fn normalize_action_pattern(raw: &str) -> String {
-    raw.trim()
+    let normalized = raw
+        .trim()
         .trim_end_matches(":*")
         .replace(":*)", "*)")
         .replace("(./", "(")
         .replace("(file://", "(")
-        .to_ascii_lowercase()
+        .to_ascii_lowercase();
+
+    if normalized.starts_with("read(") || normalized.starts_with("write(") {
+        normalized.replace('\\', "/")
+    } else {
+        normalized
+    }
 }
 
 fn secret_dump_command(cmd: &str, words: &[&str]) -> bool {
@@ -1264,7 +1271,7 @@ fn is_secret_path(raw: &str) -> bool {
     let path = raw
         .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == ':' || c == ';')
         .trim_start_matches("file://");
-    let lower = path.to_ascii_lowercase();
+    let lower = path.to_ascii_lowercase().replace('\\', "/");
     if lower.ends_with("/.env")
         || lower.contains("/.env.")
         || lower.ends_with("/tokens")
@@ -1840,6 +1847,17 @@ mod tests {
         };
         assert!(
             detect_dangerous_action_with_config(env_read, &allowed_path)
+                .unwrap()
+                .is_none()
+        );
+
+        let windows_password_source = r#"{"tool_name":"Write","tool_input":{"file_path":"C:\\repo\\tests\\onepassword_op.rs"}}"#;
+        let allowed_windows_path = ActionGuardConfig {
+            allow: vec!["Write(*/tests/*.rs)".into()],
+            ..ActionGuardConfig::default()
+        };
+        assert!(
+            detect_dangerous_action_with_config(windows_password_source, &allowed_windows_path)
                 .unwrap()
                 .is_none()
         );
