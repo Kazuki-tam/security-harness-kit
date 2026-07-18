@@ -95,21 +95,9 @@ pub fn with_secret_store_lock<T>(
 ) -> Result<T> {
     let cache_dir = secret_store_cache_dir();
     let lock_dir = secure_lock_directory(&cache_dir)?;
-
-    let root = std::fs::canonicalize(&project.root).unwrap_or_else(|_| project.root.clone());
-    let mut hasher = Sha256::new();
-    hasher.update(root.to_string_lossy().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(project.project_id.as_deref().unwrap_or_default().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(purpose.as_bytes());
-    let digest = hasher.finalize();
-    let lock_name = digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    let lock_path = lock_dir.join(format!("{lock_name}.lock"));
+    let lock_path = secret_store_lock_path(&lock_dir, project, purpose);
     let mut file = open_lock_file(&lock_path)?;
+
     let deadline = Instant::now() + SECRET_STORE_LOCK_TIMEOUT;
     loop {
         match file.try_lock_exclusive() {
@@ -143,6 +131,20 @@ pub fn with_secret_store_lock<T>(
         (Ok(value), Ok(())) => Ok(value),
         (Ok(_), Err(err)) | (Err(err), _) => Err(err),
     }
+}
+
+fn secret_store_lock_path(lock_dir: &Path, project: &ProjectIdentity, purpose: &str) -> PathBuf {
+    let root = std::fs::canonicalize(&project.root).unwrap_or_else(|_| project.root.clone());
+    let mut hasher = Sha256::new();
+    hasher.update(root.to_string_lossy().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(purpose.as_bytes());
+    let digest = hasher.finalize();
+    let lock_name = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    lock_dir.join(format!("{lock_name}.lock"))
 }
 
 fn is_lock_contention(err: &std::io::Error) -> bool {
@@ -1797,6 +1799,24 @@ mod tests {
 
         assert_eq!(lock_dir, cache_dir.join("shk/locks"));
         assert!(lock_dir.is_dir());
+    }
+
+    #[test]
+    fn lock_identity_does_not_change_with_onepassword_project_id() {
+        let lock_dir = Path::new("/cache/shk/locks");
+        let first = ProjectIdentity {
+            root: PathBuf::from("/repo/app"),
+            project_id: Some("team/first".to_string()),
+        };
+        let second = ProjectIdentity {
+            root: first.root.clone(),
+            project_id: Some("team/second".to_string()),
+        };
+
+        assert_eq!(
+            secret_store_lock_path(lock_dir, &first, SHK_ENV_SERVICE),
+            secret_store_lock_path(lock_dir, &second, SHK_ENV_SERVICE)
+        );
     }
 
     #[cfg(unix)]

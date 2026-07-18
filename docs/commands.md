@@ -594,6 +594,8 @@ Options:
 
 Without `--tool`, the command targets Claude Code, Codex, Cursor, Copilot, Antigravity, and Windsurf. Non-dry-run installation requires a project `shk.toml`.
 
+Project installs embed a safely quoted project root in managed hook commands. On Windows, installation fails closed when that path contains `"`, `%`, `!`, `$`, or a backtick because the supported hook shells cannot represent those paths consistently without expansion or command-substitution risk. Move the checkout to a path without those characters or use a global hook installation.
+
 Installed entries:
 
 | Tool | Config file | Managed entries |
@@ -612,6 +614,8 @@ Managed entries are tagged with `"_shk_managed": true` or `# shk-managed-start` 
 See [Uninstall](installation.md#uninstall) for removing managed hooks, skills, generated workflows, and stored dotenvx keys.
 
 In pre-hook mode, `shk` also runs an action guard before content scanning. It blocks sensitive file access, environment dump commands, destructive filesystem operations, direct database mutation commands, privilege or system changes, external transfer commands, and package manager operations when they are visible in the hook payload. Tune this with `[action_guard]` in `shk.toml`; `--audit` remains non-blocking, while `--log-blocked` records only the action category.
+
+Action guard allow patterns apply to individual shell segments by default. A pattern for the first command does not implicitly allow later `&&`, `||`, pipe, or semicolon-separated commands; a compound allow must include the separators and cover the complete trusted command.
 
 ## `shk ci init github`
 

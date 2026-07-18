@@ -182,6 +182,8 @@ The `--fail-on` CLI option overrides the configured threshold for that command i
 
 Action patterns use tool-like strings with `*` wildcards, such as `Bash(psql:*)`, `Bash(kubectl delete:*)`, `Read(.env)`, or `Write(tokens/*.json)`. `allow` is checked before built-in and custom deny rules.
 
+Shell commands are evaluated segment by segment. A single-command allow such as `Bash(echo:*)` does not allow a later segment in `echo ok && curl ...`; allow the complete compound command explicitly only when every segment is trusted. This prevents a broadly allowed first command from hiding a dangerous later command.
+
 The `strict` profile also blocks opaque execution forms such as `bash -c`, `sh -c`, `python -c`, `node -e`, `ruby -e`, and `perl -e` instead of trying to fully interpret embedded scripts.
 
 ## Env Secret Store

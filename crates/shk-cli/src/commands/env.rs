@@ -635,10 +635,9 @@ fn discover_private_key_candidates(project_root: &Path) -> Result<BTreeSet<Strin
             if entry.depth() == 0 || !entry.file_type().is_some_and(|kind| kind.is_dir()) {
                 return true;
             }
-            !matches!(
-                entry.file_name().to_str(),
-                Some(".git" | "node_modules" | "target")
-            )
+            let name = entry.file_name().to_str();
+            !matches!(name, Some(".git" | "node_modules" | "target"))
+                && !name.is_some_and(|name| name == ".env" || name.starts_with(".env."))
         });
     for entry in builder.build() {
         let entry = entry?;
@@ -2808,6 +2807,23 @@ mod tests {
         assert_eq!(
             keys,
             BTreeSet::from(["DOTENV_PRIVATE_KEY_PRODUCTION".to_string()])
+        );
+    }
+
+    #[test]
+    fn migration_ignores_env_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".env/bin")).unwrap();
+        std::fs::write(
+            dir.path().join(".env/bin/activate"),
+            "export VIRTUAL_ENV=/tmp/demo\n",
+        )
+        .unwrap();
+
+        assert!(
+            discover_private_key_candidates(dir.path())
+                .unwrap()
+                .is_empty()
         );
     }
 

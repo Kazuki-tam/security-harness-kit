@@ -3147,6 +3147,51 @@ fn hook_mode_payload_target_cannot_replace_content_scan_policy_or_audit_root() {
 }
 
 #[test]
+fn hook_mode_payload_cwd_cannot_redirect_relative_file_scan() {
+    use std::io::Write;
+
+    let repo = tempfile::tempdir().unwrap();
+    init_git_repo(repo.path());
+    std::fs::write(repo.path().join("shk.toml"), "").unwrap();
+    std::fs::write(
+        repo.path().join("config.txt"),
+        format!("API_KEY={}\n", synthetic_openai_key('r')),
+    )
+    .unwrap();
+    let decoy_cwd = tempfile::tempdir().unwrap();
+    let stdin = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {
+            "file_path": "config.txt",
+            "cwd": decoy_cwd.path()
+        }
+    })
+    .to_string();
+
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "claude-code"])
+        .current_dir(repo.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("hook scan");
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn hook_mode_ignores_file_paths_outside_repo_root() {
     use std::io::Write;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");

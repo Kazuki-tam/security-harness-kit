@@ -440,20 +440,14 @@ fn resolve_hook_repo_root(cwd: &Path, path_arg: &Path) -> PathBuf {
     hook_root_for_path(cwd)
 }
 
-fn resolve_hook_payload_cwd(cwd: &Path, stdin: &str) -> PathBuf {
-    shk_integrations::payload_repository_context_hints(stdin)
-        .into_iter()
-        .map(PathBuf::from)
-        .next()
-        .map(|path| {
-            if path.is_absolute() {
-                path
-            } else {
-                cwd.join(path)
-            }
-        })
-        .map(fs_canonical_or_same)
-        .unwrap_or_else(|| cwd.to_path_buf())
+fn resolve_hook_content_cwd(cwd: &Path, repo_root: &Path) -> PathBuf {
+    let cwd = fs_canonical_or_same(cwd.to_path_buf());
+    let repo_root = fs_canonical_or_same(repo_root.to_path_buf());
+    if cwd.starts_with(&repo_root) {
+        cwd
+    } else {
+        repo_root
+    }
 }
 
 fn hook_root_for_path(path: &Path) -> PathBuf {
@@ -512,7 +506,11 @@ fn run_hook_mode(
 
     let hook_event = hook_event_from_stdin(stdin_trim, post);
     let repo_root = resolve_hook_repo_root(cwd, path_arg.as_path());
-    let payload_cwd = resolve_hook_payload_cwd(cwd, stdin_trim);
+    // File candidates are resolved from installer/process-controlled context.
+    // Payload cwd fields are model-controlled and may add stricter action-guard
+    // policies, but they must not redirect the content scanner away from the
+    // actual project checkout.
+    let content_cwd = resolve_hook_content_cwd(cwd, &repo_root);
     if let Err(err) = require_hook_log_policy(&repo_root, audit, log_blocked) {
         let reason = format!("shk hook logging policy error: {err:#}");
         if audit || post {
@@ -576,7 +574,7 @@ fn run_hook_mode(
         tool.integration_tool(),
         post,
         stdin_trim,
-        &payload_cwd,
+        &content_cwd,
         &repo_root,
     )?;
     let opts = hook_scan_options(fail_on, matches!(tool, AiTool::Cursor) && !post);
@@ -968,21 +966,24 @@ mod tests {
     }
 
     #[test]
-    fn hook_payload_cwd_resolves_relative_targets_from_tool_context() {
+    fn hook_content_cwd_uses_trusted_project_when_process_is_outside() {
         let process_cwd = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        let stdin = serde_json::json!({
-            "tool_name": "Read",
-            "tool_input": {
-                "cwd": project.path(),
-                "file_path": ".env"
-            }
-        })
-        .to_string();
+        assert_eq!(
+            resolve_hook_content_cwd(process_cwd.path(), project.path()),
+            fs_canonical_or_same(project.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn hook_content_cwd_preserves_trusted_project_subdirectory() {
+        let project = tempfile::tempdir().unwrap();
+        let subdirectory = project.path().join("services/api");
+        std::fs::create_dir_all(&subdirectory).unwrap();
 
         assert_eq!(
-            resolve_hook_payload_cwd(process_cwd.path(), &stdin),
-            fs_canonical_or_same(project.path().to_path_buf())
+            resolve_hook_content_cwd(&subdirectory, project.path()),
+            fs_canonical_or_same(subdirectory)
         );
     }
 
