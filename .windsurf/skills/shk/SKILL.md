@@ -163,7 +163,7 @@ shk env key migrate --to 1password
 
 Migration notes:
 - Keep `secret_store = "keyring"` until `shk env key migrate --to 1password` succeeds; the command updates `shk.toml` afterward.
-- Migrates indexed keys plus keys referenced by project-root `.env` / `.env.keys` files.
+- Migrates indexed keys plus keys referenced by `.env` / `.env.keys` files throughout the project tree.
 - Source keys are retained for rollback; verify the destination, then delete them explicitly.
 - Set `SHK_OP_PATH` when `op` is not on PATH. 1Password items are tagged `shk` with titles like `shk:{project_id}:env:DOTENV_PRIVATE_KEY`.
 - 1Password is primarily a team-operations upgrade (distribution, offboarding, audit), not per-command biometric approval on every `shk env run`.

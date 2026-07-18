@@ -2362,8 +2362,15 @@ fn hooks_install_ai_antigravity_writes_managed_pre_and_post_hooks() {
         pre[0]["hooks"][0]["command"]
             .as_str()
             .unwrap_or_default()
-            .contains("shk scan --hook-mode antigravity"),
+            .contains("--hook-mode antigravity"),
         "{pre:?}"
+    );
+    assert!(
+        pre[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(&dir.path().to_string_lossy().to_string()),
+        "trusted project root missing: {pre:?}"
     );
     assert!(
         pre[0]["hooks"][0]["command"]
@@ -2389,7 +2396,8 @@ fn hooks_install_ai_antigravity_writes_managed_pre_and_post_hooks() {
     assert_eq!(post[0]["matcher"], pre[0]["matcher"]);
     let post_cmd = post[0]["hooks"][0]["command"].as_str().unwrap_or_default();
     assert!(
-        post_cmd.contains("shk scan --hook-mode antigravity")
+        post_cmd.contains("--hook-mode antigravity")
+            && post_cmd.contains(&dir.path().to_string_lossy().to_string())
             && post_cmd.contains("--log-blocked")
             && post_cmd.contains("--post"),
         "{post:?}"
@@ -2948,7 +2956,53 @@ fn hook_mode_invalid_action_guard_policy_fails_closed() {
 }
 
 #[test]
-fn hook_mode_outside_repo_cwd_applies_policy_from_payload_path_repo() {
+fn hook_mode_ignores_invalid_policy_from_untrusted_payload_path() {
+    use std::io::Write;
+
+    let trusted = tempfile::tempdir().unwrap();
+    std::fs::write(
+        trusted.path().join("shk.toml"),
+        "[action_guard]\nenabled = true\n",
+    )
+    .unwrap();
+    let untrusted = tempfile::tempdir().unwrap();
+    std::fs::write(
+        untrusted.path().join("shk.toml"),
+        "[action_guard]\nenabled = definitely-not-a-boolean\n",
+    )
+    .unwrap();
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "echo safe",
+            "file_path": untrusted.path().join("decoy.txt")
+        }
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "claude-code"])
+        .current_dir(trusted.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("hook scan");
+
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn hook_mode_outside_repo_cwd_keeps_default_guard_for_payload_path_repo() {
     use std::io::Write;
     // The repository containing the hook target file, with a policy that
     // allows writing password-like test sources.
@@ -2992,22 +3046,44 @@ allow = ["Write(*/tests/*.rs)"]
             .expect("hook scan")
     };
 
-    // With the payload-path repo hint, the project allow entry applies.
+    // A payload-path repo is model-controlled and cannot weaken the default
+    // guard used by a hook process that started outside a trusted project.
     let out = run_from_outside();
-    assert!(
-        out.status.success(),
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert_eq!(out.status.code(), Some(2), "expected blocking exit code");
     let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
-        stdout["hookSpecificOutput"]["permissionDecision"], "allow",
+        stdout["hookSpecificOutput"]["permissionDecision"], "deny",
         "{stdout}"
     );
 
-    // Without the allow entry, the same payload is still blocked, proving the
-    // hint loads the policy rather than disabling the guard.
+    // Project-installed hooks embed this explicit root. Unlike payload hints,
+    // that installer-owned argument is trusted and may apply project allows.
+    let trusted = Command::new(shk_bin())
+        .args([
+            "scan",
+            repo.path().to_str().unwrap(),
+            "--hook-mode",
+            "claude-code",
+        ])
+        .current_dir(outside_cwd.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("trusted-root hook scan");
+    assert!(
+        trusted.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&trusted.stdout),
+        String::from_utf8_lossy(&trusted.stderr)
+    );
+
+    // The project policy is still evaluated, but removing the allow entry does
+    // not change the fail-closed result.
     std::fs::write(
         repo.path().join("shk.toml"),
         "[action_guard]\nenabled = true\n",
@@ -3015,6 +3091,52 @@ allow = ["Write(*/tests/*.rs)"]
     .unwrap();
     let out = run_from_outside();
     assert_eq!(out.status.code(), Some(2), "expected blocking exit code");
+}
+
+#[test]
+fn hook_mode_payload_target_cannot_replace_content_scan_policy_or_audit_root() {
+    use std::io::Write;
+
+    let decoy_repo = tempfile::tempdir().unwrap();
+    init_git_repo(decoy_repo.path());
+    std::fs::write(
+        decoy_repo.path().join("shk.toml"),
+        "[rules]\nsecrets = false\npii = false\nenv = false\nai_context = false\n",
+    )
+    .unwrap();
+    let outside_cwd = tempfile::tempdir().unwrap();
+    let target = decoy_repo.path().join("notes.txt");
+    let stdin = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": target,
+            "content": format!("synthetic test value: {}", synthetic_openai_key('a'))
+        }
+    })
+    .to_string();
+
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "claude-code"])
+        .current_dir(outside_cwd.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("hook scan");
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!decoy_repo.path().join(".shk/audit.log").exists());
 }
 
 #[test]
@@ -3361,8 +3483,9 @@ fn hook_mode_log_blocked_requires_policy() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("shk.toml"), "{stderr}");
+    assert_eq!(out.status.code(), Some(2));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("shk.toml"), "{stdout}");
 }
 
 #[test]
@@ -5278,7 +5401,11 @@ fn hooks_install_ai_windsurf_writes_cascade_hooks_and_is_idempotent() {
         let arr = hooks["hooks"][key].as_array().unwrap();
         assert_eq!(arr.len(), 1, "{key}: {arr:?}");
         let cmd = arr[0]["command"].as_str().unwrap();
-        assert_eq!(cmd, "shk scan --hook-mode windsurf", "{key}");
+        assert!(cmd.contains("--hook-mode windsurf"), "{key}: {cmd}");
+        assert!(
+            cmd.contains(&dir.path().to_string_lossy().to_string()),
+            "trusted project root missing for {key}: {cmd}"
+        );
         assert_eq!(arr[0]["show_output"], true, "{key}");
     }
     for key in ["post_run_command", "post_mcp_tool_use"] {

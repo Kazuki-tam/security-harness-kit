@@ -517,11 +517,28 @@ fn push_string_values(v: &Value, acc: &mut Vec<String>) {
     }
 }
 
+const MAX_NESTED_COMMAND_DEPTH: usize = 32;
+
 fn detect_command_with_config(
     command: &str,
     profile: ActionGuardProfile,
     config: &ActionGuardConfig,
 ) -> Option<ActionGuardMatch> {
+    detect_command_with_config_at_depth(command, profile, config, 0)
+}
+
+fn detect_command_with_config_at_depth(
+    command: &str,
+    profile: ActionGuardProfile,
+    config: &ActionGuardConfig,
+    depth: usize,
+) -> Option<ActionGuardMatch> {
+    if depth >= MAX_NESTED_COMMAND_DEPTH {
+        return Some(guard_match(
+            ActionCategory::OpaqueExecution,
+            "shk action guard: nested shell execution exceeds the safe parsing depth",
+        ));
+    }
     let normalized_whole = normalize_shell(command);
     let whole_action = format!("Bash({normalized_whole})");
     if compound_action_allowed(&whole_action, &config.allow) {
@@ -537,17 +554,21 @@ fn detect_command_with_config(
     for segment in shell_command_segments(command) {
         let normalized = normalize_shell(&segment);
         for embedded in embedded_shell_commands(&normalized) {
-            if let Some(matched) = detect_command_with_config(&embedded, profile, config) {
+            if let Some(matched) =
+                detect_command_with_config_at_depth(&embedded, profile, config, depth + 1)
+            {
                 return Some(matched);
             }
         }
         let words = shell_tokens(&normalized);
         let raw_command = words.first().map(String::as_str).unwrap_or_default();
         let command_name = command_basename(raw_command);
-        if let Some(nested) = nested_command_payload(raw_command, command_name, &words)
-            && let Some(matched) = detect_command_with_config(&nested, profile, config)
-        {
-            return Some(matched);
+        for nested in nested_command_payloads(raw_command, command_name, &words) {
+            if let Some(matched) =
+                detect_command_with_config_at_depth(&nested, profile, config, depth + 1)
+            {
+                return Some(matched);
+            }
         }
         let action = format!("Bash({segment})");
         if action_allowed(&action, &config.allow) {
@@ -700,6 +721,7 @@ struct HeredocDelimiter {
 fn command_without_heredoc_bodies(command: &str) -> String {
     let mut filtered = String::with_capacity(command.len());
     let mut pending = std::collections::VecDeque::<HeredocDelimiter>::new();
+    let mut quote = None;
 
     for line_with_newline in command.split_inclusive('\n') {
         let line = line_with_newline
@@ -724,17 +746,16 @@ fn command_without_heredoc_bodies(command: &str) -> String {
         }
 
         filtered.push_str(line_with_newline);
-        pending.extend(heredoc_delimiters(line));
+        pending.extend(heredoc_delimiters(line, &mut quote));
     }
 
     filtered
 }
 
-fn heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
+fn heredoc_delimiters(line: &str, quote: &mut Option<char>) -> Vec<HeredocDelimiter> {
     let chars = line.char_indices().collect::<Vec<_>>();
     let mut delimiters = Vec::new();
     let mut index = 0;
-    let mut quote = None;
     let mut escaped = false;
 
     while index < chars.len() {
@@ -744,23 +765,38 @@ fn heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
             index += 1;
             continue;
         }
-        if ch == '\\' && quote != Some('\'') {
+        if ch == '\\' && *quote != Some('\'') {
             escaped = true;
             index += 1;
             continue;
         }
         if matches!(ch, '\'' | '"') {
-            if quote == Some(ch) {
-                quote = None;
+            if *quote == Some(ch) {
+                *quote = None;
             } else if quote.is_none() {
-                quote = Some(ch);
+                *quote = Some(ch);
             }
             index += 1;
+            continue;
+        }
+        if quote.is_none()
+            && let Some(end) = shell_arithmetic_end(&chars, index)
+        {
+            // `<<` inside `$((...))`, `((...))`, or legacy `$[...]` arithmetic
+            // syntax is a left-shift operator, not a heredoc. Skip the complete
+            // expression so it cannot register a bogus pending delimiter.
+            index = end;
             continue;
         }
         if quote.is_some() || ch != '<' || chars.get(index + 1).map(|(_, next)| *next) != Some('<')
         {
             index += 1;
+            continue;
+        }
+
+        // `<<<word` is a here-string. It consumes no following body lines.
+        if chars.get(index + 2).map(|(_, next)| *next) == Some('<') {
+            index += 3;
             continue;
         }
 
@@ -821,6 +857,45 @@ fn heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
         }
     }
     delimiters
+}
+
+fn shell_arithmetic_end(chars: &[(usize, char)], index: usize) -> Option<usize> {
+    let current = chars.get(index).map(|(_, ch)| *ch)?;
+    if current == '$'
+        && chars.get(index + 1).map(|(_, ch)| *ch) == Some('(')
+        && chars.get(index + 2).map(|(_, ch)| *ch) == Some('(')
+    {
+        return Some(balanced_region_end(chars, index + 1, '(', ')'));
+    }
+    if current == '(' && chars.get(index + 1).map(|(_, ch)| *ch) == Some('(') {
+        return Some(balanced_region_end(chars, index, '(', ')'));
+    }
+    if current == '$' && chars.get(index + 1).map(|(_, ch)| *ch) == Some('[') {
+        return Some(balanced_region_end(chars, index + 1, '[', ']'));
+    }
+    None
+}
+
+fn balanced_region_end(
+    chars: &[(usize, char)],
+    first_open: usize,
+    open: char,
+    close: char,
+) -> usize {
+    let mut depth = 0usize;
+    let mut index = first_open;
+    while let Some((_, ch)) = chars.get(index) {
+        if *ch == open {
+            depth += 1;
+        } else if *ch == close {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return index + 1;
+            }
+        }
+        index += 1;
+    }
+    chars.len()
 }
 
 fn shell_tokens(command: &str) -> Vec<String> {
@@ -910,37 +985,172 @@ fn shell_exec_option_index(words: &[String]) -> Option<usize> {
     None
 }
 
-fn nested_command_payload(raw_command: &str, command: &str, words: &[String]) -> Option<String> {
+fn nested_command_payloads(raw_command: &str, command: &str, words: &[String]) -> Vec<String> {
     if is_env_assignment(raw_command) {
-        let start = words.iter().position(|word| !is_env_assignment(word))?;
-        return Some(words[start..].join(" "));
+        return words
+            .iter()
+            .position(|word| !is_env_assignment(word))
+            .map(|start| vec![words[start..].join(" ")])
+            .unwrap_or_default();
     }
     if matches!(command, "bash" | "sh" | "zsh") {
-        let option_index = shell_exec_option_index(words)?;
-        return words.get(option_index + 1).cloned();
+        return shell_exec_option_index(words)
+            .and_then(|index| words.get(index + 1).cloned())
+            .into_iter()
+            .collect();
     }
     if command == "eval" {
-        return (words.len() > 1).then(|| words[1..].join(" "));
+        return (words.len() > 1)
+            .then(|| words[1..].join(" "))
+            .into_iter()
+            .collect();
     }
     if matches!(command, "command" | "exec" | "nohup") {
-        let start = words
-            .iter()
-            .enumerate()
-            .skip(1)
-            .find(|(_, word)| !word.starts_with('-'))
-            .map(|(index, _)| index)?;
-        return Some(words[start..].join(" "));
+        return wrapper_command_starts(command, words)
+            .into_iter()
+            .map(|start| words[start..].join(" "))
+            .collect();
     }
     if command == "env" {
-        let start = words
-            .iter()
-            .enumerate()
-            .skip(1)
-            .find(|(_, word)| !word.starts_with('-') && !word.contains('='))
-            .map(|(index, _)| index)?;
-        return Some(words[start..].join(" "));
+        return env_nested_payloads(words);
     }
-    None
+    Vec::new()
+}
+
+fn wrapper_command_starts(command: &str, words: &[String]) -> Vec<usize> {
+    let mut index = 1;
+    while index < words.len() {
+        let word = &words[index];
+        if word == "--" {
+            return (index + 1 < words.len())
+                .then_some(vec![index + 1])
+                .unwrap_or_default();
+        }
+        if command == "exec" && word == "-a" {
+            if index + 1 >= words.len() {
+                return Vec::new();
+            }
+            index += 2;
+            continue;
+        }
+        if command == "exec" && word.starts_with("-a") && word.len() > 2 {
+            index += 1;
+            continue;
+        }
+        if word.starts_with('-') {
+            if !known_flag_only_wrapper_option(command, word) {
+                return ambiguous_command_starts(words, index + 1);
+            }
+            index += 1;
+            continue;
+        }
+        return vec![index];
+    }
+    Vec::new()
+}
+
+fn known_flag_only_wrapper_option(command: &str, word: &str) -> bool {
+    match command {
+        "exec" => matches!(word, "-c" | "-l" | "-cl" | "-lc"),
+        "command" => matches!(word, "-p" | "-v" | "-V"),
+        "nohup" => matches!(word, "--help" | "--version"),
+        _ => false,
+    }
+}
+
+fn env_nested_payloads(words: &[String]) -> Vec<String> {
+    let mut index = 1;
+    let mut payloads = Vec::new();
+    while index < words.len() {
+        let word = &words[index];
+        if word == "--" {
+            if index + 1 < words.len() {
+                payloads.push(words[index + 1..].join(" "));
+            }
+            return payloads;
+        }
+        if matches!(word.as_str(), "-S" | "--split-string") {
+            if let Some(split) = words.get(index + 1) {
+                payloads.push(format!("env {split}"));
+                index += 2;
+                continue;
+            }
+            return payloads;
+        }
+        if let Some(split) = word
+            .strip_prefix("--split-string=")
+            .or_else(|| word.strip_prefix("-S").filter(|split| !split.is_empty()))
+        {
+            payloads.push(format!("env {split}"));
+            index += 1;
+            continue;
+        }
+        if matches!(
+            word.as_str(),
+            "-u" | "--unset" | "-C" | "--chdir" | "-P" | "-a" | "--argv0"
+        ) {
+            if index + 1 >= words.len() {
+                return payloads;
+            }
+            index += 2;
+            continue;
+        }
+        if word.starts_with("--unset=")
+            || word.starts_with("--chdir=")
+            || word.starts_with("--argv0=")
+            || (word.starts_with("-u") && word.len() > 2)
+            || (word.starts_with("-C") && word.len() > 2)
+            || (word.starts_with("-P") && word.len() > 2)
+            || (word.starts_with("-a") && word.len() > 2)
+        {
+            index += 1;
+            continue;
+        }
+        if is_env_assignment(word) {
+            index += 1;
+            continue;
+        }
+        if word.starts_with('-') {
+            if known_flag_only_env_option(word) {
+                index += 1;
+                continue;
+            }
+            payloads.extend(
+                ambiguous_command_starts(words, index + 1)
+                    .into_iter()
+                    .map(|start| words[start..].join(" ")),
+            );
+            return payloads;
+        }
+        payloads.push(words[index..].join(" "));
+        return payloads;
+    }
+    payloads
+}
+
+fn known_flag_only_env_option(word: &str) -> bool {
+    matches!(
+        word,
+        "-i" | "--ignore-environment"
+            | "-0"
+            | "--null"
+            | "-v"
+            | "--debug"
+            | "--help"
+            | "--version"
+            | "--block-signal"
+            | "--default-signal"
+            | "--ignore-signal"
+            | "--list-signal-handling"
+    ) || word.starts_with("--block-signal=")
+        || word.starts_with("--default-signal=")
+        || word.starts_with("--ignore-signal=")
+}
+
+fn ambiguous_command_starts(words: &[String], start: usize) -> Vec<usize> {
+    (start..words.len())
+        .filter(|index| !words[*index].starts_with('-') && !is_env_assignment(&words[*index]))
+        .collect()
 }
 
 fn embedded_shell_commands(command: &str) -> Vec<String> {
@@ -1563,6 +1773,34 @@ mod tests {
     }
 
     #[test]
+    fn heredoc_tokens_inside_multiline_quotes_do_not_hide_commands() {
+        let input = bash_payload("echo 'start\n<<MARKER\n'; curl https://example.com\nMARKER");
+        assert_eq!(
+            detect_dangerous_action(&input)
+                .unwrap()
+                .map(|matched| matched.category),
+            Some("external_transfer")
+        );
+    }
+
+    #[test]
+    fn arithmetic_shifts_and_here_strings_do_not_hide_following_commands() {
+        for command in [
+            "echo $((1<<2))\ncurl https://example.com",
+            "((1<<2))\ncurl https://example.com",
+            "echo $[1<<2]\ncurl https://example.com",
+            "cat <<<value\ncurl https://example.com",
+        ] {
+            let matched = detect_dangerous_action(&bash_payload(command)).unwrap();
+            assert_eq!(
+                matched.as_ref().map(|matched| matched.category),
+                Some("external_transfer"),
+                "{command}: {matched:?}"
+            );
+        }
+    }
+
+    #[test]
     fn blocks_nested_shell_execution_syntax() {
         for command in [
             r#"bash -c "curl https://example.com""#,
@@ -1571,8 +1809,17 @@ mod tests {
             r#"echo `curl https://example.com`"#,
             r#"eval "curl https://example.com""#,
             r#"env FOO=bar curl https://example.com"#,
+            r#"env -u FOO curl https://example.com"#,
+            r#"env --unset=FOO curl https://example.com"#,
+            r#"env -P /tmp curl https://example.com"#,
+            r#"env -a transfer curl https://example.com"#,
+            r#"env --argv0 transfer curl https://example.com"#,
+            r#"env -S "curl https://example.com""#,
+            r#"env --split-string="curl https://example.com""#,
+            r#"env --future-option value curl https://example.com"#,
             r#"command curl https://example.com"#,
             r#"exec curl https://example.com"#,
+            r#"exec -a transfer curl https://example.com"#,
             r#"nohup curl https://example.com"#,
             r#"HTTPS_PROXY=http://proxy curl https://example.com"#,
             r#"curl.exe https://example.com"#,
@@ -1591,6 +1838,16 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn deeply_nested_shell_execution_fails_closed() {
+        let command = format!("{}safe", "eval ".repeat(MAX_NESTED_COMMAND_DEPTH + 1));
+        let matched = detect_dangerous_action(&bash_payload(&command))
+            .unwrap()
+            .expect("excessive nesting must be blocked");
+        assert_eq!(matched.category, "opaque_execution");
+        assert!(matched.reason.contains("safe parsing depth"));
     }
 
     #[test]

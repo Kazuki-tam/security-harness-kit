@@ -163,7 +163,7 @@ shk env key migrate --to 1password
 
 Migration notes:
 - Keep `secret_store = "keyring"` until `shk env key migrate --to 1password` succeeds; the command updates `shk.toml` afterward.
-- Migrates indexed keys plus keys referenced by project-root `.env` / `.env.keys` files.
+- Migrates indexed keys plus keys referenced by `.env` / `.env.keys` files throughout the project tree.
 - Source keys are retained for rollback; verify the destination, then delete them explicitly.
 - Set `SHK_OP_PATH` when `op` is not on PATH. 1Password items are tagged `shk` with titles like `shk:{project_id}:env:DOTENV_PRIVATE_KEY`.
 - 1Password is primarily a team-operations upgrade (distribution, offboarding, audit), not per-command biometric approval on every `shk env run`.
@@ -232,10 +232,11 @@ Cursor gets blocking `before*` hooks plus non-blocking post scans on
 Managed user-prompt hooks use `--fail-on medium` so PII is blocked before it enters
 the agent context.
 
-Codex project hooks also ensure `features.hooks = true`, install `PreToolUse`,
-`PermissionRequest`, `UserPromptSubmit`, and `PostToolUse`, and scan
-`$(git rev-parse --show-toplevel)` so hooks still resolve the repo when Codex starts
-from a subdirectory. Global Codex hooks keep the session cwd and omit the git-root path.
+Project hook commands carry an explicit trusted project root so model-controlled payload
+paths cannot select the scan policy or audit-log destination. Codex project hooks resolve that
+root dynamically with `$(git rev-parse --show-toplevel)` and also ensure `features.hooks = true`
+while installing `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, and `PostToolUse`.
+Global hooks keep the session cwd because they are not bound to one project.
 
 Antigravity gets a managed `shk-security` entry with blocking `PreToolUse` and
 non-blocking `PostToolUse` hooks matching all Antigravity tools (`.*`) so

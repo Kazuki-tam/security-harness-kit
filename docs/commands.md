@@ -450,7 +450,7 @@ shk env key migrate --to keyring
 |--------|----------|
 | `--to <keyring\|1password>` | Destination backend. Must differ from the current `env.secret_store`. |
 
-Migration copies indexed keys plus keys referenced by project-root `.env` / `.env.keys` files (for example via matching `DOTENV_PUBLIC_KEY*` names). Keys that exist only in the source backend with no index entry and no project-root env reference are not discovered automatically; remove them with an explicit `shk env key delete --key …` before migrating, or import them into the destination manually.
+Migration copies indexed keys plus keys referenced by `.env` / `.env.keys` files throughout the project tree (for example via matching `DOTENV_PUBLIC_KEY*` names). `.git`, `node_modules`, and `target` directories are excluded. Keys that exist only in the source backend with no index entry and no project env reference are not discovered automatically; remove them with an explicit `shk env key delete --key …` before migrating, or import them into the destination manually.
 
 The command does not open the destination backend before migration starts when the current config already points at a broken backend; it reads keys from `env.secret_store` and writes to `--to`. Re-running migrate to the backend already configured in `shk.toml` is rejected.
 

@@ -305,16 +305,11 @@ fn key_migrate_locked(
         target_stores.native.as_ref(),
         target_stores.dotenvx.as_ref(),
     )?;
+    ensure_migration_has_keys(&migration, source_backend, to_backend)?;
     let migrated = migration.migrated();
     let found = migration.found();
 
-    if found == 0 {
-        println!(
-            "No keys found in the {} backend to migrate to {}",
-            source_backend.as_config_value(),
-            to_backend.as_config_value()
-        );
-    } else if migrated == 0 {
+    if migrated == 0 {
         println!(
             "All {found} key(s) already exist in the {} backend with matching values",
             to_backend.as_config_value()
@@ -384,6 +379,21 @@ impl MigrationCopy {
     fn migrated(&self) -> usize {
         self.native_applied.len() + self.dotenvx_applied.len()
     }
+}
+
+fn ensure_migration_has_keys(
+    migration: &MigrationCopy,
+    source_backend: SecretStoreBackend,
+    target_backend: SecretStoreBackend,
+) -> Result<()> {
+    if migration.found() == 0 {
+        bail!(
+            "no keys found in the {} backend to migrate to {}; env.secret_store was not changed",
+            source_backend.as_config_value(),
+            target_backend.as_config_value()
+        );
+    }
+    Ok(())
 }
 
 struct MigrationEntry {
@@ -610,17 +620,34 @@ fn keys_for_migration(
 
 fn discover_private_key_candidates(project_root: &Path) -> Result<BTreeSet<String>> {
     let mut candidates = BTreeSet::new();
-    let entries = match std::fs::read_dir(project_root) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(candidates),
-        Err(err) => return Err(err.into()),
-    };
-    for entry in entries {
+    if !project_root.exists() {
+        return Ok(candidates);
+    }
+    let mut builder = ignore::WalkBuilder::new(project_root);
+    builder
+        .hidden(false)
+        .ignore(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .follow_links(false)
+        .filter_entry(|entry| {
+            if entry.depth() == 0 || !entry.file_type().is_some_and(|kind| kind.is_dir()) {
+                return true;
+            }
+            !matches!(
+                entry.file_name().to_str(),
+                Some(".git" | "node_modules" | "target")
+            )
+        });
+    for entry in builder.build() {
         let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
+        if entry.depth() == 0 {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy();
         if name == ".env.keys" {
-            let body = read_migration_candidate(&entry.path())?;
+            let body = read_migration_candidate(entry.path())?;
             for (key, _) in parse_dotenvx_keys(&body)? {
                 candidates.insert(key);
             }
@@ -630,7 +657,7 @@ fn discover_private_key_candidates(project_root: &Path) -> Result<BTreeSet<Strin
             if name == ".env.vault" {
                 continue;
             }
-            let body = read_migration_candidate(&entry.path())?;
+            let body = read_migration_candidate(entry.path())?;
             candidates.extend(public_keys_from_env_body(&body));
         }
     }
@@ -2762,6 +2789,29 @@ mod tests {
     }
 
     #[test]
+    fn migration_discovers_unindexed_keys_referenced_by_subprojects() {
+        let dir = tempfile::tempdir().unwrap();
+        let subproject = dir.path().join("services/api");
+        std::fs::create_dir_all(&subproject).unwrap();
+        std::fs::write(
+            subproject.join(".env.production"),
+            "DOTENV_PUBLIC_KEY_PRODUCTION=\"public-demo-key\"\n",
+        )
+        .unwrap();
+        let project = test_project(dir.path());
+        let store = MockSecretStore::keyring();
+        store.insert_legacy_key(&project, "DOTENV_PRIVATE_KEY_PRODUCTION", "secret");
+
+        let candidates = discover_private_key_candidates(dir.path()).unwrap();
+        let keys = keys_for_migration(&store, &project, &candidates).unwrap();
+
+        assert_eq!(
+            keys,
+            BTreeSet::from(["DOTENV_PRIVATE_KEY_PRODUCTION".to_string()])
+        );
+    }
+
+    #[test]
     fn migration_candidate_rejects_oversized_env_files() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".env.large");
@@ -3051,7 +3101,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_updates_policy_when_no_keys_exist() {
+    fn migration_without_keys_does_not_update_policy() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("shk.toml");
         std::fs::write(
@@ -3077,10 +3127,16 @@ mod tests {
         .unwrap();
         assert_eq!(migration.migrated(), 0);
         assert_eq!(migration.found(), 0);
-        update_policy_secret_store(&path, "1password").unwrap();
+        let err = ensure_migration_has_keys(
+            &migration,
+            SecretStoreBackend::Keyring,
+            SecretStoreBackend::OnePassword,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("was not changed"), "{err}");
 
         let updated = Policy::load_from_dir(&project_root).unwrap().0;
-        assert_eq!(updated.env.secret_store, "1password");
+        assert_eq!(updated.env.secret_store, "keyring");
     }
 
     #[test]

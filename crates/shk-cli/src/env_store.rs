@@ -184,6 +184,8 @@ fn secret_store_cache_dir() -> PathBuf {
 }
 
 fn secure_lock_directory(cache_dir: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(cache_dir)
+        .with_context(|| format!("create cache directory {}", cache_dir.display()))?;
     let shk_dir = cache_dir.join("shk");
     let lock_dir = shk_dir.join("locks");
     for directory in [&shk_dir, &lock_dir] {
@@ -462,6 +464,17 @@ impl KeyringSecretStore {
         result
     }
 
+    fn recover_transaction_before_read(&self, project: &ProjectIdentity) -> Result<()> {
+        // Keep the normal read path read-only. If a journal is visible, take
+        // the same lock as writers and replay it before observing the value or
+        // index. A writer that starts after the journal check linearizes after
+        // this read, so no lock is needed when the journal is absent.
+        if self.get_raw(&Self::transaction_account(project))?.is_some() {
+            with_secret_store_lock(project, self.service, || self.recover_transaction(project))?;
+        }
+        Ok(())
+    }
+
     fn apply_transaction(
         &self,
         project: &ProjectIdentity,
@@ -536,6 +549,7 @@ impl SecretStore for KeyringSecretStore {
     }
 
     fn get(&self, project: &ProjectIdentity, key: &str) -> Result<Option<String>> {
+        self.recover_transaction_before_read(project)?;
         self.get_raw(&Self::account(project, key))
     }
 
@@ -556,6 +570,7 @@ impl SecretStore for KeyringSecretStore {
     }
 
     fn list_keys(&self, project: &ProjectIdentity) -> Result<BTreeSet<String>> {
+        self.recover_transaction_before_read(project)?;
         self.read_index(project)
     }
 
@@ -611,8 +626,7 @@ pub struct ResolvedOpPath {
 }
 
 pub fn resolve_op_path() -> Result<ResolvedOpPath> {
-    if let Ok(raw) = std::env::var(SHK_OP_PATH_ENV) {
-        let path = PathBuf::from(raw.trim());
+    if let Some(path) = configured_op_path(std::env::var(SHK_OP_PATH_ENV).ok().as_deref()) {
         validate_op_binary(&path)?;
         return Ok(ResolvedOpPath {
             path,
@@ -641,6 +655,12 @@ pub fn resolve_op_path() -> Result<ResolvedOpPath> {
     bail!(
         "1Password CLI (`op`) not found; install it, add it to PATH, or set {SHK_OP_PATH_ENV} to an absolute path"
     )
+}
+
+fn configured_op_path(raw: Option<&str>) -> Option<PathBuf> {
+    raw.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn known_op_paths() -> Vec<PathBuf> {
@@ -811,10 +831,14 @@ fn run_op_process_with_timeout(
         );
     };
     if let Some(writer) = writer {
-        writer
+        let write_result = writer
             .join()
-            .map_err(|_| anyhow!("stdin writer panicked for `{command}`"))?
-            .with_context(|| format!("write stdin for `{command}`"))?;
+            .map_err(|_| anyhow!("stdin writer panicked for `{command}`"))?;
+        if let Err(err) = write_result
+            && !(status.success() && err.kind() == std::io::ErrorKind::BrokenPipe)
+        {
+            return Err(err).with_context(|| format!("write stdin for `{command}`"));
+        }
     }
     let stdout = stdout_reader
         .join()
@@ -974,18 +998,43 @@ impl OnePasswordSecretStore {
     fn put_item(&self, project: &ProjectIdentity, key: &str, value: &str) -> Result<()> {
         let title = self.item_title(project, key)?;
         let existing_id = self.find_item_id(&title)?;
-        let template = OnePasswordItemTemplate {
-            title: &title,
-            tags: [OP_TAG],
-            category: OP_CATEGORY,
-            fields: [OnePasswordItemField {
-                label: "credential",
-                field_type: "CONCEALED",
-                value,
-            }],
+        let template_json = if let Some(id) = existing_id.as_deref() {
+            // `op item edit` expects an existing item's complete JSON when a
+            // template is piped on stdin. Preserve the server-assigned field
+            // IDs and update only the managed credential value.
+            let mut item = self.get_item_json(id, &title)?.ok_or_else(|| {
+                anyhow!("1Password item `{title}` disappeared while it was being updated")
+            })?;
+            let credential_index = item
+                .get("fields")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|fields| {
+                    fields.iter().position(|field| {
+                        field.get("label").and_then(serde_json::Value::as_str) == Some("credential")
+                    })
+                });
+            let Some(credential_index) = credential_index else {
+                zeroize_json_strings(&mut item);
+                bail!("1Password item `{title}` is corrupt: credential field is missing");
+            };
+            item["fields"][credential_index]["value"] =
+                serde_json::Value::String(value.to_string());
+            let serialized = serde_json::to_vec(&item).context("serialize 1Password item JSON");
+            zeroize_json_strings(&mut item);
+            Zeroizing::new(serialized?)
+        } else {
+            let template = OnePasswordItemTemplate {
+                title: &title,
+                tags: [OP_TAG],
+                category: OP_CATEGORY,
+                fields: [OnePasswordItemField {
+                    label: "credential",
+                    field_type: "CONCEALED",
+                    value,
+                }],
+            };
+            Zeroizing::new(serde_json::to_vec(&template).context("serialize 1Password item JSON")?)
         };
-        let template_json =
-            Zeroizing::new(serde_json::to_vec(&template).context("serialize 1Password item JSON")?);
         let args = if let Some(id) = existing_id.as_deref() {
             vec!["item", "edit", id, "--vault", &self.vault]
         } else {
@@ -1100,10 +1149,52 @@ impl OnePasswordSecretStore {
         let Some(item_id) = self.find_item_id(&title)? else {
             return Ok(None);
         };
+        let Some(mut item) = self.get_item_json(&item_id, &title)? else {
+            return Ok(None);
+        };
+        let credential = item
+            .get_mut("fields")
+            .and_then(serde_json::Value::as_array_mut)
+            .and_then(|fields| {
+                fields.iter_mut().find(|field| {
+                    field.get("label").and_then(serde_json::Value::as_str) == Some("credential")
+                })
+            })
+            .and_then(|field| field.get_mut("value"))
+            .map(serde_json::Value::take);
+        zeroize_json_strings(&mut item);
+        let mut value = match credential {
+            Some(serde_json::Value::String(value)) => value,
+            Some(mut unexpected) => {
+                zeroize_json_strings(&mut unexpected);
+                bail!("1Password item `{title}` is corrupt: credential field must be a string");
+            }
+            None => {
+                bail!("1Password item `{title}` is corrupt: credential field is missing");
+            }
+        };
+        if value.trim().is_empty() {
+            value.zeroize();
+            bail!("1Password item `{title}` is corrupt: credential field is empty");
+        }
+        let _ = audit_log::append_line(
+            &self.repo_root,
+            serde_json::json!({
+                "event": "env_secret_read",
+                "backend": "1password",
+                "store": self.kind.segment(),
+                "key": key,
+                "project_id": project.project_id,
+            }),
+        );
+        Ok(Some(value))
+    }
+
+    fn get_item_json(&self, item_id: &str, title: &str) -> Result<Option<serde_json::Value>> {
         let args = [
             "item",
             "get",
-            &item_id,
+            item_id,
             "--vault",
             &self.vault,
             "--format",
@@ -1112,48 +1203,9 @@ impl OnePasswordSecretStore {
         ];
         let mut output = self.runner.run(&self.op_path, &args)?;
         if output.status.success() {
-            // `op item get --fields label=credential` renders a JSON string
-            // literal when the stored value itself contains JSON. Parse the
-            // complete item instead so the credential is decoded exactly once.
             let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout);
             output.stdout.zeroize();
-            let mut item = parsed.context("parse 1Password item JSON")?;
-            let credential = item
-                .get_mut("fields")
-                .and_then(serde_json::Value::as_array_mut)
-                .and_then(|fields| {
-                    fields.iter_mut().find(|field| {
-                        field.get("label").and_then(serde_json::Value::as_str) == Some("credential")
-                    })
-                })
-                .and_then(|field| field.get_mut("value"))
-                .map(serde_json::Value::take);
-            zeroize_json_strings(&mut item);
-            let mut value = match credential {
-                Some(serde_json::Value::String(value)) => value,
-                Some(mut unexpected) => {
-                    zeroize_json_strings(&mut unexpected);
-                    bail!("1Password item `{title}` is corrupt: credential field must be a string");
-                }
-                None => {
-                    bail!("1Password item `{title}` is corrupt: credential field is missing");
-                }
-            };
-            if value.trim().is_empty() {
-                value.zeroize();
-                bail!("1Password item `{title}` is corrupt: credential field is empty");
-            }
-            let _ = audit_log::append_line(
-                &self.repo_root,
-                serde_json::json!({
-                    "event": "env_secret_read",
-                    "backend": "1password",
-                    "store": self.kind.segment(),
-                    "key": key,
-                    "project_id": project.project_id,
-                }),
-            );
-            return Ok(Some(value));
+            return parsed.map(Some).context("parse 1Password item JSON");
         }
         // `--reveal` may emit (partial) credential output even when the command
         // ultimately fails; zero it before entering any failure branch.
@@ -1691,6 +1743,17 @@ mod tests {
         assert!(!op_version_meets_minimum("2.20.0", "2.24.0"));
     }
 
+    #[test]
+    fn empty_configured_op_path_uses_normal_fallbacks() {
+        assert_eq!(configured_op_path(None), None);
+        assert_eq!(configured_op_path(Some("")), None);
+        assert_eq!(configured_op_path(Some("  \t")), None);
+        assert_eq!(
+            configured_op_path(Some(" /usr/local/bin/op ")),
+            Some(PathBuf::from("/usr/local/bin/op"))
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn op_validation_rejects_non_executable_files() {
@@ -1723,6 +1786,17 @@ mod tests {
         std::fs::hard_link(&victim, &hard_link_path).unwrap();
         assert!(open_lock_file(&hard_link_path).is_err());
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "preserve me");
+    }
+
+    #[test]
+    fn secure_lock_directory_creates_a_missing_cache_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("missing/cache");
+
+        let lock_dir = secure_lock_directory(&cache_dir).unwrap();
+
+        assert_eq!(lock_dir, cache_dir.join("shk/locks"));
+        assert!(lock_dir.is_dir());
     }
 
     #[cfg(unix)]
@@ -1790,6 +1864,22 @@ mod tests {
         let output = run_op_process_with_timeout(&path, &[], None, Duration::from_secs(2)).unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout.len(), 128 * 1024);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_op_command_ignores_broken_pipe_after_early_stdin_close() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("op");
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let input = vec![b'x'; 16 * 1024 * 1024];
+
+        let output =
+            run_op_process_with_timeout(&path, &[], Some(&input), Duration::from_secs(2)).unwrap();
+        assert!(output.status.success());
     }
 
     #[test]
@@ -1940,6 +2030,9 @@ mod tests {
         let listing = r#"[{"id":"stable-item-id","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#;
         let (runner, calls) = RecordingOpRunner::new(vec![
             Ok(ok_output(listing)),
+            Ok(ok_output(
+                r#"{"id":"stable-item-id","fields":[{"id":"credential-id","label":"credential","type":"CONCEALED","value":"old-value"}]}"#,
+            )),
             Ok(ok_output("{}")),
             Ok(ok_output(listing)),
             Ok(ok_output(
@@ -1957,7 +2050,7 @@ mod tests {
             .put(&sample_project(), "DOTENV_PRIVATE_KEY", "demo-value")
             .unwrap();
         let recorded = calls.lock().unwrap();
-        assert_eq!(&recorded[1][..3], ["item", "edit", "stable-item-id"]);
+        assert_eq!(&recorded[2][..3], ["item", "edit", "stable-item-id"]);
     }
 
     #[test]

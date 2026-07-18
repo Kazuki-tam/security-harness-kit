@@ -93,8 +93,41 @@ pub(crate) fn resolve_ai_config_path(tool: AiTool, cwd: &Path, global: bool) -> 
     })
 }
 
+#[cfg(test)]
 fn hook_scan_cli_command(tool: AiTool, audit: bool, log_blocked: bool, post: bool) -> String {
     hook_scan_cli_command_with_root_arg(tool, audit, log_blocked, post, None, None)
+}
+
+fn project_hook_root_arg(path: &Path) -> Result<String> {
+    let value = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("project path is not valid UTF-8: {}", path.display()))?;
+    if value.chars().any(char::is_control) {
+        anyhow::bail!("project path contains unsupported control characters");
+    }
+    #[cfg(windows)]
+    {
+        if value.contains(['"', '%', '!', '$', '`']) {
+            anyhow::bail!(
+                "project path contains characters that cannot be safely quoted for Windows hooks"
+            );
+        }
+        Ok(quote_windows_hook_arg(value))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(format!("'{}'", value.replace('\'', "'\\''")))
+    }
+}
+
+#[cfg(any(windows, test))]
+fn quote_windows_hook_arg(value: &str) -> String {
+    let trailing_backslashes = value
+        .chars()
+        .rev()
+        .take_while(|character| *character == '\\')
+        .count();
+    format!("\"{value}{}\"", "\\".repeat(trailing_backslashes))
 }
 
 fn user_prompt_hook_scan_command(
@@ -143,6 +176,25 @@ fn hook_scan_cli_command_with_root_arg(
     )
 }
 
+struct HookScanCommands {
+    pre: String,
+    post: String,
+    user_prompt: String,
+}
+
+fn hook_scan_commands(
+    tool: AiTool,
+    audit: bool,
+    log_blocked: bool,
+    root_arg: Option<&str>,
+) -> HookScanCommands {
+    HookScanCommands {
+        pre: hook_scan_cli_command_with_root_arg(tool, audit, log_blocked, false, None, root_arg),
+        post: hook_scan_cli_command_with_root_arg(tool, audit, log_blocked, true, None, root_arg),
+        user_prompt: user_prompt_hook_scan_command(tool, audit, log_blocked, root_arg),
+    }
+}
+
 pub fn install_ai(cwd: &Path, maybe_tool: Option<AiTool>, opts: InstallAiOptions) -> Result<()> {
     let summaries = install_ai_with_summaries(cwd, maybe_tool, opts)?;
     for summary in summaries {
@@ -186,7 +238,8 @@ pub fn install_ai_with_summaries(
             };
             safety::ensure_write_path_within(&base, &path)?;
         }
-        let summary = apply_tool(&path, t, opts, !opts.global)?;
+        let project_root = (!opts.global).then_some(cwd.as_path());
+        let summary = apply_tool(&path, t, opts, project_root)?;
         summaries.push(format!("{}: {}", path.display(), summary.trim()));
     }
     Ok(summaries)
@@ -223,7 +276,8 @@ pub fn configure_ai_with_summaries(cwd: &Path, opts: ConfigureAiOptions) -> Resu
             safety::ensure_write_path_within(&base, &path)?;
         }
         if scan_hooks_enabled_for(&opts, tool) {
-            let summary = apply_tool(&path, tool, install_opts, !opts.global)?;
+            let project_root = (!opts.global).then_some(cwd.as_path());
+            let summary = apply_tool(&path, tool, install_opts, project_root)?;
             summaries.push(format!("{}: {}", path.display(), summary.trim()));
         } else if path.is_file() {
             summaries.push(format!(
@@ -267,24 +321,22 @@ fn apply_tool(
     path: &Path,
     tool: AiTool,
     opts: InstallAiOptions,
-    restrict_sandbox_reads_to_project: bool,
+    project_root: Option<&Path>,
 ) -> Result<String> {
+    let root_arg = if tool == AiTool::Codex {
+        None
+    } else {
+        project_root.map(project_hook_root_arg).transpose()?
+    };
     match tool {
-        AiTool::ClaudeCode => apply_claude(
-            path,
-            opts.audit,
-            opts.log_blocked,
-            opts.dry_run,
-            opts.apply_deny,
-            opts.apply_sandbox,
-            restrict_sandbox_reads_to_project,
-        ),
+        AiTool::ClaudeCode => apply_claude(path, opts, project_root.is_some(), root_arg.as_deref()),
         AiTool::Cursor => apply_cursor(
             path,
             opts.audit,
             opts.log_blocked,
             opts.dry_run,
             opts.fail_closed || opts.apply_sandbox,
+            root_arg.as_deref(),
         ),
         AiTool::Codex => apply_codex(
             path,
@@ -294,15 +346,28 @@ fn apply_tool(
             opts.apply_sandbox,
             !opts.global,
         ),
-        AiTool::Copilot => apply_copilot(path, opts.audit, opts.log_blocked, opts.dry_run),
+        AiTool::Copilot => apply_copilot(
+            path,
+            opts.audit,
+            opts.log_blocked,
+            opts.dry_run,
+            root_arg.as_deref(),
+        ),
         AiTool::Antigravity => apply_antigravity(
             path,
             opts.audit,
             opts.log_blocked,
             opts.dry_run,
             opts.apply_deny,
+            root_arg.as_deref(),
         ),
-        AiTool::Windsurf => apply_windsurf(path, opts.audit, opts.log_blocked, opts.dry_run),
+        AiTool::Windsurf => apply_windsurf(
+            path,
+            opts.audit,
+            opts.log_blocked,
+            opts.dry_run,
+            root_arg.as_deref(),
+        ),
     }
 }
 
@@ -517,16 +582,11 @@ fn remove_json_string_array_item(
 
 fn apply_claude(
     path: &Path,
-    audit: bool,
-    log_blocked: bool,
-    dry_run: bool,
-    apply_deny: bool,
-    apply_sandbox: bool,
+    opts: InstallAiOptions,
     restrict_sandbox_reads_to_project: bool,
+    root_arg: Option<&str>,
 ) -> Result<String> {
-    let pre = hook_scan_cli_command(AiTool::ClaudeCode, audit, log_blocked, false);
-    let post = hook_scan_cli_command(AiTool::ClaudeCode, audit, log_blocked, true);
-    let user_prompt = user_prompt_hook_scan_command(AiTool::ClaudeCode, audit, log_blocked, None);
+    let commands = hook_scan_commands(AiTool::ClaudeCode, opts.audit, opts.log_blocked, root_arg);
 
     let mut root = if path.is_file() {
         load_json(path)?
@@ -537,38 +597,40 @@ fn apply_claude(
     let pre_block = json!({
         "_shk_managed": true,
         "matcher": "Read|Write|Bash|WebFetch|mcp__.*",
-        "hooks": [{ "type": "command", "command": pre }]
+        "hooks": [{ "type": "command", "command": commands.pre }]
     });
     let post_block = json!({
         "_shk_managed": true,
         "matcher": "WebFetch|WebSearch|Bash|mcp__.*|Skill|Agent",
-        "hooks": [{ "type": "command", "command": post }]
+        "hooks": [{ "type": "command", "command": commands.post }]
     });
     let user_prompt_block = json!({
         "_shk_managed": true,
-        "hooks": [{ "type": "command", "command": user_prompt }]
+        "hooks": [{ "type": "command", "command": commands.user_prompt }]
     });
 
     push_managed_claude(&mut root, "UserPromptSubmit", user_prompt_block)?;
     push_managed_claude(&mut root, "PreToolUse", pre_block)?;
     push_managed_claude(&mut root, "PostToolUse", post_block)?;
-    let deny_added = if apply_deny {
+    let deny_added = if opts.apply_deny {
         merge_claude_permissions_deny(&mut root)?
     } else {
         0
     };
-    if apply_sandbox {
+    if opts.apply_sandbox {
         merge_claude_sandbox(&mut root, restrict_sandbox_reads_to_project)?;
     }
 
-    save_json_formatted(path, &root, dry_run)?;
-    Ok(if dry_run {
+    save_json_formatted(path, &root, opts.dry_run)?;
+    Ok(if opts.dry_run {
         format!(
-            "dry-run: would write managed UserPromptSubmit/PreToolUse/PostToolUse blocks (audit={audit}, logBlocked={log_blocked}, applyDeny={apply_deny}, applySandbox={apply_sandbox}, denyAdded={deny_added})"
+            "dry-run: would write managed UserPromptSubmit/PreToolUse/PostToolUse blocks (audit={}, logBlocked={}, applyDeny={}, applySandbox={}, denyAdded={deny_added})",
+            opts.audit, opts.log_blocked, opts.apply_deny, opts.apply_sandbox,
         )
     } else {
         format!(
-            "wrote managed blocks (audit={audit}, logBlocked={log_blocked}, applyDeny={apply_deny}, applySandbox={apply_sandbox}, denyAdded={deny_added})"
+            "wrote managed blocks (audit={}, logBlocked={}, applyDeny={}, applySandbox={}, denyAdded={deny_added})",
+            opts.audit, opts.log_blocked, opts.apply_deny, opts.apply_sandbox,
         )
     })
 }
@@ -642,6 +704,7 @@ fn apply_cursor(
     log_blocked: bool,
     dry_run: bool,
     fail_closed: bool,
+    root_arg: Option<&str>,
 ) -> Result<String> {
     const PRE_KEYS: &[&str] = &[
         "beforeReadFile",
@@ -652,22 +715,20 @@ fn apply_cursor(
     // non-blocking `--post` semantics (always exit 0).
     const POST_KEYS: &[&str] = &["afterShellExecution", "afterMCPExecution"];
 
-    let cmd = hook_scan_cli_command(AiTool::Cursor, audit, log_blocked, false);
-    let post_cmd = hook_scan_cli_command(AiTool::Cursor, audit, log_blocked, true);
-    let prompt_cmd = user_prompt_hook_scan_command(AiTool::Cursor, audit, log_blocked, None);
+    let commands = hook_scan_commands(AiTool::Cursor, audit, log_blocked, root_arg);
     let entry = json!({
-        "command": cmd,
+        "command": commands.pre,
         "timeout": HOOK_CLI_TIMEOUT_SEC,
         "failClosed": fail_closed,
         "_shk_managed": true
     });
     let post_entry = json!({
-        "command": post_cmd,
+        "command": commands.post,
         "timeout": HOOK_CLI_TIMEOUT_SEC,
         "_shk_managed": true
     });
     let prompt_entry = json!({
-        "command": prompt_cmd,
+        "command": commands.user_prompt,
         "timeout": HOOK_CLI_TIMEOUT_SEC,
         "failClosed": fail_closed,
         "_shk_managed": true
@@ -776,28 +837,20 @@ fn copilot_command_entry(command: String) -> Value {
     })
 }
 
-fn apply_copilot(path: &Path, audit: bool, log_blocked: bool, dry_run: bool) -> Result<String> {
+fn apply_copilot(
+    path: &Path,
+    audit: bool,
+    log_blocked: bool,
+    dry_run: bool,
+    root_arg: Option<&str>,
+) -> Result<String> {
     const PRE_KEYS: &[&str] = &["preToolUse", "PermissionRequest"];
     const POST_KEYS: &[&str] = &["postToolUse", "postToolUseFailure"];
 
-    let pre = copilot_command_entry(hook_scan_cli_command(
-        AiTool::Copilot,
-        audit,
-        log_blocked,
-        false,
-    ));
-    let post = copilot_command_entry(hook_scan_cli_command(
-        AiTool::Copilot,
-        audit,
-        log_blocked,
-        true,
-    ));
-    let prompt = copilot_command_entry(user_prompt_hook_scan_command(
-        AiTool::Copilot,
-        audit,
-        log_blocked,
-        None,
-    ));
+    let commands = hook_scan_commands(AiTool::Copilot, audit, log_blocked, root_arg);
+    let pre = copilot_command_entry(commands.pre);
+    let post = copilot_command_entry(commands.post);
+    let prompt = copilot_command_entry(commands.user_prompt);
 
     let mut root = if path.is_file() {
         load_json(path)?
@@ -906,9 +959,9 @@ fn apply_antigravity(
     log_blocked: bool,
     dry_run: bool,
     apply_deny: bool,
+    root_arg: Option<&str>,
 ) -> Result<String> {
-    let pre = hook_scan_cli_command(AiTool::Antigravity, audit, log_blocked, false);
-    let post = hook_scan_cli_command(AiTool::Antigravity, audit, log_blocked, true);
+    let commands = hook_scan_commands(AiTool::Antigravity, audit, log_blocked, root_arg);
 
     let mut root = if path.is_file() {
         load_json(path)?
@@ -925,8 +978,8 @@ fn apply_antigravity(
     root_obj.insert(
         ANTIGRAVITY_HOOK_NAME.to_string(),
         json!({
-            "PreToolUse": [antigravity_command_hook(pre)],
-            "PostToolUse": [antigravity_command_hook(post)]
+            "PreToolUse": [antigravity_command_hook(commands.pre)],
+            "PostToolUse": [antigravity_command_hook(commands.post)]
         }),
     );
 
@@ -1013,25 +1066,17 @@ fn windsurf_command_entry(command: String) -> Value {
     })
 }
 
-fn apply_windsurf(path: &Path, audit: bool, log_blocked: bool, dry_run: bool) -> Result<String> {
-    let pre = windsurf_command_entry(hook_scan_cli_command(
-        AiTool::Windsurf,
-        audit,
-        log_blocked,
-        false,
-    ));
-    let post = windsurf_command_entry(hook_scan_cli_command(
-        AiTool::Windsurf,
-        audit,
-        log_blocked,
-        true,
-    ));
-    let prompt = windsurf_command_entry(user_prompt_hook_scan_command(
-        AiTool::Windsurf,
-        audit,
-        log_blocked,
-        None,
-    ));
+fn apply_windsurf(
+    path: &Path,
+    audit: bool,
+    log_blocked: bool,
+    dry_run: bool,
+    root_arg: Option<&str>,
+) -> Result<String> {
+    let commands = hook_scan_commands(AiTool::Windsurf, audit, log_blocked, root_arg);
+    let pre = windsurf_command_entry(commands.pre);
+    let post = windsurf_command_entry(commands.post);
+    let prompt = windsurf_command_entry(commands.user_prompt);
 
     let mut root = if path.is_file() {
         load_json(path)?
@@ -1473,8 +1518,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hooks.json");
 
-        apply_cursor(&path, false, false, false, false).unwrap();
-        apply_cursor(&path, false, false, false, true).unwrap();
+        apply_cursor(&path, false, false, false, false, None).unwrap();
+        apply_cursor(&path, false, false, false, true, None).unwrap();
 
         let root: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
         for key in [
@@ -1540,6 +1585,60 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn project_hook_root_arg_shell_quotes_spaces_and_apostrophes() {
+        assert_eq!(
+            project_hook_root_arg(Path::new("/work/team's app")).unwrap(),
+            r#"'/work/team'\''s app'"#
+        );
+    }
+
+    #[test]
+    fn windows_hook_arg_doubles_trailing_backslashes_before_closing_quote() {
+        assert_eq!(
+            quote_windows_hook_arg(r"C:\work\project\"),
+            r#""C:\work\project\\""#
+        );
+        assert_eq!(
+            quote_windows_hook_arg(r"C:\work\project"),
+            r#""C:\work\project""#
+        );
+    }
+
+    #[test]
+    fn project_installs_embed_trusted_root_for_every_tool() {
+        let project = tempfile::tempdir().unwrap();
+        let opts = InstallAiOptions {
+            audit: false,
+            log_blocked: true,
+            dry_run: false,
+            global: false,
+            fail_closed: true,
+            apply_deny: false,
+            apply_sandbox: false,
+        };
+        let quoted_root = project_hook_root_arg(project.path()).unwrap();
+
+        for tool in [
+            AiTool::ClaudeCode,
+            AiTool::Cursor,
+            AiTool::Codex,
+            AiTool::Copilot,
+            AiTool::Antigravity,
+            AiTool::Windsurf,
+        ] {
+            let config_path = project.path().join(ai_config_relative_path(tool));
+            apply_tool(&config_path, tool, opts, Some(project.path())).unwrap();
+            let body = fs::read_to_string(&config_path).unwrap();
+            if tool == AiTool::Codex {
+                assert!(body.contains(CODEX_GIT_ROOT_ARG), "{tool:?}: {body}");
+            } else {
+                assert!(body.contains(&quoted_root), "{tool:?}: {body}");
+            }
+        }
+    }
+
     #[test]
     fn antigravity_managed_hook_is_replaced_on_rerun() {
         let dir = tempfile::tempdir().unwrap();
@@ -1555,8 +1654,8 @@ mod tests {
         )
         .unwrap();
 
-        apply_antigravity(&path, false, false, false, false).unwrap();
-        apply_antigravity(&path, true, false, false, false).unwrap();
+        apply_antigravity(&path, false, false, false, false, None).unwrap();
+        apply_antigravity(&path, true, false, false, false, None).unwrap();
 
         let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert!(
@@ -1605,8 +1704,8 @@ mod tests {
         )
         .unwrap();
 
-        apply_windsurf(&path, false, false, false).unwrap();
-        apply_windsurf(&path, true, false, false).unwrap();
+        apply_windsurf(&path, false, false, false, None).unwrap();
+        apply_windsurf(&path, true, false, false, None).unwrap();
 
         let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
 
@@ -1650,7 +1749,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hooks.json");
 
-        let summary = apply_windsurf(&path, false, false, true).unwrap();
+        let summary = apply_windsurf(&path, false, false, true, None).unwrap();
 
         assert!(summary.starts_with("dry-run:"), "{summary}");
         assert!(!path.exists(), "dry-run must not create the hooks file");
@@ -1672,7 +1771,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        apply_windsurf(&path, false, false, false).unwrap();
+        apply_windsurf(&path, false, false, false, None).unwrap();
 
         let summary = remove_windsurf_scan_hooks(&path, false).unwrap();
         assert!(summary.contains("removed"), "{summary}");
@@ -1710,7 +1809,7 @@ mod tests {
     fn antigravity_remove_deletes_only_managed_entry() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hooks.json");
-        apply_antigravity(&path, false, false, false, false).unwrap();
+        apply_antigravity(&path, false, false, false, false, None).unwrap();
 
         let summary = remove_antigravity_scan_hooks(&path, false).unwrap();
         assert!(summary.contains("removed 1"), "{summary}");

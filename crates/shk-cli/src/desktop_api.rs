@@ -2609,9 +2609,10 @@ mod tests {
         assert!(result.success, "{result:?}");
         let settings = fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
         assert!(settings.contains("\"permissions\""), "{settings}");
+        assert!(settings.contains("--hook-mode claude-code"), "{settings}");
         assert!(
-            settings.contains("shk scan --hook-mode claude-code"),
-            "{settings}"
+            settings.contains(&dir.path().to_string_lossy().to_string()),
+            "trusted project root missing: {settings}"
         );
     }
 

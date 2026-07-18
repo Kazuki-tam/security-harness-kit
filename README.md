@@ -266,7 +266,7 @@ shk env key export --instructions
 shk env key import --stdin
 
 # Migrate keyring keys to 1Password (copies keys and updates shk.toml)
-# Migrates indexed keys plus keys referenced by project-root .env / .env.keys files.
+# Migrates indexed keys plus keys referenced by .env / .env.keys files throughout the project tree.
 shk env key migrate --to 1password
 # Verify the destination, then delete source copies explicitly.
 ```
