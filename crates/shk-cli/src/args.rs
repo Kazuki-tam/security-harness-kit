@@ -536,7 +536,7 @@ pub enum EnvCmd {
         #[command(subcommand)]
         cmd: EnvKeyCmd,
     },
-    /// Store and inject dotenvx private keys with the OS credential store
+    /// Store and inject dotenvx private keys with the configured secret store
     Dotenvx {
         #[command(subcommand)]
         cmd: DotenvxCmd,
@@ -610,7 +610,7 @@ pub struct EnvRunArgs {
 
 #[derive(Subcommand)]
 pub enum EnvKeyCmd {
-    /// Import a DOTENV_PRIVATE_KEY* value into the OS credential store
+    /// Import a DOTENV_PRIVATE_KEY* value into the configured secret store
     Import(EnvKeyImportArgs),
     /// List stored native shk private key names for this project
     List,
@@ -675,12 +675,6 @@ pub struct EnvKeyMigrateArgs {
     /// Destination secret store backend.
     #[arg(long = "to", value_parser = ["keyring", "1password"])]
     pub to: String,
-    /// Delete keys from the source backend after a successful migration.
-    #[arg(long)]
-    pub delete_source: bool,
-    /// Skip the confirmation prompt (required for non-TTY use with --delete-source).
-    #[arg(long)]
-    pub yes: bool,
 }
 
 #[derive(Subcommand)]
@@ -694,7 +688,7 @@ pub enum DotenvxCmd {
     List,
     /// Delete stored dotenvx private keys for this project
     Delete(DotenvxDeleteArgs),
-    /// Run a command through dotenvx with private keys injected from the OS store
+    /// Run dotenvx with private keys injected from the configured secret store
     Run(DotenvxRunArgs),
 }
 

@@ -47,13 +47,13 @@ shk doctor workflows --fix           # add persist-credentials: false to checkou
 shk doctor version                   # check latest release
 shk env encrypt .env --in-place  # native shk dotenv encryption; adds [SHK_NATIVE_ENV] header
 shk env run -- npm test           # decrypt native env values only for the child process
-shk env key import                # register the default local decryption key in the OS store
+shk env key import                # register the default key in the configured secret store
 shk env key list                  # show native key names for this project, not values
-shk env key delete --env staging  # remove a native decryption key from the OS store
+shk env key delete --env staging  # remove a native key from the configured secret store
 shk env key export --instructions # show safe handoff instructions; no raw key output
 shk env key migrate --to 1password  # copy keys to 1Password; updates shk.toml on success
 shk env decrypt .env --output .env.local
-shk env dotenvx import-keys .env.keys # store dotenvx private keys in OS credential store
+shk env dotenvx import-keys .env.keys # store keys in the configured secret store
 shk env dotenvx run -- npm test       # inject stored keys only into child process
 shk env dotenvx delete --all
 shk secrets push --profile prod       # push dotenv payload to AWS/GCP secret manager
@@ -159,12 +159,12 @@ secret_store = "keyring"          # default
 ```bash
 shk doctor env                    # check plaintext env files + 1Password CLI when configured
 shk env key migrate --to 1password
-shk env key migrate --to 1password --delete-source --yes
 ```
 
 Migration notes:
 - Keep `secret_store = "keyring"` until `shk env key migrate --to 1password` succeeds; the command updates `shk.toml` afterward.
 - Migrates indexed keys plus keys referenced by project-root `.env` / `.env.keys` files.
+- Source keys are retained for rollback; verify the destination, then delete them explicitly.
 - Set `SHK_OP_PATH` when `op` is not on PATH. 1Password items are tagged `shk` with titles like `shk:{project_id}:env:DOTENV_PRIVATE_KEY`.
 - 1Password is primarily a team-operations upgrade (distribution, offboarding, audit), not per-command biometric approval on every `shk env run`.
 
@@ -283,7 +283,7 @@ shk ci init github                      # write .github/workflows/shk.yml
 shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
-shk ci init github --shk-version v0.5.4
+shk ci init github --shk-version v0.5.5
 shk ci init github --output .github/workflows/security.yml --force
 ```
 

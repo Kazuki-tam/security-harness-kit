@@ -1,17 +1,21 @@
 use crate::audit_log;
 use anyhow::{Context, Result, anyhow, bail};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use shk_core::policy::Policy;
 use std::collections::BTreeSet;
-use std::io::{Seek, SeekFrom, Write};
+use std::fs::OpenOptions;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::Duration;
-use tempfile::NamedTempFile;
+use std::time::{Duration, Instant};
+use wait_timeout::ChildExt;
 use zeroize::{Zeroize, Zeroizing};
 
 const DOTENVX_SERVICE: &str = "security-harness-kit/dotenvx";
 const DOTENVX_INDEX_KEY: &str = "__index";
+const KEYRING_TRANSACTION_KEY: &str = "__transaction_v1";
 const SHK_ENV_SERVICE: &str = "security-harness-kit/env";
 const SHK_OP_PATH_ENV: &str = "SHK_OP_PATH";
 const MIN_OP_VERSION: &str = "2.24.0";
@@ -19,6 +23,9 @@ const OP_TAG: &str = "shk";
 const OP_CATEGORY: &str = "API_CREDENTIAL";
 const OP_CONFLICT_RETRY_DELAYS: &[Duration] =
     &[Duration::from_millis(250), Duration::from_millis(750)];
+const OP_DOCTOR_TIMEOUT: Duration = Duration::from_secs(5);
+const OP_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const SECRET_STORE_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreKind {
@@ -80,11 +87,193 @@ impl ProjectIdentity {
     }
 }
 
+pub fn with_secret_store_lock<T>(
+    project: &ProjectIdentity,
+    purpose: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let cache_dir = secret_store_cache_dir();
+    let lock_dir = secure_lock_directory(&cache_dir)?;
+
+    let root = std::fs::canonicalize(&project.root).unwrap_or_else(|_| project.root.clone());
+    let mut hasher = Sha256::new();
+    hasher.update(root.to_string_lossy().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(project.project_id.as_deref().unwrap_or_default().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(purpose.as_bytes());
+    let digest = hasher.finalize();
+    let lock_name = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let lock_path = lock_dir.join(format!("{lock_name}.lock"));
+    let mut file = open_lock_file(&lock_path)?;
+    let deadline = Instant::now() + SECRET_STORE_LOCK_TIMEOUT;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    let holder = lock_holder_label(&mut file).unwrap_or_default();
+                    bail!(
+                        "timed out waiting {} seconds for secret store operation `{purpose}`{holder}",
+                        SECRET_STORE_LOCK_TIMEOUT.as_secs()
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("lock secret store operation `{purpose}`"));
+            }
+        }
+    }
+    file.set_len(0)
+        .with_context(|| format!("reset secret store lock {}", lock_path.display()))?;
+    write!(file, "pid={}", std::process::id())
+        .with_context(|| format!("record secret store lock holder {}", lock_path.display()))?;
+    file.flush()
+        .with_context(|| format!("flush secret store lock {}", lock_path.display()))?;
+    let result = operation();
+    let unlock_result = FileExt::unlock(&file)
+        .with_context(|| format!("unlock secret store operation `{purpose}`"));
+    match (result, unlock_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(err)) | (Err(err), _) => Err(err),
+    }
+}
+
+fn lock_holder_label(file: &mut std::fs::File) -> Option<String> {
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let mut value = String::new();
+    file.take(64).read_to_string(&mut value).ok()?;
+    let pid = value.trim().strip_prefix("pid=")?;
+    if pid.is_empty() || !pid.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("; lock holder pid={pid}"))
+}
+
+fn secret_store_cache_dir() -> PathBuf {
+    #[cfg(test)]
+    {
+        let directory = std::env::temp_dir().join(format!("shk-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&directory);
+        directory
+    }
+    #[cfg(not(test))]
+    {
+        dirs::cache_dir().unwrap_or_else(std::env::temp_dir)
+    }
+}
+
+fn secure_lock_directory(cache_dir: &Path) -> Result<PathBuf> {
+    let shk_dir = cache_dir.join("shk");
+    let lock_dir = shk_dir.join("locks");
+    for directory in [&shk_dir, &lock_dir] {
+        match std::fs::create_dir(directory) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("create secret store lock directory {}", directory.display())
+                });
+            }
+        }
+        let metadata = std::fs::symlink_metadata(directory).with_context(|| {
+            format!(
+                "inspect secret store lock directory {}",
+                directory.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            bail!(
+                "refusing symlinked secret store lock directory {}",
+                directory.display()
+            );
+        }
+        if !metadata.is_dir() {
+            bail!(
+                "secret store lock path is not a directory: {}",
+                directory.display()
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let directory_file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+                .open(directory)
+                .with_context(|| {
+                    format!("open secret store lock directory {}", directory.display())
+                })?;
+            directory_file
+                .set_permissions(std::fs::Permissions::from_mode(0o700))
+                .with_context(|| {
+                    format!("secure secret store lock directory {}", directory.display())
+                })?;
+        }
+    }
+    Ok(lock_dir)
+}
+
+fn open_lock_file(path: &Path) -> Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("open secret store lock {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspect secret store lock {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!(
+            "secret store lock is not a regular file: {}",
+            path.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.nlink() != 1 {
+            bail!(
+                "refusing multiply-linked secret store lock {}",
+                path.display()
+            );
+        }
+        // SAFETY: `geteuid` has no preconditions and does not dereference pointers.
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            bail!(
+                "secret store lock is not owned by this user: {}",
+                path.display()
+            );
+        }
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("secure secret store lock {}", path.display()))?;
+    }
+    Ok(file)
+}
+
 pub trait SecretStore: Send + Sync {
     fn put(&self, project: &ProjectIdentity, key: &str, value: &str) -> Result<()>;
     fn get(&self, project: &ProjectIdentity, key: &str) -> Result<Option<String>>;
     fn delete(&self, project: &ProjectIdentity, key: &str) -> Result<()>;
     fn list_keys(&self, project: &ProjectIdentity) -> Result<BTreeSet<String>>;
+    fn delete_if_value(
+        &self,
+        _project: &ProjectIdentity,
+        _key: &str,
+        _expected: &str,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 pub struct EnvStores {
@@ -162,6 +351,20 @@ struct KeyIndex {
     keys: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum KeyringTransactionOperation {
+    Put,
+    Delete,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct KeyringTransaction {
+    operation: KeyringTransactionOperation,
+    key: String,
+    value: Option<String>,
+}
+
 struct KeyringSecretStore {
     service: &'static str,
 }
@@ -184,6 +387,10 @@ impl KeyringSecretStore {
         Self::account(project, DOTENVX_INDEX_KEY)
     }
 
+    fn transaction_account(project: &ProjectIdentity) -> String {
+        Self::account(project, KEYRING_TRANSACTION_KEY)
+    }
+
     fn read_index(&self, project: &ProjectIdentity) -> Result<BTreeSet<String>> {
         let Some(raw) = self.get_raw(&Self::index_account(project))? else {
             return Ok(BTreeSet::new());
@@ -200,6 +407,74 @@ impl KeyringSecretStore {
             keys: index.iter().cloned().collect(),
         })?;
         self.put_raw(&Self::index_account(project), &body)
+    }
+
+    fn write_transaction(
+        &self,
+        project: &ProjectIdentity,
+        transaction: &KeyringTransaction,
+    ) -> Result<()> {
+        let mut body =
+            serde_json::to_string(transaction).context("serialize keyring transaction")?;
+        let result = self
+            .put_raw(&Self::transaction_account(project), &body)
+            .context("write keyring transaction journal");
+        body.zeroize();
+        result
+    }
+
+    fn recover_transaction(&self, project: &ProjectIdentity) -> Result<()> {
+        let Some(raw) = self.get_raw(&Self::transaction_account(project))? else {
+            return Ok(());
+        };
+        let raw = Zeroizing::new(raw);
+        let mut transaction = match serde_json::from_str::<KeyringTransaction>(&raw) {
+            Ok(transaction) => transaction,
+            Err(err) => {
+                eprintln!(
+                    "warning: ignoring corrupt keyring transaction journal for {}: {err}",
+                    project.root.display()
+                );
+                return self
+                    .delete_raw(&Self::transaction_account(project))
+                    .context("clear corrupt keyring transaction journal");
+            }
+        };
+        let result = self.apply_transaction(project, &mut transaction);
+        if let Some(value) = transaction.value.as_mut() {
+            value.zeroize();
+        }
+        result
+    }
+
+    fn apply_transaction(
+        &self,
+        project: &ProjectIdentity,
+        transaction: &mut KeyringTransaction,
+    ) -> Result<()> {
+        let account = Self::account(project, &transaction.key);
+        let mut index = self.read_index(project)?;
+        match transaction.operation {
+            KeyringTransactionOperation::Put => {
+                let value = transaction
+                    .value
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("keyring put transaction has no value"))?;
+                self.put_raw(&account, value)
+                    .with_context(|| format!("store {} in OS credential store", transaction.key))?;
+                index.insert(transaction.key.clone());
+            }
+            KeyringTransactionOperation::Delete => {
+                self.delete_raw(&account).with_context(|| {
+                    format!("delete {} from OS credential store", transaction.key)
+                })?;
+                index.remove(&transaction.key);
+            }
+        }
+        self.write_index(project, &index)
+            .context("update keyring index during transaction")?;
+        self.delete_raw(&Self::transaction_account(project))
+            .context("clear keyring transaction journal")
     }
 
     fn put_raw(&self, account: &str, value: &str) -> Result<()> {
@@ -226,14 +501,23 @@ impl KeyringSecretStore {
 
 impl SecretStore for KeyringSecretStore {
     fn put(&self, project: &ProjectIdentity, key: &str, value: &str) -> Result<()> {
-        self.put_raw(&Self::account(project, key), value)
-            .with_context(|| format!("store {key} in OS credential store"))?;
-        if key != DOTENVX_INDEX_KEY {
-            let mut index = self.read_index(project)?;
-            index.insert(key.to_string());
-            self.write_index(project, &index)?;
+        if key == DOTENVX_INDEX_KEY {
+            return self.put_raw(&Self::account(project, key), value);
         }
-        Ok(())
+        with_secret_store_lock(project, self.service, || {
+            self.recover_transaction(project)?;
+            let mut transaction = KeyringTransaction {
+                operation: KeyringTransactionOperation::Put,
+                key: key.to_string(),
+                value: Some(value.to_string()),
+            };
+            self.write_transaction(project, &transaction)?;
+            let result = self.apply_transaction(project, &mut transaction);
+            if let Some(value) = transaction.value.as_mut() {
+                value.zeroize();
+            }
+            result
+        })
     }
 
     fn get(&self, project: &ProjectIdentity, key: &str) -> Result<Option<String>> {
@@ -241,18 +525,49 @@ impl SecretStore for KeyringSecretStore {
     }
 
     fn delete(&self, project: &ProjectIdentity, key: &str) -> Result<()> {
-        self.delete_raw(&Self::account(project, key))
-            .with_context(|| format!("delete {key} from OS credential store"))?;
-        if key != DOTENVX_INDEX_KEY {
-            let mut index = self.read_index(project)?;
-            index.remove(key);
-            self.write_index(project, &index)?;
+        if key == DOTENVX_INDEX_KEY {
+            return self.delete_raw(&Self::account(project, key));
         }
-        Ok(())
+        with_secret_store_lock(project, self.service, || {
+            self.recover_transaction(project)?;
+            let mut transaction = KeyringTransaction {
+                operation: KeyringTransactionOperation::Delete,
+                key: key.to_string(),
+                value: None,
+            };
+            self.write_transaction(project, &transaction)?;
+            self.apply_transaction(project, &mut transaction)
+        })
     }
 
     fn list_keys(&self, project: &ProjectIdentity) -> Result<BTreeSet<String>> {
         self.read_index(project)
+    }
+
+    fn delete_if_value(
+        &self,
+        project: &ProjectIdentity,
+        key: &str,
+        expected: &str,
+    ) -> Result<bool> {
+        with_secret_store_lock(project, self.service, || {
+            self.recover_transaction(project)?;
+            let Some(current) = self.get_raw(&Self::account(project, key))? else {
+                return Ok(true);
+            };
+            let current = Zeroizing::new(current);
+            if current.as_str() != expected {
+                return Ok(false);
+            }
+            let mut transaction = KeyringTransaction {
+                operation: KeyringTransactionOperation::Delete,
+                key: key.to_string(),
+                value: None,
+            };
+            self.write_transaction(project, &transaction)?;
+            self.apply_transaction(project, &mut transaction)?;
+            Ok(true)
+        })
     }
 }
 
@@ -356,6 +671,12 @@ fn validate_op_binary(path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         let metadata =
             std::fs::metadata(path).with_context(|| format!("inspect {}", path.display()))?;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            bail!(
+                "1Password CLI binary is not executable at {}",
+                path.display()
+            );
+        }
         if metadata.permissions().mode() & 0o002 != 0 {
             bail!(
                 "refusing to execute world-writable 1Password CLI binary at {}",
@@ -368,6 +689,7 @@ fn validate_op_binary(path: &Path) -> Result<()> {
 
 trait OpRunner: Send + Sync {
     fn run(&self, op_path: &Path, args: &[&str]) -> Result<Output>;
+    fn run_with_stdin(&self, op_path: &Path, args: &[&str], input: &[u8]) -> Result<Output>;
 
     fn wait_before_retry(&self, _delay: Duration) {}
 }
@@ -376,18 +698,112 @@ struct ProcessOpRunner;
 
 impl OpRunner for ProcessOpRunner {
     fn run(&self, op_path: &Path, args: &[&str]) -> Result<Output> {
-        let output = Command::new(op_path)
-            .args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .with_context(|| format!("run `{}`", command_line(op_path, args)))?;
-        Ok(output)
+        run_op_process_with_timeout(op_path, args, None, OP_COMMAND_TIMEOUT)
+    }
+
+    fn run_with_stdin(&self, op_path: &Path, args: &[&str], input: &[u8]) -> Result<Output> {
+        run_op_process_with_timeout(op_path, args, Some(input), OP_COMMAND_TIMEOUT)
     }
 
     fn wait_before_retry(&self, delay: Duration) {
         std::thread::sleep(delay);
     }
+}
+
+fn run_op_process_with_timeout(
+    op_path: &Path,
+    args: &[&str],
+    input: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<Output> {
+    let command = command_line(op_path, args);
+    let mut child = Command::new(op_path)
+        .args(args)
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("run `{command}`"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("capture stdout for `{command}`"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("capture stderr for `{command}`"))?;
+    let stdout_reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        stdout.read_to_end(&mut output)?;
+        Ok::<_, std::io::Error>(output)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        stderr.read_to_end(&mut output)?;
+        Ok::<_, std::io::Error>(output)
+    });
+    let writer = if let Some(input) = input {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("open stdin for `{command}`"))?;
+        let input = Zeroizing::new(input.to_vec());
+        Some(std::thread::spawn(move || stdin.write_all(&input)))
+    } else {
+        None
+    };
+
+    let status = if let Some(status) = child
+        .wait_timeout(timeout)
+        .with_context(|| format!("wait for `{command}`"))?
+    {
+        status
+    } else {
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Some(writer) = writer {
+            let _ = writer.join();
+        }
+        let mut stdout = stdout_reader
+            .join()
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
+        let mut stderr = stderr_reader
+            .join()
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
+        stdout.zeroize();
+        stderr.zeroize();
+        bail!(
+            "`{command}` timed out after {} seconds",
+            timeout.as_secs_f64()
+        );
+    };
+    if let Some(writer) = writer {
+        writer
+            .join()
+            .map_err(|_| anyhow!("stdin writer panicked for `{command}`"))?
+            .with_context(|| format!("write stdin for `{command}`"))?;
+    }
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| anyhow!("stdout reader panicked for `{command}`"))?
+        .with_context(|| format!("read stdout from `{command}`"))?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| anyhow!("stderr reader panicked for `{command}`"))?
+        .with_context(|| format!("read stderr from `{command}`"))?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 struct OnePasswordSecretStore {
@@ -399,6 +815,10 @@ struct OnePasswordSecretStore {
 }
 
 impl OnePasswordSecretStore {
+    fn lock_purpose(&self, key: &str) -> String {
+        format!("1password:{}:{}:{key}", self.vault, self.kind.segment())
+    }
+
     fn new(
         kind: StoreKind,
         resolved: ResolvedOpPath,
@@ -479,9 +899,20 @@ impl OnePasswordSecretStore {
     }
 
     fn find_item_id(&self, title: &str) -> Result<Option<String>> {
+        let mut matching_ids = self.find_item_ids(title)?;
+        match matching_ids.len() {
+            0 => Ok(None),
+            1 => Ok(matching_ids.pop()),
+            count => bail!(
+                "found {count} 1Password items named `{title}`; remove duplicates before continuing"
+            ),
+        }
+    }
+
+    fn find_item_ids(&self, title: &str) -> Result<Vec<String>> {
         let value = self.run_json(&["item", "list", "--tags", OP_TAG, "--vault", &self.vault])?;
         let Some(items) = value.as_array() else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
         let mut matching_ids = Vec::new();
         for item in items {
@@ -500,13 +931,7 @@ impl OnePasswordSecretStore {
                 .ok_or_else(|| anyhow!("1Password item `{title}` has no item ID"))?;
             matching_ids.push(id.to_string());
         }
-        match matching_ids.len() {
-            0 => Ok(None),
-            1 => Ok(matching_ids.pop()),
-            count => bail!(
-                "found {count} 1Password items named `{title}`; remove duplicates before continuing"
-            ),
-        }
+        Ok(matching_ids)
     }
 
     fn put_item(&self, project: &ProjectIdentity, key: &str, value: &str) -> Result<()> {
@@ -522,26 +947,19 @@ impl OnePasswordSecretStore {
                 value,
             }],
         };
-        let (mut tmp, template_len) = write_temp_json(&template)?;
-        let template_path = tmp.path().to_string_lossy().to_string();
+        let template_json =
+            Zeroizing::new(serde_json::to_vec(&template).context("serialize 1Password item JSON")?);
         let args = if let Some(id) = existing_id.as_deref() {
-            vec![
-                "item",
-                "edit",
-                id,
-                "--vault",
-                &self.vault,
-                "--template",
-                &template_path,
-            ]
+            vec!["item", "edit", id, "--vault", &self.vault]
         } else {
             vec![
                 "item",
                 "create",
+                "-",
                 "--vault",
                 &self.vault,
-                "--template",
-                &template_path,
+                "--format",
+                "json",
             ]
         };
         let action = if existing_id.is_some() {
@@ -549,17 +967,95 @@ impl OnePasswordSecretStore {
         } else {
             "create"
         };
-        let result = self.runner.run(&self.op_path, &args);
-        zero_temp_file(&mut tmp, template_len)?;
-        let mut output = result?;
+        let mut output = self
+            .runner
+            .run_with_stdin(&self.op_path, &args, &template_json)?;
+        if !output.status.success() {
+            output.stdout.zeroize();
+            return Err(map_op_failure(
+                &output,
+                &format!("{action} 1Password item `{title}`"),
+            ));
+        }
+        if existing_id.is_some() {
+            output.stdout.zeroize();
+            let stored = self.get_item_value(project, key)?;
+            match stored {
+                Some(current) if current == value => return Ok(()),
+                Some(_) => bail!(
+                    "1Password item `{title}` was not updated to the expected value; retry the command"
+                ),
+                None => {
+                    bail!("1Password item `{title}` disappeared after update; retry the command")
+                }
+            }
+        }
+
+        let created = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .context("parse created 1Password item JSON");
         output.stdout.zeroize();
-        if output.status.success() {
+        let mut created = created?;
+        let created_id = created
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+        zeroize_json_strings(&mut created);
+        let created_id =
+            created_id.ok_or_else(|| anyhow!("created 1Password item `{title}` has no item ID"))?;
+        let mut matching_ids = match self.find_item_ids(&title) {
+            Ok(ids) => ids,
+            Err(err) => {
+                return self.fail_created_item(
+                    &created_id,
+                    &title,
+                    err.context("verify created 1Password item"),
+                );
+            }
+        };
+        for delay in OP_CONFLICT_RETRY_DELAYS {
+            if matching_ids.iter().any(|id| id == &created_id) {
+                break;
+            }
+            self.runner.wait_before_retry(*delay);
+            matching_ids = match self.find_item_ids(&title) {
+                Ok(ids) => ids,
+                Err(err) => {
+                    return self.fail_created_item(
+                        &created_id,
+                        &title,
+                        err.context("verify created 1Password item"),
+                    );
+                }
+            };
+        }
+        if !matching_ids.iter().any(|id| id == &created_id) {
+            return self.fail_created_item(
+                &created_id,
+                &title,
+                anyhow!(
+                    "created 1Password item `{title}` was not visible after creation; retry the command"
+                ),
+            );
+        }
+        if matching_ids.len() <= 1 {
             return Ok(());
         }
-        Err(map_op_failure(
-            &output,
-            &format!("{action} 1Password item `{title}`"),
-        ))
+
+        self.delete_item_by_id(&created_id, &title)?;
+        bail!(
+            "concurrent creation detected for 1Password item `{title}`; removed this operation's \
+             duplicate item, retry the command"
+        )
+    }
+
+    fn fail_created_item(&self, created_id: &str, title: &str, error: anyhow::Error) -> Result<()> {
+        match self.delete_item_by_id(created_id, title) {
+            Ok(()) => Err(error.context("removed the newly-created 1Password item")),
+            Err(cleanup_err) => bail!(
+                "{error:#}; additionally failed to remove newly-created item `{created_id}`: {cleanup_err:#}"
+            ),
+        }
     }
 
     fn get_item_value(&self, project: &ProjectIdentity, key: &str) -> Result<Option<String>> {
@@ -596,13 +1092,19 @@ impl OnePasswordSecretStore {
                 .and_then(|field| field.get_mut("value"))
                 .map(serde_json::Value::take);
             zeroize_json_strings(&mut item);
-            let Some(serde_json::Value::String(mut value)) = credential else {
-                return Ok(None);
+            let mut value = match credential {
+                Some(serde_json::Value::String(value)) => value,
+                Some(mut unexpected) => {
+                    zeroize_json_strings(&mut unexpected);
+                    bail!("1Password item `{title}` is corrupt: credential field must be a string");
+                }
+                None => {
+                    bail!("1Password item `{title}` is corrupt: credential field is missing");
+                }
             };
-            value.truncate(value.trim_end().len());
-            if value.is_empty() {
+            if value.trim().is_empty() {
                 value.zeroize();
-                return Ok(None);
+                bail!("1Password item `{title}` is corrupt: credential field is empty");
             }
             let _ = audit_log::append_line(
                 &self.repo_root,
@@ -634,7 +1136,11 @@ impl OnePasswordSecretStore {
         let Some(item_id) = self.find_item_id(&title)? else {
             return Ok(());
         };
-        let args = ["item", "delete", &item_id, "--vault", &self.vault];
+        self.delete_item_by_id(&item_id, &title)
+    }
+
+    fn delete_item_by_id(&self, item_id: &str, title: &str) -> Result<()> {
+        let args = ["item", "delete", item_id, "--vault", &self.vault];
         let mut output = self.runner.run(&self.op_path, &args)?;
         for delay in OP_CONFLICT_RETRY_DELAYS {
             if output.status.success() {
@@ -710,8 +1216,10 @@ struct OnePasswordItemField<'a> {
 
 impl SecretStore for OnePasswordSecretStore {
     fn put(&self, project: &ProjectIdentity, key: &str, value: &str) -> Result<()> {
-        self.put_item(project, key, value)
-            .with_context(|| format!("store {key} in 1Password vault {}", self.vault))
+        with_secret_store_lock(project, &self.lock_purpose(key), || {
+            self.put_item(project, key, value)
+                .with_context(|| format!("store {key} in 1Password vault {}", self.vault))
+        })
     }
 
     fn get(&self, project: &ProjectIdentity, key: &str) -> Result<Option<String>> {
@@ -719,8 +1227,10 @@ impl SecretStore for OnePasswordSecretStore {
     }
 
     fn delete(&self, project: &ProjectIdentity, key: &str) -> Result<()> {
-        self.delete_item(project, key)
-            .with_context(|| format!("delete {key} from 1Password vault {}", self.vault))
+        with_secret_store_lock(project, &self.lock_purpose(key), || {
+            self.delete_item(project, key)
+                .with_context(|| format!("delete {key} from 1Password vault {}", self.vault))
+        })
     }
 
     fn list_keys(&self, project: &ProjectIdentity) -> Result<BTreeSet<String>> {
@@ -738,12 +1248,32 @@ impl SecretStore for OnePasswordSecretStore {
                 continue;
             };
             if let Some(key) = title.strip_prefix(&prefix) {
-                if !key.is_empty() {
+                if !key.is_empty() && !key.contains(':') {
                     keys.insert(key.to_string());
                 }
             }
         }
         Ok(keys)
+    }
+
+    fn delete_if_value(
+        &self,
+        project: &ProjectIdentity,
+        key: &str,
+        expected: &str,
+    ) -> Result<bool> {
+        with_secret_store_lock(project, &self.lock_purpose(key), || {
+            let Some(current) = self.get_item_value(project, key)? else {
+                return Ok(true);
+            };
+            let current = Zeroizing::new(current);
+            if current.as_str() != expected {
+                return Ok(false);
+            }
+            self.delete_item(project, key)
+                .with_context(|| format!("roll back {key} from 1Password vault {}", self.vault))?;
+            Ok(true)
+        })
     }
 }
 
@@ -772,37 +1302,46 @@ pub fn collect_onepassword_doctor_status(policy: &Policy) -> Result<OnePasswordD
         Ok(resolved) => {
             status.op_path = Some(resolved.path.display().to_string());
             status.op_path_source = Some(resolved.source);
-            let output = Command::new(&resolved.path)
-                .arg("--version")
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output()
-                .context("run `op --version`")?;
-            if output.status.success() {
-                let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                status.op_version = Some(version.clone());
-                status.op_version_ok = op_version_meets_minimum(&version, MIN_OP_VERSION);
-            } else {
-                status.op_version_error =
-                    Some(String::from_utf8_lossy(&output.stderr).trim().to_string());
+            match run_doctor_op_command(&resolved.path, &["--version"]) {
+                Ok(output) if output.status.success() => {
+                    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    status.op_version = Some(version.clone());
+                    status.op_version_ok = op_version_meets_minimum(&version, MIN_OP_VERSION);
+                }
+                Ok(output) => {
+                    status.op_version_error =
+                        Some(String::from_utf8_lossy(&output.stderr).trim().to_string());
+                }
+                Err(err) => status.op_version_error = Some(err.to_string()),
             }
 
-            let whoami = Command::new(&resolved.path)
-                .args(["whoami"])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output()
-                .context("run `op whoami`")?;
-            status.op_signed_in = whoami.status.success();
-            if !status.op_signed_in {
-                status.op_sign_in_error =
-                    Some(String::from_utf8_lossy(&whoami.stderr).trim().to_string());
+            match run_doctor_op_command(&resolved.path, &["whoami"]) {
+                Ok(output) => {
+                    status.op_signed_in = output.status.success();
+                    if !status.op_signed_in {
+                        status.op_sign_in_error =
+                            Some(String::from_utf8_lossy(&output.stderr).trim().to_string());
+                    }
+                }
+                Err(err) => status.op_sign_in_error = Some(err.to_string()),
             }
         }
         Err(err) => status.op_resolution_error = Some(err.to_string()),
     }
 
     Ok(status)
+}
+
+fn run_doctor_op_command(op_path: &Path, args: &[&str]) -> Result<Output> {
+    run_doctor_op_command_with_timeout(op_path, args, OP_DOCTOR_TIMEOUT)
+}
+
+fn run_doctor_op_command_with_timeout(
+    op_path: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Output> {
+    run_op_process_with_timeout(op_path, args, None, timeout)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -818,29 +1357,6 @@ pub struct OnePasswordDoctorStatus {
     pub op_signed_in: bool,
     pub op_sign_in_error: Option<String>,
     pub op_resolution_error: Option<String>,
-}
-
-fn write_temp_json(value: &impl Serialize) -> Result<(NamedTempFile, usize)> {
-    let mut tmp = NamedTempFile::new().context("create temporary 1Password template file")?;
-    let bytes =
-        Zeroizing::new(serde_json::to_vec(value).context("serialize 1Password template JSON")?);
-    let len = bytes.len();
-    tmp.write_all(&bytes)
-        .context("write temporary 1Password template file")?;
-    tmp.flush()
-        .context("flush temporary 1Password template file")?;
-    Ok((tmp, len))
-}
-
-fn zero_temp_file(tmp: &mut NamedTempFile, len: usize) -> Result<()> {
-    tmp.as_file_mut()
-        .seek(SeekFrom::Start(0))
-        .context("seek temporary secret payload file")?;
-    tmp.write_all(&vec![0u8; len])
-        .context("zero temporary secret payload file")?;
-    tmp.flush()
-        .context("flush zeroed temporary secret payload file")?;
-    Ok(())
 }
 
 fn command_line(program: &Path, args: &[&str]) -> String {
@@ -896,6 +1412,8 @@ mod tests {
     use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt;
+    #[cfg(windows)]
+    use std::os::windows::process::ExitStatusExt;
     use std::sync::{Arc, Mutex};
 
     pub struct MockSecretStore {
@@ -994,6 +1512,19 @@ mod tests {
         fn list_keys(&self, project: &ProjectIdentity) -> Result<BTreeSet<String>> {
             Ok(self.read_index(project))
         }
+
+        fn delete_if_value(
+            &self,
+            project: &ProjectIdentity,
+            key: &str,
+            expected: &str,
+        ) -> Result<bool> {
+            if self.get(project, key)?.as_deref() != Some(expected) {
+                return Ok(false);
+            }
+            self.delete(project, key)?;
+            Ok(true)
+        }
     }
 
     pub(crate) fn run_secret_store_contract<S: SecretStore>(store: &S, project: &ProjectIdentity) {
@@ -1052,6 +1583,10 @@ mod tests {
                 .remove(0)
                 .map_err(|err| anyhow!(err))
         }
+
+        fn run_with_stdin(&self, _op_path: &Path, args: &[&str], _input: &[u8]) -> Result<Output> {
+            self.run(Path::new("op"), args)
+        }
     }
 
     fn sample_project() -> ProjectIdentity {
@@ -1095,6 +1630,107 @@ mod tests {
         assert!(!op_version_meets_minimum("2.20.0", "2.24.0"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn op_validation_rejects_non_executable_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("op");
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let err = validate_op_binary(&path).unwrap_err();
+        assert!(err.to_string().contains("not executable"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_file_rejects_symlinks_and_hard_links() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "preserve me").unwrap();
+
+        let symlink_path = dir.path().join("symlink.lock");
+        symlink(&victim, &symlink_path).unwrap();
+        assert!(open_lock_file(&symlink_path).is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "preserve me");
+
+        let hard_link_path = dir.path().join("hard-link.lock");
+        std::fs::hard_link(&victim, &hard_link_path).unwrap();
+        assert!(open_lock_file(&hard_link_path).is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "preserve me");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_op_command_times_out() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("op");
+        std::fs::write(&path, "#!/bin/sh\nsleep 2\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let err = run_doctor_op_command_with_timeout(&path, &["whoami"], Duration::from_millis(20))
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_op_command_collects_successful_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("op");
+        std::fs::write(&path, "#!/bin/sh\nprintf '2.24.0\\n'\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let output =
+            run_doctor_op_command_with_timeout(&path, &["--version"], Duration::from_secs(1))
+                .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"2.24.0\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regular_op_command_times_out() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("op");
+        std::fs::write(&path, "#!/bin/sh\nsleep 2\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let err =
+            run_op_process_with_timeout(&path, &["item", "list"], None, Duration::from_millis(20))
+                .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regular_op_command_drains_large_stdout() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("op");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\ndd if=/dev/zero bs=1024 count=128 2>/dev/null\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let output = run_op_process_with_timeout(&path, &[], None, Duration::from_secs(2)).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 128 * 1024);
+    }
+
     #[test]
     fn onepassword_get_decodes_json_credential_once() {
         let (runner, calls) = RecordingOpRunner::new(vec![
@@ -1124,6 +1760,34 @@ mod tests {
                 .any(|args| args == ["--format", "json"])
         );
         assert!(!recorded[1].contains(&"--fields".to_string()));
+    }
+
+    #[test]
+    fn onepassword_get_rejects_missing_or_invalid_credentials() {
+        for item_body in [
+            r#"{"fields":[]}"#,
+            r#"{"fields":[{"label":"credential","value":"   "}]}"#,
+            r#"{"fields":[{"label":"credential","value":42}]}"#,
+        ] {
+            let (runner, _calls) = RecordingOpRunner::new(vec![
+                Ok(ok_output(
+                    r#"[{"id":"item-id","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#,
+                )),
+                Ok(ok_output(item_body)),
+            ]);
+            let store = OnePasswordSecretStore::with_runner(
+                StoreKind::NativeEnv,
+                PathBuf::from("/usr/local/bin/op"),
+                "vault".to_string(),
+                PathBuf::from("/repo"),
+                Box::new(runner),
+            );
+
+            let err = store
+                .get(&sample_project(), "DOTENV_PRIVATE_KEY")
+                .unwrap_err();
+            assert!(err.to_string().contains("is corrupt"), "{err}");
+        }
     }
 
     #[test]
@@ -1177,8 +1841,13 @@ mod tests {
 
     #[test]
     fn onepassword_put_does_not_place_value_in_argv() {
-        let (runner, calls) =
-            RecordingOpRunner::new(vec![Ok(ok_output("[]")), Ok(ok_output("{}"))]);
+        let created = r#"{"id":"created-item"}"#;
+        let listing = r#"[{"id":"created-item","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#;
+        let (runner, calls) = RecordingOpRunner::new(vec![
+            Ok(ok_output("[]")),
+            Ok(ok_output(created)),
+            Ok(ok_output(listing)),
+        ]);
         let store = OnePasswordSecretStore::with_runner(
             StoreKind::NativeEnv,
             PathBuf::from("/usr/local/bin/op"),
@@ -1190,7 +1859,7 @@ mod tests {
             .put(&sample_project(), "DOTENV_PRIVATE_KEY", "demo-value")
             .unwrap();
         let recorded = calls.lock().unwrap();
-        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded.len(), 3);
         assert!(
             recorded
                 .iter()
@@ -1201,17 +1870,20 @@ mod tests {
                 .windows(2)
                 .any(|args| args == ["--tags", OP_TAG])
         );
-        assert!(recorded[1].contains(&"--template".to_string()));
-        assert_eq!(&recorded[1][..2], ["item", "create"]);
+        assert!(!recorded[1].contains(&"--template".to_string()));
+        assert_eq!(&recorded[1][..3], ["item", "create", "-"]);
     }
 
     #[test]
     fn onepassword_put_edits_existing_item_by_id() {
+        let listing = r#"[{"id":"stable-item-id","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#;
         let (runner, calls) = RecordingOpRunner::new(vec![
-            Ok(ok_output(
-                r#"[{"id":"stable-item-id","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#,
-            )),
+            Ok(ok_output(listing)),
             Ok(ok_output("{}")),
+            Ok(ok_output(listing)),
+            Ok(ok_output(
+                r#"{"fields":[{"label":"credential","type":"CONCEALED","value":"demo-value"}]}"#,
+            )),
         ]);
         let store = OnePasswordSecretStore::with_runner(
             StoreKind::NativeEnv,
@@ -1225,6 +1897,100 @@ mod tests {
             .unwrap();
         let recorded = calls.lock().unwrap();
         assert_eq!(&recorded[1][..3], ["item", "edit", "stable-item-id"]);
+    }
+
+    #[test]
+    fn onepassword_get_preserves_trailing_whitespace() {
+        let listing = r#"[{"id":"stable-item-id","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#;
+        let (runner, _calls) = RecordingOpRunner::new(vec![
+            Ok(ok_output(listing)),
+            Ok(ok_output(
+                r#"{"fields":[{"label":"credential","type":"CONCEALED","value":"secret\n"}]}"#,
+            )),
+        ]);
+        let store = OnePasswordSecretStore::with_runner(
+            StoreKind::NativeEnv,
+            PathBuf::from("/usr/local/bin/op"),
+            "vault".to_string(),
+            PathBuf::from("/repo"),
+            Box::new(runner),
+        );
+        assert_eq!(
+            store.get(&sample_project(), "DOTENV_PRIVATE_KEY").unwrap(),
+            Some("secret\n".to_string())
+        );
+    }
+
+    #[test]
+    fn onepassword_list_keys_rejects_ambiguous_titles() {
+        let (runner, _calls) = RecordingOpRunner::new(vec![Ok(ok_output(
+            r#"[{"id":"other-item","title":"shk:team:env:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#,
+        ))]);
+        let store = OnePasswordSecretStore::with_runner(
+            StoreKind::NativeEnv,
+            PathBuf::from("/usr/local/bin/op"),
+            "vault".to_string(),
+            PathBuf::from("/repo"),
+            Box::new(runner),
+        );
+        let project = ProjectIdentity {
+            root: PathBuf::from("/repo"),
+            project_id: Some("team".to_string()),
+        };
+        assert!(store.list_keys(&project).unwrap().is_empty());
+    }
+
+    #[test]
+    fn onepassword_delete_if_value_only_deletes_the_expected_value() {
+        let listing = r#"[{"id":"stable-item-id","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#;
+        let (runner, calls) = RecordingOpRunner::new(vec![
+            Ok(ok_output(listing)),
+            Ok(ok_output(
+                r#"{"fields":[{"label":"credential","type":"CONCEALED","value":"expected"}]}"#,
+            )),
+            Ok(ok_output(listing)),
+            Ok(ok_output("{}")),
+        ]);
+        let store = OnePasswordSecretStore::with_runner(
+            StoreKind::NativeEnv,
+            PathBuf::from("/usr/local/bin/op"),
+            "vault".to_string(),
+            PathBuf::from("/repo"),
+            Box::new(runner),
+        );
+
+        assert!(
+            store
+                .delete_if_value(&sample_project(), "DOTENV_PRIVATE_KEY", "expected")
+                .unwrap()
+        );
+        let recorded = calls.lock().unwrap();
+        assert_eq!(&recorded[3][..3], ["item", "delete", "stable-item-id"]);
+    }
+
+    #[test]
+    fn onepassword_delete_if_value_preserves_a_changed_value() {
+        let listing = r#"[{"id":"stable-item-id","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#;
+        let (runner, calls) = RecordingOpRunner::new(vec![
+            Ok(ok_output(listing)),
+            Ok(ok_output(
+                r#"{"fields":[{"label":"credential","type":"CONCEALED","value":"changed"}]}"#,
+            )),
+        ]);
+        let store = OnePasswordSecretStore::with_runner(
+            StoreKind::NativeEnv,
+            PathBuf::from("/usr/local/bin/op"),
+            "vault".to_string(),
+            PathBuf::from("/repo"),
+            Box::new(runner),
+        );
+
+        assert!(
+            !store
+                .delete_if_value(&sample_project(), "DOTENV_PRIVATE_KEY", "expected")
+                .unwrap()
+        );
+        assert_eq!(calls.lock().unwrap().len(), 2);
     }
 
     #[test]
@@ -1248,12 +2014,43 @@ mod tests {
     }
 
     #[test]
+    fn onepassword_put_removes_its_item_when_a_concurrent_create_wins() {
+        let listing = r#"[{"id":"existing-item","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]},{"id":"created-item","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#;
+        let (runner, calls) = RecordingOpRunner::new(vec![
+            Ok(ok_output("[]")),
+            Ok(ok_output(r#"{"id":"created-item"}"#)),
+            Ok(ok_output(listing)),
+            Ok(ok_output("{}")),
+        ]);
+        let store = OnePasswordSecretStore::with_runner(
+            StoreKind::NativeEnv,
+            PathBuf::from("/usr/local/bin/op"),
+            "vault".to_string(),
+            PathBuf::from("/repo"),
+            Box::new(runner),
+        );
+
+        let err = store
+            .put(&sample_project(), "DOTENV_PRIVATE_KEY", "demo-value")
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("concurrent creation"),
+            "{err:#}"
+        );
+        let recorded = calls.lock().unwrap();
+        assert_eq!(&recorded[3][..3], ["item", "delete", "created-item"]);
+    }
+
+    #[test]
     fn onepassword_put_never_edits_same_title_item_with_unmanaged_category() {
+        let listing = r#"[{"id":"unrelated-item","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"LOGIN"},{"id":"created-item","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#;
         let (runner, calls) = RecordingOpRunner::new(vec![
             Ok(ok_output(
                 r#"[{"id":"unrelated-item","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"LOGIN"}]"#,
             )),
-            Ok(ok_output("{}")),
+            Ok(ok_output(r#"{"id":"created-item"}"#)),
+            Ok(ok_output(listing)),
         ]);
         let store = OnePasswordSecretStore::with_runner(
             StoreKind::NativeEnv,
@@ -1328,8 +2125,12 @@ mod tests {
         // `op item list --tags shk` also returns items tagged only `shk/foo`;
         // those must not be treated as shk-managed.
         let sub_tag_only = r#"[{"id":"sub-tag-item","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk/foo"]}]"#;
-        let (runner, calls) =
-            RecordingOpRunner::new(vec![Ok(ok_output(sub_tag_only)), Ok(ok_output("{}"))]);
+        let listing = r#"[{"id":"sub-tag-item","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk/foo"]},{"id":"created-item","title":"shk:acme/backend:env:DOTENV_PRIVATE_KEY","category":"API_CREDENTIAL","tags":["shk"]}]"#;
+        let (runner, calls) = RecordingOpRunner::new(vec![
+            Ok(ok_output(sub_tag_only)),
+            Ok(ok_output(r#"{"id":"created-item"}"#)),
+            Ok(ok_output(listing)),
+        ]);
         let store = OnePasswordSecretStore::with_runner(
             StoreKind::NativeEnv,
             PathBuf::from("/usr/local/bin/op"),

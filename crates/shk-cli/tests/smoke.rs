@@ -2900,6 +2900,54 @@ allow = ["Bash(psql:*)"]
 }
 
 #[test]
+fn hook_mode_invalid_action_guard_policy_fails_closed() {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("shk.toml"),
+        "[action_guard]\nenabled = definitely-not-a-boolean\n",
+    )
+    .unwrap();
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": { "command": "echo safe" }
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "claude-code"])
+        .current_dir(dir.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("hook scan");
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(stdout["hookSpecificOutput"]["permissionDecision"], "deny");
+    let reason = stdout["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        reason.contains("policy") && reason.contains("invalid"),
+        "{stdout}"
+    );
+    assert!(!reason.contains("definitely-not-a-boolean"), "{stdout}");
+}
+
+#[test]
 fn hook_mode_outside_repo_cwd_applies_policy_from_payload_path_repo() {
     use std::io::Write;
     // The repository containing the hook target file, with a policy that
@@ -4274,6 +4322,32 @@ fn doctor_env_reports_findings_without_values() {
 }
 
 #[test]
+fn doctor_env_reports_unsupported_secret_store_without_onepassword_diagnostics() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("shk.toml"),
+        "[env]\nsecret_store = \"1pasword\"\n",
+    )
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["doctor", "env", dir.path().to_str().unwrap()])
+        .output()
+        .expect("doctor env");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("unsupported secret store backend `1pasword`"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("env.onepassword.vault"), "{stdout}");
+    assert!(!stdout.contains("1Password CLI"), "{stdout}");
+}
+
+#[test]
 fn doctor_env_skips_dotenvx_encrypted_files() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -4656,27 +4730,16 @@ fn env_key_help_is_registered_without_raw_export() {
 }
 
 #[test]
-fn env_key_migrate_rejects_source_deletion_without_policy() {
-    let dir = tempfile::tempdir().unwrap();
+fn env_key_migrate_does_not_offer_unsafe_source_deletion() {
     let out = Command::new(shk_bin())
-        .args([
-            "env",
-            "key",
-            "migrate",
-            "--to",
-            "1password",
-            "--delete-source",
-            "--yes",
-        ])
-        .current_dir(dir.path())
+        .args(["env", "key", "migrate", "--help"])
         .output()
-        .expect("env key migrate");
+        .expect("env key migrate help");
 
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("--delete-source requires"), "{stderr}");
-    assert!(stderr.contains("shk.toml"), "{stderr}");
-    assert!(!dir.path().join("shk.toml").exists());
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("--delete-source"), "{stdout}");
+    assert!(!stdout.contains("--yes"), "{stdout}");
 }
 
 #[test]

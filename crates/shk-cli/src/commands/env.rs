@@ -4,7 +4,7 @@ use crate::args::{
 };
 use crate::env_store::{
     EnvStores, ProjectIdentity, SecretStore, SecretStoreBackend, open_env_stores,
-    parse_secret_store_backend,
+    parse_secret_store_backend, with_secret_store_lock,
 };
 use crate::exit::CliExit;
 use crate::{fs_atomic, safety};
@@ -14,15 +14,16 @@ use dotenvx::{Keypair, decrypt as dotenvx_decrypt, encrypt as dotenvx_encrypt};
 use serde::{Deserialize, Serialize};
 use shk_core::policy::Policy;
 use std::collections::BTreeSet;
-use std::io::{IsTerminal, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::NamedTempFile;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 const PRIVATE_KEY_PREFIX: &str = "DOTENV_PRIVATE_KEY";
 const DOTENV_PUBLIC_KEY_PREFIX: &str = "DOTENV_PUBLIC_KEY";
 const DOTENV_ENCRYPTED_PREFIX: &str = "encrypted:";
+const MAX_MIGRATION_CANDIDATE_BYTES: u64 = 1024 * 1024;
 const SHK_NATIVE_ENV_HEADER_START: &str =
     "#/----------------------[SHK_NATIVE_ENV]----------------------/";
 const SHK_NATIVE_ENV_HEADER_BODY: &str =
@@ -101,7 +102,9 @@ pub fn dotenvx_import_keys(cwd: &Path, file: &Path) -> Result<()> {
     }
     let imported = entries.len();
 
-    dotenvx_import_keys_with_store(stores.dotenvx.as_ref(), &project, entries)?;
+    with_secret_store_lock(&project, "env-project", || {
+        dotenvx_import_keys_with_store(stores.dotenvx.as_ref(), &project, entries)
+    })?;
 
     println!(
         "Imported {imported} dotenvx private key(s) into the {}",
@@ -128,35 +131,37 @@ pub fn encrypt(cwd: &Path, args: EnvEncryptArgs) -> Result<()> {
             "--remove-source requires input and output to be different files"
         );
     }
-    let mut key_material = read_or_create_native_env_key(
-        stores.native.as_ref(),
-        stores.dotenvx.as_ref(),
-        &project,
-        &private_key_name,
-    )?;
-    let mut plaintext = std::fs::read_to_string(&args.file)
-        .with_context(|| format!("read {}", args.file.display()))?;
-    let encrypt_result =
-        encrypt_dotenv_body(&plaintext, &public_key_name, &key_material.public_key);
-    plaintext.zeroize();
-    let encrypted = encrypt_result?;
-    key_material.private_key.zeroize();
-    write_output(output, encrypted.as_bytes(), args.force || args.in_place)?;
-    println!(
-        "Encrypted {} to {} with {private_key_name}",
-        args.file.display(),
-        output.display()
-    );
-    println!(
-        "Public key was written to the env file; private key was stored in the {} and was not printed.",
-        credential_store_label(&stores)
-    );
-    if args.remove_source {
-        std::fs::remove_file(&args.file)
-            .with_context(|| format!("remove source {}", args.file.display()))?;
-        println!("Removed plaintext source {}", args.file.display());
-    }
-    Ok(())
+    with_secret_store_lock(&project, "env-project", || {
+        let mut key_material = read_or_create_native_env_key_unlocked(
+            stores.native.as_ref(),
+            stores.dotenvx.as_ref(),
+            &project,
+            &private_key_name,
+        )?;
+        let mut plaintext = std::fs::read_to_string(&args.file)
+            .with_context(|| format!("read {}", args.file.display()))?;
+        let encrypt_result =
+            encrypt_dotenv_body(&plaintext, &public_key_name, &key_material.public_key);
+        plaintext.zeroize();
+        let encrypted = encrypt_result?;
+        key_material.private_key.zeroize();
+        write_output(output, encrypted.as_bytes(), args.force || args.in_place)?;
+        println!(
+            "Encrypted {} to {} with {private_key_name}",
+            args.file.display(),
+            output.display()
+        );
+        println!(
+            "Public key was written to the env file; private key was stored in the {} and was not printed.",
+            credential_store_label(&stores)
+        );
+        if args.remove_source {
+            std::fs::remove_file(&args.file)
+                .with_context(|| format!("remove source {}", args.file.display()))?;
+            println!("Removed plaintext source {}", args.file.display());
+        }
+        Ok(())
+    })
 }
 
 pub fn decrypt(cwd: &Path, args: EnvDecryptArgs) -> Result<()> {
@@ -171,11 +176,11 @@ pub fn decrypt(cwd: &Path, args: EnvDecryptArgs) -> Result<()> {
         &project,
         &private_key_name,
     )?
-        .ok_or_else(|| {
-            anyhow!(
-                "no stored {private_key_name}; run `shk env encrypt` or `shk env dotenvx import-keys .env.keys` first"
-            )
-        })?;
+    .ok_or_else(|| {
+        anyhow!(
+            "no stored {private_key_name}; run `shk env encrypt` or `shk env dotenvx import-keys .env.keys` first"
+        )
+    })?;
     let mut plaintext = decrypt_dotenv_body(&body, &key_material.private_key)?;
     key_material.private_key.zeroize();
     let write_result = write_output(output, &plaintext, args.force);
@@ -257,11 +262,24 @@ pub fn key_list(cwd: &Path) -> Result<()> {
 
 pub fn key_delete(cwd: &Path, args: EnvKeyDeleteArgs) -> Result<()> {
     let (_project_root, project, stores) = load_env_context(cwd)?;
-    key_delete_with_store(stores.native.as_ref(), &project, args)
+    with_secret_store_lock(&project, "env-project", || {
+        key_delete_with_store(stores.native.as_ref(), &project, args)
+    })
 }
 
 pub fn key_migrate(cwd: &Path, args: EnvKeyMigrateArgs) -> Result<()> {
     let (project_root, project) = load_env_project(cwd)?;
+    let lock_project = project.clone();
+    with_secret_store_lock(&lock_project, "env-project", move || {
+        key_migrate_locked(project_root, project, args)
+    })
+}
+
+fn key_migrate_locked(
+    project_root: PathBuf,
+    project: ProjectIdentity,
+    args: EnvKeyMigrateArgs,
+) -> Result<()> {
     let (policy, policy_path) = Policy::load_from_dir(&project_root)?;
     let to_backend = parse_secret_store_backend(&args.to)?;
     let source_backend = parse_secret_store_backend(&policy.env.secret_store)?;
@@ -272,13 +290,6 @@ pub fn key_migrate(cwd: &Path, args: EnvKeyMigrateArgs) -> Result<()> {
             args.to
         );
     }
-
-    ensure!(
-        !args.delete_source || policy_path.is_some(),
-        "--delete-source requires a project shk.toml so env.secret_store can be switched \
-         before source keys are deleted; create and configure shk.toml, then retry"
-    );
-
     let mut target_policy = policy.clone();
     target_policy.env.secret_store = args.to.clone();
     target_policy.validate_env_config(&project_root)?;
@@ -286,15 +297,7 @@ pub fn key_migrate(cwd: &Path, args: EnvKeyMigrateArgs) -> Result<()> {
     let source_stores = open_env_stores(&project, &policy)?;
     let target_stores = open_env_stores(&project, &target_policy)?;
 
-    if args.delete_source {
-        confirm_migration_delete_source(&args)?;
-    }
-
-    let MigrationCopy {
-        migrated,
-        native_keys,
-        dotenvx_keys,
-    } = copy_keys_between_stores(
+    let migration = copy_keys_between_stores(
         &project_root,
         &project,
         source_stores.native.as_ref(),
@@ -302,25 +305,46 @@ pub fn key_migrate(cwd: &Path, args: EnvKeyMigrateArgs) -> Result<()> {
         target_stores.native.as_ref(),
         target_stores.dotenvx.as_ref(),
     )?;
+    let migrated = migration.migrated();
+    let found = migration.found();
 
-    if migrated == 0 {
+    if found == 0 {
         println!(
             "No keys found in the {} backend to migrate to {}",
             source_backend.as_config_value(),
             to_backend.as_config_value()
         );
-        return Ok(());
+    } else if migrated == 0 {
+        println!(
+            "All {found} key(s) already exist in the {} backend with matching values",
+            to_backend.as_config_value()
+        );
+    } else {
+        println!(
+            "Migrated {migrated} key(s) from {} to {}",
+            source_backend.as_config_value(),
+            to_backend.as_config_value()
+        );
     }
 
-    println!(
-        "Migrated {migrated} key(s) from {} to {}",
-        source_backend.as_config_value(),
-        to_backend.as_config_value()
-    );
-
     if let Some(path) = policy_path {
-        safety::ensure_write_path_within(&project_root, &path)?;
-        update_policy_secret_store(&path, &args.to)?;
+        let update_result = safety::ensure_write_path_within(&project_root, &path)
+            .and_then(|()| update_policy_secret_store(&path, &args.to));
+        if let Err(err) = update_result {
+            if migrated > 0 {
+                let rollback = rollback_migration_copy(
+                    &migration,
+                    &project,
+                    target_stores.native.as_ref(),
+                    target_stores.dotenvx.as_ref(),
+                );
+                return migration_error_with_rollback(
+                    err.context("update shk.toml after copying destination keys"),
+                    rollback,
+                );
+            }
+            return Err(err.context("update shk.toml after migration"));
+        }
         println!(
             "Updated {} to set env.secret_store = \"{}\"",
             path.display(),
@@ -333,30 +357,39 @@ pub fn key_migrate(cwd: &Path, args: EnvKeyMigrateArgs) -> Result<()> {
         );
     }
 
-    if args.delete_source {
-        delete_migrated_source_keys(
-            &project,
-            source_stores.native.as_ref(),
-            source_stores.dotenvx.as_ref(),
-            &native_keys,
-            &dotenvx_keys,
-        )
-        .with_context(|| {
-            "delete migrated keys from source backend after updating shk.toml; \
-             destination already has the keys, but shk.toml now selects the destination backend — \
-             remove any remaining source keys manually"
-        })?;
-        println!("Deleted migrated key(s) from the source backend.");
-    }
-
     Ok(())
 }
 
-#[derive(Debug)]
 struct MigrationCopy {
-    migrated: usize,
-    native_keys: BTreeSet<String>,
-    dotenvx_keys: BTreeSet<String>,
+    native: Vec<MigrationEntry>,
+    dotenvx: Vec<MigrationEntry>,
+    native_applied: Vec<usize>,
+    dotenvx_applied: Vec<usize>,
+}
+
+impl std::fmt::Debug for MigrationCopy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MigrationCopy")
+            .field("found", &self.found())
+            .field("migrated", &self.migrated())
+            .finish()
+    }
+}
+
+impl MigrationCopy {
+    fn found(&self) -> usize {
+        self.native.len() + self.dotenvx.len()
+    }
+
+    fn migrated(&self) -> usize {
+        self.native_applied.len() + self.dotenvx_applied.len()
+    }
+}
+
+struct MigrationEntry {
+    key: String,
+    source_value: Zeroizing<String>,
+    needs_write: bool,
 }
 
 fn copy_keys_between_stores(
@@ -368,50 +401,154 @@ fn copy_keys_between_stores(
     to_dotenvx: &dyn SecretStore,
 ) -> Result<MigrationCopy> {
     let candidates = discover_private_key_candidates(project_root)?;
-    let mut migrated = 0usize;
-    let mut native_keys = BTreeSet::new();
-    let mut dotenvx_keys = BTreeSet::new();
-    for (store_name, from, to, keys) in [
-        ("native env", from_native, to_native, &mut native_keys),
-        ("dotenvx", from_dotenvx, to_dotenvx, &mut dotenvx_keys),
-    ] {
-        for key in keys_for_migration(from, project, &candidates)? {
-            let Some(mut value) = from.get(project, &key)? else {
-                continue;
-            };
-            let target_value = match to.get(project, &key) {
-                Ok(value) => value,
-                Err(err) => {
-                    value.zeroize();
-                    return Err(err).with_context(|| {
-                        format!("check destination {store_name} key {key} before migration")
-                    });
-                }
-            };
-            if let Some(mut existing) = target_value {
-                let matches = existing == value;
-                existing.zeroize();
-                if !matches {
-                    value.zeroize();
-                    bail!(
-                        "destination {store_name} already contains a different value for {key}; resolve the conflict before migrating"
-                    );
-                }
-            } else if let Err(err) = to.put(project, &key, &value) {
-                value.zeroize();
-                return Err(err)
-                    .with_context(|| format!("copy {store_name} key {key} to destination"));
+    let native = plan_store_migration("native env", from_native, to_native, project, &candidates)?;
+    let dotenvx = plan_store_migration("dotenvx", from_dotenvx, to_dotenvx, project, &candidates)?;
+
+    let native_applied = apply_store_migration("native env", to_native, project, &native)?;
+    let dotenvx_applied = match apply_store_migration("dotenvx", to_dotenvx, project, &dotenvx) {
+        Ok(applied) => applied,
+        Err(err) => {
+            let rollback = rollback_store_migration(to_native, project, &native, &native_applied);
+            return migration_error_with_rollback(err, rollback);
+        }
+    };
+
+    Ok(MigrationCopy {
+        native,
+        dotenvx,
+        native_applied,
+        dotenvx_applied,
+    })
+}
+
+fn plan_store_migration(
+    store_name: &str,
+    from: &dyn SecretStore,
+    to: &dyn SecretStore,
+    project: &ProjectIdentity,
+    candidates: &BTreeSet<String>,
+) -> Result<Vec<MigrationEntry>> {
+    let mut entries = Vec::new();
+    for key in keys_for_migration(from, project, candidates)? {
+        let Some(value) = from.get(project, &key)? else {
+            continue;
+        };
+        let source_value = Zeroizing::new(value);
+        let target_value = to.get(project, &key).with_context(|| {
+            format!("check destination {store_name} key {key} before migration")
+        })?;
+        let needs_write = if let Some(existing) = target_value {
+            let existing = Zeroizing::new(existing);
+            if existing.as_str() != source_value.as_str() {
+                bail!(
+                    "destination {store_name} already contains a different value for {key}; resolve the conflict before migrating"
+                );
             }
-            value.zeroize();
-            keys.insert(key);
-            migrated += 1;
+            false
+        } else {
+            true
+        };
+        entries.push(MigrationEntry {
+            key,
+            source_value,
+            needs_write,
+        });
+    }
+    Ok(entries)
+}
+
+fn apply_store_migration(
+    store_name: &str,
+    to: &dyn SecretStore,
+    project: &ProjectIdentity,
+    entries: &[MigrationEntry],
+) -> Result<Vec<usize>> {
+    let mut applied = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if !entry.needs_write {
+            continue;
+        }
+        match to
+            .get(project, &entry.key)
+            .with_context(|| format!("recheck destination {store_name} key {}", entry.key))
+        {
+            Ok(Some(existing)) => {
+                let existing = Zeroizing::new(existing);
+                if existing.as_str() == entry.source_value.as_str() {
+                    continue;
+                }
+                let rollback = rollback_store_migration(to, project, entries, &applied);
+                let err = anyhow!(
+                    "destination {store_name} key {} changed during migration; refusing to overwrite it",
+                    entry.key
+                );
+                return migration_error_with_rollback(err, rollback);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                let rollback = rollback_store_migration(to, project, entries, &applied);
+                return migration_error_with_rollback(err, rollback);
+            }
+        }
+        if let Err(err) = to.put(project, &entry.key, entry.source_value.as_str()) {
+            let rollback = rollback_store_migration(to, project, entries, &applied);
+            let err = err.context(format!(
+                "copy {store_name} key {} to destination",
+                entry.key
+            ));
+            return migration_error_with_rollback(err, rollback);
+        }
+        applied.push(index);
+    }
+    Ok(applied)
+}
+
+fn rollback_store_migration(
+    store: &dyn SecretStore,
+    project: &ProjectIdentity,
+    entries: &[MigrationEntry],
+    applied: &[usize],
+) -> Result<()> {
+    for index in applied.iter().rev() {
+        let entry = &entries[*index];
+        if !store.delete_if_value(project, &entry.key, entry.source_value.as_str())? {
+            bail!(
+                "destination backend cannot safely roll back key {} or the value changed; \
+                 refusing rollback deletion",
+                entry.key
+            );
         }
     }
-    Ok(MigrationCopy {
-        migrated,
-        native_keys,
-        dotenvx_keys,
-    })
+    Ok(())
+}
+
+fn rollback_migration_copy(
+    migration: &MigrationCopy,
+    project: &ProjectIdentity,
+    target_native: &dyn SecretStore,
+    target_dotenvx: &dyn SecretStore,
+) -> Result<()> {
+    rollback_store_migration(
+        target_dotenvx,
+        project,
+        &migration.dotenvx,
+        &migration.dotenvx_applied,
+    )?;
+    rollback_store_migration(
+        target_native,
+        project,
+        &migration.native,
+        &migration.native_applied,
+    )
+}
+
+fn migration_error_with_rollback<T>(error: anyhow::Error, rollback: Result<()>) -> Result<T> {
+    match rollback {
+        Ok(()) => Err(error.context("migration write failed; copied destination keys rolled back")),
+        Err(rollback_err) => bail!(
+            "{error:#}; additionally failed to roll back copied destination keys: {rollback_err:#}"
+        ),
+    }
 }
 
 fn update_policy_secret_store(path: &Path, backend: &str) -> Result<()> {
@@ -459,8 +596,7 @@ fn discover_private_key_candidates(project_root: &Path) -> Result<BTreeSet<Strin
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name == ".env.keys" {
-            let body = std::fs::read_to_string(entry.path())
-                .with_context(|| format!("read {}", entry.path().display()))?;
+            let body = read_migration_candidate(&entry.path())?;
             for (key, _) in parse_dotenvx_keys(&body)? {
                 candidates.insert(key);
             }
@@ -470,12 +606,49 @@ fn discover_private_key_candidates(project_root: &Path) -> Result<BTreeSet<Strin
             if name == ".env.vault" {
                 continue;
             }
-            let body = std::fs::read_to_string(entry.path())
-                .with_context(|| format!("read {}", entry.path().display()))?;
+            let body = read_migration_candidate(&entry.path())?;
             candidates.extend(public_keys_from_env_body(&body));
         }
     }
     Ok(candidates)
+}
+
+fn read_migration_candidate(path: &Path) -> Result<String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspect migration candidate {}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        bail!(
+            "refusing to inspect symlinked env file during key migration: {}",
+            path.display()
+        );
+    }
+    if !metadata.file_type().is_file() {
+        bail!(
+            "refusing to inspect non-regular env file during key migration: {}",
+            path.display()
+        );
+    }
+    if metadata.len() > MAX_MIGRATION_CANDIDATE_BYTES {
+        bail!(
+            "refusing to inspect env file larger than {} bytes during key migration: {}",
+            MAX_MIGRATION_CANDIDATE_BYTES,
+            path.display()
+        );
+    }
+
+    let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut body = String::new();
+    file.take(MAX_MIGRATION_CANDIDATE_BYTES + 1)
+        .read_to_string(&mut body)
+        .with_context(|| format!("read {}", path.display()))?;
+    if body.len() as u64 > MAX_MIGRATION_CANDIDATE_BYTES {
+        bail!(
+            "env file grew beyond {} bytes during key migration: {}",
+            MAX_MIGRATION_CANDIDATE_BYTES,
+            path.display()
+        );
+    }
+    Ok(body)
 }
 
 fn public_keys_from_env_body(body: &str) -> BTreeSet<String> {
@@ -506,54 +679,6 @@ fn public_to_private_key_name(public_key: &str) -> Option<String> {
         return None;
     }
     Some(format!("{PRIVATE_KEY_PREFIX}_{suffix}"))
-}
-
-fn delete_migrated_source_keys(
-    project: &ProjectIdentity,
-    source_native: &dyn SecretStore,
-    source_dotenvx: &dyn SecretStore,
-    native_keys: &BTreeSet<String>,
-    dotenvx_keys: &BTreeSet<String>,
-) -> Result<()> {
-    delete_keys_from_stores(project, source_native, native_keys)?;
-    delete_keys_from_stores(project, source_dotenvx, dotenvx_keys)?;
-    Ok(())
-}
-
-fn delete_keys_from_stores(
-    project: &ProjectIdentity,
-    store: &dyn SecretStore,
-    keys: &BTreeSet<String>,
-) -> Result<()> {
-    for key in keys {
-        store.delete(project, key)?;
-    }
-    Ok(())
-}
-
-fn confirm_migration_delete_source(args: &EnvKeyMigrateArgs) -> Result<()> {
-    if args.yes {
-        return Ok(());
-    }
-    if !std::io::stdin().is_terminal() {
-        return Err(
-            crate::exit::CliExit::message(2, "confirmation requires a TTY; pass --yes").into(),
-        );
-    }
-    eprint!(
-        "Delete source keys after migrating to {}? Type `yes` to continue: ",
-        args.to
-    );
-    std::io::stderr().flush().ok();
-    let mut line = String::new();
-    std::io::stdin()
-        .read_line(&mut line)
-        .context("read confirmation")?;
-    if line.trim() == "yes" {
-        Ok(())
-    } else {
-        bail!("migration cancelled")
-    }
 }
 
 pub fn key_export(cwd: &Path, args: EnvKeyExportArgs) -> Result<()> {
@@ -640,7 +765,9 @@ pub fn dotenvx_list(cwd: &Path) -> Result<()> {
 
 pub fn dotenvx_delete(cwd: &Path, args: DotenvxDeleteArgs) -> Result<()> {
     let (_project_root, project, stores) = load_env_context(cwd)?;
-    dotenvx_delete_with_store(stores.dotenvx.as_ref(), &project, args)
+    with_secret_store_lock(&project, "env-project", || {
+        dotenvx_delete_with_store(stores.dotenvx.as_ref(), &project, args)
+    })
 }
 
 fn dotenvx_delete_with_store(
@@ -875,16 +1002,18 @@ fn import_native_env_key_with_store(
     force: bool,
 ) -> Result<()> {
     validate_private_key_name(private_key_name)?;
-    if !force && read_native_env_key(store, project, private_key_name)?.is_some() {
-        bail!("stored {private_key_name} already exists; pass --force to replace it");
-    }
-    let keypair = Keypair::from_private_key(private_key)
-        .with_context(|| format!("validate {private_key_name} private key"))?;
-    let key = NativeEnvKeyMaterial {
-        public_key: keypair.public_key(),
-        private_key: private_key.to_string(),
-    };
-    store_native_env_key(store, project, private_key_name, &key)
+    with_secret_store_lock(project, "env-project", || {
+        if !force && read_native_env_key(store, project, private_key_name)?.is_some() {
+            bail!("stored {private_key_name} already exists; pass --force to replace it");
+        }
+        let keypair = Keypair::from_private_key(private_key)
+            .with_context(|| format!("validate {private_key_name} private key"))?;
+        let key = NativeEnvKeyMaterial {
+            public_key: keypair.public_key(),
+            private_key: private_key.to_string(),
+        };
+        store_native_env_key(store, project, private_key_name, &key)
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1163,7 +1292,24 @@ fn private_to_public_key_name(private_key_name: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn read_or_create_native_env_key(
+    native_store: &dyn SecretStore,
+    dotenvx_store: &dyn SecretStore,
+    project: &ProjectIdentity,
+    private_key_name: &str,
+) -> Result<NativeEnvKeyMaterial> {
+    with_secret_store_lock(project, &format!("native-key:{private_key_name}"), || {
+        read_or_create_native_env_key_unlocked(
+            native_store,
+            dotenvx_store,
+            project,
+            private_key_name,
+        )
+    })
+}
+
+fn read_or_create_native_env_key_unlocked(
     native_store: &dyn SecretStore,
     dotenvx_store: &dyn SecretStore,
     project: &ProjectIdentity,
@@ -1511,6 +1657,41 @@ mod tests {
 
         fn list_keys(&self, _project: &ProjectIdentity) -> Result<BTreeSet<String>> {
             Ok(BTreeSet::new())
+        }
+    }
+
+    struct FailingKeySecretStore {
+        inner: MockSecretStore,
+        fail_key: &'static str,
+    }
+
+    impl SecretStore for FailingKeySecretStore {
+        fn put(&self, project: &ProjectIdentity, key: &str, value: &str) -> Result<()> {
+            if key == self.fail_key {
+                bail!("simulated write failure for {key}");
+            }
+            self.inner.put(project, key, value)
+        }
+
+        fn get(&self, project: &ProjectIdentity, key: &str) -> Result<Option<String>> {
+            self.inner.get(project, key)
+        }
+
+        fn delete(&self, project: &ProjectIdentity, key: &str) -> Result<()> {
+            self.inner.delete(project, key)
+        }
+
+        fn list_keys(&self, project: &ProjectIdentity) -> Result<BTreeSet<String>> {
+            self.inner.list_keys(project)
+        }
+
+        fn delete_if_value(
+            &self,
+            project: &ProjectIdentity,
+            key: &str,
+            expected: &str,
+        ) -> Result<bool> {
+            self.inner.delete_if_value(project, key, expected)
         }
     }
 
@@ -2509,6 +2690,43 @@ mod tests {
     }
 
     #[test]
+    fn migration_candidate_rejects_oversized_env_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env.large");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_MIGRATION_CANDIDATE_BYTES + 1).unwrap();
+
+        let err = discover_private_key_candidates(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("larger than"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_candidate_rejects_symlinks_and_special_files() {
+        use std::os::unix::fs::{FileTypeExt, symlink};
+
+        let symlink_dir = tempfile::tempdir().unwrap();
+        let target = symlink_dir.path().join("target");
+        std::fs::write(&target, "DOTENV_PUBLIC_KEY=public-demo-key\n").unwrap();
+        symlink(&target, symlink_dir.path().join(".env.link")).unwrap();
+        let err = discover_private_key_candidates(symlink_dir.path()).unwrap_err();
+        assert!(err.to_string().contains("symlinked env file"), "{err}");
+
+        let fifo_dir = tempfile::tempdir().unwrap();
+        let fifo = fifo_dir.path().join(".env.fifo");
+        let status = Command::new("mkfifo").arg(&fifo).status().unwrap();
+        assert!(status.success());
+        assert!(
+            std::fs::symlink_metadata(&fifo)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
+        let err = discover_private_key_candidates(fifo_dir.path()).unwrap_err();
+        assert!(err.to_string().contains("non-regular env file"), "{err}");
+    }
+
+    #[test]
     fn public_to_private_key_name_maps_env_suffixes() {
         assert_eq!(
             public_to_private_key_name("DOTENV_PUBLIC_KEY").as_deref(),
@@ -2522,7 +2740,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_keys_between_mock_stores_then_delete_source() {
+    fn copy_keys_between_mock_stores_preserves_source() {
         let project = test_project(Path::new("/repo/app"));
         let source_native = MockSecretStore::keyring();
         let source_dotenvx = MockSecretStore::keyring();
@@ -2535,11 +2753,7 @@ mod tests {
             .put(&project, "DOTENV_PRIVATE_KEY_PRODUCTION", "value-b")
             .unwrap();
 
-        let MigrationCopy {
-            migrated,
-            native_keys,
-            dotenvx_keys,
-        } = copy_keys_between_stores(
+        let migration = copy_keys_between_stores(
             Path::new("/repo/app"),
             &project,
             &source_native,
@@ -2548,7 +2762,7 @@ mod tests {
             &target_dotenvx,
         )
         .unwrap();
-        assert_eq!(migrated, 2);
+        assert_eq!(migration.migrated(), 2);
         assert_eq!(
             source_native.list_keys(&project).unwrap(),
             BTreeSet::from(["DOTENV_PRIVATE_KEY".to_string()])
@@ -2565,11 +2779,6 @@ mod tests {
             target_dotenvx.list_keys(&project).unwrap(),
             BTreeSet::from(["DOTENV_PRIVATE_KEY_PRODUCTION".to_string()])
         );
-
-        delete_keys_from_stores(&project, &source_native, &native_keys).unwrap();
-        delete_keys_from_stores(&project, &source_dotenvx, &dotenvx_keys).unwrap();
-        assert!(source_native.list_keys(&project).unwrap().is_empty());
-        assert!(source_dotenvx.list_keys(&project).unwrap().is_empty());
     }
 
     #[test]
@@ -2613,6 +2822,116 @@ mod tests {
                 .as_deref(),
             Some("destination-value")
         );
+    }
+
+    #[test]
+    fn migration_preflights_all_conflicts_before_writing() {
+        let project = test_project(Path::new("/repo/app"));
+        let source_native = MockSecretStore::keyring();
+        let source_dotenvx = MockSecretStore::keyring();
+        let target_native = MockSecretStore::keyring();
+        let target_dotenvx = MockSecretStore::keyring();
+        source_native
+            .put(&project, "DOTENV_PRIVATE_KEY", "value-a")
+            .unwrap();
+        source_dotenvx
+            .put(&project, "DOTENV_PRIVATE_KEY_PRODUCTION", "source-value")
+            .unwrap();
+        target_dotenvx
+            .put(
+                &project,
+                "DOTENV_PRIVATE_KEY_PRODUCTION",
+                "destination-value",
+            )
+            .unwrap();
+
+        let err = copy_keys_between_stores(
+            Path::new("/repo/app"),
+            &project,
+            &source_native,
+            &source_dotenvx,
+            &target_native,
+            &target_dotenvx,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("different value"), "{err}");
+        assert!(
+            target_native
+                .get(&project, "DOTENV_PRIVATE_KEY")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn migration_rolls_back_keys_written_before_a_later_failure() {
+        let project = test_project(Path::new("/repo/app"));
+        let source_native = MockSecretStore::keyring();
+        let source_dotenvx = MockSecretStore::keyring();
+        let target_native = FailingKeySecretStore {
+            inner: MockSecretStore::keyring(),
+            fail_key: "DOTENV_PRIVATE_KEY_PRODUCTION",
+        };
+        let target_dotenvx = MockSecretStore::keyring();
+        source_native
+            .put(&project, "DOTENV_PRIVATE_KEY", "value-a")
+            .unwrap();
+        source_native
+            .put(&project, "DOTENV_PRIVATE_KEY_PRODUCTION", "value-b")
+            .unwrap();
+
+        let err = copy_keys_between_stores(
+            Path::new("/repo/app"),
+            &project,
+            &source_native,
+            &source_dotenvx,
+            &target_native,
+            &target_dotenvx,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("rolled back"), "{err:#}");
+        assert!(target_native.list_keys(&project).unwrap().is_empty());
+        assert!(
+            target_native
+                .get(&project, "DOTENV_PRIVATE_KEY")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn migration_updates_policy_when_no_keys_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shk.toml");
+        std::fs::write(
+            &path,
+            "[env]\nsecret_store = \"keyring\"\nproject_id = \"acme/app\"\n\n[env.onepassword]\nvault = \"shk-project-keys\"\n",
+        )
+        .unwrap();
+
+        let project_root = dir.path().to_path_buf();
+        let project = test_project(&project_root);
+        let source_native = MockSecretStore::keyring();
+        let source_dotenvx = MockSecretStore::keyring();
+        let target_native = MockSecretStore::keyring();
+        let target_dotenvx = MockSecretStore::keyring();
+        let migration = copy_keys_between_stores(
+            &project_root,
+            &project,
+            &source_native,
+            &source_dotenvx,
+            &target_native,
+            &target_dotenvx,
+        )
+        .unwrap();
+        assert_eq!(migration.migrated(), 0);
+        assert_eq!(migration.found(), 0);
+        update_policy_secret_store(&path, "1password").unwrap();
+
+        let updated = Policy::load_from_dir(&project_root).unwrap().0;
+        assert_eq!(updated.env.secret_store, "1password");
     }
 
     #[test]

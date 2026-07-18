@@ -566,6 +566,26 @@ impl Policy {
                         "env.onepassword.vault is required when env.secret_store = \"1password\""
                     );
                 }
+                if self
+                    .env
+                    .project_id
+                    .as_ref()
+                    .is_some_and(|value| value.contains(':'))
+                {
+                    anyhow::bail!(
+                        "env.project_id must not contain ':' when env.secret_store = \"1password\"; use '/', '-', or '_' instead"
+                    );
+                }
+                if self
+                    .env
+                    .project_id
+                    .as_ref()
+                    .is_some_and(|value| value != value.trim())
+                {
+                    anyhow::bail!(
+                        "env.project_id must not have leading or trailing whitespace when env.secret_store = \"1password\""
+                    );
+                }
                 Ok(())
             }
             other => anyhow::bail!(
@@ -620,8 +640,7 @@ fn project_id_from_git_remote(remote: &str) -> Option<String> {
                         .unwrap_or(authority);
                     format!("{host}/{repo}")
                 })
-        })
-        .unwrap_or_else(|| trimmed.to_string());
+        })?;
     let mut normalized = path.trim_end_matches(".git").replace('\\', "/");
     while normalized.starts_with('/') {
         normalized.remove(0);
@@ -1070,6 +1089,18 @@ format = "dotenv"
 
         policy.env.onepassword.vault = Some("shk-project-keys".to_string());
         policy.validate_env_config(dir.path()).unwrap();
+
+        policy.env.project_id = Some("team:env".to_string());
+        let err = policy.validate_env_config(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("must not contain ':'"), "{err}");
+
+        policy.env.project_id = Some(" acme/backend ".to_string());
+        let err = policy.validate_env_config(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("must not have leading or trailing whitespace"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1091,6 +1122,14 @@ format = "dotenv"
         assert_eq!(
             project_id_from_git_remote("ssh://git@github.com/acme/backend-api.git"), // shk-ignore pii.email
             Some("github.com/acme/backend-api".to_string())
+        );
+        assert_eq!(
+            project_id_from_git_remote("/Users/alice/repos/backend-api.git"),
+            None
+        );
+        assert_eq!(
+            project_id_from_git_remote("file:///Users/alice/repos/backend-api.git"),
+            None
         );
     }
 }

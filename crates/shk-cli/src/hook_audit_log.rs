@@ -14,6 +14,7 @@ use std::path::Path;
 pub const EVENT_BLOCKED: &str = "blocked";
 pub const REASON_FINDING_THRESHOLD: &str = "finding_threshold";
 pub const REASON_ACTION_GUARD: &str = "action_guard";
+pub const REASON_POLICY_ERROR: &str = "policy_error";
 
 pub fn hook_phase_name(event: HookEvent) -> &'static str {
     match event {
@@ -106,6 +107,15 @@ pub fn blocked_action_guard_payload(
     })
 }
 
+pub fn blocked_policy_error_payload(tool: AiTool, event: HookEvent) -> serde_json::Value {
+    serde_json::json!({
+        "event": EVENT_BLOCKED,
+        "tool": tool.kebab_str(),
+        "hook": hook_phase_name(event),
+        "reason": REASON_POLICY_ERROR,
+    })
+}
+
 pub fn append_audit_hook(
     repo_root: &Path,
     tool: AiTool,
@@ -150,6 +160,12 @@ pub fn append_blocked_action_guard(
         "shk blocked: action_guard category={} (see .shk/audit.log)",
         guard_match.category,
     );
+    Ok(())
+}
+
+pub fn append_blocked_policy_error(repo_root: &Path, tool: AiTool, event: HookEvent) -> Result<()> {
+    audit_log::append_line(repo_root, blocked_policy_error_payload(tool, event))?;
+    eprintln!("shk blocked: invalid policy (see .shk/audit.log)");
     Ok(())
 }
 
@@ -272,6 +288,17 @@ mod tests {
         assert_eq!(payload["hook"], "pre");
         assert!(!encoded.contains("blocked command"));
         assert!(!encoded.contains("guard_match"));
+    }
+
+    #[test]
+    fn blocked_policy_error_payload_is_metadata_only() {
+        let payload = blocked_policy_error_payload(AiTool::ClaudeCode, HookEvent::PreToolUse);
+
+        assert_eq!(payload["event"], EVENT_BLOCKED);
+        assert_eq!(payload["reason"], REASON_POLICY_ERROR);
+        assert_eq!(payload["tool"], "claude-code");
+        assert_eq!(payload["hook"], "pre");
+        assert_eq!(payload.as_object().map(serde_json::Map::len), Some(4));
     }
 
     #[test]

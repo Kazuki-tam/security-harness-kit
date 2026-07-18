@@ -119,7 +119,7 @@ Release assets are also covered by GitHub artifact attestations.
 For CI or security-sensitive environments, install from a pinned release tag and verify both the checksum and GitHub artifact attestation before placing the binary on `PATH`:
 
 ```bash
-version=v0.5.4
+version=v0.5.5
 target=x86_64-unknown-linux-gnu
 asset="shk-cli-${target}.tar.xz"
 repo=Kazuki-tam/security-harness-kit
@@ -182,13 +182,13 @@ See [`desktop-release.md`](desktop-release.md) for maintainer release steps.
 Download from the release page for your tag, for example:
 
 ```text
-https://github.com/Kazuki-tam/security-harness-kit/releases/tag/desktop-unsigned-v0.5.4
+https://github.com/Kazuki-tam/security-harness-kit/releases/tag/desktop-unsigned-v0.5.5
 ```
 
 Verify checksums when available:
 
 ```bash
-curl -LO https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-unsigned-v0.5.4/shk-desktop.sha256sum
+curl -LO https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-unsigned-v0.5.5/shk-desktop.sha256sum
 sha256sum -c shk-desktop.sha256sum
 ```
 
@@ -336,7 +336,7 @@ When `[env].secret_store = "keyring"` (the default), dotenvx keys live under the
 When `[env].secret_store = "1password"`, keys are stored as tagged 1Password items (`shk` tag) in the vault configured by `env.onepassword.vault`. Item titles look like `shk:{project_id}:env:DOTENV_PRIVATE_KEY` or `shk:{project_id}:dotenvx:DOTENV_PRIVATE_KEY_PRODUCTION`. Delete them from the vault UI, or migrate back to the keyring first:
 
 ```bash
-shk env key migrate --to keyring --delete-source --yes
+shk env key migrate --to keyring
 ```
 
-Then remove any remaining local copies with the keyring commands above if needed.
+Verify the keyring copy, then remove the old tagged items explicitly from 1Password. Automatic source deletion is intentionally refused for a shared 1Password source.

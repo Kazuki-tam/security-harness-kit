@@ -1,4 +1,6 @@
-use crate::env_store::{OpPathSource, collect_onepassword_doctor_status};
+use crate::env_store::{
+    OpPathSource, SecretStoreBackend, collect_onepassword_doctor_status, parse_secret_store_backend,
+};
 use crate::{npm_hardening, safety, workflow_hardening};
 use anyhow::Result;
 use serde_json::Value;
@@ -638,9 +640,16 @@ fn print_secret_store_status(root: &Path, policy: &Policy) -> Result<()> {
         "env secret store: {} (configured in shk.toml [env])",
         policy.env.secret_store
     );
-    if policy.env.secret_store == "keyring" {
-        println!("  backend: OS keyring (default)");
-        return Ok(());
+    match parse_secret_store_backend(&policy.env.secret_store) {
+        Ok(SecretStoreBackend::Keyring) => {
+            println!("  backend: OS keyring (default)");
+            return Ok(());
+        }
+        Ok(SecretStoreBackend::OnePassword) => {}
+        Err(err) => {
+            println!("  warning: {err}");
+            return Ok(());
+        }
     }
 
     if policy

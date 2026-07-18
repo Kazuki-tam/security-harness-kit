@@ -388,7 +388,7 @@ shk env dotenvx import-keys .env.keys
 shk env run -f .env -- npm test
 ```
 
-`shk env run`, `decrypt`, and `encrypt` first use native `shk` keys. If none exist, they can reuse imported dotenvx `DOTENV_PRIVATE_KEY*` values from the OS credential store, derive the public key when needed, and attempt to adopt the key into the native store. This keeps existing dotenvx-encrypted files usable while removing the external `dotenvx` binary from the normal execution path. After a native command reports that the imported key was adopted, the imported dotenvx copy can be removed with `shk env dotenvx delete --all` if the project no longer needs `shk env dotenvx run`. If adoption prints a warning, keep the imported dotenvx copy or import the key with `shk env key import`.
+`shk env run`, `decrypt`, and `encrypt` first use native `shk` keys. If none exist, they can reuse imported dotenvx `DOTENV_PRIVATE_KEY*` values from the configured env secret store, derive the public key when needed, and attempt to adopt the key into the native store. This keeps existing dotenvx-encrypted files usable while removing the external `dotenvx` binary from the normal execution path. After a native command reports that the imported key was adopted, the imported dotenvx copy can be removed with `shk env dotenvx delete --all` if the project no longer needs `shk env dotenvx run`. If adoption prints a warning, keep the imported dotenvx copy or import the key with `shk env key import`.
 
 | Option | Meaning |
 |--------|---------|
@@ -415,7 +415,6 @@ shk env key delete --all
 shk env key export --env production --instructions
 shk env key migrate --to 1password
 shk env key migrate --to keyring
-shk env key migrate --to 1password --delete-source --yes
 ```
 
 `import` stores one `DOTENV_PRIVATE_KEY*` value in the native env secret store for the current project. Without `--stdin`, it prompts for the key without echoing input. With `--stdin`, it can read from a password manager CLI:
@@ -441,8 +440,7 @@ Migrating to or using the 1Password backend requires the [1Password CLI (`op`)](
 # 2. Run migrate (updates shk.toml to "1password" after copying keys)
 shk env key migrate --to 1password
 
-# Optional: remove source copies after a successful migration
-shk env key migrate --to 1password --delete-source --yes
+# Verify the destination, then remove source copies explicitly.
 
 # Roll back to the OS keyring when 1Password is configured
 shk env key migrate --to keyring
@@ -451,8 +449,6 @@ shk env key migrate --to keyring
 | Option | Behavior |
 |--------|----------|
 | `--to <keyring\|1password>` | Destination backend. Must differ from the current `env.secret_store`. |
-| `--delete-source` | Delete migrated keys from the source backend after copying them and updating `shk.toml`. |
-| `--yes` | Skip the confirmation prompt required by `--delete-source` in non-TTY environments. |
 
 Migration copies indexed keys plus keys referenced by project-root `.env` / `.env.keys` files (for example via matching `DOTENV_PUBLIC_KEY*` names). Keys that exist only in the source backend with no index entry and no project-root env reference are not discovered automatically; remove them with an explicit `shk env key delete --key …` before migrating, or import them into the destination manually.
 
@@ -462,15 +458,15 @@ Flow on success:
 
 1. Copy keys to the destination backend.
 2. Update `shk.toml` to set `env.secret_store` to `--to` when a policy file exists.
-3. With `--delete-source`, delete the migrated keys from the source backend using the already-open source stores.
+3. Retain source keys for rollback.
 
-If `--delete-source` fails after step 2, destination keys remain available and the error message directs you to remove any remaining source keys manually.
+After verifying the destination, remove source keys explicitly. Migration does not automatically delete them because the supported backends do not provide a portable conditional-delete operation.
 
 See [Configuration](configuration.md#env-secret-store) for `[env]` / `[env.onepassword]` settings and the 1Password threat model notes in the README.
 
 ## `shk env dotenvx`
 
-Store dotenvx private keys in the operating system credential store and inject them only when running a command through dotenvx.
+Store dotenvx private keys in the configured env secret store and inject them only when running a command through dotenvx.
 
 ```bash
 shk env dotenvx import-keys .env.keys
@@ -488,7 +484,7 @@ This command group stores dotenvx private keys in the env secret store configure
 
 `import-keys` reads only `DOTENV_PRIVATE_KEY` and `DOTENV_PRIVATE_KEY_<ENV>` entries from a `.env.keys`-style file. Raw key values are never printed. `run` reads the stored keys for the current project and invokes `dotenvx run -- <command>` with those values present only in the child process environment. `delete` requires an explicit target: `--all`, `--key <DOTENV_PRIVATE_KEY*>`, or `--env <name>`.
 
-There is intentionally no raw-key export under `shk env dotenvx` because printing or writing raw private keys defeats the purpose of moving `.env.keys` into the OS credential store. Use `shk env key export --instructions` for safe handoff guidance that does not print key material.
+There is intentionally no raw-key export under `shk env dotenvx` because printing or writing raw private keys defeats the purpose of moving `.env.keys` into the configured secret store. Use `shk env key export --instructions` for safe handoff guidance that does not print key material.
 
 Run options:
 

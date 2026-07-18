@@ -3,6 +3,7 @@
 //! Run with:
 //! `SHK_OP_TEST_VAULT=shk-integration-test cargo test -p shk-cli --test onepassword_op -- --ignored`
 
+use dotenvx::crypto::Keypair;
 use serde::Serialize;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -74,6 +75,26 @@ impl OpTestProject {
             .current_dir(self.dir.path())
             .output()
             .expect("run shk")
+    }
+
+    fn run_shk_with_stdin(&self, args: &[&str], input: &str) -> Output {
+        use std::io::Write as _;
+
+        let mut child = Command::new(shk_bin())
+            .args(args)
+            .current_dir(self.dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("run shk");
+        child
+            .stdin
+            .take()
+            .expect("piped shk stdin")
+            .write_all(input.as_bytes())
+            .expect("write shk stdin");
+        child.wait_with_output().expect("wait for shk")
     }
 
     fn run_op(&self, args: &[&str]) -> Output {
@@ -161,6 +182,39 @@ fn onepassword_round_trips_an_env_key() {
     assert_success(&output, "decrypt through 1Password");
     let decrypted_body = std::fs::read_to_string(decrypted).expect("read decrypted env");
     assert!(decrypted_body.contains("APP_TOKEN=\"integration-value\""));
+}
+
+#[test]
+#[ignore = "requires a real 1Password CLI session and SHK_OP_TEST_VAULT"]
+fn onepassword_updates_an_existing_env_key() {
+    let Some(project) = OpTestProject::new("update") else {
+        eprintln!("skipped: {TEST_VAULT_ENV} is not set");
+        return;
+    };
+    let first = Keypair::generate().private_key();
+    let second = Keypair::generate().private_key();
+
+    let output = project.run_shk_with_stdin(&["env", "key", "import", "--stdin"], &first);
+    assert_success(&output, "create key through 1Password");
+    let output =
+        project.run_shk_with_stdin(&["env", "key", "import", "--stdin", "--force"], &second);
+    assert_success(&output, "update key through 1Password");
+
+    let encrypted = project.dir.path().join(".env");
+    let decrypted = project.dir.path().join(".env.plain");
+    std::fs::write(&encrypted, "APP_TOKEN=rotated-key-value\n").expect("write plaintext env");
+    let output = project.run_shk(&["env", "encrypt", ".env", "--in-place"]);
+    assert_success(&output, "encrypt with updated key");
+    let output = project.run_shk(&[
+        "env",
+        "decrypt",
+        ".env",
+        "--output",
+        decrypted.to_str().expect("UTF-8 test path"),
+    ]);
+    assert_success(&output, "decrypt with updated key");
+    let decrypted_body = std::fs::read_to_string(decrypted).expect("read decrypted env");
+    assert!(decrypted_body.contains("APP_TOKEN=\"rotated-key-value\""));
 }
 
 #[test]
