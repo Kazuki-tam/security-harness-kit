@@ -153,7 +153,7 @@ fn is_lock_contention(err: &std::io::Error) -> bool {
     {
         // Windows reports a competing byte-range lock as ERROR_LOCK_VIOLATION,
         // which Rust does not consistently normalize to WouldBlock.
-        return err.raw_os_error() == Some(33);
+        err.raw_os_error() == Some(33)
     }
     #[cfg(not(windows))]
     false
