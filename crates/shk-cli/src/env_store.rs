@@ -23,6 +23,7 @@ const OP_TAG: &str = "shk";
 const OP_CATEGORY: &str = "API_CREDENTIAL";
 const OP_CONFLICT_RETRY_DELAYS: &[Duration] =
     &[Duration::from_millis(250), Duration::from_millis(750)];
+const OP_SPAWN_RETRY_DELAYS: &[Duration] = &[Duration::from_millis(10), Duration::from_millis(25)];
 const OP_DOCTOR_TIMEOUT: Duration = Duration::from_secs(5);
 const OP_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const SECRET_STORE_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -113,7 +114,7 @@ pub fn with_secret_store_lock<T>(
     loop {
         match file.try_lock_exclusive() {
             Ok(()) => break,
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(err) if is_lock_contention(&err) => {
                 if Instant::now() >= deadline {
                     let holder = lock_holder_label(&mut file).unwrap_or_default();
                     bail!(
@@ -142,6 +143,20 @@ pub fn with_secret_store_lock<T>(
         (Ok(value), Ok(())) => Ok(value),
         (Ok(_), Err(err)) | (Err(err), _) => Err(err),
     }
+}
+
+fn is_lock_contention(err: &std::io::Error) -> bool {
+    if err.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        // Windows reports a competing byte-range lock as ERROR_LOCK_VIOLATION,
+        // which Rust does not consistently normalize to WouldBlock.
+        return err.raw_os_error() == Some(33);
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 fn lock_holder_label(file: &mut std::fs::File) -> Option<String> {
@@ -717,7 +732,8 @@ fn run_op_process_with_timeout(
     timeout: Duration,
 ) -> Result<Output> {
     let command = command_line(op_path, args);
-    let mut child = Command::new(op_path)
+    let mut process = Command::new(op_path);
+    process
         .args(args)
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -725,9 +741,18 @@ fn run_op_process_with_timeout(
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("run `{command}`"))?;
+        .stderr(Stdio::piped());
+    let mut retry = 0;
+    let mut child = loop {
+        match process.spawn() {
+            Ok(child) => break child,
+            Err(err) if is_transient_exec_busy(&err) && retry < OP_SPAWN_RETRY_DELAYS.len() => {
+                std::thread::sleep(OP_SPAWN_RETRY_DELAYS[retry]);
+                retry += 1;
+            }
+            Err(err) => return Err(err).with_context(|| format!("run `{command}`")),
+        }
+    };
     let mut stdout = child
         .stdout
         .take()
@@ -804,6 +829,18 @@ fn run_op_process_with_timeout(
         stdout,
         stderr,
     })
+}
+
+fn is_transient_exec_busy(err: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        err.raw_os_error() == Some(libc::ETXTBSY)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = err;
+        false
+    }
 }
 
 struct OnePasswordSecretStore {
@@ -1622,6 +1659,30 @@ mod tests {
             ),
             "C:/Users/alice/repo::DOTENV_PRIVATE_KEY_PRODUCTION"
         );
+    }
+
+    #[test]
+    fn would_block_is_lock_contention() {
+        assert!(is_lock_contention(&std::io::Error::from(
+            std::io::ErrorKind::WouldBlock
+        )));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lock_violation_is_lock_contention() {
+        assert!(is_lock_contention(&std::io::Error::from_raw_os_error(33)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_text_file_busy_is_transient() {
+        assert!(is_transient_exec_busy(&std::io::Error::from_raw_os_error(
+            libc::ETXTBSY
+        )));
+        assert!(!is_transient_exec_busy(&std::io::Error::from_raw_os_error(
+            libc::ENOENT
+        )));
     }
 
     #[test]
