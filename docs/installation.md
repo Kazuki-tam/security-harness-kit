@@ -119,7 +119,7 @@ Release assets are also covered by GitHub artifact attestations.
 For CI or security-sensitive environments, install from a pinned release tag and verify both the checksum and GitHub artifact attestation before placing the binary on `PATH`:
 
 ```bash
-version=v0.5.4
+version=v0.5.5
 target=x86_64-unknown-linux-gnu
 asset="shk-cli-${target}.tar.xz"
 repo=Kazuki-tam/security-harness-kit
@@ -182,13 +182,13 @@ See [`desktop-release.md`](desktop-release.md) for maintainer release steps.
 Download from the release page for your tag, for example:
 
 ```text
-https://github.com/Kazuki-tam/security-harness-kit/releases/tag/desktop-unsigned-v0.5.4
+https://github.com/Kazuki-tam/security-harness-kit/releases/tag/desktop-unsigned-v0.5.5
 ```
 
 Verify checksums when available:
 
 ```bash
-curl -LO https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-unsigned-v0.5.4/shk-desktop.sha256sum
+curl -LO https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-unsigned-v0.5.5/shk-desktop.sha256sum
 sha256sum -c shk-desktop.sha256sum
 ```
 
@@ -324,11 +324,19 @@ Managed entries use the same markers as project installs (`"_shk_managed": true`
 
 ### 4. Remove Stored Env Keys
 
-If you used `shk env dotenvx import-keys` to store dotenvx private keys in the operating system credential store (macOS Keychain, Windows Credential Manager, or Linux Secret Service / keyutils), delete them before removing the binary so they are not orphaned. Stored keys are scoped to the canonical project root, so run this from each project where you imported keys:
+If you used `shk env dotenvx import-keys` or `shk env key import` / `shk env encrypt`, delete stored private keys before removing the binary so they are not orphaned. Stored keys are scoped to the canonical project root, so run this from each project where keys were stored:
 
 ```bash
 shk env dotenvx delete --all
 shk env key delete --all
 ```
 
-Those imported dotenvx keys are stored under the service name `security-harness-kit/dotenvx`. Native keys created by `shk env encrypt`, adopted from dotenvx, or imported with `shk env key import` are stored under `security-harness-kit/env` and can be removed with `shk env key delete`. If `shk` has already been removed, both stores can be cleaned up by searching for those service names in the platform credential store UI.
+When `[env].secret_store = "keyring"` (the default), dotenvx keys live under the OS credential service `security-harness-kit/dotenvx`, and native keys live under `security-harness-kit/env`. If `shk` has already been removed, search for those service names in the platform credential store UI.
+
+When `[env].secret_store = "1password"`, keys are stored as tagged 1Password items (`shk` tag) in the vault configured by `env.onepassword.vault`. Item titles look like `shk:{project_id}:env:DOTENV_PRIVATE_KEY` or `shk:{project_id}:dotenvx:DOTENV_PRIVATE_KEY_PRODUCTION`. Delete them from the vault UI, or migrate back to the keyring first:
+
+```bash
+shk env key migrate --to keyring
+```
+
+Verify the keyring copy, then remove the old tagged items explicitly from 1Password. Automatic source deletion is intentionally refused for a shared 1Password source.

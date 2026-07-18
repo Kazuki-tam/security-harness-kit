@@ -9,6 +9,7 @@ use shk_core::scanner::{
     GitHistoryPreview, ScanOptions, ScanResult, preview_git_history, scan_path, scan_string,
 };
 use shk_integrations::ActionGuardMatch;
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -305,18 +306,181 @@ fn format_git_history_preview(preview: &GitHistoryPreview) -> String {
     out
 }
 
-fn resolve_repo_root(cwd: &Path, path_arg: &Path) -> PathBuf {
-    let candidates = [
-        cwd.to_path_buf(),
-        path_arg.to_path_buf(),
-        cwd.join(path_arg),
-    ];
-    for cand in candidates {
-        if let Some(r) = shk_core::git::discover_repo_root(&cand) {
-            return fs_canonical_or_same(r);
+fn hook_action_guard_policy_root(path: &Path) -> Option<PathBuf> {
+    hook_project_root_for_path(path)
+}
+
+fn push_unique_guard_root(roots: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBuf) {
+    if let Some(root) = hook_action_guard_policy_root(&path) {
+        if seen.insert(root.clone()) {
+            roots.push(root);
         }
     }
-    fs_canonical_or_same(cwd.to_path_buf())
+}
+
+fn hook_action_guard_trusted_policy_roots(cwd: &Path, path_arg: &Path) -> HashSet<PathBuf> {
+    let mut roots = HashSet::new();
+    let process_root = hook_action_guard_policy_root(cwd);
+    roots.extend(process_root.iter().cloned());
+    if path_arg != Path::new(".") {
+        let explicit_path = if path_arg.is_absolute() {
+            path_arg.to_path_buf()
+        } else {
+            cwd.join(path_arg)
+        };
+        if let Some(root) = hook_action_guard_policy_root(&explicit_path)
+            && process_root
+                .as_ref()
+                .is_none_or(|process_root| process_root == &root)
+        {
+            roots.insert(root);
+        }
+    }
+    roots
+}
+
+/// Collect every policy root that may apply to a hook payload. Action guard
+/// evaluates all of them so a model-controlled `cwd` cannot disable stricter
+/// policies from the process cwd or concrete target paths.
+fn hook_action_guard_policy_roots(cwd: &Path, path_arg: &Path, stdin: &str) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut seen = HashSet::new();
+    let process_root = hook_action_guard_policy_root(cwd);
+    let mut has_trusted_root = process_root.is_some();
+
+    if path_arg != Path::new(".") {
+        let explicit_path = if path_arg.is_absolute() {
+            path_arg.to_path_buf()
+        } else {
+            cwd.join(path_arg)
+        };
+        if let Some(root) = hook_action_guard_policy_root(&explicit_path)
+            && process_root
+                .as_ref()
+                .is_none_or(|process_root| process_root == &root)
+        {
+            has_trusted_root = true;
+            if seen.insert(root.clone()) {
+                roots.push(root);
+            }
+        }
+    }
+
+    if let Some(root) = &process_root
+        && seen.insert(root.clone())
+    {
+        roots.push(root.clone());
+    }
+
+    let target_hints = shk_integrations::payload_path_hints(stdin);
+    for hint in &target_hints {
+        let hint = Path::new(hint.trim());
+        let hint = if hint.is_absolute() {
+            hint.to_path_buf()
+        } else {
+            cwd.join(hint)
+        };
+        push_unique_guard_root(&mut roots, &mut seen, hint);
+    }
+
+    for hint in shk_integrations::payload_repository_context_hints(stdin) {
+        let hint = Path::new(hint.trim());
+        let hint = if hint.is_absolute() {
+            hint.to_path_buf()
+        } else {
+            cwd.join(hint)
+        };
+        push_unique_guard_root(&mut roots, &mut seen, hint);
+    }
+
+    // A payload-provided target or cwd cannot be a trust anchor for command
+    // execution. If the hook process itself has no project policy, retain the
+    // default guard even when the payload points at `enabled = false`.
+    if roots.is_empty() || !has_trusted_root {
+        let fallback = hook_root_for_path(cwd);
+        if seen.insert(fallback.clone()) {
+            roots.push(fallback);
+        }
+    }
+
+    roots
+}
+
+/// Resolve the policy, content-scan, and audit root from trusted launch
+/// context only. Every payload field is model-controlled, including concrete
+/// target paths, so payload hints may add stricter action-guard evaluations but
+/// must never choose the scan policy or audit-log destination.
+fn resolve_hook_repo_root(cwd: &Path, path_arg: &Path) -> PathBuf {
+    if path_arg != Path::new(".") {
+        let explicit_path = if path_arg.is_absolute() {
+            path_arg.to_path_buf()
+        } else {
+            cwd.join(path_arg)
+        };
+        let cwd_root = hook_project_root_for_path(cwd);
+        let explicit_root = explicit_path
+            .exists()
+            .then(|| hook_project_root_for_path(&explicit_path))
+            .flatten();
+        return match (cwd_root, explicit_root) {
+            // Project hook files are commonly committed. Prefer the trusted
+            // launch cwd when an embedded install-time path is stale or points
+            // at a different checkout after a clone or directory move.
+            (Some(cwd_root), Some(explicit_root)) if cwd_root != explicit_root => cwd_root,
+            (_, Some(explicit_root)) => explicit_root,
+            (Some(cwd_root), None) => cwd_root,
+            (None, None) => hook_root_for_path(&explicit_path),
+        };
+    }
+
+    if let Some(root) = hook_project_root_for_path(cwd) {
+        return root;
+    }
+
+    hook_root_for_path(cwd)
+}
+
+fn resolve_hook_content_cwd(cwd: &Path, repo_root: &Path) -> PathBuf {
+    let cwd = fs_canonical_or_same(cwd.to_path_buf());
+    let repo_root = fs_canonical_or_same(repo_root.to_path_buf());
+    if cwd.starts_with(&repo_root) {
+        cwd
+    } else {
+        repo_root
+    }
+}
+
+fn hook_root_for_path(path: &Path) -> PathBuf {
+    hook_project_root_for_path(path).unwrap_or_else(|| hook_base_for_path(path))
+}
+
+fn hook_project_root_for_path(path: &Path) -> Option<PathBuf> {
+    if let Some(root) = shk_core::git::discover_repo_root(path) {
+        return Some(fs_canonical_or_same(root));
+    }
+
+    let base = existing_hook_base(path);
+    base.ancestors()
+        .find(|candidate| candidate.join("shk.toml").is_file())
+        .map(|policy_root| fs_canonical_or_same(policy_root.to_path_buf()))
+}
+
+fn hook_base_for_path(path: &Path) -> PathBuf {
+    fs_canonical_or_same(existing_hook_base(path))
+}
+
+fn existing_hook_base(path: &Path) -> PathBuf {
+    let mut base = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent().unwrap_or(path).to_path_buf()
+    };
+    while !base.exists() {
+        if !base.pop() {
+            return path.to_path_buf();
+        }
+    }
+    base
 }
 
 fn run_hook_mode(
@@ -341,36 +505,76 @@ fn run_hook_mode(
     }
 
     let hook_event = hook_event_from_stdin(stdin_trim, post);
-    let repo_root = resolve_repo_root(cwd, path_arg.as_path());
-    require_hook_log_policy(&repo_root, audit, log_blocked)?;
+    let repo_root = resolve_hook_repo_root(cwd, path_arg.as_path());
+    // File candidates are resolved from installer/process-controlled context.
+    // Payload cwd fields are model-controlled and may add stricter action-guard
+    // policies, but they must not redirect the content scanner away from the
+    // actual project checkout.
+    let content_cwd = resolve_hook_content_cwd(cwd, &repo_root);
+    if let Err(err) = require_hook_log_policy(&repo_root, audit, log_blocked) {
+        let reason = format!("shk hook logging policy error: {err:#}");
+        if audit || post {
+            eprintln!("{reason}");
+            println!(
+                "{}",
+                hook_output::allow_stdout_for_event(tool, hook_event, Some(&reason))
+            );
+            return Ok(());
+        }
+        return deny_hook(tool, hook_event, &reason);
+    }
 
     if hook_event == hook_output::HookEvent::UserPromptSubmit {
         return run_user_prompt_mode(tool, audit, log_blocked, fail_on, &repo_root, stdin_trim);
     }
 
-    let (policy, _) = Policy::load_from_dir(&repo_root)?;
-    let action_guard_config = action_guard_config_from_policy(&policy);
-
-    if should_run_action_guard(post, audit)
-        && let Some(guard_match) =
-            shk_integrations::detect_dangerous_action_with_config(stdin_trim, &action_guard_config)?
-    {
-        let reason = action_guard_deny_reason(&guard_match);
-        return deny_hook_with_log(
-            &repo_root,
-            log_blocked,
-            tool,
-            hook_event,
-            &reason,
-            BlockLog::ActionGuard(&guard_match),
-        );
+    if should_run_action_guard(post, audit) {
+        let trusted_guard_roots = hook_action_guard_trusted_policy_roots(cwd, path_arg.as_path());
+        for guard_root in hook_action_guard_policy_roots(cwd, path_arg.as_path(), stdin_trim) {
+            let (policy, _) = match Policy::load_from_dir(&guard_root) {
+                Ok(loaded) => loaded,
+                Err(_) => {
+                    if !trusted_guard_roots.is_empty() && !trusted_guard_roots.contains(&guard_root)
+                    {
+                        continue;
+                    }
+                    let reason = action_guard_policy_error_reason(&guard_root);
+                    return deny_hook_with_log(
+                        &repo_root,
+                        log_blocked,
+                        tool,
+                        hook_event,
+                        &reason,
+                        BlockLog::PolicyError,
+                    );
+                }
+            };
+            let action_guard_config = action_guard_config_from_policy(&policy);
+            if !action_guard_config.enabled {
+                continue;
+            }
+            if let Some(guard_match) = shk_integrations::detect_dangerous_action_with_config(
+                stdin_trim,
+                &action_guard_config,
+            )? {
+                let reason = action_guard_deny_reason(&guard_match);
+                return deny_hook_with_log(
+                    &repo_root,
+                    log_blocked,
+                    tool,
+                    hook_event,
+                    &reason,
+                    BlockLog::ActionGuard(&guard_match),
+                );
+            }
+        }
     }
 
     let (disp, body) = shk_integrations::stdin_to_hook_body(
         tool.integration_tool(),
         post,
         stdin_trim,
-        cwd,
+        &content_cwd,
         &repo_root,
     )?;
     let opts = hook_scan_options(fail_on, matches!(tool, AiTool::Cursor) && !post);
@@ -453,6 +657,7 @@ enum BlockLog<'a> {
         result: &'a ScanResult,
     },
     ActionGuard(&'a ActionGuardMatch),
+    PolicyError,
 }
 
 fn deny_hook_with_log(
@@ -464,17 +669,38 @@ fn deny_hook_with_log(
     block_log: BlockLog<'_>,
 ) -> Result<()> {
     if log_blocked {
-        let append_result = match block_log {
-            BlockLog::Scan {
-                display_path,
-                result,
-            } => hook_audit_log::append_blocked_scan(repo_root, tool, event, display_path, result),
-            BlockLog::ActionGuard(guard_match) => {
-                hook_audit_log::append_blocked_action_guard(repo_root, tool, event, guard_match)
+        match safety::require_project_policy(repo_root, "scan --log-blocked") {
+            Ok(_) => {
+                let append_result = match block_log {
+                    BlockLog::Scan {
+                        display_path,
+                        result,
+                    } => hook_audit_log::append_blocked_scan(
+                        repo_root,
+                        tool,
+                        event,
+                        display_path,
+                        result,
+                    ),
+                    BlockLog::ActionGuard(guard_match) => {
+                        hook_audit_log::append_blocked_action_guard(
+                            repo_root,
+                            tool,
+                            event,
+                            guard_match,
+                        )
+                    }
+                    BlockLog::PolicyError => {
+                        hook_audit_log::append_blocked_policy_error(repo_root, tool, event)
+                    }
+                };
+                if let Err(err) = append_result {
+                    eprintln!("shk blocked: unable to write .shk/audit.log: {err:#}");
+                }
             }
-        };
-        if let Err(err) = append_result {
-            eprintln!("shk blocked: unable to write .shk/audit.log: {err:#}");
+            Err(err) => {
+                eprintln!("shk blocked: audit log not written: {err:#}");
+            }
         }
     }
     deny_hook(tool, event, reason)
@@ -513,6 +739,13 @@ fn action_guard_config_from_policy(policy: &Policy) -> shk_integrations::ActionG
 
 fn action_guard_deny_reason(guard_match: &ActionGuardMatch) -> String {
     format!("shk action guard: {} blocked", guard_match.category)
+}
+
+fn action_guard_policy_error_reason(guard_root: &Path) -> String {
+    format!(
+        "shk action guard: blocked because {} is invalid; fix the policy and retry",
+        guard_root.join("shk.toml").display()
+    )
 }
 
 fn should_run_action_guard(post: bool, audit: bool) -> bool {
@@ -706,6 +939,264 @@ fn fs_canonical_or_same(p: PathBuf) -> PathBuf {
 mod tests {
     use super::*;
     use hook_output::HookEvent;
+
+    fn init_test_repo(path: &Path) {
+        std::fs::create_dir(path.join(".git")).unwrap();
+    }
+
+    #[test]
+    fn hook_repo_root_prefers_process_project() {
+        let cwd_repo = tempfile::tempdir().unwrap();
+        init_test_repo(cwd_repo.path());
+
+        assert_eq!(
+            resolve_hook_repo_root(cwd_repo.path(), Path::new(".")),
+            fs_canonical_or_same(cwd_repo.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn hook_repo_root_uses_cwd_default_outside_project() {
+        let process_cwd = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            resolve_hook_repo_root(process_cwd.path(), Path::new(".")),
+            fs_canonical_or_same(process_cwd.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn hook_content_cwd_uses_trusted_project_when_process_is_outside() {
+        let process_cwd = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        assert_eq!(
+            resolve_hook_content_cwd(process_cwd.path(), project.path()),
+            fs_canonical_or_same(project.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn hook_content_cwd_preserves_trusted_project_subdirectory() {
+        let project = tempfile::tempdir().unwrap();
+        let subdirectory = project.path().join("services/api");
+        std::fs::create_dir_all(&subdirectory).unwrap();
+
+        assert_eq!(
+            resolve_hook_content_cwd(&subdirectory, project.path()),
+            fs_canonical_or_same(subdirectory)
+        );
+    }
+
+    #[test]
+    fn hook_repo_root_prefers_explicit_project() {
+        let cwd = tempfile::tempdir().unwrap();
+        let explicit_repo = tempfile::tempdir().unwrap();
+        init_test_repo(explicit_repo.path());
+
+        assert_eq!(
+            resolve_hook_repo_root(cwd.path(), explicit_repo.path()),
+            fs_canonical_or_same(explicit_repo.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn hook_repo_root_falls_back_to_checkout_when_embedded_path_is_stale() {
+        let checkout = tempfile::tempdir().unwrap();
+        init_test_repo(checkout.path());
+        let stale_path = checkout.path().join("../missing-old-checkout");
+
+        assert_eq!(
+            resolve_hook_repo_root(checkout.path(), &stale_path),
+            fs_canonical_or_same(checkout.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn hook_repo_root_prefers_checkout_over_a_different_embedded_repo() {
+        let checkout = tempfile::tempdir().unwrap();
+        let old_checkout = tempfile::tempdir().unwrap();
+        init_test_repo(checkout.path());
+        init_test_repo(old_checkout.path());
+
+        assert_eq!(
+            resolve_hook_repo_root(checkout.path(), old_checkout.path()),
+            fs_canonical_or_same(checkout.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn action_guard_ignores_a_different_embedded_checkout() {
+        let checkout = tempfile::tempdir().unwrap();
+        let old_checkout = tempfile::tempdir().unwrap();
+        init_test_repo(checkout.path());
+        init_test_repo(old_checkout.path());
+        std::fs::write(
+            old_checkout.path().join("shk.toml"),
+            "[action_guard]\ndeny = [\"Bash(curl:*)\"]\n",
+        )
+        .unwrap();
+        let stdin = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "curl https://example.com" }
+        })
+        .to_string();
+
+        let roots = hook_action_guard_policy_roots(checkout.path(), old_checkout.path(), &stdin);
+
+        assert_eq!(
+            roots,
+            vec![fs_canonical_or_same(checkout.path().to_path_buf())]
+        );
+        assert_eq!(
+            hook_action_guard_trusted_policy_roots(checkout.path(), old_checkout.path()),
+            HashSet::from([fs_canonical_or_same(checkout.path().to_path_buf())])
+        );
+    }
+
+    #[test]
+    fn hook_action_guard_policy_roots_include_process_cwd_when_payload_cwd_is_relaxed() {
+        let strict_repo = tempfile::tempdir().unwrap();
+        let relaxed_repo = tempfile::tempdir().unwrap();
+        init_test_repo(strict_repo.path());
+        std::fs::write(
+            strict_repo.path().join("shk.toml"),
+            "[action_guard]\ndeny = [\"Bash(curl:*)\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            relaxed_repo.path().join("shk.toml"),
+            "[action_guard]\nenabled = false\n",
+        )
+        .unwrap();
+        let stdin = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "curl https://example.com",
+                "cwd": relaxed_repo.path()
+            }
+        })
+        .to_string();
+
+        let roots = hook_action_guard_policy_roots(strict_repo.path(), Path::new("."), &stdin);
+        assert!(roots.contains(&fs_canonical_or_same(strict_repo.path().to_path_buf())));
+        assert!(roots.contains(&fs_canonical_or_same(relaxed_repo.path().to_path_buf())));
+    }
+
+    #[test]
+    fn hook_action_guard_policy_roots_keep_default_guard_outside_a_project() {
+        let outside_cwd = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        init_test_repo(repo.path());
+        std::fs::write(
+            repo.path().join("shk.toml"),
+            "[action_guard]\nenabled = true\n",
+        )
+        .unwrap();
+        let target = repo.path().join("tests/demo.rs");
+        let stdin = serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": target,
+            }
+        })
+        .to_string();
+
+        let roots = hook_action_guard_policy_roots(outside_cwd.path(), Path::new("."), &stdin);
+        assert_eq!(
+            roots,
+            vec![
+                fs_canonical_or_same(repo.path().to_path_buf()),
+                fs_canonical_or_same(outside_cwd.path().to_path_buf()),
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_project_root_is_a_trusted_action_guard_root() {
+        let outside_cwd = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        init_test_repo(project.path());
+        std::fs::write(
+            project.path().join("shk.toml"),
+            "[action_guard]\nallow = [\"Write(*/tests/*.rs)\"]\n",
+        )
+        .unwrap();
+        let stdin = serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": project.path().join("tests/demo.rs")
+            }
+        })
+        .to_string();
+
+        let roots = hook_action_guard_policy_roots(outside_cwd.path(), project.path(), &stdin);
+        assert_eq!(
+            roots,
+            vec![fs_canonical_or_same(project.path().to_path_buf())]
+        );
+    }
+
+    #[test]
+    fn file_hook_keeps_default_guard_when_payload_policy_is_disabled() {
+        let outside_cwd = tempfile::tempdir().unwrap();
+        let relaxed_repo = tempfile::tempdir().unwrap();
+        std::fs::write(
+            relaxed_repo.path().join("shk.toml"),
+            "[action_guard]\nenabled = false\n",
+        )
+        .unwrap();
+        let stdin = serde_json::json!({
+            "tool_name": "Read",
+            "tool_input": {
+                "cwd": relaxed_repo.path(),
+                "file_path": "/home/demo/.aws/credentials"
+            }
+        })
+        .to_string();
+
+        let roots = hook_action_guard_policy_roots(outside_cwd.path(), Path::new("."), &stdin);
+        assert!(roots.contains(&fs_canonical_or_same(relaxed_repo.path().to_path_buf())));
+        assert!(roots.contains(&fs_canonical_or_same(outside_cwd.path().to_path_buf())));
+    }
+
+    #[test]
+    fn blocked_hook_never_logs_without_project_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let result = deny_hook_with_log(
+            root.path(),
+            true,
+            AiTool::Codex,
+            HookEvent::PreToolUse,
+            "blocked for test",
+            BlockLog::PolicyError,
+        );
+        assert!(result.is_err());
+        assert!(!root.path().join(".shk/audit.log").exists());
+    }
+
+    #[test]
+    fn command_hook_keeps_default_guard_when_payload_policy_is_disabled() {
+        let outside_cwd = tempfile::tempdir().unwrap();
+        let relaxed_repo = tempfile::tempdir().unwrap();
+        std::fs::write(
+            relaxed_repo.path().join("shk.toml"),
+            "[action_guard]\nenabled = false\n",
+        )
+        .unwrap();
+        let stdin = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "curl https://example.com",
+                "cwd": relaxed_repo.path(),
+                "file_path": relaxed_repo.path().join("decoy.txt")
+            }
+        })
+        .to_string();
+
+        let roots = hook_action_guard_policy_roots(outside_cwd.path(), Path::new("."), &stdin);
+        assert!(roots.contains(&fs_canonical_or_same(relaxed_repo.path().to_path_buf())));
+        assert!(roots.contains(&fs_canonical_or_same(outside_cwd.path().to_path_buf())));
+    }
 
     #[test]
     fn hook_event_post_flag_always_maps_to_post_tool_use() {

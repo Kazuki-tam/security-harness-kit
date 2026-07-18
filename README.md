@@ -26,7 +26,7 @@ With `shk`, you can:
 
 - Scan project paths and Git-staged files for common secrets and PII across source code, Markdown, plain text, Office documents (`.docx`, `.xlsx`, `.pptx`), and text-layer `.pdf` files.
 - Mask sensitive content from stdin, text files, and Office documents (`.docx`, `.xlsx`, `.pptx`).
-- Encrypt `.env` files, store private keys in the OS credential store, and run commands with decrypted values injected only at runtime.
+- Encrypt `.env` files, store private keys in the configured secret store, and run commands with decrypted values injected only at runtime.
 - Install Git pre-commit hooks.
 - Install managed hooks for Claude Code, Cursor, Codex, GitHub Copilot, Antigravity, and Windsurf.
 - Preview metadata-only audit logs to understand blocked hook activity without storing detected values.
@@ -198,6 +198,7 @@ shk env key import
 shk env key list
 shk env key delete --env staging
 shk env key export --instructions
+shk env key migrate --to 1password
 shk env decrypt .env --output .env.local
 
 shk hooks install
@@ -211,7 +212,7 @@ shk hooks install-ai --tool windsurf
 shk ci init github
 shk ci init github --dry-run
 shk ci init github --mode audit
-shk ci init github --shk-version v0.5.4
+shk ci init github --shk-version v0.5.5
 
 shk skills install
 shk skills install --tool claude-code --global
@@ -238,6 +239,39 @@ shk init --strict
 When `package.json` is present, `shk init` can also apply package-manager supply-chain hardening such as `ignore-scripts=true`, npm `min-release-age=7`, and equivalent pnpm/Yarn/Bun age gates. Use `--no-npm-hardening` to skip that setup in automated runs.
 
 See [Configuration](docs/configuration.md) for the full `shk.toml` reference, custom rules, and suppression options.
+
+### Env secret store backends
+
+By default, `shk env` stores dotenv private keys in the **OS keyring** (local, zero extra dependencies). Teams can opt in to **1Password** for shared vault distribution, centralized revocation, and Business audit logs:
+
+> **Prerequisite:** The 1Password backend requires the [1Password CLI (`op`)](https://www.1password.dev/cli/get-started), version 2.24.0 or later. Install it, connect it to the 1Password app or sign in, then verify it with `op --version` and `op whoami` before enabling this backend. The default keyring backend does not require `op`.
+
+```toml
+# Keep secret_store = "keyring" until after `shk env key migrate --to 1password`.
+[env]
+secret_store = "keyring"
+project_id = "acme/backend-api"   # required for 1Password; machine-independent
+
+[env.onepassword]
+vault = "shk-project-keys"        # required before migrating to 1Password
+```
+
+Set `SHK_OP_PATH` to an absolute path when the `op` binary is not on PATH. Run `shk doctor env` to verify `op` resolution, version, and sign-in state.
+
+See [Configuration — Env Secret Store](docs/configuration.md#env-secret-store) and [Commands — env key migrate](docs/commands.md#shk-env-key-migrate) for the full reference.
+
+```bash
+# Phase 0 team handoff (no backend change): export instructions → vault → import
+shk env key export --instructions
+shk env key import --stdin
+
+# Migrate keyring keys to 1Password (copies keys and updates shk.toml)
+# Migrates indexed keys plus keys referenced by .env / .env.keys files throughout the project tree.
+shk env key migrate --to 1password
+# Verify the destination, then delete source copies explicitly.
+```
+
+**Threat model (honest):** 1Password is primarily a **team operations** upgrade (distribution, offboarding, audit). It also avoids persisting keys in the local keyring. Desktop app authorization can persist for a CLI session, so it is not a guarantee of biometric approval on every `shk env run`. Prefer short vault auto-lock and 1Password Business access logs for visibility.
 
 ## Exit Codes
 

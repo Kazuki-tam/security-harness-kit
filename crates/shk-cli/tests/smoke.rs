@@ -17,6 +17,13 @@ fn shk_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_shk"))
 }
 
+fn canonical_path_text(path: &Path) -> String {
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn synthetic_openai_key(seed: char) -> String {
     format!("sk-proj-{seed}bcdefghijklmnopqrstuvwxyz0123456789")
 }
@@ -2362,8 +2369,15 @@ fn hooks_install_ai_antigravity_writes_managed_pre_and_post_hooks() {
         pre[0]["hooks"][0]["command"]
             .as_str()
             .unwrap_or_default()
-            .contains("shk scan --hook-mode antigravity"),
+            .contains("--hook-mode antigravity"),
         "{pre:?}"
+    );
+    assert!(
+        pre[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(&canonical_path_text(dir.path())),
+        "trusted project root missing: {pre:?}"
     );
     assert!(
         pre[0]["hooks"][0]["command"]
@@ -2389,7 +2403,8 @@ fn hooks_install_ai_antigravity_writes_managed_pre_and_post_hooks() {
     assert_eq!(post[0]["matcher"], pre[0]["matcher"]);
     let post_cmd = post[0]["hooks"][0]["command"].as_str().unwrap_or_default();
     assert!(
-        post_cmd.contains("shk scan --hook-mode antigravity")
+        post_cmd.contains("--hook-mode antigravity")
+            && post_cmd.contains(&canonical_path_text(dir.path()))
             && post_cmd.contains("--log-blocked")
             && post_cmd.contains("--post"),
         "{post:?}"
@@ -2900,6 +2915,283 @@ allow = ["Bash(psql:*)"]
 }
 
 #[test]
+fn hook_mode_invalid_action_guard_policy_fails_closed() {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("shk.toml"),
+        "[action_guard]\nenabled = definitely-not-a-boolean\n",
+    )
+    .unwrap();
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": { "command": "echo safe" }
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "claude-code"])
+        .current_dir(dir.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("hook scan");
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(stdout["hookSpecificOutput"]["permissionDecision"], "deny");
+    let reason = stdout["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        reason.contains("policy") && reason.contains("invalid"),
+        "{stdout}"
+    );
+    assert!(!reason.contains("definitely-not-a-boolean"), "{stdout}");
+}
+
+#[test]
+fn hook_mode_ignores_invalid_policy_from_untrusted_payload_path() {
+    use std::io::Write;
+
+    let trusted = tempfile::tempdir().unwrap();
+    std::fs::write(
+        trusted.path().join("shk.toml"),
+        "[action_guard]\nenabled = true\n",
+    )
+    .unwrap();
+    let untrusted = tempfile::tempdir().unwrap();
+    std::fs::write(
+        untrusted.path().join("shk.toml"),
+        "[action_guard]\nenabled = definitely-not-a-boolean\n",
+    )
+    .unwrap();
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "echo safe",
+            "file_path": untrusted.path().join("decoy.txt")
+        }
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "claude-code"])
+        .current_dir(trusted.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("hook scan");
+
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn hook_mode_outside_repo_cwd_keeps_default_guard_for_payload_path_repo() {
+    use std::io::Write;
+    // The repository containing the hook target file, with a policy that
+    // allows writing password-like test sources.
+    let repo = tempfile::tempdir().unwrap();
+    init_git_repo(repo.path());
+    std::fs::write(
+        repo.path().join("shk.toml"),
+        r#"[action_guard]
+enabled = true
+allow = ["Write(*/tests/*.rs)"]
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(repo.path().join("tests")).unwrap();
+    let target = repo.path().join("tests/onepassword_op.rs");
+
+    // The hook process starts outside the repository.
+    let outside_cwd = tempfile::tempdir().unwrap();
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": target.to_str().unwrap(),
+            "content": "// synthetic"
+        }
+    }))
+    .unwrap();
+
+    let run_from_outside = || {
+        Command::new(shk_bin())
+            .args(["scan", ".", "--hook-mode", "claude-code"])
+            .current_dir(outside_cwd.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut c| {
+                c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+                c.wait_with_output()
+            })
+            .expect("hook scan")
+    };
+
+    // A payload-path repo is model-controlled and cannot weaken the default
+    // guard used by a hook process that started outside a trusted project.
+    let out = run_from_outside();
+    assert_eq!(out.status.code(), Some(2), "expected blocking exit code");
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        stdout["hookSpecificOutput"]["permissionDecision"], "deny",
+        "{stdout}"
+    );
+
+    // Project-installed hooks embed this explicit root. Unlike payload hints,
+    // that installer-owned argument is trusted and may apply project allows.
+    let trusted = Command::new(shk_bin())
+        .args([
+            "scan",
+            repo.path().to_str().unwrap(),
+            "--hook-mode",
+            "claude-code",
+        ])
+        .current_dir(outside_cwd.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("trusted-root hook scan");
+    assert!(
+        trusted.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&trusted.stdout),
+        String::from_utf8_lossy(&trusted.stderr)
+    );
+
+    // The project policy is still evaluated, but removing the allow entry does
+    // not change the fail-closed result.
+    std::fs::write(
+        repo.path().join("shk.toml"),
+        "[action_guard]\nenabled = true\n",
+    )
+    .unwrap();
+    let out = run_from_outside();
+    assert_eq!(out.status.code(), Some(2), "expected blocking exit code");
+}
+
+#[test]
+fn hook_mode_payload_target_cannot_replace_content_scan_policy_or_audit_root() {
+    use std::io::Write;
+
+    let decoy_repo = tempfile::tempdir().unwrap();
+    init_git_repo(decoy_repo.path());
+    std::fs::write(
+        decoy_repo.path().join("shk.toml"),
+        "[rules]\nsecrets = false\npii = false\nenv = false\nai_context = false\n",
+    )
+    .unwrap();
+    let outside_cwd = tempfile::tempdir().unwrap();
+    let target = decoy_repo.path().join("notes.txt");
+    let stdin = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": target,
+            "content": format!("synthetic test value: {}", synthetic_openai_key('a'))
+        }
+    })
+    .to_string();
+
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "claude-code"])
+        .current_dir(outside_cwd.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("hook scan");
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!decoy_repo.path().join(".shk/audit.log").exists());
+}
+
+#[test]
+fn hook_mode_payload_cwd_cannot_redirect_relative_file_scan() {
+    use std::io::Write;
+
+    let repo = tempfile::tempdir().unwrap();
+    init_git_repo(repo.path());
+    std::fs::write(repo.path().join("shk.toml"), "").unwrap();
+    std::fs::write(
+        repo.path().join("config.txt"),
+        format!("API_KEY={}\n", synthetic_openai_key('r')),
+    )
+    .unwrap();
+    let decoy_cwd = tempfile::tempdir().unwrap();
+    let stdin = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {
+            "file_path": "config.txt",
+            "cwd": decoy_cwd.path()
+        }
+    })
+    .to_string();
+
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "claude-code"])
+        .current_dir(repo.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("hook scan");
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn hook_mode_ignores_file_paths_outside_repo_root() {
     use std::io::Write;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -3243,8 +3535,9 @@ fn hook_mode_log_blocked_requires_policy() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("shk.toml"), "{stderr}");
+    assert_eq!(out.status.code(), Some(2));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("shk.toml"), "{stdout}");
 }
 
 #[test]
@@ -4204,6 +4497,32 @@ fn doctor_env_reports_findings_without_values() {
 }
 
 #[test]
+fn doctor_env_reports_unsupported_secret_store_without_onepassword_diagnostics() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("shk.toml"),
+        "[env]\nsecret_store = \"1pasword\"\n",
+    )
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["doctor", "env", dir.path().to_str().unwrap()])
+        .output()
+        .expect("doctor env");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("unsupported secret store backend `1pasword`"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("env.onepassword.vault"), "{stdout}");
+    assert!(!stdout.contains("1Password CLI"), "{stdout}");
+}
+
+#[test]
 fn doctor_env_skips_dotenvx_encrypted_files() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -4559,6 +4878,7 @@ fn env_key_help_is_registered_without_raw_export() {
     assert!(stdout.contains("list"), "{stdout}");
     assert!(stdout.contains("delete"), "{stdout}");
     assert!(stdout.contains("export"), "{stdout}");
+    assert!(stdout.contains("migrate"), "{stdout}");
 
     let out = Command::new(shk_bin())
         .args(["env", "key", "delete"])
@@ -4582,6 +4902,19 @@ fn env_key_help_is_registered_without_raw_export() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("--instructions"), "{stdout}");
     assert!(!stdout.contains("--print"), "{stdout}");
+}
+
+#[test]
+fn env_key_migrate_does_not_offer_unsafe_source_deletion() {
+    let out = Command::new(shk_bin())
+        .args(["env", "key", "migrate", "--help"])
+        .output()
+        .expect("env key migrate help");
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("--delete-source"), "{stdout}");
+    assert!(!stdout.contains("--yes"), "{stdout}");
 }
 
 #[test]
@@ -5120,7 +5453,11 @@ fn hooks_install_ai_windsurf_writes_cascade_hooks_and_is_idempotent() {
         let arr = hooks["hooks"][key].as_array().unwrap();
         assert_eq!(arr.len(), 1, "{key}: {arr:?}");
         let cmd = arr[0]["command"].as_str().unwrap();
-        assert_eq!(cmd, "shk scan --hook-mode windsurf", "{key}");
+        assert!(cmd.contains("--hook-mode windsurf"), "{key}: {cmd}");
+        assert!(
+            cmd.contains(&canonical_path_text(dir.path())),
+            "trusted project root missing for {key}: {cmd}"
+        );
         assert_eq!(arr[0]["show_output"], true, "{key}");
     }
     for key in ["post_run_command", "post_mcp_tool_use"] {

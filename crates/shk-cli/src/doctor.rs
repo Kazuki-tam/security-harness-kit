@@ -1,3 +1,6 @@
+use crate::env_store::{
+    OpPathSource, SecretStoreBackend, collect_onepassword_doctor_status, parse_secret_store_backend,
+};
 use crate::{npm_hardening, safety, workflow_hardening};
 use anyhow::Result;
 use serde_json::Value;
@@ -565,7 +568,8 @@ fn directory_pattern_covers(existing: &str, required: &str) -> bool {
 }
 
 pub fn run_env(root: &Path, dotenvx: bool) -> Result<()> {
-    let (_policy, _) = Policy::load_from_dir(root)?;
+    let (policy, _) = Policy::load_from_dir(root)?;
+    print_secret_store_status(root, &policy)?;
     let mut env_files = Vec::new();
     let mut mixed_env_files = Vec::new();
     for e in fs::read_dir(root)? {
@@ -627,6 +631,77 @@ pub fn run_env(root: &Path, dotenvx: bool) -> Result<()> {
 
     if dotenvx {
         run_dotenvx(root);
+    }
+    Ok(())
+}
+
+fn print_secret_store_status(root: &Path, policy: &Policy) -> Result<()> {
+    println!(
+        "env secret store: {} (configured in shk.toml [env])",
+        policy.env.secret_store
+    );
+    match parse_secret_store_backend(&policy.env.secret_store) {
+        Ok(SecretStoreBackend::Keyring) => {
+            println!("  backend: OS keyring (default)");
+            return Ok(());
+        }
+        Ok(SecretStoreBackend::OnePassword) => {}
+        Err(err) => {
+            println!("  warning: {err}");
+            return Ok(());
+        }
+    }
+
+    if policy
+        .env
+        .project_id
+        .as_ref()
+        .is_none_or(|v| v.trim().is_empty())
+    {
+        println!("  warning: env.project_id is required for 1Password");
+        if let Some(candidate) = shk_core::policy::suggest_env_project_id(root) {
+            println!("  suggestion: project_id = \"{candidate}\"");
+        }
+    }
+    if policy
+        .env
+        .onepassword
+        .vault
+        .as_ref()
+        .is_none_or(|v| v.trim().is_empty())
+    {
+        println!("  warning: env.onepassword.vault is required for 1Password");
+    }
+
+    let status = collect_onepassword_doctor_status(policy)?;
+    if let Some(err) = &status.op_resolution_error {
+        println!("  1Password CLI: not resolved ({err})");
+        println!("  hint: install `op`, set SHK_OP_PATH, or add it to PATH");
+        return Ok(());
+    }
+    if let Some(path) = &status.op_path {
+        let source = status
+            .op_path_source
+            .map(OpPathSource::label)
+            .unwrap_or("unknown");
+        println!("  1Password CLI: {path} (via {source})");
+    }
+    if let Some(version) = &status.op_version {
+        if status.op_version_ok {
+            println!("  op version: {version} (>= 2.24.0)");
+        } else {
+            println!("  warning: op version {version} is below supported minimum 2.24.0");
+        }
+    } else if let Some(err) = &status.op_version_error {
+        println!("  warning: could not read op version: {err}");
+    }
+    if status.op_signed_in {
+        println!("  op sign-in: ok (`op whoami`)");
+    } else if let Some(err) = &status.op_sign_in_error {
+        println!("  warning: op sign-in check failed: {err}");
+        println!("  hint: unlock 1Password and run `op signin`");
+    } else {
+        println!("  warning: op sign-in check failed");
     }
     Ok(())
 }

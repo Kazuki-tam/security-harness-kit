@@ -1768,6 +1768,19 @@ mod tests {
     use super::*;
     use std::fs;
 
+    fn json_string_contains(value: &serde_json::Value, needle: &str) -> bool {
+        match value {
+            serde_json::Value::String(value) => value.contains(needle),
+            serde_json::Value::Array(values) => values
+                .iter()
+                .any(|value| json_string_contains(value, needle)),
+            serde_json::Value::Object(values) => values
+                .values()
+                .any(|value| json_string_contains(value, needle)),
+            _ => false,
+        }
+    }
+
     #[test]
     fn resolve_project_root_canonicalizes_directories_and_rejects_other_paths() {
         let dir = tempfile::tempdir().unwrap();
@@ -2609,9 +2622,12 @@ mod tests {
         assert!(result.success, "{result:?}");
         let settings = fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
         assert!(settings.contains("\"permissions\""), "{settings}");
+        assert!(settings.contains("--hook-mode claude-code"), "{settings}");
+        let parsed: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        let canonical_root = fs::canonicalize(dir.path()).unwrap();
         assert!(
-            settings.contains("shk scan --hook-mode claude-code"),
-            "{settings}"
+            json_string_contains(&parsed, &canonical_root.to_string_lossy()),
+            "trusted project root missing: {settings}"
         );
     }
 

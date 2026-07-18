@@ -97,6 +97,14 @@ cargo run -p shk-cli --bin shk -- doctor env
 cargo run -p shk-cli --bin shk -- doctor workflows # actions/checkout persist-credentials: false
 cargo run -p shk-cli --bin shk -- doctor workflows --fix
 
+# 1Password secret store migration (keep secret_store = "keyring" until migrate succeeds)
+cargo run -p shk-cli --bin shk -- env key migrate --to 1password
+
+# Opt-in integration tests against a real 1Password test vault (not run by default).
+# Requires signed-in op >= 2.24; create the dedicated vault once with:
+# op vault create shk-integration-test
+SHK_OP_TEST_VAULT=shk-integration-test cargo test -p shk-cli --test onepassword_op -- --ignored
+
 # Audit log preview
 cargo run -p shk-cli --bin shk -- audit
 cargo run -p shk-cli --bin shk -- audit --reason action-guard --no-paths
@@ -229,6 +237,18 @@ redaction = "match"
 
 [doctor.ignore]
 required_patterns = [".env", ".env.*", "!.env.example", "secrets/**", "*.pem", "*.key"]
+
+# Native env secret store (default: OS keyring). Opt in to 1Password for team vault sharing.
+# [env]
+# secret_store = "keyring" # keyring | 1password
+# project_id = "acme/backend-api" # required when secret_store = "1password"
+# [env.onepassword]
+# vault = "shk-project-keys" # required when secret_store = "1password"
+# SHK_OP_PATH=/absolute/path/to/op # optional; op resolution order: env var, known paths, PATH
+#
+# Migrate keyring → 1Password (keep secret_store = "keyring" until migrate succeeds):
+# shk env key migrate --to 1password
+# Verify destination keys, then delete source copies explicitly.
 
 # Suppress a specific finding by path + rule
 [[allowlist]]

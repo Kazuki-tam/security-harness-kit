@@ -314,7 +314,7 @@ It also reports on Claude Code `.claude/settings.json` read deny entries and Cod
 
 ### `shk doctor env`
 
-Check plaintext `.env` files at the project root.
+Check plaintext `.env` files at the project root and report the configured env secret store backend.
 
 ```bash
 shk doctor env
@@ -323,6 +323,8 @@ shk doctor env ./path
 ```
 
 `.env.example`, dotenvx-encrypted env files, and `shk env encrypt` output files are excluded from the plaintext env file warning. If an encrypted env file contains newly added or edited plaintext values, `doctor env` reports the plaintext key names and recommends re-running `shk env encrypt <file> --in-place`. With `--dotenvx`, the diagnostic also reports known dotenvx artifact files such as `.env.keys` and `.env.vault`.
+
+When `[env].secret_store = "1password"`, the diagnostic also checks `env.project_id`, `env.onepassword.vault`, `op` resolution (`SHK_OP_PATH`, known paths, or `PATH`), CLI version (minimum `2.24.0`), and sign-in state (`op whoami`). When `secret_store = "keyring"`, it reports that the OS keyring is the active backend.
 
 ### `shk doctor workflows`
 
@@ -365,7 +367,7 @@ shk env run -f .env.production --env production -- npm start
 shk env decrypt .env.production.shk --env production --output .env.production.local
 ```
 
-The encryption key pair is generated per project and environment label, with the public key written to the `.env` file as `DOTENV_PUBLIC_KEY*` and the private key stored in the operating system credential store as `DOTENV_PRIVATE_KEY*`. Values are written as `KEY="encrypted:..."`, preserving key names and the dotenv file shape. Use `--in-place` on `encrypt` to keep the `.env` filename while replacing plaintext values with encrypted values. Use `--output` to write a separate encrypted file instead. Existing output files are refused unless `--force` is passed. `decrypt` always requires `--output` so plaintext is not written to stdout accidentally. Prefer `shk env run` for day-to-day use: it decrypts values in memory and injects only the resulting application variables into the child process.
+The encryption key pair is generated per project and environment label, with the public key written to the `.env` file as `DOTENV_PUBLIC_KEY*` and the private key stored in the configured env secret store (`[env].secret_store` in `shk.toml`) as `DOTENV_PRIVATE_KEY*`. By default the OS keyring is used; teams can opt in to 1Password. Values are written as `KEY="encrypted:..."`, preserving key names and the dotenv file shape. Use `--in-place` on `encrypt` to keep the `.env` filename while replacing plaintext values with encrypted values. Use `--output` to write a separate encrypted file instead. Existing output files are refused unless `--force` is passed. `decrypt` always requires `--output` so plaintext is not written to stdout accidentally. Prefer `shk env run` for day-to-day use: it decrypts values in memory and injects only the resulting application variables into the child process.
 
 Files written by `shk env encrypt` include a comment-only `[SHK_NATIVE_ENV]` header before the `DOTENV_PUBLIC_KEY*` block. This makes native `shk` output recognizable when reading the file, while preserving the existing encrypted dotenv value shape.
 
@@ -386,7 +388,7 @@ shk env dotenvx import-keys .env.keys
 shk env run -f .env -- npm test
 ```
 
-`shk env run`, `decrypt`, and `encrypt` first use native `shk` keys. If none exist, they can reuse imported dotenvx `DOTENV_PRIVATE_KEY*` values from the OS credential store, derive the public key when needed, and attempt to adopt the key into the native store. This keeps existing dotenvx-encrypted files usable while removing the external `dotenvx` binary from the normal execution path. After a native command reports that the imported key was adopted, the imported dotenvx copy can be removed with `shk env dotenvx delete --all` if the project no longer needs `shk env dotenvx run`. If adoption prints a warning, keep the imported dotenvx copy or import the key with `shk env key import`.
+`shk env run`, `decrypt`, and `encrypt` first use native `shk` keys. If none exist, they can reuse imported dotenvx `DOTENV_PRIVATE_KEY*` values from the configured env secret store, derive the public key when needed, and attempt to adopt the key into the native store. This keeps existing dotenvx-encrypted files usable while removing the external `dotenvx` binary from the normal execution path. After a native command reports that the imported key was adopted, the imported dotenvx copy can be removed with `shk env dotenvx delete --all` if the project no longer needs `shk env dotenvx run`. If adoption prints a warning, keep the imported dotenvx copy or import the key with `shk env key import`.
 
 | Option | Meaning |
 |--------|---------|
@@ -411,9 +413,11 @@ shk env key list
 shk env key delete --env staging
 shk env key delete --all
 shk env key export --env production --instructions
+shk env key migrate --to 1password
+shk env key migrate --to keyring
 ```
 
-`import` stores one `DOTENV_PRIVATE_KEY*` value in the native `shk` OS credential store for the current project. Without `--stdin`, it prompts for the key without echoing input. With `--stdin`, it can read from a password manager CLI:
+`import` stores one `DOTENV_PRIVATE_KEY*` value in the native env secret store for the current project. Without `--stdin`, it prompts for the key without echoing input. With `--stdin`, it can read from a password manager CLI:
 
 ```bash
 op read "op://Project/prod/DOTENV_PRIVATE_KEY_PRODUCTION" \
@@ -424,9 +428,45 @@ op read "op://Project/prod/DOTENV_PRIVATE_KEY_PRODUCTION" \
 
 `export --instructions` intentionally does not print raw key material. It prints the key name, whether a key is already present on this machine, and a recommended local handoff flow: store the key in a team password manager, share vault access with the teammate, and have the recipient run `shk env key import`.
 
+### `shk env key migrate`
+
+Copy env private keys from the backend configured in `shk.toml` to another backend and update `env.secret_store` on success.
+
+Migrating to or using the 1Password backend requires the [1Password CLI (`op`)](https://www.1password.dev/cli/get-started), version `2.24.0` or later, and an authenticated `op` session. Run `op --version`, `op whoami`, and `shk doctor env` to verify the prerequisite before migration. Migrating to the keyring does not require `op` for the destination, but `op` must still be available to read keys when the current source backend is 1Password.
+
+```bash
+# Typical keyring → 1Password rollout
+# 1. Set project_id and vault in shk.toml while secret_store stays "keyring"
+# 2. Run migrate (updates shk.toml to "1password" after copying keys)
+shk env key migrate --to 1password
+
+# Verify the destination, then remove source copies explicitly.
+
+# Roll back to the OS keyring when 1Password is configured
+shk env key migrate --to keyring
+```
+
+| Option | Behavior |
+|--------|----------|
+| `--to <keyring\|1password>` | Destination backend. Must differ from the current `env.secret_store`. |
+
+Migration copies indexed keys plus keys referenced by `.env` / `.env.keys` files throughout the project tree (for example via matching `DOTENV_PUBLIC_KEY*` names). `.git`, `node_modules`, and `target` directories are excluded. Keys that exist only in the source backend with no index entry and no project env reference are not discovered automatically; remove them with an explicit `shk env key delete --key …` before migrating, or import them into the destination manually.
+
+The command does not open the destination backend before migration starts when the current config already points at a broken backend; it reads keys from `env.secret_store` and writes to `--to`. Re-running migrate to the backend already configured in `shk.toml` is rejected.
+
+Flow on success:
+
+1. Copy keys to the destination backend.
+2. Update `shk.toml` to set `env.secret_store` to `--to` when a policy file exists.
+3. Retain source keys for rollback.
+
+After verifying the destination, remove source keys explicitly. Migration does not automatically delete them because the supported backends do not provide a portable conditional-delete operation.
+
+See [Configuration](configuration.md#env-secret-store) for `[env]` / `[env.onepassword]` settings and the 1Password threat model notes in the README.
+
 ## `shk env dotenvx`
 
-Store dotenvx private keys in the operating system credential store and inject them only when running a command through dotenvx.
+Store dotenvx private keys in the configured env secret store and inject them only when running a command through dotenvx.
 
 ```bash
 shk env dotenvx import-keys .env.keys
@@ -440,11 +480,11 @@ shk env dotenvx delete --key DOTENV_PRIVATE_KEY_PRODUCTION
 shk env dotenvx delete --all
 ```
 
-This command group uses the platform credential store through the `keyring` crate: macOS Keychain, Windows Credential Manager, and Linux Secret Service / keyutils depending on platform support.
+This command group stores dotenvx private keys in the env secret store configured by `[env].secret_store` in `shk.toml`. The default backend is the OS keyring (macOS Keychain, Windows Credential Manager, or Linux Secret Service / keyutils depending on platform support). When `secret_store = "1password"`, the same keys are stored as tagged 1Password items in the configured vault.
 
 `import-keys` reads only `DOTENV_PRIVATE_KEY` and `DOTENV_PRIVATE_KEY_<ENV>` entries from a `.env.keys`-style file. Raw key values are never printed. `run` reads the stored keys for the current project and invokes `dotenvx run -- <command>` with those values present only in the child process environment. `delete` requires an explicit target: `--all`, `--key <DOTENV_PRIVATE_KEY*>`, or `--env <name>`.
 
-There is intentionally no raw-key export under `shk env dotenvx` because printing or writing raw private keys defeats the purpose of moving `.env.keys` into the OS credential store. Use `shk env key export --instructions` for safe handoff guidance that does not print key material.
+There is intentionally no raw-key export under `shk env dotenvx` because printing or writing raw private keys defeats the purpose of moving `.env.keys` into the configured secret store. Use `shk env key export --instructions` for safe handoff guidance that does not print key material.
 
 Run options:
 
@@ -554,6 +594,8 @@ Options:
 
 Without `--tool`, the command targets Claude Code, Codex, Cursor, Copilot, Antigravity, and Windsurf. Non-dry-run installation requires a project `shk.toml`.
 
+Project installs embed a safely quoted project root in managed hook commands. On Windows, installation fails closed when that path contains `"`, `%`, `!`, `$`, or a backtick because the supported hook shells cannot represent those paths consistently without expansion or command-substitution risk. Move the checkout to a path without those characters or use a global hook installation.
+
 Installed entries:
 
 | Tool | Config file | Managed entries |
@@ -572,6 +614,8 @@ Managed entries are tagged with `"_shk_managed": true` or `# shk-managed-start` 
 See [Uninstall](installation.md#uninstall) for removing managed hooks, skills, generated workflows, and stored dotenvx keys.
 
 In pre-hook mode, `shk` also runs an action guard before content scanning. It blocks sensitive file access, environment dump commands, destructive filesystem operations, direct database mutation commands, privilege or system changes, external transfer commands, and package manager operations when they are visible in the hook payload. Tune this with `[action_guard]` in `shk.toml`; `--audit` remains non-blocking, while `--log-blocked` records only the action category.
+
+Action guard allow patterns apply to individual shell segments by default. A pattern for the first command does not implicitly allow later `&&`, `||`, pipe, or semicolon-separated commands; a compound allow must include the separators and cover the complete trusted command.
 
 ## `shk ci init github`
 

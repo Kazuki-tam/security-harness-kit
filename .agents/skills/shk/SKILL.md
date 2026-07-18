@@ -47,12 +47,13 @@ shk doctor workflows --fix           # add persist-credentials: false to checkou
 shk doctor version                   # check latest release
 shk env encrypt .env --in-place  # native shk dotenv encryption; adds [SHK_NATIVE_ENV] header
 shk env run -- npm test           # decrypt native env values only for the child process
-shk env key import                # register the default local decryption key in the OS store
+shk env key import                # register the default key in the configured secret store
 shk env key list                  # show native key names for this project, not values
-shk env key delete --env staging  # remove a native decryption key from the OS store
+shk env key delete --env staging  # remove a native key from the configured secret store
 shk env key export --instructions # show safe handoff instructions; no raw key output
+shk env key migrate --to 1password  # copy keys to 1Password; updates shk.toml on success
 shk env decrypt .env --output .env.local
-shk env dotenvx import-keys .env.keys # store dotenvx private keys in OS credential store
+shk env dotenvx import-keys .env.keys # store keys in the configured secret store
 shk env dotenvx run -- npm test       # inject stored keys only into child process
 shk env dotenvx delete --all
 shk secrets push --profile prod       # push dotenv payload to AWS/GCP secret manager
@@ -142,6 +143,31 @@ shk clipboard mask --write           # explicitly replace the clipboard with mas
 
 `shk clipboard …` exits 2 when the OS clipboard is unavailable. Non-text clipboard contents are treated as empty text.
 
+## Env secret store backends
+
+`shk env` stores `DOTENV_PRIVATE_KEY*` values outside the repository. Default backend is the **OS keyring**; teams can opt in to **1Password** in `shk.toml`:
+
+```toml
+[env]
+secret_store = "keyring"          # default
+# secret_store = "1password"
+# project_id = "acme/backend-api" # required for 1Password
+# [env.onepassword]
+# vault = "shk-project-keys"      # required for 1Password
+```
+
+```bash
+shk doctor env                    # check plaintext env files + 1Password CLI when configured
+shk env key migrate --to 1password
+```
+
+Migration notes:
+- Keep `secret_store = "keyring"` until `shk env key migrate --to 1password` succeeds; the command updates `shk.toml` afterward.
+- Migrates indexed keys plus keys referenced by `.env` / `.env.keys` files throughout the project tree.
+- Source keys are retained for rollback; verify the destination, then delete them explicitly.
+- Set `SHK_OP_PATH` when `op` is not on PATH. 1Password items are tagged `shk` with titles like `shk:{project_id}:env:DOTENV_PRIVATE_KEY`.
+- 1Password is primarily a team-operations upgrade (distribution, offboarding, audit), not per-command biometric approval on every `shk env run`.
+
 ## Local dotenvx key storage
 
 Use `shk env dotenvx` when a project has `.env.keys` or `DOTENV_PRIVATE_KEY*` values that should not stay in plaintext files.
@@ -161,7 +187,7 @@ shk env dotenvx delete --all
 ```
 
 Important behavior:
-- Keys are stored in the OS credential store through the platform keychain/credential backend.
+- Keys are stored in the env secret store configured by `[env].secret_store` (OS keyring by default, or 1Password when opted in).
 - `run` injects keys only into the child `dotenvx run -- <command>` environment.
 - There is no raw-key export under `shk env dotenvx`; use `shk env key export --instructions` only for handoff guidance.
 - `delete` requires an explicit target: `--all`, `--key <DOTENV_PRIVATE_KEY*>`, or `--env <name>`.
@@ -206,10 +232,11 @@ Cursor gets blocking `before*` hooks plus non-blocking post scans on
 Managed user-prompt hooks use `--fail-on medium` so PII is blocked before it enters
 the agent context.
 
-Codex project hooks also ensure `features.hooks = true`, install `PreToolUse`,
-`PermissionRequest`, `UserPromptSubmit`, and `PostToolUse`, and scan
-`$(git rev-parse --show-toplevel)` so hooks still resolve the repo when Codex starts
-from a subdirectory. Global Codex hooks keep the session cwd and omit the git-root path.
+Project hook commands carry an explicit trusted project root so model-controlled payload
+paths cannot select the scan policy or audit-log destination. Codex project hooks resolve that
+root dynamically with `$(git rev-parse --show-toplevel)` and also ensure `features.hooks = true`
+while installing `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, and `PostToolUse`.
+Global hooks keep the session cwd because they are not bound to one project.
 
 Antigravity gets a managed `shk-security` entry with blocking `PreToolUse` and
 non-blocking `PostToolUse` hooks matching all Antigravity tools (`.*`) so
@@ -257,7 +284,7 @@ shk ci init github                      # write .github/workflows/shk.yml
 shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
-shk ci init github --shk-version v0.4.11
+shk ci init github --shk-version v0.5.5
 shk ci init github --output .github/workflows/security.yml --force
 ```
 

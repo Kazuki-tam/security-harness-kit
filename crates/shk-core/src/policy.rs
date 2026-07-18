@@ -408,6 +408,8 @@ pub struct Policy {
     #[serde(default)]
     pub doctor: DoctorSection,
     #[serde(default)]
+    pub env: EnvSection,
+    #[serde(default)]
     pub secrets: SecretsSection,
     /// Path-based / hash-based suppression (also see inline `# shk-ignore` in scanner).
     #[serde(default)]
@@ -421,6 +423,38 @@ pub struct Policy {
 pub struct DoctorSection {
     #[serde(default)]
     pub ignore: DoctorIgnoreSection,
+}
+
+fn default_env_secret_store() -> String {
+    "keyring".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct EnvSection {
+    #[serde(default = "default_env_secret_store")]
+    pub secret_store: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub onepassword: OnePasswordSection,
+}
+
+impl Default for EnvSection {
+    fn default() -> Self {
+        Self {
+            secret_store: default_env_secret_store(),
+            project_id: None,
+            onepassword: OnePasswordSection::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct OnePasswordSection {
+    #[serde(default)]
+    pub vault: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -502,6 +536,131 @@ impl Policy {
             ai_context: self.rules.ai_context,
         }
     }
+
+    /// Validate `[env]` settings for the configured secret store backend.
+    pub fn validate_env_config(&self, root: &Path) -> Result<()> {
+        match self.env.secret_store.as_str() {
+            "keyring" => Ok(()),
+            "1password" => {
+                if self
+                    .env
+                    .project_id
+                    .as_ref()
+                    .is_none_or(|value| value.trim().is_empty())
+                {
+                    let hint = suggest_env_project_id(root)
+                        .map(|candidate| format!("; suggested project_id = \"{candidate}\""))
+                        .unwrap_or_default();
+                    anyhow::bail!(
+                        "env.project_id is required when env.secret_store = \"1password\"{hint}"
+                    );
+                }
+                if self
+                    .env
+                    .onepassword
+                    .vault
+                    .as_ref()
+                    .is_none_or(|value| value.trim().is_empty())
+                {
+                    anyhow::bail!(
+                        "env.onepassword.vault is required when env.secret_store = \"1password\""
+                    );
+                }
+                if self
+                    .env
+                    .project_id
+                    .as_ref()
+                    .is_some_and(|value| value.contains(':'))
+                {
+                    anyhow::bail!(
+                        "env.project_id must not contain ':' when env.secret_store = \"1password\"; use '/', '-', or '_' instead"
+                    );
+                }
+                if self
+                    .env
+                    .project_id
+                    .as_ref()
+                    .is_some_and(|value| value != value.trim())
+                {
+                    anyhow::bail!(
+                        "env.project_id must not have leading or trailing whitespace when env.secret_store = \"1password\""
+                    );
+                }
+                Ok(())
+            }
+            other => anyhow::bail!(
+                "unsupported env.secret_store `{other}`; supported: keyring, 1password"
+            ),
+        }
+    }
+}
+
+/// Derive a stable, machine-independent project identifier suggestion from git metadata.
+pub fn suggest_env_project_id(root: &Path) -> Option<String> {
+    let repo_root = crate::git::discover_repo_root(root)?;
+    let output = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(&repo_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return repo_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(sanitize_project_id);
+    }
+    let remote = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    project_id_from_git_remote(&remote).or_else(|| {
+        repo_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(sanitize_project_id)
+    })
+}
+
+fn project_id_from_git_remote(remote: &str) -> Option<String> {
+    let trimmed = remote.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = trimmed
+        .strip_prefix("git@")
+        .and_then(|rest| rest.split_once(':'))
+        .map(|(host, repo)| format!("{host}/{repo}"))
+        .or_else(|| {
+            trimmed
+                .strip_prefix("ssh://")
+                .or_else(|| trimmed.strip_prefix("https://"))
+                .or_else(|| trimmed.strip_prefix("http://"))
+                .and_then(|rest| rest.split_once('/'))
+                .map(|(authority, repo)| {
+                    let host = authority
+                        .rsplit_once('@')
+                        .map(|(_, host)| host)
+                        .unwrap_or(authority);
+                    format!("{host}/{repo}")
+                })
+        })?;
+    let mut normalized = path.trim_end_matches(".git").replace('\\', "/");
+    while normalized.starts_with('/') {
+        normalized.remove(0);
+    }
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(sanitize_project_id(&normalized))
+}
+
+fn sanitize_project_id(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '/' | '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 pub fn default_policy_toml(strict: bool) -> String {
@@ -598,6 +757,13 @@ required_patterns = [
   "*.mobileprovision",
   "*.log"
 ]
+
+# Native env secret store (default: OS keyring). Opt in to 1Password for team vault sharing.
+# [env]
+# secret_store = "keyring" # keyring | 1password
+# project_id = "acme/backend-api" # required when secret_store = "1password"
+# [env.onepassword]
+# vault = "shk-project-keys" # required when secret_store = "1password"
 
 # Allowlist / inline suppressions (spec §5.3). Prefer path-scoped rows; use value_hash only as an equality fingerprint.
 # Inline: # shk-ignore-next-line <rule_id>
@@ -701,6 +867,13 @@ required_patterns = [
   "*.mobileprovision",
   "*.log"
 ]
+
+# Native env secret store (default: OS keyring). Opt in to 1Password for team vault sharing.
+# [env]
+# secret_store = "keyring" # keyring | 1password
+# project_id = "acme/backend-api" # required when secret_store = "1password"
+# [env.onepassword]
+# vault = "shk-project-keys" # required when secret_store = "1password"
 
 # Allowlist / inline suppressions (spec §5.3). Prefer path-scoped rows; use value_hash only as an equality fingerprint.
 # Inline: # shk-ignore-next-line <rule_id>
@@ -884,5 +1057,79 @@ format = "dotenv"
         assert!(path.is_none());
         assert!(policy.rules.secrets);
         assert_eq!(policy.thresholds.scan_fail_on, "high");
+        assert_eq!(policy.env.secret_store, "keyring");
+    }
+
+    #[test]
+    fn env_section_defaults_to_keyring() {
+        let policy: Policy = toml::from_str("").unwrap();
+        assert_eq!(policy.env.secret_store, "keyring");
+        assert!(policy.env.project_id.is_none());
+        assert!(policy.env.onepassword.vault.is_none());
+    }
+
+    #[test]
+    fn validate_env_config_requires_onepassword_fields() {
+        let mut policy = Policy::default();
+        policy.env.secret_store = "1password".to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let err = policy.validate_env_config(dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("env.project_id is required"),
+            "{err}"
+        );
+
+        policy.env.project_id = Some("acme/backend".to_string());
+        let err = policy.validate_env_config(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("env.onepassword.vault is required"),
+            "{err}"
+        );
+
+        policy.env.onepassword.vault = Some("shk-project-keys".to_string());
+        policy.validate_env_config(dir.path()).unwrap();
+
+        policy.env.project_id = Some("team:env".to_string());
+        let err = policy.validate_env_config(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("must not contain ':'"), "{err}");
+
+        policy.env.project_id = Some(" acme/backend ".to_string());
+        let err = policy.validate_env_config(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("must not have leading or trailing whitespace"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn suggest_env_project_id_sanitizes_git_remote() {
+        assert_eq!(
+            project_id_from_git_remote("git@github.com:acme/backend-api.git"), // shk-ignore pii.email
+            Some("github.com/acme/backend-api".to_string())
+        );
+        assert_eq!(
+            project_id_from_git_remote("https://github.com/acme/backend-api.git"),
+            Some("github.com/acme/backend-api".to_string())
+        );
+        assert_eq!(
+            project_id_from_git_remote(
+                "https://alice:github-token-value@github.com/acme/backend-api.git" // shk-ignore pii.email
+            ),
+            Some("github.com/acme/backend-api".to_string())
+        );
+        assert_eq!(
+            project_id_from_git_remote("ssh://git@github.com/acme/backend-api.git"), // shk-ignore pii.email
+            Some("github.com/acme/backend-api".to_string())
+        );
+        assert_eq!(
+            project_id_from_git_remote("/Users/alice/repos/backend-api.git"),
+            None
+        );
+        assert_eq!(
+            project_id_from_git_remote("file:///Users/alice/repos/backend-api.git"),
+            None
+        );
     }
 }
