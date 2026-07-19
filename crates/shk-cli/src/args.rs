@@ -1,6 +1,6 @@
 use clap::{ArgGroup, Args, Parser, Subcommand};
 use clap_complete::Shell;
-use shk_core::policy::Severity;
+use shk_core::policy::{SecretStoreBackend, Severity};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -673,8 +673,8 @@ pub struct EnvKeyExportArgs {
 #[derive(Args)]
 pub struct EnvKeyMigrateArgs {
     /// Destination secret store backend.
-    #[arg(long = "to", value_parser = ["keyring", "1password"])]
-    pub to: String,
+    #[arg(long = "to")]
+    pub to: SecretStoreBackend,
 }
 
 #[derive(Subcommand)]
