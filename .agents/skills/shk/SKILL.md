@@ -40,6 +40,7 @@ shk hooks install-ai --tool claude-code --global
 shk hooks install-ai --apply-sandbox # harden supported tool sandbox settings
 shk hooks install-ai --dry-run       # preview changes
 shk ci init github --dry-run         # preview GitHub Actions workflow
+shk ci init github --upload-sarif    # upload findings to GitHub code scanning
 shk doctor                           # full project diagnostics
 shk doctor ignore --fix              # fix missing .gitignore entries
 shk doctor env --dotenvx             # include dotenvx artifact checks
@@ -91,6 +92,7 @@ Useful flags:
 - `--fail-on <info|low|medium|high|critical>` — override threshold
 - `--verbose` — show informational skip findings
 - `--json` — machine-readable JSON report
+- `--audit` — report findings without returning exit 1; runtime errors still fail
 - `--staged` — only scan git-staged files
 - `--git-history` — scan committed blobs reachable from Git refs
 - `--preview` — with `--git-history`, show candidate counts without scanning contents
@@ -284,11 +286,15 @@ shk ci init github                      # write .github/workflows/shk.yml
 shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
-shk ci init github --shk-version v0.5.5
+shk ci init github --upload-sarif
+shk ci init github --shk-version v0.5.6
 shk ci init github --output .github/workflows/security.yml --force
 ```
 
-The generated workflow runs `shk scan . --json --fail-on high` by default. Use audit mode for a non-blocking rollout.
+The generated workflow runs `shk scan --json --fail-on high -- .` by default. Use
+`--upload-sarif` for Security-tab alerts and pull-request annotations; it uploads before
+restoring the scan exit code. This grants `security-events: write` and requires GitHub Code
+Security for private repositories. Use audit mode for a non-blocking rollout.
 
 ## External data sources and MCP integration
 

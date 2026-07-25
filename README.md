@@ -133,7 +133,31 @@ Generate a GitHub Actions workflow that scans every pull request:
 
 ```bash
 shk ci init github
+# Add GitHub code scanning alerts and PR annotations:
+shk ci init github --upload-sarif
 ```
+
+Alternatively, use the repository's composite action after checkout on a Linux or macOS runner:
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+
+steps:
+  - uses: actions/checkout@v6
+    with:
+      persist-credentials: false
+  - uses: Kazuki-tam/security-harness-kit@v1
+    with:
+      path: .
+      fail-on: high
+      upload-sarif: true
+```
+
+Set `upload-sarif: false` when GitHub code scanning is unavailable. Private repositories
+need GitHub Code Security enabled to upload SARIF. Pull requests from forks normally receive
+a read-only token; disable upload for those runs if the repository does not permit SARIF upload.
 
 Install the shk agent skill for Claude Code, Codex/Cursor, Copilot, Antigravity, and Windsurf:
 
@@ -210,9 +234,10 @@ shk hooks install-ai --tool antigravity
 shk hooks install-ai --tool windsurf
 
 shk ci init github
+shk ci init github --upload-sarif
 shk ci init github --dry-run
 shk ci init github --mode audit
-shk ci init github --shk-version v0.5.5
+shk ci init github --shk-version v0.5.6
 
 shk skills install
 shk skills install --tool claude-code --global

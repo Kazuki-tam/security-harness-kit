@@ -112,8 +112,10 @@ pub enum Commands {
         /// Post-tool hook inbound scan — never blocks (spec §7.9).
         #[arg(long, requires = "hook_mode")]
         post: bool,
-        /// Audit-only hooks: append JSON lines to `.shk/audit.log`, always exit 0.
-        #[arg(long, conflicts_with = "log_blocked", requires = "hook_mode")]
+        /// Audit-only scan: report findings but always exit 0.
+        ///
+        /// In hook mode this also appends metadata-only entries to `.shk/audit.log`.
+        #[arg(long, conflicts_with = "log_blocked")]
         audit: bool,
         /// Blocking hook mode: append metadata-only block entries to `.shk/audit.log`.
         #[arg(long, conflicts_with = "audit", requires = "hook_mode")]
@@ -439,6 +441,12 @@ pub struct GithubCiArgs {
     /// shk release version to install, or `latest` (e.g. `v0.2.3`).
     #[arg(long = "shk-version", default_value = DEFAULT_SHK_VERSION)]
     pub shk_version: String,
+    /// Emit SARIF and upload it to GitHub code scanning.
+    ///
+    /// The generated workflow grants `security-events: write`. Private repositories
+    /// require GitHub Code Security to be enabled.
+    #[arg(long)]
+    pub upload_sarif: bool,
     /// Workflow destination path.
     #[arg(long, default_value = ".github/workflows/shk.yml")]
     pub output: PathBuf,
@@ -878,6 +886,26 @@ mod tests {
     }
 
     #[test]
+    fn scan_accepts_audit_without_hook_mode() {
+        let cli = Cli::try_parse_from(["shk", "scan", ".", "--sarif", "--audit"])
+            .expect("CI audit scans should parse without hook mode");
+
+        let Commands::Scan {
+            sarif,
+            audit,
+            hook_mode,
+            ..
+        } = cli.command
+        else {
+            panic!("expected scan command");
+        };
+
+        assert!(sarif);
+        assert!(audit);
+        assert!(hook_mode.is_none());
+    }
+
+    #[test]
     fn clipboard_mask_accepts_write_and_json() {
         let cli = Cli::try_parse_from(["shk", "clipboard", "mask", "--write", "--json"])
             .expect("clipboard mask flags should parse");
@@ -923,16 +951,6 @@ mod tests {
     fn scan_rejects_log_blocked_without_hook_mode() {
         let err = match Cli::try_parse_from(["shk", "scan", ".", "--log-blocked"]) {
             Ok(_) => panic!("--log-blocked should require --hook-mode"),
-            Err(err) => err,
-        };
-
-        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
-    }
-
-    #[test]
-    fn scan_rejects_audit_without_hook_mode() {
-        let err = match Cli::try_parse_from(["shk", "scan", ".", "--audit"]) {
-            Ok(_) => panic!("--audit should require --hook-mode"),
             Err(err) => err,
         };
 

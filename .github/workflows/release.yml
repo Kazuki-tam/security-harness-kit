@@ -9,7 +9,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - "v*.*.*"
       - "cli-v*"
       - "desktop-v*"
       - "shk-v*"
@@ -401,6 +401,24 @@ jobs:
           body_path: release-body.md
           generate_release_notes: true
           make_latest: ${{ needs.prepare.outputs.make_latest == 'true' }}
+
+      - name: update v1 action tag
+        if: needs.prepare.outputs.build_cli == 'true' && needs.prepare.outputs.make_latest == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v1" >/dev/null 2>&1; then
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/v1" \
+              -f sha="$RELEASE_SHA" \
+              -F force=true
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/v1" \
+              -f sha="$RELEASE_SHA"
+          fi
 
       - name: publish desktop updater endpoint
         if: needs.prepare.outputs.build_desktop == 'true'

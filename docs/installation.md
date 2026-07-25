@@ -119,7 +119,7 @@ Release assets are also covered by GitHub artifact attestations.
 For CI or security-sensitive environments, install from a pinned release tag and verify both the checksum and GitHub artifact attestation before placing the binary on `PATH`:
 
 ```bash
-version=v0.5.5
+version=v0.5.6
 target=x86_64-unknown-linux-gnu
 asset="shk-cli-${target}.tar.xz"
 repo=Kazuki-tam/security-harness-kit
@@ -182,13 +182,13 @@ See [`desktop-release.md`](desktop-release.md) for maintainer release steps.
 Download from the release page for your tag, for example:
 
 ```text
-https://github.com/Kazuki-tam/security-harness-kit/releases/tag/desktop-unsigned-v0.5.5
+https://github.com/Kazuki-tam/security-harness-kit/releases/tag/desktop-unsigned-v0.5.6
 ```
 
 Verify checksums when available:
 
 ```bash
-curl -LO https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-unsigned-v0.5.5/shk-desktop.sha256sum
+curl -LO https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-unsigned-v0.5.6/shk-desktop.sha256sum
 sha256sum -c shk-desktop.sha256sum
 ```
 

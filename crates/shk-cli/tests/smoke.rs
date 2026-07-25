@@ -134,6 +134,10 @@ fn scan_sarif_outputs_code_scanning_shape() {
     );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("sarif json");
     assert_eq!(v["version"], "2.1.0");
+    assert_eq!(
+        v["runs"][0]["tool"]["driver"]["semanticVersion"],
+        env!("CARGO_PKG_VERSION")
+    );
     let results = v["runs"][0]["results"].as_array().expect("sarif results");
     assert!(
         results
@@ -149,6 +153,41 @@ fn scan_sarif_outputs_code_scanning_shape() {
         "valueHash should be opt-in: {}",
         String::from_utf8_lossy(&out.stdout)
     );
+    assert!(
+        results
+            .iter()
+            .all(|r| r.get("partialFingerprints").is_none()),
+        "upload-sarif should compute source-aware fingerprints: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn scan_sarif_audit_without_hook_mode_never_blocks() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("finding.txt"), synthetic_openai_key('z'))
+        .expect("write fixture");
+
+    let out = Command::new(shk_bin())
+        .args([
+            "scan",
+            &dir.path().display().to_string(),
+            "--sarif",
+            "--audit",
+        ])
+        .output()
+        .expect("run shk sarif audit");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).expect("sarif json");
+    let results = report["runs"][0]["results"]
+        .as_array()
+        .expect("sarif results");
+    assert!(!results.is_empty(), "audit should still report findings");
 }
 
 #[test]
@@ -825,7 +864,7 @@ fn ci_init_github_dry_run_prints_workflow() {
     );
     assert!(stdout.contains("sha256sum -c"), "{stdout}");
     assert!(
-        stdout.contains("shk scan . --json --fail-on high"),
+        stdout.contains("shk scan --json --fail-on high -- ."),
         "{stdout}"
     );
 }
@@ -848,7 +887,7 @@ fn ci_init_github_writes_workflow_and_refuses_overwrite() {
 
     let workflow_path = tmp.path().join(".github/workflows/shk.yml");
     let workflow = std::fs::read_to_string(&workflow_path).expect("workflow");
-    assert!(workflow.contains("shk scan . --json --fail-on high"));
+    assert!(workflow.contains("shk scan --json --fail-on high -- ."));
     assert!(workflow.contains("permissions:\n  contents: read"));
     assert!(workflow.contains("cancel-in-progress: true"));
 
@@ -997,7 +1036,7 @@ fn ci_init_github_warns_when_audit_combined_with_fail_on() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stdout.contains("shk scan . --json --audit"), "{stdout}");
+    assert!(stdout.contains("shk scan --json --audit -- ."), "{stdout}");
     assert!(!stdout.contains("--fail-on"), "{stdout}");
     assert!(
         stderr.contains("--fail-on is ignored when --mode audit"),
