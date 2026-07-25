@@ -22,10 +22,15 @@ jobs:
           cache: false
 
       - name: install actionlint
-        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+        env:
+          GOBIN: ${{ runner.temp }}/actionlint-bin
+        run: |
+          mkdir -p "$GOBIN"
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          echo "$GOBIN" >> "$GITHUB_PATH"
 
       - name: lint workflows
-        run: "$(go env GOPATH)/bin/actionlint"
+        run: actionlint
 
       - name: smoke local composite action
         uses: ./
