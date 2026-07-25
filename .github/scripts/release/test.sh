@@ -67,6 +67,12 @@ if resolve_tag vbad >/dev/null 2>&1; then
 fi
 echo "ok: invalid tag rejected"
 
+if resolve_tag v1 >/dev/null 2>&1; then
+  echo "FAIL: moving action tag should not resolve as a release" >&2
+  exit 1
+fi
+echo "ok: moving action tag rejected by release resolver"
+
 RELEASE_COMPONENT=cli RELEASE_VERSION="$current_version" \
   ./.github/scripts/release/verify-versions.sh
 

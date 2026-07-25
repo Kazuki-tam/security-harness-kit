@@ -96,6 +96,7 @@ shk scan ./src
 shk scan . --json
 shk scan . --json --with-value-hash
 shk scan . --sarif
+shk scan . --sarif --audit
 shk scan . --verbose
 shk scan . --fail-on medium
 shk scan . --include-binary
@@ -116,6 +117,7 @@ Options:
 | `PATH` | Path to scan. Defaults to `.`. |
 | `--json` | Print a JSON report. |
 | `--sarif` | Print SARIF 2.1.0 for GitHub code scanning and compatible tools. Cannot be combined with `--json`. |
+| `--audit` | Report findings but always exit `0` for findings. Runtime and configuration errors still fail. In hook mode, also append metadata-only audit entries. |
 | `--with-value-hash` | Include deterministic value hashes in JSON/SARIF output. Use only when reports are handled as sensitive artifacts. |
 | `--verbose` | Include informational skip findings in human-readable output. |
 | `--fail-on <severity>` | Override the configured failure threshold. Valid values: `info`, `low`, `medium`, `high`, `critical`. |
@@ -151,7 +153,7 @@ Exit codes:
 
 | Code | Meaning |
 |------|---------|
-| `0` | No findings at or above the active threshold, or command completed successfully. |
+| `0` | No findings at or above the active threshold, audit mode reported findings, or command completed successfully. |
 | `1` | Scan findings met or exceeded the active threshold. |
 | `2` | Blocking AI pre-hook triggered, or a Git-specific scan mode was run outside a Git repository. |
 
@@ -626,6 +628,7 @@ shk ci init github
 shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
+shk ci init github --upload-sarif
 shk ci init github --shk-version v0.3.3
 shk ci init github --output .github/workflows/security.yml --force
 ```
@@ -639,11 +642,12 @@ Options:
 | `--path <path>` | Path passed to `shk scan`. Defaults to `.`. |
 | `--repo <owner/name>` | GitHub repository hosting `shk` releases. Defaults to `Kazuki-tam/security-harness-kit`. |
 | `--shk-version <version>` | Release version to install. Defaults to the generating `shk` release (`v` + crate version). Also accepts `latest` or a SemVer-ish tag such as `v0.3.0`. |
+| `--upload-sarif` | Emit SARIF, upload it with `github/codeql-action/upload-sarif@v4`, and add `security-events: write` plus `actions: read` permissions. The scan exit code is applied after upload. |
 | `--output <path>` | Workflow destination path. Defaults to `.github/workflows/shk.yml`. |
 | `--dry-run` | Print the workflow YAML to stdout without writing it. |
 | `--force` | Overwrite an existing workflow file. |
 
-Generated workflows include `permissions: contents: read` and a `concurrency` block with `cancel-in-progress: true` so reruns on the same ref supersede in-flight jobs. The CLI rejects unsafe values for `--repo` and `--shk-version` to keep the generated release download commands well-formed.
+Generated workflows include `permissions: contents: read` and a `concurrency` block with `cancel-in-progress: true` so reruns on the same ref supersede in-flight jobs. With `--upload-sarif`, the generated workflow also grants `security-events: write` and `actions: read`; private repositories require GitHub Code Security. The CLI rejects unsafe values for `--repo` and `--shk-version` to keep the generated release download commands well-formed.
 
 See [GitHub Actions integration](ci.md) for a full guide covering the generated YAML, blocking vs audit rollout, pinning a release, and PR Required Check setup.
 

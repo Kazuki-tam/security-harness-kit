@@ -40,11 +40,15 @@ const BARE_VERSION_FILES: &[&str] = &[
 
 // Files where the v-prefixed version string (e.g. "v0.3.7") appears.
 const V_VERSION_FILES: &[&str] = &[
+    "action.yml",
     "README.md",
     "docs/installation.md",
     "docs/ci.md",
     "crates/shk-cli/src/skills/shk.md",
     ".claude/skills/shk/SKILL.md",
+    ".agents/skills/shk/SKILL.md",
+    ".github/skills/shk/SKILL.md",
+    ".windsurf/skills/shk/SKILL.md",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -182,15 +186,37 @@ fn bump_version(new_version: &str) -> Result<()> {
 
     println!("bumping {old_version} -> {new_version}");
 
+    let total = replace_version_references(
+        &root,
+        &old_version,
+        new_version,
+        BARE_VERSION_FILES,
+        V_VERSION_FILES,
+    )?;
+
+    println!(
+        "done - {total} replacement(s) across {} file(s)",
+        BARE_VERSION_FILES.len() + V_VERSION_FILES.len()
+    );
+    Ok(())
+}
+
+fn replace_version_references(
+    root: &Path,
+    old_version: &str,
+    new_version: &str,
+    bare_version_files: &[&str],
+    v_version_files: &[&str],
+) -> Result<usize> {
     let mut total = 0usize;
-    for file in BARE_VERSION_FILES {
-        let n = replace_in_file(&root.join(file), &old_version, new_version)?;
+    for file in bare_version_files {
+        let n = replace_in_file(&root.join(file), old_version, new_version)?;
         if n > 0 {
             println!("  {file} ({n})");
         }
         total += n;
     }
-    for file in V_VERSION_FILES {
+    for file in v_version_files {
         let n = replace_in_file(
             &root.join(file),
             &format!("v{old_version}"),
@@ -201,12 +227,7 @@ fn bump_version(new_version: &str) -> Result<()> {
         }
         total += n;
     }
-
-    println!(
-        "done - {total} replacement(s) across {} file(s)",
-        BARE_VERSION_FILES.len() + V_VERSION_FILES.len()
-    );
-    Ok(())
+    Ok(total)
 }
 
 fn read_workspace_version(root: &Path) -> Result<String> {
@@ -639,6 +660,47 @@ fn rust_str(value: &str) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn version_bump_updates_composite_action_binary_pin() {
+        let root = tempdir().expect("temp dir");
+        fs::write(root.path().join("action.yml"), "default: v0.5.5\n")
+            .expect("write action fixture");
+
+        for file in BARE_VERSION_FILES {
+            let path = root.path().join(file);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create bare-version fixture directory");
+            }
+            fs::write(path, "version = \"0.5.5\"\n").expect("write bare-version fixture");
+        }
+        for file in V_VERSION_FILES
+            .iter()
+            .copied()
+            .filter(|file| *file != "action.yml")
+        {
+            let path = root.path().join(file);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create v-version fixture directory");
+            }
+            fs::write(path, "shk-version v0.5.5\n").expect("write v-version fixture");
+        }
+
+        let replacements = replace_version_references(
+            root.path(),
+            "0.5.5",
+            "0.5.6",
+            BARE_VERSION_FILES,
+            V_VERSION_FILES,
+        )
+        .expect("replace fixture versions");
+
+        assert!(replacements >= BARE_VERSION_FILES.len() + V_VERSION_FILES.len());
+        assert_eq!(
+            fs::read_to_string(root.path().join("action.yml")).expect("read action fixture"),
+            "default: v0.5.6\n"
+        );
+    }
 
     #[test]
     fn parse_bump_version_args_accepts_single_version() {

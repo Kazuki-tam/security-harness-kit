@@ -1,0 +1,166 @@
+name: Security Harness Kit
+description: Scan a checked-out repository on Linux or macOS, with optional SARIF upload.
+author: Kazuki Tam
+
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  path:
+    description: Repository-relative path passed to `shk scan`.
+    required: false
+    default: .
+  fail-on:
+    description: Minimum severity that fails blocking mode.
+    required: false
+    default: high
+  mode:
+    description: Scan mode (`blocking` or `audit`).
+    required: false
+    default: blocking
+  upload-sarif:
+    description: Upload results to GitHub code scanning (`true` or `false`).
+    required: false
+    default: "true"
+  category:
+    description: Code scanning category used to distinguish this analysis.
+    required: false
+    default: shk
+  shk-version:
+    description: shk release tag to install, or `latest`.
+    required: false
+    default: v0.5.6
+
+outputs:
+  sarif-file:
+    description: Absolute path to the generated SARIF report.
+    value: ${{ steps.scan.outputs.sarif-file }}
+  exit-code:
+    description: Effective scan exit code after applying the selected mode.
+    value: ${{ steps.scan.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate inputs
+      shell: bash
+      env:
+        SHK_FAIL_ON: ${{ inputs.fail-on }}
+        SHK_MODE: ${{ inputs.mode }}
+        SHK_UPLOAD_SARIF: ${{ inputs.upload-sarif }}
+        SHK_VERSION: ${{ inputs.shk-version }}
+      run: |
+        set -euo pipefail
+        case "$SHK_FAIL_ON" in
+          info|low|medium|high|critical) ;;
+          *) echo "invalid fail-on: $SHK_FAIL_ON" >&2; exit 2 ;;
+        esac
+        case "$SHK_MODE" in
+          blocking|audit) ;;
+          *) echo "invalid mode: $SHK_MODE" >&2; exit 2 ;;
+        esac
+        case "$SHK_UPLOAD_SARIF" in
+          true|false) ;;
+          *) echo "invalid upload-sarif: $SHK_UPLOAD_SARIF" >&2; exit 2 ;;
+        esac
+        if [[ "$SHK_VERSION" != "latest" && ! "$SHK_VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+          echo "invalid shk-version: $SHK_VERSION" >&2
+          exit 2
+        fi
+
+    - name: Install shk
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        SHK_REPOSITORY: ${{ github.action_repository || github.repository }}
+        SHK_VERSION: ${{ inputs.shk-version }}
+      run: |
+        set -euo pipefail
+        case "$(uname -s)-$(uname -m)" in
+          Linux-x86_64) TARGET=x86_64-unknown-linux-gnu ;;
+          Linux-aarch64|Linux-arm64) TARGET=aarch64-unknown-linux-gnu ;;
+          Darwin-x86_64) TARGET=x86_64-apple-darwin ;;
+          Darwin-arm64) TARGET=aarch64-apple-darwin ;;
+          *) echo "unsupported runner: $(uname -s)-$(uname -m)" >&2; exit 2 ;;
+        esac
+
+        DOWNLOAD_DIR="$(mktemp -d "$RUNNER_TEMP/shk-download.XXXXXX")"
+        INSTALL_DIR="$(mktemp -d "$RUNNER_TEMP/shk-bin.XXXXXX")"
+        ASSET="shk-cli-${TARGET}.tar.xz"
+
+        if [ "$SHK_VERSION" = "latest" ]; then
+          gh release download -R "$SHK_REPOSITORY" \
+            -p "$ASSET" -p "${ASSET}.sha256" --dir "$DOWNLOAD_DIR"
+        else
+          RELEASE_TAG="$SHK_VERSION"
+          if [[ "$RELEASE_TAG" != v* ]]; then
+            RELEASE_TAG="v${RELEASE_TAG}"
+          fi
+          gh release download "$RELEASE_TAG" -R "$SHK_REPOSITORY" \
+            -p "$ASSET" -p "${ASSET}.sha256" --dir "$DOWNLOAD_DIR"
+        fi
+
+        if command -v sha256sum >/dev/null 2>&1; then
+          (cd "$DOWNLOAD_DIR" && sha256sum -c "${ASSET}.sha256")
+        else
+          (cd "$DOWNLOAD_DIR" && shasum -a 256 -c "${ASSET}.sha256")
+        fi
+        gh attestation verify "$DOWNLOAD_DIR/$ASSET" -R "$SHK_REPOSITORY"
+
+        tar -xJf "$DOWNLOAD_DIR/$ASSET" -C "$DOWNLOAD_DIR"
+        install -m 755 "$DOWNLOAD_DIR/shk-cli-${TARGET}/shk" "$INSTALL_DIR/shk"
+        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+
+    - name: Run shk
+      id: scan
+      shell: bash
+      env:
+        SHK_FAIL_ON: ${{ inputs.fail-on }}
+        SHK_MODE: ${{ inputs.mode }}
+        SHK_PATH: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        SARIF_DIR="$(mktemp -d "$RUNNER_TEMP/shk-results.XXXXXX")"
+        SARIF_FILE="$SARIF_DIR/shk-results.sarif"
+
+        SCAN_ARGS=(scan --sarif)
+        if [ "$SHK_MODE" = "audit" ]; then
+          SCAN_ARGS+=(--audit)
+        else
+          SCAN_ARGS+=(--fail-on "$SHK_FAIL_ON")
+        fi
+        SCAN_ARGS+=(-- "$SHK_PATH")
+
+        set +e
+        shk "${SCAN_ARGS[@]}" > "$SARIF_FILE"
+        SHK_EXIT_CODE=$?
+        set -e
+
+        echo "sarif-file=$SARIF_FILE" >> "$GITHUB_OUTPUT"
+        echo "exit-code=$SHK_EXIT_CODE" >> "$GITHUB_OUTPUT"
+        if [ "$SHK_EXIT_CODE" -le 1 ] && [ -s "$SARIF_FILE" ]; then
+          echo "report-ready=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "report-ready=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Upload SARIF
+      if: ${{ inputs.upload-sarif == 'true' && steps.scan.outputs.report-ready == 'true' }}
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: ${{ steps.scan.outputs.sarif-file }}
+        category: ${{ inputs.category }}
+
+    - name: Apply scan result
+      if: ${{ always() && steps.scan.outputs.exit-code != '' }}
+      shell: bash
+      env:
+        SHK_EXIT_CODE: ${{ steps.scan.outputs.exit-code }}
+      run: |
+        set -euo pipefail
+        if [[ ! "$SHK_EXIT_CODE" =~ ^[0-9]+$ ]]; then
+          echo "shk scan did not produce an exit code" >&2
+          exit 2
+        fi
+        exit "$SHK_EXIT_CODE"

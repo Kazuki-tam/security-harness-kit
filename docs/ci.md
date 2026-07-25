@@ -2,6 +2,17 @@
 
 `shk ci init github` generates a ready-to-commit GitHub Actions workflow that installs a **pinned** `shk` release (checksum + GitHub attestation verified) and scans your repository on every pull request and push to `main`. It is intended as a sane default that you can adopt without authoring YAML by hand, and that you can re-generate later when defaults improve.
 
+Use `--upload-sarif` to publish findings to GitHub code scanning. This adds Security-tab
+alerts and annotations for findings on changed pull-request lines:
+
+```bash
+shk ci init github --upload-sarif
+```
+
+The generated workflow captures the scan exit code, uploads a valid report even when findings
+produce exit `1`, and only then applies the original exit code. Runtime/configuration failures
+still fail the job.
+
 ## Quick Start
 
 ```bash
@@ -15,7 +26,47 @@ This writes `.github/workflows/shk.yml`. The workflow:
 
 - Triggers on every `pull_request` and on `push` to `main`.
 - Installs a pinned `shk` release archive with SHA256 verification and `gh attestation verify`.
-- Runs `shk scan . --json --fail-on high` and fails the job (and the PR check) when findings reach the threshold.
+- Runs `shk scan --json --fail-on high -- .` and fails the job (and the PR check) when findings reach the threshold.
+
+With `--upload-sarif`, it instead runs `shk scan --sarif --fail-on high -- .`, grants
+`security-events: write` and `actions: read`, uploads with
+`github/codeql-action/upload-sarif@v4`, and then restores the scan result.
+
+## Composite Action
+
+This repository also provides a composite action for adding `shk` to an existing workflow.
+The caller must check out the repository and grant the token permission to upload code-scanning
+results. The action supports Linux and macOS runners:
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+
+steps:
+  - uses: actions/checkout@v6
+    with:
+      persist-credentials: false
+
+  - uses: Kazuki-tam/security-harness-kit@v1
+    with:
+      path: .
+      fail-on: high
+      mode: blocking
+      upload-sarif: true
+```
+
+Supported inputs are `path`, `fail-on`, `mode` (`blocking` or `audit`), `upload-sarif`,
+`category`, and `shk-version`. The action exposes `sarif-file` and `exit-code` outputs.
+Set `upload-sarif: false` to generate SARIF and expose its runner-local path without calling
+GitHub code scanning.
+
+Public repositories can use code scanning without a paid license. Private and internal
+repositories require GitHub Code Security to be enabled. The composite action cannot grant
+permissions to its caller, so `security-events: write` must remain in the workflow when upload
+is enabled. Pull requests from forks normally receive a read-only token. If SARIF upload is not
+available for fork-triggered runs, set `upload-sarif: false` for those runs; do not switch to
+`pull_request_target` merely to obtain a write token while scanning untrusted pull-request code.
 
 Preview without writing the file:
 
@@ -55,7 +106,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          SHK_VERSION=v0.5.5
+          SHK_VERSION=v0.5.6
           REPO=Kazuki-tam/security-harness-kit
           mkdir -p "$HOME/.cargo/bin"
           case "$(uname -s)-$(uname -m)" in
@@ -64,7 +115,7 @@ jobs:
             *) echo "unsupported runner" >&2; exit 1 ;;
           esac
           ASSET="shk-cli-${TARGET}.tar.xz"
-          gh release download v0.5.5 -R "$REPO" -p "$ASSET" -p "${ASSET}.sha256"
+          gh release download v0.5.6 -R "$REPO" -p "$ASSET" -p "${ASSET}.sha256"
           sha256sum -c "${ASSET}.sha256"
           gh attestation verify "$ASSET" -R "$REPO"
           TMP="$(mktemp -d)"
@@ -75,7 +126,7 @@ jobs:
       - name: Run shk
         shell: bash
         run: |
-          shk scan . --json --fail-on high
+          shk scan --json --fail-on high -- .
 ```
 
 ### Why these defaults
@@ -88,6 +139,9 @@ jobs:
 | `persist-credentials: false` | Stops `actions/checkout` from leaving the GitHub token in a Git credential file that later steps could read. `shk doctor workflows` flags this for any checkout step. |
 | Pinned release + checksum + attestation | Avoids `curl \| sh` and `latest`. Downloads the release archive, verifies SHA256, and checks GitHub artifact attestation before install. |
 | `--json --fail-on high` | JSON output is greppable / archivable from the run log. `high` matches the default `[thresholds].scan_fail_on` shipped by `shk init`. |
+
+When `--upload-sarif` is enabled, the JSON command is replaced with `--sarif`, and the workflow
+uploads the report before it applies the scanner's exit code.
 
 ## Choose A Mode
 
@@ -109,7 +163,7 @@ shk ci init github --fail-on critical
 
 ### `--mode audit`
 
-The workflow runs `shk scan . --json --audit` and always exits `0`. Findings appear in the run log so reviewers can see them, but the PR check stays green. Use this for a soak period before flipping to blocking.
+The workflow runs `shk scan --json --audit -- .` and always exits `0`. Findings appear in the run log so reviewers can see them, but the PR check stays green. Use this for a soak period before flipping to blocking.
 
 ```bash
 shk ci init github --mode audit

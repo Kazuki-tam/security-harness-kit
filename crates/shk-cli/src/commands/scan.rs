@@ -164,6 +164,7 @@ fn sarif_report(res: &ScanResult, include_value_hash: bool) -> serde_json::Value
                 "tool": {
                     "driver": {
                         "name": "shk",
+                        "semanticVersion": env!("CARGO_PKG_VERSION"),
                         "informationUri": "https://github.com/Kazuki-tam/security-harness-kit",
                         "rules": rules
                     }
@@ -235,9 +236,6 @@ fn sarif_result(
                 }
             }
         ],
-        "partialFingerprints": {
-            "primaryLocationLineHash": format!("{}:{}:{}", finding.rule_id, finding.file, finding.line)
-        },
         "properties": properties
     })
 }
