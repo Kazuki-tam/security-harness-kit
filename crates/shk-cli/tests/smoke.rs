@@ -5516,6 +5516,34 @@ fn skills_install_all_writes_project_skill_files() {
 }
 
 #[test]
+fn repo_skill_copies_match_embedded_source() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest.join("../..");
+    // The committed copies only exist in a development checkout of the workspace.
+    if !root.join("xtask/Cargo.toml").exists() {
+        return;
+    }
+
+    let embedded = std::fs::read_to_string(manifest.join("src/skills/shk.md"))
+        .expect("read embedded skill source");
+
+    for rel in [
+        ".claude/skills/shk/SKILL.md",
+        ".agents/skills/shk/SKILL.md",
+        ".github/skills/shk/SKILL.md",
+        ".windsurf/skills/shk/SKILL.md",
+    ] {
+        let copy = std::fs::read_to_string(root.join(rel))
+            .unwrap_or_else(|err| panic!("read {rel}: {err}"));
+        assert_eq!(
+            copy, embedded,
+            "{rel} is out of sync with crates/shk-cli/src/skills/shk.md; \
+             run `shk skills install --force` to redeploy"
+        );
+    }
+}
+
+#[test]
 fn skills_install_all_preflights_existing_destinations() {
     let dir = tempfile::tempdir().unwrap();
     let agents_skill = dir.path().join(".agents/skills/shk/SKILL.md");

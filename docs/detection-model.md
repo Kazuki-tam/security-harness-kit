@@ -41,6 +41,7 @@ The rule engine supports these kinds:
 | `ai-context` | AI-context-oriented rules. |
 | `ignore` | Scanner skip notices and policy warnings. |
 | `git` | Git-related findings. |
+| `mcp` | MCP server configuration findings produced by `shk mcp audit`. |
 
 Not every kind is used by every command or built-in rule set.
 
@@ -89,6 +90,42 @@ These are pattern-based detections. Review findings before treating them as conf
 In pre-hook mode, `shk scan --hook-mode <tool>` checks the AI tool payload for dangerous actions before scanning text content. This guard is separate from secret and PII detection: it looks at operation intent such as file paths and shell commands.
 
 The initial guard blocks sensitive file reads/writes, `.env` dump commands, environment dump commands such as `printenv`, `env`, `export -p`, `set | ...`, shell `-c` environment dumps, and common interpreter environment reads such as Python `os.environ`, Node `process.env`, Ruby `ENV`, and Perl `%ENV`, destructive recursive removal, direct database mutation commands, privilege or system changes, external transfer commands, and package manager operations. Projects can tune it with `[action_guard]` in `shk.toml`, including `profile`, `allow`, and `deny` patterns. In `strict` profile, opaque execution such as `bash -c`, `python -c`, and `node -e` is blocked rather than deeply interpreted. Audit mode still records findings without blocking.
+
+## MCP Configuration Audit
+
+`shk mcp audit` uses a separate detection model from content scanning. Instead of matching text in
+project files, it parses MCP client configuration files and evaluates how each server entry is
+declared. The audit is static: it never starts a server, resolves a command, expands a variable,
+or makes a network request.
+
+Findings use kind `mcp` and are reported at line 1, column 1 of the configuration file, because the
+subject of the finding is the server entry rather than a text position.
+
+| Rule | Severity | Detects |
+|------|----------|---------|
+| `mcp.npx_auto_install` | `medium` | Automatic package installation through `npx -y` or `npx --yes`. |
+| `mcp.unpinned_package` | `medium` | `npx`, `uvx`, or `pipx run` packages without an exact version. |
+| `mcp.shell_wrapper` | `medium` | Shell wrappers using `-c` or `/c`, which hide the effective command. |
+| `mcp.local_unpinned_executable` | `low` | Relative or non-system executable paths with no integrity verification. |
+| `mcp.broad_filesystem_scope` | `high` / `medium` | Filesystem servers exposing `/` or the user's home directory. |
+| `mcp.http_no_tls` | `high` | Non-loopback remote endpoints using `http://`. |
+| `mcp.secret_in_url` | `high` | Sensitive query parameter names in a server URL. |
+| `mcp.unknown_transport` | `info` | Entries declaring neither a command nor a URL. |
+| `mcp.config_unreadable` | `low` | Files that cannot be read or parsed, including entries rejected by the read limits below. |
+
+Configured argument, process-variable, header, and URL values additionally pass through the
+built-in secret rules, so a plaintext credential in a server definition is reported with its normal
+`secret.*` rule id and kind `secret`, with the message rewritten to name the server, client, and
+field. References such as `${VAR}`, `$VAR`, and `${input:token}` are recognised as indirection and
+are not treated as plaintext values. Existing `[[allowlist]]` entries apply.
+
+Reads are bounded before parsing: 1 MiB per file, 1,000 server entries per file, and resolved paths
+must stay inside the selected project or home scope. Escaping symbolic links, oversized files,
+excessive server maps, non-regular files, and (on Unix) hard-linked configuration files are reported
+as `mcp.config_unreadable` instead of being read. A single unreadable file does not abort the audit.
+
+Reports contain no process-variable values, header values, or raw matches. See
+[`shk mcp audit`](commands.md#shk-mcp-audit) for the audited file locations and exit codes.
 
 ## PII Coverage
 
