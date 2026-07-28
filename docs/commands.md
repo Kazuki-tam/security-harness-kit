@@ -74,6 +74,67 @@ Options:
 
 `shk audit` is read-only. If the log is missing, it exits successfully and prints setup guidance. Invalid JSON lines are skipped and counted as parse warnings.
 
+## `shk mcp audit`
+
+Statically inspect MCP server configuration files without starting servers, resolving commands, expanding variables, or making network requests.
+
+```bash
+shk mcp audit
+shk mcp audit path/to/project
+shk mcp audit --json
+shk mcp audit --sarif
+shk mcp audit --global
+shk mcp audit --fail-on medium
+```
+
+The default scan is limited to project-local files. `--global` additionally reads user-level files under the current user's home directory. Missing files are silently skipped.
+Configuration reads are capped at 1 MiB and 1,000 server entries per file, and must remain inside the selected project or home scope after path resolution. Escaping symbolic links, oversized files, excessive server maps, and non-regular files produce `mcp.config_unreadable` instead of being read. On Unix, hard-linked configuration files are also rejected.
+
+Project configuration locations:
+
+| Client | File | Server map |
+|--------|------|------------|
+| Claude Code | `.mcp.json` | `mcpServers` |
+| Cursor | `.cursor/mcp.json` | `mcpServers` |
+| VS Code / Copilot | `.vscode/mcp.json` | `servers` |
+| Codex | `.codex/config.toml` | `mcp_servers` |
+
+Additional locations with `--global`:
+
+| Client | File |
+|--------|------|
+| Claude Code | `~/.claude.json` |
+| Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Cursor | `~/.cursor/mcp.json` |
+| Codex | `~/.codex/config.toml` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` |
+
+Rules:
+
+| Rule | Severity | Detects |
+|------|----------|---------|
+| `mcp.npx_auto_install` | medium | Automatic package installation with `npx -y` or `npx --yes` |
+| `mcp.unpinned_package` | medium | `npx`, `uvx`, or `pipx run` packages without an exact version |
+| `mcp.shell_wrapper` | medium | Shell wrappers using `-c` or `/c` |
+| `mcp.local_unpinned_executable` | low | Relative or non-system executable paths without integrity verification |
+| `mcp.broad_filesystem_scope` | high / medium | Filesystem servers exposing `/` or the user's home directory |
+| `mcp.http_no_tls` | high | Non-loopback remote endpoints using `http://` |
+| `mcp.secret_in_url` | high | Sensitive query parameter names in a URL |
+| `mcp.unknown_transport` | info | Entries with neither a command nor a URL |
+| `mcp.config_unreadable` | low | Files that cannot be read or parsed |
+
+Configured argument, process-variable, header, and URL values also pass through the existing secret rule engine. References such as `${VAR}`, `$VAR`, and `${input:token}` are not treated as plaintext values. Existing `[[allowlist]]` entries apply. Reports contain no process-variable values, header values, or raw matches.
+
+`--json` returns `findings`, `summary.by_severity`, and a redacted `servers` inventory. `--sarif` emits SARIF 2.1.0 using the same rule metadata shape as `shk scan --sarif`. The two output flags are mutually exclusive. Human output hides informational findings unless `--verbose` is passed.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| `0` | No finding meets the active threshold (default `high`). Parse failures below the threshold remain findings and do not abort the audit. |
+| `1` | At least one finding meets the active threshold. |
+| `2` | Runtime or argument error, such as an invalid audit path. |
+
 ## `shk completions`
 
 Generate shell completion scripts.
@@ -154,8 +215,8 @@ Exit codes:
 | Code | Meaning |
 |------|---------|
 | `0` | No findings at or above the active threshold, audit mode reported findings, or command completed successfully. |
-| `1` | Scan findings met or exceeded the active threshold. |
-| `2` | Blocking AI pre-hook triggered, or a Git-specific scan mode was run outside a Git repository. |
+| `1` | Scan or MCP audit findings met or exceeded the active threshold. |
+| `2` | Blocking AI pre-hook triggered, or a scan/MCP audit runtime or configuration error occurred. |
 
 ## `shk allowlist suggest`
 

@@ -21,6 +21,8 @@ shk scan . --json                    # JSON report
 shk scan --staged                    # scan git-staged files (pre-commit)
 shk scan --git-history --preview     # inspect history scan scope
 shk scan --git-history --ref HEAD~50..HEAD
+shk mcp audit                         # statically audit project MCP configs
+shk mcp audit --global                # also include user-level MCP configs
 shk allowlist suggest --from report.json # generate safe [[allowlist]] TOML snippets
 shk mask < file.txt                  # mask PII/secrets from stdin
 shk mask file.txt --json             # JSON output with findings + masked content

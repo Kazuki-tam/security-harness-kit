@@ -41,9 +41,9 @@ cargo build --release
 
 | Code | Meaning | Commands |
 |------|---------|----------|
-| `0` | No findings above threshold / success | `shk scan`, `shk scan --staged`, `shk mask`, `shk clipboard scan`, `shk clipboard mask`, `shk doctor`, `shk audit`, `shk scan --audit` |
-| `1` | Findings at or above the fail threshold | `shk scan`, `shk scan --staged`, `shk clipboard scan` |
-| `2` | Blocking AI pre-hook triggered / runtime or config error | `shk scan --hook-mode <tool>` (block), `shk scan --staged` outside a Git repo, `shk clipboard …` when the OS clipboard is unavailable |
+| `0` | No findings above threshold / success | `shk scan`, `shk scan --staged`, `shk mcp audit`, `shk mask`, `shk clipboard scan`, `shk clipboard mask`, `shk doctor`, `shk audit`, `shk scan --audit` |
+| `1` | Findings at or above the fail threshold | `shk scan`, `shk scan --staged`, `shk mcp audit`, `shk clipboard scan` |
+| `2` | Blocking AI pre-hook triggered / runtime or config error | `shk scan --hook-mode <tool>` (block), `shk scan --staged` outside a Git repo, invalid `shk mcp audit` arguments/path, `shk clipboard …` when the OS clipboard is unavailable |
 
 - `--audit` mode **always exits 0** (log-only; never blocks).
 - `--log-blocked` keeps pre-hook blocking behavior, writes metadata-only blocked-event entries to `.shk/audit.log`, and lets post hooks write non-blocking audit entries.
@@ -81,6 +81,10 @@ cargo run -p shk-cli --bin shk -- scan .
 
 # JSON only, relax threshold (similar to CI smoke)
 cargo run -p shk-cli --bin shk -- scan fixtures/basic --json --fail-on critical
+
+# Statically audit MCP client configurations without starting servers or using the network
+cargo run -p shk-cli --bin shk -- mcp audit
+cargo run -p shk-cli --bin shk -- mcp audit --global --json
 
 # Mask (stdin)
 cargo run -p shk-cli --bin shk -- mask --json < fixtures/pii.txt

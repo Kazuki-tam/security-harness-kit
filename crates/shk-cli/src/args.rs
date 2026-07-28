@@ -173,6 +173,11 @@ pub enum Commands {
         #[arg(long)]
         no_paths: bool,
     },
+    /// Audit MCP server configurations without starting any servers
+    Mcp {
+        #[command(subcommand)]
+        cmd: McpCmd,
+    },
     /// Project diagnostics
     Doctor {
         #[command(subcommand)]
@@ -214,6 +219,30 @@ pub enum Commands {
     Secrets {
         #[command(subcommand)]
         cmd: SecretsCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum McpCmd {
+    /// Statically audit MCP server configurations (no server execution)
+    Audit {
+        /// Project root to scan for client configs
+        #[arg(value_name = "PATH", default_value = ".")]
+        path: PathBuf,
+        /// Also scan user-level (home directory) client configs
+        #[arg(long)]
+        global: bool,
+        #[arg(long, conflicts_with = "sarif")]
+        json: bool,
+        /// Emit SARIF 2.1.0 for GitHub code scanning and compatible tools.
+        #[arg(long, conflicts_with = "json")]
+        sarif: bool,
+        /// Minimum severity that causes exit code 1 (default: high)
+        #[arg(long, value_enum, value_name = "SEVERITY")]
+        fail_on: Option<SeverityArg>,
+        /// Show informational findings in human output
+        #[arg(long)]
+        verbose: bool,
     },
 }
 
@@ -934,6 +963,41 @@ mod tests {
         };
 
         assert_eq!(fail_on, Some(SeverityArg::Critical));
+    }
+
+    #[test]
+    fn mcp_audit_parses_flags_and_rejects_conflicting_output() {
+        let cli = Cli::try_parse_from([
+            "shk",
+            "mcp",
+            "audit",
+            "project",
+            "--global",
+            "--fail-on",
+            "medium",
+        ])
+        .expect("MCP audit flags should parse");
+        let Commands::Mcp {
+            cmd:
+                McpCmd::Audit {
+                    path,
+                    global,
+                    fail_on,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected MCP audit command");
+        };
+        assert_eq!(path, PathBuf::from("project"));
+        assert!(global);
+        assert_eq!(fail_on, Some(SeverityArg::Medium));
+
+        let err = match Cli::try_parse_from(["shk", "mcp", "audit", "--json", "--sarif"]) {
+            Ok(_) => panic!("machine output flags should conflict"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     }
 
     #[test]
