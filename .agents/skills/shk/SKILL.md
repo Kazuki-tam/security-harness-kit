@@ -5,6 +5,7 @@ description: >
   Use when the user asks to: scan for secrets/credentials/sensitive data, detect or mask PII,
   set up security hooks for Claude Code/Cursor/Codex/Copilot/Antigravity/Windsurf, run security diagnostics (shk doctor),
   manage dotenvx private keys, push dotenv payloads to AWS/GCP secret managers,
+  audit MCP server configuration files (shk mcp audit),
   or guard content flowing through MCP tools or external data connections.
 ---
 
@@ -21,6 +22,8 @@ shk scan . --json                    # JSON report
 shk scan --staged                    # scan git-staged files (pre-commit)
 shk scan --git-history --preview     # inspect history scan scope
 shk scan --git-history --ref HEAD~50..HEAD
+shk mcp audit                         # statically audit project MCP configs
+shk mcp audit --global                # also include user-level MCP configs
 shk allowlist suggest --from report.json # generate safe [[allowlist]] TOML snippets
 shk mask < file.txt                  # mask PII/secrets from stdin
 shk mask file.txt --json             # JSON output with findings + masked content
@@ -287,7 +290,7 @@ shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
 shk ci init github --upload-sarif
-shk ci init github --shk-version v0.5.6
+shk ci init github --shk-version v0.5.7
 shk ci init github --output .github/workflows/security.yml --force
 ```
 
@@ -295,6 +298,40 @@ The generated workflow runs `shk scan --json --fail-on high -- .` by default. Us
 `--upload-sarif` for Security-tab alerts and pull-request annotations; it uploads before
 restoring the scan exit code. This grants `security-events: write` and requires GitHub Code
 Security for private repositories. Use audit mode for a non-blocking rollout.
+
+## MCP configuration audit
+
+`shk mcp audit` statically inspects MCP client configuration files. It never starts a server,
+resolves a command, expands a variable, or makes a network request, so it is safe to run against
+an unfamiliar configuration.
+
+```bash
+shk mcp audit                        # project-local configs
+shk mcp audit path/to/project
+shk mcp audit --global               # also read user-level configs
+shk mcp audit --json
+shk mcp audit --sarif
+shk mcp audit --fail-on medium
+```
+
+Project files: `.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.codex/config.toml`.
+`--global` also reads `~/.claude.json`, `~/.cursor/mcp.json`, `~/.codex/config.toml`,
+`~/.codeium/windsurf/mcp_config.json`, and the macOS Claude Desktop config. Missing files are
+skipped silently.
+
+Rules: `mcp.npx_auto_install`, `mcp.unpinned_package`, `mcp.shell_wrapper`,
+`mcp.local_unpinned_executable`, `mcp.broad_filesystem_scope`, `mcp.http_no_tls`,
+`mcp.secret_in_url`, `mcp.unknown_transport`, `mcp.config_unreadable`. Argument, header, URL, and
+process-variable values also pass through the secret rules, while `${VAR}`, `$VAR`, and
+`${input:token}` references are not treated as plaintext. Reports never contain raw values.
+
+Exit codes:
+- 0: no finding at or above threshold (default `high`)
+- 1: findings at or above threshold
+- 2: runtime or argument error, such as an invalid audit path
+
+Run this when the user adds or changes an MCP server, onboards to an unfamiliar repository, or
+asks whether their MCP setup is safe.
 
 ## External data sources and MCP integration
 

@@ -42,6 +42,9 @@ The command updates all of the following files.
 - `docs/ci.md`
 - `crates/shk-cli/src/skills/shk.md`
 - `.claude/skills/shk/SKILL.md`
+- `.agents/skills/shk/SKILL.md`
+- `.github/skills/shk/SKILL.md`
+- `.windsurf/skills/shk/SKILL.md`
 
 ## Notes
 

@@ -191,6 +191,146 @@ fn scan_sarif_audit_without_hook_mode_never_blocks() {
 }
 
 #[test]
+fn mcp_audit_reports_exit_codes_and_machine_output() {
+    let safe = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        safe.path().join(".mcp.json"),
+        r#"{"mcpServers":{"safe":{"command":"npx","args":["@scope/pkg@1.2.3"]}}}"#,
+    )
+    .expect("write safe MCP config");
+    let safe_out = Command::new(shk_bin())
+        .args(["mcp", "audit", &safe.path().display().to_string()])
+        .output()
+        .expect("run safe MCP audit");
+    assert!(
+        safe_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&safe_out.stderr)
+    );
+
+    let risky = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        risky.path().join(".mcp.json"),
+        r#"{"mcpServers":{"filesystem":{"command":"npx","args":["@modelcontextprotocol/server-filesystem@1.2.3","/"]}}}"#,
+    )
+    .expect("write risky MCP config");
+    let json_out = Command::new(shk_bin())
+        .args([
+            "mcp",
+            "audit",
+            &risky.path().display().to_string(),
+            "--json",
+        ])
+        .output()
+        .expect("run MCP JSON audit");
+    assert_eq!(json_out.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&json_out.stdout).expect("MCP JSON");
+    assert_eq!(report["config_files"].as_array().unwrap().len(), 1);
+    assert_eq!(report["servers"].as_array().unwrap().len(), 1);
+    assert!(
+        report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["rule_id"] == "mcp.broad_filesystem_scope")
+    );
+    assert_eq!(report["summary"]["by_severity"]["high"], 1);
+
+    let sarif_out = Command::new(shk_bin())
+        .args([
+            "mcp",
+            "audit",
+            &risky.path().display().to_string(),
+            "--sarif",
+            "--fail-on",
+            "critical",
+        ])
+        .output()
+        .expect("run MCP SARIF audit");
+    assert!(sarif_out.status.success());
+    let sarif: serde_json::Value = serde_json::from_slice(&sarif_out.stdout).expect("MCP SARIF");
+    assert_eq!(sarif["version"], "2.1.0");
+    assert!(
+        sarif["runs"][0]["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|result| result["ruleId"] == "mcp.broad_filesystem_scope")
+    );
+}
+
+#[test]
+fn mcp_audit_never_prints_literal_secrets() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let synthetic = synthetic_openai_key('m');
+    let config = serde_json::json!({
+        "mcpServers": {
+            synthetic.clone(): {
+                "command": "node",
+                "env": { "TOKEN": synthetic.clone() }
+            }
+        }
+    });
+    std::fs::write(
+        dir.path().join(".mcp.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .expect("write MCP config");
+
+    for format in ["--json", "--sarif"] {
+        let out = Command::new(shk_bin())
+            .args(["mcp", "audit", &dir.path().display().to_string(), format])
+            .output()
+            .expect("run MCP audit");
+        assert_eq!(out.status.code(), Some(1));
+        assert!(!String::from_utf8_lossy(&out.stdout).contains(&synthetic));
+        assert!(!String::from_utf8_lossy(&out.stderr).contains(&synthetic));
+    }
+}
+
+#[test]
+fn mcp_audit_parse_failure_is_a_nonfatal_finding() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join(".mcp.json"), "{broken").expect("write broken config");
+    let out = Command::new(shk_bin())
+        .args(["mcp", "audit", &dir.path().display().to_string(), "--json"])
+        .output()
+        .expect("run MCP audit");
+    assert!(out.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).expect("MCP JSON");
+    assert_eq!(report["findings"][0]["rule_id"], "mcp.config_unreadable");
+}
+
+#[test]
+fn mcp_audit_runtime_errors_exit_two() {
+    let missing = tempfile::tempdir().expect("tempdir").path().join("missing");
+    let out = Command::new(shk_bin())
+        .args(["mcp", "audit", &missing.display().to_string()])
+        .output()
+        .expect("run MCP audit");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("MCP audit failed"));
+    assert!(stderr.contains("MCP audit path not found"));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join(".mcp.json"),
+        r#"{"mcpServers":{"demo":{"command":"node","args":["server.js"]}}}"#,
+    )
+    .expect("write MCP config");
+    std::fs::write(dir.path().join("shk.toml"), "[scan").expect("write invalid policy");
+    let out = Command::new(shk_bin())
+        .args(["mcp", "audit", &dir.path().display().to_string()])
+        .output()
+        .expect("run MCP audit");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("MCP audit failed"));
+    assert!(stderr.contains("parse shk.toml"));
+}
+
+#[test]
 fn scan_with_value_hash_requires_machine_output() {
     let out = Command::new(shk_bin())
         .args(["scan", ".", "--with-value-hash"])
@@ -5373,6 +5513,34 @@ fn skills_install_all_writes_project_skill_files() {
     let body = std::fs::read_to_string(agents_skill).unwrap();
     assert!(body.contains("name: shk"), "{body}");
     assert!(body.contains("shk scan"), "{body}");
+}
+
+#[test]
+fn repo_skill_copies_match_embedded_source() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest.join("../..");
+    // The committed copies only exist in a development checkout of the workspace.
+    if !root.join("xtask/Cargo.toml").exists() {
+        return;
+    }
+
+    let embedded = std::fs::read_to_string(manifest.join("src/skills/shk.md"))
+        .expect("read embedded skill source");
+
+    for rel in [
+        ".claude/skills/shk/SKILL.md",
+        ".agents/skills/shk/SKILL.md",
+        ".github/skills/shk/SKILL.md",
+        ".windsurf/skills/shk/SKILL.md",
+    ] {
+        let copy = std::fs::read_to_string(root.join(rel))
+            .unwrap_or_else(|err| panic!("read {rel}: {err}"));
+        assert_eq!(
+            copy, embedded,
+            "{rel} is out of sync with crates/shk-cli/src/skills/shk.md; \
+             run `shk skills install --force` to redeploy"
+        );
+    }
 }
 
 #[test]

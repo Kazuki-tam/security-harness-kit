@@ -30,6 +30,7 @@ With `shk`, you can:
 - Install Git pre-commit hooks.
 - Install managed hooks for Claude Code, Cursor, Codex, GitHub Copilot, Antigravity, and Windsurf.
 - Preview metadata-only audit logs to understand blocked hook activity without storing detected values.
+- Statically audit MCP client configurations for unsafe package, credential, HTTP, and filesystem settings.
 - Generate a GitHub Actions workflow that runs `shk scan` on every pull request.
 - Diagnose ignore file and `.env` safety coverage.
 - Deploy AI agent skills to Claude Code, Codex, Cursor, GitHub Copilot, Antigravity, and Windsurf project directories.
@@ -215,6 +216,11 @@ shk audit --reason action-guard
 shk audit --since 7d --tool cursor
 shk audit --json
 
+shk mcp audit
+shk mcp audit --json
+shk mcp audit --sarif
+shk mcp audit --global
+
 shk env dotenvx import-keys .env.keys
 shk env encrypt .env --in-place
 shk env run -- npm test
@@ -237,7 +243,7 @@ shk ci init github
 shk ci init github --upload-sarif
 shk ci init github --dry-run
 shk ci init github --mode audit
-shk ci init github --shk-version v0.5.6
+shk ci init github --shk-version v0.5.7
 
 shk skills install
 shk skills install --tool claude-code --global
@@ -303,8 +309,8 @@ shk env key migrate --to 1password
 | Code | Meaning |
 |------|---------|
 | `0` | No findings at or above the active threshold, or command completed successfully. |
-| `1` | Scan findings met or exceeded the active threshold. |
-| `2` | Blocking AI pre-hook triggered, or a Git-specific scan mode was run outside a Git repository. |
+| `1` | Scan or MCP audit findings met or exceeded the active threshold. |
+| `2` | Blocking AI pre-hook triggered, or a scan/MCP audit runtime or configuration error occurred. |
 
 ## Safety Notes
 

@@ -1,5 +1,5 @@
 name: Security Harness Kit
-description: Scan a checked-out repository on Linux or macOS, with optional SARIF upload.
+description: Scan a checked-out repository on Linux or macOS, with optional MCP configuration audit and SARIF upload.
 author: Kazuki Tam
 
 branding:
@@ -19,6 +19,10 @@ inputs:
     description: Scan mode (`blocking` or `audit`).
     required: false
     default: blocking
+  mcp-audit:
+    description: Also run `shk mcp audit` on the checked-out project configs (`true` or `false`).
+    required: false
+    default: "false"
   upload-sarif:
     description: Upload results to GitHub code scanning (`true` or `false`).
     required: false
@@ -30,7 +34,7 @@ inputs:
   shk-version:
     description: shk release tag to install, or `latest`.
     required: false
-    default: v0.5.6
+    default: v0.5.7
 
 outputs:
   sarif-file:
@@ -39,6 +43,12 @@ outputs:
   exit-code:
     description: Effective scan exit code after applying the selected mode.
     value: ${{ steps.scan.outputs.exit-code }}
+  mcp-sarif-file:
+    description: Absolute path to the MCP audit SARIF report, when `mcp-audit` is enabled.
+    value: ${{ steps.mcp-audit.outputs.sarif-file }}
+  mcp-exit-code:
+    description: Effective MCP audit exit code after applying the selected mode.
+    value: ${{ steps.mcp-audit.outputs.exit-code }}
 
 runs:
   using: composite
@@ -48,6 +58,7 @@ runs:
       env:
         SHK_FAIL_ON: ${{ inputs.fail-on }}
         SHK_MODE: ${{ inputs.mode }}
+        SHK_MCP_AUDIT: ${{ inputs.mcp-audit }}
         SHK_UPLOAD_SARIF: ${{ inputs.upload-sarif }}
         SHK_VERSION: ${{ inputs.shk-version }}
       run: |
@@ -59,6 +70,10 @@ runs:
         case "$SHK_MODE" in
           blocking|audit) ;;
           *) echo "invalid mode: $SHK_MODE" >&2; exit 2 ;;
+        esac
+        case "$SHK_MCP_AUDIT" in
+          true|false) ;;
+          *) echo "invalid mcp-audit: $SHK_MCP_AUDIT" >&2; exit 2 ;;
         esac
         case "$SHK_UPLOAD_SARIF" in
           true|false) ;;
@@ -152,15 +167,69 @@ runs:
         sarif_file: ${{ steps.scan.outputs.sarif-file }}
         category: ${{ inputs.category }}
 
-    - name: Apply scan result
+    - name: Run shk mcp audit
+      id: mcp-audit
+      if: ${{ inputs.mcp-audit == 'true' }}
+      shell: bash
+      env:
+        SHK_FAIL_ON: ${{ inputs.fail-on }}
+        SHK_MODE: ${{ inputs.mode }}
+        SHK_PATH: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        if ! shk mcp audit --help >/dev/null 2>&1; then
+          echo "mcp-audit requires a shk release that provides 'shk mcp audit'; set shk-version to a newer release" >&2
+          exit 2
+        fi
+        SARIF_DIR="$(mktemp -d "$RUNNER_TEMP/shk-mcp-results.XXXXXX")"
+        SARIF_FILE="$SARIF_DIR/shk-mcp-results.sarif"
+
+        set +e
+        shk mcp audit --sarif --fail-on "$SHK_FAIL_ON" -- "$SHK_PATH" > "$SARIF_FILE"
+        SHK_EXIT_CODE=$?
+        set -e
+
+        # `shk mcp audit` has no --audit flag, so audit mode is applied here.
+        if [ "$SHK_MODE" = "audit" ] && [ "$SHK_EXIT_CODE" -eq 1 ]; then
+          SHK_EXIT_CODE=0
+        fi
+
+        echo "sarif-file=$SARIF_FILE" >> "$GITHUB_OUTPUT"
+        echo "exit-code=$SHK_EXIT_CODE" >> "$GITHUB_OUTPUT"
+        if [ "$SHK_EXIT_CODE" -le 1 ] && [ -s "$SARIF_FILE" ]; then
+          echo "report-ready=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "report-ready=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Upload MCP audit SARIF
+      if: ${{ inputs.upload-sarif == 'true' && steps.mcp-audit.outputs.report-ready == 'true' }}
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: ${{ steps.mcp-audit.outputs.sarif-file }}
+        category: ${{ inputs.category }}-mcp
+
+    - name: Apply shk result
       if: ${{ always() && steps.scan.outputs.exit-code != '' }}
       shell: bash
       env:
         SHK_EXIT_CODE: ${{ steps.scan.outputs.exit-code }}
+        SHK_MCP_EXIT_CODE: ${{ steps.mcp-audit.outputs.exit-code }}
       run: |
         set -euo pipefail
         if [[ ! "$SHK_EXIT_CODE" =~ ^[0-9]+$ ]]; then
           echo "shk scan did not produce an exit code" >&2
           exit 2
         fi
-        exit "$SHK_EXIT_CODE"
+        MCP_EXIT_CODE="${SHK_MCP_EXIT_CODE:-0}"
+        if [[ ! "$MCP_EXIT_CODE" =~ ^[0-9]+$ ]]; then
+          echo "shk mcp audit did not produce an exit code" >&2
+          exit 2
+        fi
+        if [ "$SHK_EXIT_CODE" -ge 2 ] || [ "$MCP_EXIT_CODE" -ge 2 ]; then
+          exit 2
+        fi
+        if [ "$SHK_EXIT_CODE" -eq 1 ] || [ "$MCP_EXIT_CODE" -eq 1 ]; then
+          exit 1
+        fi
+        exit 0

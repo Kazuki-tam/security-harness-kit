@@ -12,17 +12,19 @@ mod fs_atomic;
 mod hook_audit_log;
 mod hook_output;
 mod hooks;
+mod mcp_audit;
 mod npm_hardening;
 mod output;
 mod policy_cmd;
 mod safety;
+mod sarif;
 mod version_check;
 mod workflow_hardening;
 
 use anyhow::{Context, Result};
 use args::{
     AllowlistCmd, CiCmd, CiInitProvider, Cli, ClipboardCmd, Commands, DoctorCmd, DotenvxCmd,
-    EnvCmd, EnvKeyCmd, HooksCmd, PolicyCmd, SecretsCmd, SkillToolArg, SkillsCmd,
+    EnvCmd, EnvKeyCmd, HooksCmd, McpCmd, PolicyCmd, SecretsCmd, SkillToolArg, SkillsCmd,
 };
 use clap::Parser;
 use shk_core::policy::ColorMode;
@@ -194,6 +196,24 @@ pub fn run() -> Result<()> {
             limit,
             hide_paths: no_paths,
         })?,
+        Commands::Mcp { cmd } => match cmd {
+            McpCmd::Audit {
+                path,
+                global,
+                json,
+                sarif,
+                fail_on,
+                verbose,
+            } => commands::mcp::run(commands::mcp::McpAuditInvocation {
+                path,
+                global,
+                json,
+                sarif,
+                fail_on,
+                verbose,
+                color_enabled: color,
+            })?,
+        },
         Commands::Doctor { cmd, json } => match cmd {
             None => doctor::run_all(&cwd, json)?,
             Some(DoctorCmd::Version) => version_check::run(json)?,
