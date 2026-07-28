@@ -95,6 +95,7 @@ jobs:
     # still protects distributed desktop binaries.
     env:
       SHK_ALLOW_MISSING_UPDATER_PUBKEY: "1"
+      BUILD_MANIFEST_NAME: target/distrib/${{ matrix.target }}-dist-manifest.json
     steps:
       - uses: actions/checkout@v7
         with:
@@ -116,14 +117,11 @@ jobs:
         run: ./.github/scripts/ci/install-linux-deps.sh cli
 
       - name: build dist artifacts
-        if: runner.os != 'Windows'
         shell: bash
-        run: dist build --artifacts=local --target=${{ matrix.target }}
-
-      - name: build dist artifacts
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: dist build --artifacts=local --target=${{ matrix.target }}
+        run: |
+          dist build --artifacts=local --target=${{ matrix.target }} \
+            --print=linkage --output-format=json > dist-manifest.json
+          cp dist-manifest.json "$BUILD_MANIFEST_NAME"
 
       - name: smoke version
         if: runner.os != 'Windows'
@@ -143,6 +141,7 @@ jobs:
             target/distrib/*.tar.xz
             target/distrib/*.zip
             target/distrib/*.sha256
+            target/distrib/*-dist-manifest.json
           if-no-files-found: error
 
   build-desktop-artifacts:
@@ -291,6 +290,10 @@ jobs:
         shell: bash
         run: dist build --artifacts=global
 
+      - name: verify shell installer checksums
+        shell: bash
+        run: ./.github/scripts/release/verify-cli-installer-checksums.sh target/distrib
+
       - name: upload global artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -343,6 +346,10 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
+
+      - name: remove internal dist manifests
+        shell: bash
+        run: rm -f release-assets/*-dist-manifest.json
 
       - name: generate release body
         shell: bash
