@@ -290,7 +290,7 @@ shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
 shk ci init github --upload-sarif
-shk ci init github --shk-version v0.5.6
+shk ci init github --shk-version v0.5.7
 shk ci init github --output .github/workflows/security.yml --force
 ```
 
