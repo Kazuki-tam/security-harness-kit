@@ -177,6 +177,10 @@ runs:
         SHK_PATH: ${{ inputs.path }}
       run: |
         set -euo pipefail
+        if ! shk mcp audit --help >/dev/null 2>&1; then
+          echo "mcp-audit requires a shk release that provides 'shk mcp audit'; set shk-version to a newer release" >&2
+          exit 2
+        fi
         SARIF_DIR="$(mktemp -d "$RUNNER_TEMP/shk-mcp-results.XXXXXX")"
         SARIF_FILE="$SARIF_DIR/shk-mcp-results.sarif"
 
