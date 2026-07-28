@@ -290,6 +290,81 @@ printf 'windows exe\n' > "$tmpdir/shk.exe"
 )
 printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  shk-cli-x86_64-pc-windows-msvc.zip\n' \
   > "$tmpdir/shk-cli-x86_64-pc-windows-msvc.zip.sha256"
+
+installer_fixture_dir="$tmpdir/installer-checksum"
+mkdir -p "$installer_fixture_dir"
+printf 'mac archive\n' > "$installer_fixture_dir/shk-cli-aarch64-apple-darwin.tar.xz"
+printf 'linux archive\n' > "$installer_fixture_dir/shk-cli-x86_64-unknown-linux-gnu.tar.xz"
+fixture_sha256() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{ print $1 }'
+  else
+    shasum -a 256 "$path" | awk '{ print $1 }'
+  fi
+}
+installer_digest_a="$(fixture_sha256 "$installer_fixture_dir/shk-cli-aarch64-apple-darwin.tar.xz")"
+installer_digest_b="$(fixture_sha256 "$installer_fixture_dir/shk-cli-x86_64-unknown-linux-gnu.tar.xz")"
+printf '%s  shk-cli-aarch64-apple-darwin.tar.xz\n' "$installer_digest_a" \
+  > "$installer_fixture_dir/shk-cli-aarch64-apple-darwin.tar.xz.sha256"
+printf '%s  shk-cli-x86_64-unknown-linux-gnu.tar.xz\n' "$installer_digest_b" \
+  > "$installer_fixture_dir/shk-cli-x86_64-unknown-linux-gnu.tar.xz.sha256"
+
+write_installer_checksum_fixture() {
+  local digest_a="$1"
+  local digest_b="$2"
+  cat > "$installer_fixture_dir/shk-cli-installer.sh" <<EOF
+case "\$_artifact_name" in
+    "shk-cli-aarch64-apple-darwin.tar.xz")
+        _checksum_style="sha256"
+        _checksum_value="${digest_a}"
+        ;;
+    "shk-cli-x86_64-unknown-linux-gnu.tar.xz")
+        _checksum_style="sha256"
+        _checksum_value="${digest_b}"
+        ;;
+esac
+EOF
+}
+
+assert_installer_verification_fails() {
+  local description="$1"
+  if ./.github/scripts/release/verify-cli-installer-checksums.sh \
+    "$installer_fixture_dir" >/dev/null 2>&1; then
+    echo "FAIL: ${description}" >&2
+    exit 1
+  fi
+  echo "ok: ${description}"
+}
+
+write_installer_checksum_fixture "$installer_digest_a" "$installer_digest_b"
+./.github/scripts/release/verify-cli-installer-checksums.sh "$installer_fixture_dir" >/dev/null
+echo "ok: CLI shell installer checksums verified"
+
+write_installer_checksum_fixture "$installer_digest_b" "$installer_digest_a"
+assert_installer_verification_fails "misplaced CLI shell installer checksums rejected"
+
+write_installer_checksum_fixture "$installer_digest_a" "$installer_digest_b"
+sed -i.bak -e '/_checksum_style=/d' -e '/_checksum_value=/d' \
+  "$installer_fixture_dir/shk-cli-installer.sh"
+rm "$installer_fixture_dir/shk-cli-installer.sh.bak"
+assert_installer_verification_fails "missing CLI shell installer checksum metadata rejected"
+
+printf 'case "$_artifact_name" in\nesac\n' \
+  > "$installer_fixture_dir/shk-cli-installer.sh"
+assert_installer_verification_fails "CLI shell installer with no archive entries rejected"
+
+write_installer_checksum_fixture "$installer_digest_a" "$installer_digest_b"
+sed -i.bak '/shk-cli-x86_64-unknown-linux-gnu.tar.xz")/,/;;/d' \
+  "$installer_fixture_dir/shk-cli-installer.sh"
+rm "$installer_fixture_dir/shk-cli-installer.sh.bak"
+assert_installer_verification_fails "CLI shell installer with a missing archive entry rejected"
+
+write_installer_checksum_fixture "$installer_digest_a" "$installer_digest_b"
+printf 'tampered archive\n' \
+  > "$installer_fixture_dir/shk-cli-aarch64-apple-darwin.tar.xz"
+assert_installer_verification_fails "CLI archive with a mismatched published checksum rejected"
+
 printf 'stale\n' > "$tmpdir/stale.txt"
 (
   cd "$tmpdir"
