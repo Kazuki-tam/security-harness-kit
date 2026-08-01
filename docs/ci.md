@@ -44,7 +44,7 @@ permissions:
   security-events: write
 
 steps:
-  - uses: actions/checkout@v6
+  - uses: actions/checkout@v7
     with:
       persist-credentials: false
 
@@ -97,7 +97,7 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -136,7 +136,7 @@ jobs:
 |-------|-----------------|
 | `permissions: contents: read` | The workflow only needs to read repository content. Explicitly minimising the `GITHUB_TOKEN` scopes prevents an accidental write at the workflow or organisation default level. |
 | `concurrency: cancel-in-progress: true` | Successive pushes to the same PR cancel the in-flight job. Cuts CI cost on busy branches without losing the result for the latest commit. |
-| `actions/checkout@v6` | GitHub-owned checkout action pinned to the current major for maintainability. |
+| `actions/checkout@v7` | GitHub-owned checkout action pinned to the current major for maintainability. |
 | `persist-credentials: false` | Stops `actions/checkout` from leaving the GitHub token in a Git credential file that later steps could read. `shk doctor workflows` flags this for any checkout step. |
 | Pinned release + checksum + attestation | Avoids `curl \| sh` and `latest`. Downloads the release archive, verifies SHA256, and checks GitHub artifact attestation before install. |
 | `--json --fail-on high` | JSON output is greppable / archivable from the run log. `high` matches the default `[thresholds].scan_fail_on` shipped by `shk init`. |

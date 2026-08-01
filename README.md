@@ -146,7 +146,7 @@ permissions:
   security-events: write
 
 steps:
-  - uses: actions/checkout@v6
+  - uses: actions/checkout@v7
     with:
       persist-credentials: false
   - uses: Kazuki-tam/security-harness-kit@v1
