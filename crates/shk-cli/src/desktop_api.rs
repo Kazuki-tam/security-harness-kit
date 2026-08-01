@@ -2626,8 +2626,12 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&settings).unwrap();
         let canonical_root = fs::canonicalize(dir.path()).unwrap();
         assert!(
-            json_string_contains(&parsed, &canonical_root.to_string_lossy()),
-            "trusted project root missing: {settings}"
+            json_string_contains(&parsed, "\"${CLAUDE_PROJECT_DIR:-.}\""),
+            "portable project root arg missing: {settings}"
+        );
+        assert!(
+            !json_string_contains(&parsed, &canonical_root.to_string_lossy()),
+            "machine-local path must not leak into committed settings: {settings}"
         );
     }
 

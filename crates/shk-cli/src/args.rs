@@ -65,7 +65,10 @@ pub enum Commands {
     },
     /// Scan repository or path for secrets and PII
     Scan {
-        #[arg(value_name = "PATH", default_value = ".")]
+        /// Hook commands may pass an env-var or command-substitution path that
+        /// expands to an empty string; treat that like the `.` default instead
+        /// of failing the hook process on argument parsing.
+        #[arg(value_name = "PATH", default_value = ".", value_parser = parse_scan_path)]
         path: PathBuf,
         #[arg(long)]
         staged: bool,
@@ -845,6 +848,14 @@ pub struct SecretsPushArgs {
     pub expected_env: Option<String>,
 }
 
+fn parse_scan_path(raw: &str) -> Result<PathBuf, std::convert::Infallible> {
+    Ok(if raw.is_empty() {
+        PathBuf::from(".")
+    } else {
+        PathBuf::from(raw)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -912,6 +923,16 @@ mod tests {
         };
 
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn scan_treats_empty_path_arg_as_default() {
+        let cli = Cli::try_parse_from(["shk", "scan", ""])
+            .expect("empty PATH from an unexpanded hook variable must parse");
+        let Commands::Scan { path, .. } = cli.command else {
+            panic!("expected scan command");
+        };
+        assert_eq!(path, PathBuf::from("."));
     }
 
     #[test]
