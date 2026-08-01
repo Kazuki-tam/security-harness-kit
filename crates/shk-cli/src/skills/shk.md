@@ -237,8 +237,11 @@ Cursor gets blocking `before*` hooks plus non-blocking post scans on
 Managed user-prompt hooks use `--fail-on medium` so PII is blocked before it enters
 the agent context.
 
-Project hook commands carry an explicit trusted project root so model-controlled payload
-paths cannot select the scan policy or audit-log destination. Codex project hooks resolve that
+Project hook commands stay portable so committed config files work across machines:
+Claude Code scans `"${CLAUDE_PROJECT_DIR:-.}"`, Cursor scans `"${CURSOR_PROJECT_DIR:-.}"` (both
+editor-expanded, still process-controlled so model-controlled payload paths cannot select
+the scan policy or audit-log destination), and Copilot/Antigravity/Windsurf resolve the
+project root from the hook process cwd. Codex project hooks resolve that
 root dynamically with `$(git rev-parse --show-toplevel)` and also ensure `features.hooks = true`
 while installing `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, and `PostToolUse`.
 Global hooks keep the session cwd because they are not bound to one project.
@@ -290,7 +293,7 @@ shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
 shk ci init github --upload-sarif
-shk ci init github --shk-version v0.5.8
+shk ci init github --shk-version v0.5.9
 shk ci init github --output .github/workflows/security.yml --force
 ```
 

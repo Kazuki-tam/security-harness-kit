@@ -16,6 +16,11 @@ use std::sync::OnceLock;
 /// Timeout (seconds) embedded in Cursor / Codex hook command payloads (CLI JSON / TOML).
 const HOOK_CLI_TIMEOUT_SEC: u64 = 30;
 const CODEX_GIT_ROOT_ARG: &str = r#""$(git rev-parse --show-toplevel)""#;
+// `:-.` keeps the hook command runnable when the editor does not provide the
+// variable: the argument degrades to `.` and scan hook mode resolves the
+// project root from the hook process cwd.
+const CLAUDE_PROJECT_DIR_ARG: &str = r#""${CLAUDE_PROJECT_DIR:-.}""#;
+const CURSOR_PROJECT_DIR_ARG: &str = r#""${CURSOR_PROJECT_DIR:-.}""#;
 
 #[derive(Clone, Copy, Debug)]
 pub struct InstallAiOptions {
@@ -98,36 +103,20 @@ fn hook_scan_cli_command(tool: AiTool, audit: bool, log_blocked: bool, post: boo
     hook_scan_cli_command_with_root_arg(tool, audit, log_blocked, post, None, None)
 }
 
-fn project_hook_root_arg(path: &Path) -> Result<String> {
-    let value = path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("project path is not valid UTF-8: {}", path.display()))?;
-    if value.chars().any(char::is_control) {
-        anyhow::bail!("project path contains unsupported control characters");
+/// Project-root argument embedded in managed hook commands for project-level
+/// installs. Config files under the project are commonly committed, so the
+/// argument must stay portable across machines: editor-provided environment
+/// variables where available, otherwise no argument (the hook process cwd is
+/// the project root for these tools, matching global installs). Shells that
+/// don't expand the variable leave a nonexistent path, which
+/// `resolve_hook_repo_root` resolves from cwd instead.
+fn project_hook_root_arg(tool: AiTool) -> Option<&'static str> {
+    match tool {
+        AiTool::ClaudeCode => Some(CLAUDE_PROJECT_DIR_ARG),
+        AiTool::Cursor => Some(CURSOR_PROJECT_DIR_ARG),
+        // Codex embeds CODEX_GIT_ROOT_ARG via codex_hook_command instead.
+        AiTool::Codex | AiTool::Copilot | AiTool::Antigravity | AiTool::Windsurf => None,
     }
-    #[cfg(windows)]
-    {
-        if value.contains(['"', '%', '!', '$', '`']) {
-            anyhow::bail!(
-                "project path contains characters that cannot be safely quoted for Windows hooks"
-            );
-        }
-        Ok(quote_windows_hook_arg(value))
-    }
-    #[cfg(not(windows))]
-    {
-        Ok(format!("'{}'", value.replace('\'', "'\\''")))
-    }
-}
-
-#[cfg(any(windows, test))]
-fn quote_windows_hook_arg(value: &str) -> String {
-    let trailing_backslashes = value
-        .chars()
-        .rev()
-        .take_while(|character| *character == '\\')
-        .count();
-    format!("\"{value}{}\"", "\\".repeat(trailing_backslashes))
 }
 
 fn user_prompt_hook_scan_command(
@@ -323,20 +312,20 @@ fn apply_tool(
     opts: InstallAiOptions,
     project_root: Option<&Path>,
 ) -> Result<String> {
-    let root_arg = if tool == AiTool::Codex {
-        None
+    let root_arg = if project_root.is_some() {
+        project_hook_root_arg(tool)
     } else {
-        project_root.map(project_hook_root_arg).transpose()?
+        None
     };
     match tool {
-        AiTool::ClaudeCode => apply_claude(path, opts, project_root.is_some(), root_arg.as_deref()),
+        AiTool::ClaudeCode => apply_claude(path, opts, project_root.is_some(), root_arg),
         AiTool::Cursor => apply_cursor(
             path,
             opts.audit,
             opts.log_blocked,
             opts.dry_run,
             opts.fail_closed || opts.apply_sandbox,
-            root_arg.as_deref(),
+            root_arg,
         ),
         AiTool::Codex => apply_codex(
             path,
@@ -346,28 +335,20 @@ fn apply_tool(
             opts.apply_sandbox,
             !opts.global,
         ),
-        AiTool::Copilot => apply_copilot(
-            path,
-            opts.audit,
-            opts.log_blocked,
-            opts.dry_run,
-            root_arg.as_deref(),
-        ),
+        AiTool::Copilot => {
+            apply_copilot(path, opts.audit, opts.log_blocked, opts.dry_run, root_arg)
+        }
         AiTool::Antigravity => apply_antigravity(
             path,
             opts.audit,
             opts.log_blocked,
             opts.dry_run,
             opts.apply_deny,
-            root_arg.as_deref(),
+            root_arg,
         ),
-        AiTool::Windsurf => apply_windsurf(
-            path,
-            opts.audit,
-            opts.log_blocked,
-            opts.dry_run,
-            root_arg.as_deref(),
-        ),
+        AiTool::Windsurf => {
+            apply_windsurf(path, opts.audit, opts.log_blocked, opts.dry_run, root_arg)
+        }
     }
 }
 
@@ -1598,29 +1579,8 @@ mod tests {
         }
     }
 
-    #[cfg(not(windows))]
     #[test]
-    fn project_hook_root_arg_shell_quotes_spaces_and_apostrophes() {
-        assert_eq!(
-            project_hook_root_arg(Path::new("/work/team's app")).unwrap(),
-            r#"'/work/team'\''s app'"#
-        );
-    }
-
-    #[test]
-    fn windows_hook_arg_doubles_trailing_backslashes_before_closing_quote() {
-        assert_eq!(
-            quote_windows_hook_arg(r"C:\work\project\"),
-            r#""C:\work\project\\""#
-        );
-        assert_eq!(
-            quote_windows_hook_arg(r"C:\work\project"),
-            r#""C:\work\project""#
-        );
-    }
-
-    #[test]
-    fn project_installs_embed_trusted_root_for_every_tool() {
+    fn project_installs_stay_portable_for_every_tool() {
         let project = tempfile::tempdir().unwrap();
         let opts = InstallAiOptions {
             audit: false,
@@ -1644,14 +1604,32 @@ mod tests {
             let config_path = project.path().join(ai_config_relative_path(tool));
             apply_tool(&config_path, tool, opts, Some(project.path())).unwrap();
             let body = fs::read_to_string(&config_path).unwrap();
-            if tool == AiTool::Codex {
-                assert!(body.contains(CODEX_GIT_ROOT_ARG), "{tool:?}: {body}");
-            } else {
-                let config: Value = serde_json::from_str(&body).unwrap();
-                assert!(
-                    json_string_contains(&config, &project_root),
-                    "{tool:?}: {body}"
-                );
+            // Project config files are committed and shared: no machine-local
+            // absolute path may leak into managed hook commands.
+            assert!(!body.contains(project_root.as_ref()), "{tool:?}: {body}");
+            match tool {
+                AiTool::ClaudeCode | AiTool::Cursor => {
+                    let expected = if tool == AiTool::ClaudeCode {
+                        CLAUDE_PROJECT_DIR_ARG
+                    } else {
+                        CURSOR_PROJECT_DIR_ARG
+                    };
+                    let config: Value = serde_json::from_str(&body).unwrap();
+                    assert!(json_string_contains(&config, expected), "{tool:?}: {body}");
+                }
+                AiTool::Codex => {
+                    assert!(body.contains(CODEX_GIT_ROOT_ARG), "{tool:?}: {body}");
+                }
+                AiTool::Copilot | AiTool::Antigravity | AiTool::Windsurf => {
+                    let config: Value = serde_json::from_str(&body).unwrap();
+                    assert!(
+                        json_string_contains(
+                            &config,
+                            &format!("shk scan --hook-mode {}", tool.kebab_str())
+                        ),
+                        "{tool:?}: {body}"
+                    );
+                }
             }
         }
     }

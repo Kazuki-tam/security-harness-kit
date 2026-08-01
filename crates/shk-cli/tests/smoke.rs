@@ -2552,11 +2552,11 @@ fn hooks_install_ai_antigravity_writes_managed_pre_and_post_hooks() {
         "{pre:?}"
     );
     assert!(
-        pre[0]["hooks"][0]["command"]
+        !pre[0]["hooks"][0]["command"]
             .as_str()
             .unwrap_or_default()
             .contains(&canonical_path_text(dir.path())),
-        "trusted project root missing: {pre:?}"
+        "machine-local path must not leak into managed hooks: {pre:?}"
     );
     assert!(
         pre[0]["hooks"][0]["command"]
@@ -2583,7 +2583,7 @@ fn hooks_install_ai_antigravity_writes_managed_pre_and_post_hooks() {
     let post_cmd = post[0]["hooks"][0]["command"].as_str().unwrap_or_default();
     assert!(
         post_cmd.contains("--hook-mode antigravity")
-            && post_cmd.contains(&canonical_path_text(dir.path()))
+            && !post_cmd.contains(&canonical_path_text(dir.path()))
             && post_cmd.contains("--log-blocked")
             && post_cmd.contains("--post"),
         "{post:?}"
@@ -5662,8 +5662,8 @@ fn hooks_install_ai_windsurf_writes_cascade_hooks_and_is_idempotent() {
         let cmd = arr[0]["command"].as_str().unwrap();
         assert!(cmd.contains("--hook-mode windsurf"), "{key}: {cmd}");
         assert!(
-            cmd.contains(&canonical_path_text(dir.path())),
-            "trusted project root missing for {key}: {cmd}"
+            !cmd.contains(&canonical_path_text(dir.path())),
+            "machine-local path must not leak into managed hooks for {key}: {cmd}"
         );
         assert_eq!(arr[0]["show_output"], true, "{key}");
     }

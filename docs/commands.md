@@ -657,7 +657,7 @@ Options:
 
 Without `--tool`, the command targets Claude Code, Codex, Cursor, Copilot, Antigravity, and Windsurf. Non-dry-run installation requires a project `shk.toml`.
 
-Project installs embed a safely quoted project root in managed hook commands. On Windows, installation fails closed when that path contains `"`, `%`, `!`, `$`, or a backtick because the supported hook shells cannot represent those paths consistently without expansion or command-substitution risk. Move the checkout to a path without those characters or use a global hook installation.
+Project installs keep managed hook commands portable so committed config files work on every teammate's machine: Claude Code commands scan `"${CLAUDE_PROJECT_DIR:-.}"`, Cursor commands scan `"${CURSOR_PROJECT_DIR:-.}"` (both expanded by the editor's hook shell at run time, degrading to `.` when the variable is absent), and Codex commands scan `$(git rev-parse --show-toplevel)`. Copilot, Antigravity, and Windsurf commands take no path argument; `shk scan --hook-mode` resolves the project root from the hook process working directory. When an embedded path is missing or points at a different checkout (for example an unexpanded variable or a moved clone), hook mode falls back to cwd-based project-root discovery.
 
 Installed entries:
 

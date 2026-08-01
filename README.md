@@ -146,7 +146,7 @@ permissions:
   security-events: write
 
 steps:
-  - uses: actions/checkout@v6
+  - uses: actions/checkout@v7
     with:
       persist-credentials: false
   - uses: Kazuki-tam/security-harness-kit@v1
@@ -243,7 +243,7 @@ shk ci init github
 shk ci init github --upload-sarif
 shk ci init github --dry-run
 shk ci init github --mode audit
-shk ci init github --shk-version v0.5.8
+shk ci init github --shk-version v0.5.9
 
 shk skills install
 shk skills install --tool claude-code --global
