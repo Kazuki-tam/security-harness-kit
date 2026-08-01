@@ -68,7 +68,7 @@ pub enum Commands {
         /// Hook commands may pass an env-var or command-substitution path that
         /// expands to an empty string; treat that like the `.` default instead
         /// of failing the hook process on argument parsing.
-        #[arg(value_name = "PATH", default_value = ".", value_parser = parse_scan_path)]
+        #[arg(value_name = "PATH", default_value = ".", value_parser = scan_path_parser())]
         path: PathBuf,
         #[arg(long)]
         staged: bool,
@@ -848,11 +848,15 @@ pub struct SecretsPushArgs {
     pub expected_env: Option<String>,
 }
 
-fn parse_scan_path(raw: &str) -> Result<PathBuf, std::convert::Infallible> {
-    Ok(if raw.is_empty() {
-        PathBuf::from(".")
-    } else {
-        PathBuf::from(raw)
+fn scan_path_parser() -> impl clap::builder::TypedValueParser<Value = PathBuf> {
+    use clap::builder::TypedValueParser;
+
+    clap::builder::OsStringValueParser::new().map(|raw| {
+        if raw.is_empty() {
+            PathBuf::from(".")
+        } else {
+            PathBuf::from(raw)
+        }
     })
 }
 
@@ -933,6 +937,27 @@ mod tests {
             panic!("expected scan command");
         };
         assert_eq!(path, PathBuf::from("."));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_accepts_non_utf8_path() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = std::ffi::OsString::from_vec(vec![b'p', b'a', b't', b'h', 0xff]);
+        let cli = Cli::try_parse_from([
+            std::ffi::OsString::from("shk"),
+            std::ffi::OsString::from("scan"),
+            path.clone(),
+        ])
+        .expect("scan paths must not be restricted to UTF-8");
+        let Commands::Scan {
+            path: parsed_path, ..
+        } = cli.command
+        else {
+            panic!("expected scan command");
+        };
+        assert_eq!(parsed_path, PathBuf::from(path));
     }
 
     #[test]

@@ -335,13 +335,9 @@ fn apply_tool(
             opts.apply_sandbox,
             !opts.global,
         ),
-        AiTool::Copilot => apply_copilot(
-            path,
-            opts.audit,
-            opts.log_blocked,
-            opts.dry_run,
-            root_arg,
-        ),
+        AiTool::Copilot => {
+            apply_copilot(path, opts.audit, opts.log_blocked, opts.dry_run, root_arg)
+        }
         AiTool::Antigravity => apply_antigravity(
             path,
             opts.audit,
@@ -350,13 +346,9 @@ fn apply_tool(
             opts.apply_deny,
             root_arg,
         ),
-        AiTool::Windsurf => apply_windsurf(
-            path,
-            opts.audit,
-            opts.log_blocked,
-            opts.dry_run,
-            root_arg,
-        ),
+        AiTool::Windsurf => {
+            apply_windsurf(path, opts.audit, opts.log_blocked, opts.dry_run, root_arg)
+        }
     }
 }
 
