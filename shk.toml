@@ -192,6 +192,11 @@ path = "crates/shk-cli/src/commands/secrets.rs"
 reason = "Example email in secrets command tests"
 
 [[allowlist]]
+rule_id = "pii.ipv4"
+path = "crates/shk-cli/src/mcp_audit.rs"
+reason = "Loopback address literals used for local-host URL checks"
+
+[[allowlist]]
 rule_id = "pii.en.name"
 path = "crates/shk-cli/src/skills/shk.md"
 reason = "Documentation text contains a name-like skill heading"
@@ -235,3 +240,8 @@ reason = "MinimumOSVersion value in winget manifest template looks like an IPv4 
 rule_id = "pii.email"
 path = ".github/scripts/release/test.sh"
 reason = "Synthetic example.com address in signing config test"
+
+[[allowlist]]
+rule_id = "pii.en.name"
+path = "action.yml"
+reason = "GitHub Action metadata (name/author fields), not personal data in code"
