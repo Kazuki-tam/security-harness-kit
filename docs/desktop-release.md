@@ -1,10 +1,13 @@
 # Desktop Release
 
-The desktop app can be published as an **unsigned early access** build while OS code
-signing is deferred. Signed desktop releases remain available for later via
-`desktop-vX.Y.Z`.
+Signed desktop releases via `desktop-vX.Y.Z` (or combined `shk-vX.Y.Z`) are the
+default as of `desktop-v0.6.0`: macOS builds are Developer ID signed and
+notarized, and Windows ships unsigned under the explicit opt-in described in
+[Releasing without Windows Authenticode signing](#releasing-without-windows-authenticode-signing)
+until Authenticode signing is configured. The **unsigned early access** path
+below remains available for maintainers.
 
-## Unsigned early access (recommended first release)
+## Unsigned early access
 
 Publish unsigned desktop builds from tags matching `desktop-unsigned-vX.Y.Z`.
 The **Release Desktop (unsigned)** workflow can also be run manually, but manual

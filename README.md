@@ -39,10 +39,11 @@ With `shk`, you can:
 ## Desktop App
 
 The **shk Desktop** app (`apps/shk-desktop`) provides a local GUI for project
-scanning, AI-oriented masking, setup automation, and audit review. Early access
-builds are published as unsigned installers from GitHub Releases.
+scanning, AI-oriented masking, setup automation, and audit review. Installers
+are published from GitHub Releases; macOS builds are Developer ID signed and
+notarized as of `desktop-v0.6.0`.
 
-- Download and install: [Installation → Desktop App](docs/installation.md#desktop-app-unsigned-early-access)
+- Download and install: [Installation → Desktop App](docs/installation.md#desktop-app)
 - Maintainer release process: [Desktop Release](docs/desktop-release.md)
 
 ## Installation
