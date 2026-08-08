@@ -161,11 +161,13 @@ To install a pinned release this way, replace `latest/download` with `download/<
 
 Intel macOS, Apple Silicon macOS, Linux x86_64/aarch64, and Windows x86_64 are supported. Scoop manifests are not published by the current release pipeline.
 
-## Desktop App (unsigned early access)
+## Desktop App
 
-The desktop app is distributed separately from the CLI. Early access builds are
-published from `desktop-unsigned-vX.Y.Z` tags as `shk-desktop_*` assets on GitHub
-Releases. These builds include the in-app updater but are **not** OS code-signed.
+The desktop app is distributed separately from the CLI. Releases are published
+from `desktop-vX.Y.Z` (or combined `shk-vX.Y.Z`) tags as `shk-desktop_*` assets
+on GitHub Releases. Starting with `desktop-v0.6.0`, macOS builds are Developer
+ID signed, notarized, and stapled. Windows installers are currently **not**
+Authenticode-signed (see [Windows SmartScreen](#windows-smartscreen) below).
 
 See [`desktop-release.md`](desktop-release.md) for maintainer release steps.
 
@@ -175,53 +177,50 @@ See [`desktop-release.md`](desktop-release.md) for maintainer release steps.
 |----------|---------------|-------|
 | Linux x86_64 | `shk-desktop_*_x86_64-unknown-linux-gnu_*.AppImage` or `*.deb` | AppImage needs `chmod +x` |
 | Linux aarch64 | `shk-desktop_*_aarch64-unknown-linux-gnu_*.AppImage` or `*.deb` | Same as above |
-| macOS Intel | `shk-desktop_*_x86_64-apple-darwin_*.app.tar.gz` | Extract and move `shk.app` to `/Applications` |
-| macOS Apple Silicon | `shk-desktop_*_aarch64-apple-darwin_*.app.tar.gz` | Same as above |
-| Windows x86_64 | `shk-desktop_*_x86_64-pc-windows-msvc_*setup.exe` | NSIS installer |
+| macOS Intel | `shk-desktop_*_x86_64-apple-darwin_*.dmg` | Signed and notarized; drag `shk.app` to `/Applications` |
+| macOS Apple Silicon | `shk-desktop_*_aarch64-apple-darwin_*.dmg` | Same as above |
+| Windows x86_64 | `shk-desktop_*_x86_64-pc-windows-msvc_*setup.exe` or `*.msi` | Currently unsigned |
 
 Download from the release page for your tag, for example:
 
 ```text
-https://github.com/Kazuki-tam/security-harness-kit/releases/tag/desktop-unsigned-v0.6.0
+https://github.com/Kazuki-tam/security-harness-kit/releases/tag/desktop-v0.6.0
 ```
 
 Verify checksums when available:
 
 ```bash
-curl -LO https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-unsigned-v0.6.0/shk-desktop.sha256sum
+curl -LO https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-v0.6.0/shk-desktop.sha256sum
 sha256sum -c shk-desktop.sha256sum
 ```
 
-### macOS Gatekeeper (unsigned builds)
+### macOS
 
-macOS may block the app because it is not notarized. After copying `shk.app` to
-`/Applications`, either:
+Installers from `desktop-v0.6.0` onward are Developer ID signed and notarized;
+Gatekeeper opens them without workarounds. If you still run an older unsigned
+early access build, replace it with a signed `.dmg` install — the in-app
+updater also migrates existing installs because all releases share the same
+Tauri updater signing keys.
 
-1. Open **System Settings → Privacy & Security** and choose **Open Anyway**, or
-2. Run once from Terminal:
+### Windows SmartScreen
 
-```bash
-xattr -dr com.apple.quarantine /Applications/shk.app
-open /Applications/shk.app
-```
-
-### Windows SmartScreen (unsigned builds)
-
-Windows may show **Windows protected your PC** for unsigned installers. Choose
-**More info → Run anyway** if you trust the release checksum and attestation.
+Windows installers are currently not Authenticode-signed, so SmartScreen may
+show **Windows protected your PC**. Choose **More info → Run anyway** if you
+trust the release checksum and attestation.
 
 ### In-app updates
 
 The desktop app checks `desktop-latest/latest.json` on GitHub for updater
-metadata. Updater packages themselves are signed with the project Tauri updater
-key even when OS code signing is skipped.
+metadata. Updater packages are always signed with the project Tauri updater
+key, independent of OS code signing.
 
-### Signed desktop releases (later)
+### Unsigned early access builds (historical)
 
-When OS signing is configured, `desktop-vX.Y.Z` or `shk-vX.Y.Z` tags publish
-Developer ID / Authenticode signed installers in addition to the unsigned
-artifact set above. Use the same updater signing keys across unsigned and signed
-releases so existing installs can update in place.
+Before `desktop-v0.6.0`, builds were published unsigned from
+`desktop-unsigned-vX.Y.Z` tags (last: `desktop-unsigned-v0.5.5`). Those
+required Gatekeeper / SmartScreen workarounds documented in their release
+notes. The unsigned release path still exists for maintainers but is no longer
+the recommended install.
 
 ## Build From Source
 

@@ -357,6 +357,11 @@ jobs:
         env:
           RELEASE_COMPONENT: ${{ needs.prepare.outputs.component }}
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          # Lets the desktop notes state whether Windows installers are signed.
+          SHK_ALLOW_UNSIGNED_WINDOWS: ${{ vars.SHK_ALLOW_UNSIGNED_WINDOWS }}
+          TAURI_WINDOWS_SIGN_COMMAND: ${{ secrets.TAURI_WINDOWS_SIGN_COMMAND }}
+          TAURI_WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.TAURI_WINDOWS_CERTIFICATE_THUMBPRINT }}
+          TAURI_WINDOWS_TIMESTAMP_URL: ${{ secrets.TAURI_WINDOWS_TIMESTAMP_URL }}
         run: ./.github/scripts/release/generate-release-body.sh
 
       - name: generate desktop checksums

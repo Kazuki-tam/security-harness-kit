@@ -179,12 +179,18 @@ shk_gh_output() {
 
 shk_desktop_release_notes() {
   local version="$1"
+  local windows_note
+  if [[ "${SHK_ALLOW_UNSIGNED_WINDOWS:-}" == "true" && "$(shk_windows_signing_mode)" == "none" ]]; then
+    windows_note='Windows installers are **not** Authenticode-signed in this release; SmartScreen may warn on first run. Choose "More info", then "Run anyway".'
+  else
+    windows_note="Windows installers are Authenticode-signed and verified during release."
+  fi
   cat <<EOF
 ## shk Desktop v${version}
 
 Installers for macOS, Linux, and Windows are attached as \`shk-desktop_*\` assets.
 macOS installers are Developer ID signed, notarized, stapled, and verified during release.
-Windows installers are Authenticode-signed and verified during release.
+${windows_note}
 Checksums are in \`shk-desktop.sha256sum\`.
 Machine-readable desktop release metadata is in \`shk-desktop-latest.json\`.
 Tauri updater metadata is published as \`latest.json\` and mirrored to the \`desktop-latest\` release.
