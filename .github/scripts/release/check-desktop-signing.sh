@@ -20,5 +20,11 @@ if is_macos_release_runner; then
 fi
 
 if is_windows_release_runner; then
-  shk_require_windows_signing
+  # An invalid signing config must fail even when unsigned Windows is allowed.
+  windows_mode="$(shk_windows_signing_mode)"
+  if [[ "$windows_mode" == "none" && "${SHK_ALLOW_UNSIGNED_WINDOWS:-}" == "true" ]]; then
+    echo "WARNING: Windows Authenticode signing is not configured; continuing unsigned (SHK_ALLOW_UNSIGNED_WINDOWS=true)."
+  else
+    shk_require_windows_signing
+  fi
 fi

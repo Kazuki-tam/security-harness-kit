@@ -213,6 +213,34 @@ SHK_REQUIRE_WINDOWS_CODESIGN=true \
   ./.github/scripts/release/check-desktop-signing.sh >/dev/null
 echo "ok: Windows certificate signing config accepted"
 
+SHK_REQUIRE_WINDOWS_CODESIGN=true \
+  SHK_ALLOW_UNSIGNED_WINDOWS=true \
+  TAURI_UPDATER_PUBKEY=public-key \
+  TAURI_SIGNING_PRIVATE_KEY=private-key \
+  ./.github/scripts/release/check-desktop-signing.sh >/dev/null
+echo "ok: unsigned Windows accepted with explicit opt-in"
+
+if SHK_REQUIRE_WINDOWS_CODESIGN=true \
+  SHK_ALLOW_UNSIGNED_WINDOWS=true \
+  TAURI_UPDATER_PUBKEY=public-key \
+  TAURI_SIGNING_PRIVATE_KEY=private-key \
+  TAURI_WINDOWS_SIGN_COMMAND="trusted-signing-cli sign %1" \
+  TAURI_WINDOWS_CERTIFICATE_THUMBPRINT=00112233445566778899AABBCCDDEEFF00112233 \
+  TAURI_WINDOWS_TIMESTAMP_URL=https://timestamp.example.invalid \
+  ./.github/scripts/release/check-desktop-signing.sh >/dev/null 2>&1; then
+  echo "FAIL: opt-in must not mask an invalid Windows signing config" >&2
+  exit 1
+fi
+echo "ok: opt-in does not mask invalid Windows signing config"
+
+SHK_REQUIRE_WINDOWS_CODESIGN=true \
+  SHK_ALLOW_UNSIGNED_WINDOWS=true \
+  TAURI_UPDATER_PUBKEY=public-key \
+  TAURI_SIGNING_PRIVATE_KEY=private-key \
+  TAURI_WINDOWS_SIGN_COMMAND="trusted-signing-cli sign %1" \
+  ./.github/scripts/release/check-desktop-signing.sh >/dev/null
+echo "ok: configured Windows signing still validated when opt-in is set"
+
 tmpdir="$(mktemp -d)"
 case "$(uname -s)" in
   Darwin)
