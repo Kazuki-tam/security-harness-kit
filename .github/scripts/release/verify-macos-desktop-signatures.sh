@@ -50,7 +50,7 @@ for archive in "${app_archives[@]}"; do
   while IFS= read -r -d '' app; do
     verify_app "$app"
     app_count=$((app_count + 1))
-  done < <(find "$archive_dir" -type d -name "*.app" -print0)
+  done < <(find "$archive_dir" -mindepth 1 -type d -name "*.app" -print0)
 
   if ((app_count == 0)); then
     echo "no .app bundle found in $(basename "$archive")" >&2
