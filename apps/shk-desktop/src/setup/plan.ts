@@ -19,7 +19,7 @@ export function defaultRecommendedFixIds(status: ProjectStatus, policyExists: bo
     .map((fix) => fix.id);
 }
 
-export type QuickSetupStepId = "policy" | "ignore" | "git" | "ai" | "npm" | "skills";
+export type QuickSetupStepId = "policy" | "ignore" | "git" | "ai" | "env" | "npm" | "skills";
 
 export type QuickSetupStep = {
   id: QuickSetupStepId;
@@ -124,6 +124,11 @@ export function buildQuickSetupSteps(status: ProjectStatus): QuickSetupStep[] {
         fixes.has("ai_codex_sandbox"),
     },
     {
+      id: "env",
+      done: !status.doctor.envApplicable || status.doctor.envOk,
+      pending: fixes.has("env_encrypt"),
+    },
+    {
       id: "npm",
       done: !status.npmHardening.hasProjects || npmSettingsReady(status),
       pending: status.npmHardening.hasProjects && fixes.has("npm_hardening"),
@@ -142,7 +147,14 @@ export function countPendingQuickSetup(status: ProjectStatus): number {
 
 export function quickSetupCanApply(status: ProjectStatus): boolean {
   if (!status.policy.exists) return true;
-  return defaultRecommendedFixIds(status, true).length > 0;
+  // Any offered fix keeps the apply flow reachable — opt-in fixes
+  // (e.g. env_encrypt) are applied through an explicit selection.
+  return status.recommendedFixes.length > 0;
+}
+
+/** Env files the env_encrypt fix can touch (anything not fully encrypted). */
+export function envEncryptTargets(status: ProjectStatus): string[] {
+  return status.envFiles.filter((file) => file.state !== "encrypted").map((file) => file.name);
 }
 
 export function defaultQuickSetupIgnoreTargets(): string[] {

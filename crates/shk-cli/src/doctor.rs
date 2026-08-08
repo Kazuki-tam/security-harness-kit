@@ -57,11 +57,22 @@ pub struct IgnoreFixTargetStatus {
     pub exists: bool,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EnvFileState {
+    Plaintext,
+    Mixed,
+    Encrypted,
+}
+
+/// Per-file env encryption report. Key names only — values are never collected.
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct EnvStatus {
-    pub has_env_files: bool,
-    pub plaintext_env_files: Vec<String>,
-    pub mixed_env_files: Vec<String>,
+#[serde(rename_all = "camelCase")]
+pub struct EnvFileStatus {
+    pub name: String,
+    pub state: EnvFileState,
+    pub plaintext_keys: Vec<String>,
+    pub encrypted_key_count: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -111,34 +122,113 @@ pub fn collect_ignore_status(root: &Path) -> IgnoreStatus {
     })
 }
 
-pub fn collect_env_status(root: &Path) -> EnvStatus {
-    let mut has_env_files = false;
-    let mut plaintext_env_files = Vec::new();
-    let mut mixed_env_files = Vec::new();
+pub fn collect_env_file_statuses(root: &Path) -> Vec<EnvFileStatus> {
+    let mut files = Vec::new();
     if let Ok(entries) = fs::read_dir(root) {
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            if (name == ".env" || (name.starts_with(".env.") && name != ".env.example"))
-                && e.path().is_file()
-            {
-                has_env_files = true;
+            if is_native_env_candidate_name(&name) && e.path().is_file() {
                 let content = fs::read_to_string(e.path()).unwrap_or_default();
-                match dotenv_encryption_state(&content) {
-                    EnvFileEncryptionState::FullyEncrypted => {}
-                    EnvFileEncryptionState::MixedPlaintext { .. } => {
-                        mixed_env_files.push(name);
-                    }
-                    EnvFileEncryptionState::Plaintext => {
-                        plaintext_env_files.push(name);
-                    }
-                }
+                files.push(env_file_status(name, &content));
             }
         }
     }
-    EnvStatus {
-        has_env_files,
-        plaintext_env_files,
-        mixed_env_files,
+    files.sort_by(|a, b| a.name.cmp(&b.name));
+    files
+}
+
+fn is_native_env_candidate_name(name: &str) -> bool {
+    (name == ".env" || name.starts_with(".env."))
+        && !matches!(
+            name,
+            ".env.example" | ".env.sample" | ".env.keys" | ".env.vault"
+        )
+}
+
+fn env_file_status(name: String, content: &str) -> EnvFileStatus {
+    let state = match dotenv_encryption_state(content) {
+        EnvFileEncryptionState::FullyEncrypted => EnvFileState::Encrypted,
+        EnvFileEncryptionState::MixedPlaintext { .. } => EnvFileState::Mixed,
+        EnvFileEncryptionState::Plaintext => EnvFileState::Plaintext,
+    };
+    let (plaintext_keys, encrypted_key_count) = dotenv_key_summary(content);
+    EnvFileStatus {
+        name,
+        state,
+        plaintext_keys,
+        encrypted_key_count,
+    }
+}
+
+/// Count encrypted values and collect plaintext key names (never values).
+/// Private-key entries count as plaintext: key material inside an env file is
+/// exactly what the doctor should surface.
+fn dotenv_key_summary(content: &str) -> (Vec<String>, usize) {
+    let mut plaintext_keys = Vec::new();
+    let mut encrypted_key_count = 0usize;
+    for raw_line in content.lines() {
+        match classify_dotenv_line(raw_line) {
+            DotenvLine::Skip | DotenvLine::Malformed => {}
+            DotenvLine::Entry {
+                encrypted: true,
+                parse_error: false,
+                private_key: false,
+                ..
+            } => encrypted_key_count += 1,
+            DotenvLine::Entry { key, .. } => plaintext_keys.push(key.to_string()),
+        }
+    }
+    (plaintext_keys, encrypted_key_count)
+}
+
+/// A single dotenv line as seen by the doctor checks. Only key names and value
+/// shape are inspected; values themselves are never retained.
+enum DotenvLine<'a> {
+    /// Blank line, comment, or a public-key entry — not a secret-bearing entry.
+    Skip,
+    /// No `=` or an empty key.
+    Malformed,
+    Entry {
+        key: &'a str,
+        /// Value parsed and carries the `encrypted:` prefix.
+        encrypted: bool,
+        /// Value quoting could not be parsed.
+        parse_error: bool,
+        /// Key names dotenv private-key material.
+        private_key: bool,
+    },
+}
+
+fn classify_dotenv_line(raw_line: &str) -> DotenvLine<'_> {
+    let line = raw_line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return DotenvLine::Skip;
+    }
+    let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+    let Some((raw_key, raw_value)) = line.split_once('=') else {
+        return DotenvLine::Malformed;
+    };
+    let key = raw_key.trim();
+    if key.is_empty() {
+        return DotenvLine::Malformed;
+    }
+    if is_dotenv_public_key_name(key) {
+        return DotenvLine::Skip;
+    }
+    let private_key = is_dotenv_private_key_name(key);
+    match dotenv_value_without_wrapping_quotes(raw_value.trim()) {
+        Some(value) => DotenvLine::Entry {
+            key,
+            encrypted: value.starts_with(DOTENV_ENCRYPTED_VALUE_PREFIX),
+            parse_error: false,
+            private_key,
+        },
+        None => DotenvLine::Entry {
+            key,
+            encrypted: false,
+            parse_error: true,
+            private_key,
+        },
     }
 }
 
@@ -709,32 +799,22 @@ fn dotenv_encryption_state(content: &str) -> EnvFileEncryptionState {
     let mut plaintext_keys = Vec::new();
 
     for raw_line in content.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
+        match classify_dotenv_line(raw_line) {
+            DotenvLine::Skip => {}
+            // Malformed lines, unparsable values, and private-key material make
+            // the whole file untrusted: report it as plaintext.
+            DotenvLine::Malformed
+            | DotenvLine::Entry {
+                private_key: true, ..
+            }
+            | DotenvLine::Entry {
+                parse_error: true, ..
+            } => return EnvFileEncryptionState::Plaintext,
+            DotenvLine::Entry {
+                encrypted: true, ..
+            } => saw_encrypted_value = true,
+            DotenvLine::Entry { key, .. } => plaintext_keys.push(key.to_string()),
         }
-
-        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
-        let Some((raw_key, raw_value)) = line.split_once('=') else {
-            return EnvFileEncryptionState::Plaintext;
-        };
-        let key = raw_key.trim();
-        if key.is_empty() || is_dotenv_private_key_name(key) {
-            return EnvFileEncryptionState::Plaintext;
-        }
-        if is_dotenv_public_key_name(key) {
-            continue;
-        }
-
-        let Some(value) = dotenv_value_without_wrapping_quotes(raw_value.trim()) else {
-            return EnvFileEncryptionState::Plaintext;
-        };
-        if value.starts_with(DOTENV_ENCRYPTED_VALUE_PREFIX) {
-            saw_encrypted_value = true;
-            continue;
-        }
-
-        plaintext_keys.push(key.to_string());
     }
 
     match (saw_encrypted_value, plaintext_keys.is_empty()) {
@@ -1161,25 +1241,54 @@ mod tests {
     }
 
     #[test]
-    fn collect_env_status_detects_plaintext_and_mixed_env() {
+    fn collect_env_file_statuses_reports_key_names_per_file() {
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join(".env"), "API_KEY=plain\n").unwrap();
+        fs::write(dir.path().join(".env"), "API_KEY=plain\nDB_URL=postgres\n").unwrap();
         fs::write(
             dir.path().join(".env.production"),
             "DOTENV_PUBLIC_KEY=pk\nSECRET=encrypted:abc\nPLAIN=value\n",
         )
         .unwrap();
+        fs::write(
+            dir.path().join(".env.ci"),
+            "DOTENV_PUBLIC_KEY=pk\nTOKEN=encrypted:abc\n",
+        )
+        .unwrap();
         fs::write(dir.path().join(".env.example"), "DEMO=ok\n").unwrap();
+        fs::write(dir.path().join(".env.sample"), "DEMO=ok\n").unwrap();
+        fs::write(dir.path().join(".env.keys"), "PLACEHOLDER=ok\n").unwrap();
+        fs::write(dir.path().join(".env.vault"), "PLACEHOLDER=ok\n").unwrap();
 
-        let status = collect_env_status(dir.path());
-        assert!(status.has_env_files);
-        assert!(status.plaintext_env_files.iter().any(|f| f == ".env"));
-        assert!(
-            status
-                .mixed_env_files
-                .iter()
-                .any(|f| f == ".env.production")
+        let files = collect_env_file_statuses(dir.path());
+        assert_eq!(
+            files.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            vec![".env", ".env.ci", ".env.production"],
+            "sorted, templates and dotenvx metadata files excluded"
         );
+
+        let plain = &files[0];
+        assert_eq!(plain.state, EnvFileState::Plaintext);
+        assert_eq!(plain.plaintext_keys, vec!["API_KEY", "DB_URL"]);
+        assert_eq!(plain.encrypted_key_count, 0);
+
+        let encrypted = &files[1];
+        assert_eq!(encrypted.state, EnvFileState::Encrypted);
+        assert!(encrypted.plaintext_keys.is_empty());
+        assert_eq!(encrypted.encrypted_key_count, 1);
+
+        let mixed = &files[2];
+        assert_eq!(mixed.state, EnvFileState::Mixed);
+        assert_eq!(mixed.plaintext_keys, vec!["PLAIN"]);
+        assert_eq!(mixed.encrypted_key_count, 1);
+    }
+
+    #[test]
+    fn dotenv_key_summary_counts_private_key_material_as_plaintext() {
+        let (keys, encrypted) = dotenv_key_summary(
+            "DOTENV_PUBLIC_KEY=pk\nDOTENV_PRIVATE_KEY=encrypted:looks-encrypted\nTOKEN=encrypted:abc\n",
+        );
+        assert_eq!(keys, vec!["DOTENV_PRIVATE_KEY"]);
+        assert_eq!(encrypted, 1);
     }
 
     #[test]

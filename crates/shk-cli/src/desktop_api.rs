@@ -1,12 +1,12 @@
 //! Structured APIs for the desktop app (no stdout parsing).
 
-use crate::args::{AiTool, AuditReasonArg};
+use crate::args::{AiTool, AuditReasonArg, EnvEncryptArgs};
 pub use crate::commands::audit::AuditReport;
 use crate::commands::audit::{self, AuditInvocation};
 use crate::commands::skills::{SkillTool, SkillsInstallArgs};
 use crate::doctor::{
-    ClaudePermissionsStatus, CodexConfigStatus, EnvStatus, IgnoreStatus,
-    collect_claude_permissions_status, collect_codex_config_status, collect_env_status,
+    ClaudePermissionsStatus, CodexConfigStatus, EnvFileState, EnvFileStatus, IgnoreStatus,
+    collect_claude_permissions_status, collect_codex_config_status, collect_env_file_statuses,
     collect_ignore_status, fix_ignore_patterns, has_shk_pre_commit, ignore_fix_target_statuses,
 };
 use crate::hooks::{
@@ -57,6 +57,8 @@ pub struct ProjectStatus {
     pub ai_safety_applied: AiSafetyAppliedStatus,
     pub npm_hardening: NpmHardeningStatusDto,
     pub skills: Vec<SkillStatusDto>,
+    /// Per-file env encryption report — key names and counts only, never values.
+    pub env_files: Vec<EnvFileStatus>,
     pub ignore_fix_targets: Vec<IgnoreFixTargetDto>,
     pub recommended_fixes: Vec<RecommendedFixDto>,
     pub cli_installed: bool,
@@ -660,6 +662,12 @@ pub struct FixDoctorIgnoreOptions {
 pub struct ApplyRecommendedFixesOptions {
     pub fix_ids: Vec<String>,
     pub ignore_targets: Vec<String>,
+    /// Env files the env_encrypt fix should touch. `None` preserves the old
+    /// desktop behavior of selecting every eligible file; `Some` is an
+    /// explicit selection and must not be empty. Names are re-validated
+    /// against the freshly collected statuses.
+    #[serde(default)]
+    pub env_targets: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -775,7 +783,7 @@ struct ProjectCheckStatus {
     ignore: IgnoreStatus,
     claude: ClaudePermissionsStatus,
     codex: CodexConfigStatus,
-    env: EnvStatus,
+    env_files: Vec<EnvFileStatus>,
     npm: npm_hardening::NpmHardeningStatus,
     workflows: Vec<workflow_hardening::WorkflowFileStatus>,
 }
@@ -1030,6 +1038,14 @@ fn validate_recommended_fixes(
                     anyhow::bail!("workflows fix requires shk.toml");
                 }
             }
+            "env_encrypt" => {
+                if !policy_exists {
+                    anyhow::bail!("env encrypt fix requires shk.toml");
+                }
+                if options.env_targets.as_ref().is_some_and(Vec::is_empty) {
+                    anyhow::bail!("env encrypt fix requires at least one target");
+                }
+            }
             "npm_hardening" => {}
             other => anyhow::bail!("unknown recommended fix id: {other}"),
         }
@@ -1100,12 +1116,191 @@ fn apply_recommended_fix(
             }
             fix_doctor_workflows(&root.display().to_string())
         }
+        "env_encrypt" => {
+            if !policy_exists {
+                anyhow::bail!("env encrypt fix requires shk.toml");
+            }
+            encrypt_env_files_in_place(root, options.env_targets.as_deref())
+        }
         "npm_hardening" => apply_npm_hardening(
             &root.display().to_string(),
             ApplyNpmHardeningOptions { enabled: true },
         ),
         other => anyhow::bail!("unknown recommended fix id: {other}"),
     }
+}
+
+/// Encrypt plaintext/mixed env files at the project root in place.
+/// Eligibility is recomputed server-side; `requested` (client-selected file
+/// names) can only narrow that set, never extend it. Plaintext values never
+/// leave the process — the private key goes to the configured secret store
+/// and only ciphertext is written back.
+fn encrypt_env_files_in_place(root: &Path, requested: Option<&[String]>) -> Result<ActionResult> {
+    let eligible = env_encrypt_targets(&collect_env_file_statuses(root));
+    let selected = select_env_encrypt_names(eligible, requested)?;
+    let resolution = resolve_env_encrypt_target_paths(root, selected)?;
+    if resolution.targets.is_empty() && resolution.skipped.is_empty() {
+        return Ok(ActionResult {
+            success: true,
+            message: "No plaintext env files to encrypt".to_string(),
+            details: vec![],
+        });
+    }
+    let target_count = resolution.targets.len();
+    let skipped_count = resolution.skipped.len();
+    let mut details = resolution.skipped;
+    let mut encrypted = 0usize;
+    for target in &resolution.targets {
+        let result = crate::commands::env::encrypt(
+            root,
+            EnvEncryptArgs {
+                file: target.path.clone(),
+                output: None,
+                in_place: true,
+                env: target.env.clone(),
+                key: None,
+                force: false,
+                remove_source: false,
+            },
+        );
+        match result {
+            Ok(()) => {
+                encrypted += 1;
+                details.push(format!(
+                    "Encrypted {} in place with the {} environment key",
+                    target.name, target.env
+                ));
+            }
+            // Keep going: one file refusing (e.g. ciphertext under a foreign
+            // key) must not block encrypting the others.
+            Err(err) => details.push(format!("Failed to encrypt {}: {err:#}", target.name)),
+        }
+    }
+    if encrypted == 0 {
+        anyhow::bail!("failed to encrypt env files: {}", details.join("; "));
+    }
+    Ok(ActionResult {
+        success: true,
+        message: if encrypted == target_count && skipped_count == 0 {
+            format!("Encrypted {encrypted} env file(s) in place")
+        } else {
+            "Partially encrypted env files; review remaining items".to_string()
+        },
+        details,
+    })
+}
+
+/// Narrow the freshly recomputed eligible set to the client's selection.
+/// An omitted `requested` list from an older frontend means every eligible
+/// file. An explicit list can only narrow that set. A requested name outside
+/// the eligible set is a stale or forged client view — refuse rather than
+/// guess.
+fn select_env_encrypt_names(
+    eligible: Vec<String>,
+    requested: Option<&[String]>,
+) -> Result<Vec<String>> {
+    let Some(requested) = requested else {
+        return Ok(eligible);
+    };
+    anyhow::ensure!(
+        !requested.is_empty(),
+        "env encrypt fix requires at least one target"
+    );
+    for name in requested {
+        anyhow::ensure!(
+            eligible.contains(name),
+            "env file {name} is not eligible for encryption (missing, renamed, or already encrypted); refresh the project status and retry"
+        );
+    }
+    // Iterate the recomputed list, not `requested`, so ordering is stable and
+    // duplicate client entries collapse.
+    Ok(eligible
+        .into_iter()
+        .filter(|name| requested.contains(name))
+        .collect())
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct EnvEncryptTarget {
+    name: String,
+    path: PathBuf,
+    env: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct EnvEncryptResolution {
+    targets: Vec<EnvEncryptTarget>,
+    skipped: Vec<String>,
+}
+
+/// Follow dotenv's conventional file naming: `.env` and `.env.local` use the
+/// default key, `.env.<environment>` uses that environment, and
+/// `.env.<environment>.local` is the local override for the same environment.
+fn env_label_for_dotenv_name(name: &str) -> Result<String> {
+    if matches!(name, ".env" | ".env.local") {
+        return Ok("default".to_string());
+    }
+    let suffix = name
+        .strip_prefix(".env.")
+        .ok_or_else(|| anyhow::anyhow!("unsupported env file name {name}"))?;
+    let label = suffix.strip_suffix(".local").unwrap_or(suffix);
+    anyhow::ensure!(
+        !label.is_empty()
+            && label
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'),
+        "cannot infer a safe environment key from {name}; encrypt it explicitly with `shk env encrypt --env <name>`"
+    );
+    Ok(label.to_ascii_lowercase())
+}
+
+/// Resolve report names back to the exact directory entries that were
+/// inspected. Refuse ambiguous, symlinked, or unreadable targets before the
+/// first file is mutated.
+fn resolve_env_encrypt_target_paths(
+    root: &Path,
+    names: Vec<String>,
+) -> Result<EnvEncryptResolution> {
+    let entries = fs::read_dir(root)
+        .with_context(|| format!("read env file directory {}", root.display()))?
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let mut targets = Vec::with_capacity(names.len());
+    let mut skipped = Vec::new();
+    let mut seen_names = Vec::with_capacity(names.len());
+    for name in names {
+        anyhow::ensure!(
+            !seen_names.contains(&name),
+            "refusing to encrypt ambiguous env file name {name}"
+        );
+        seen_names.push(name.clone());
+        let matches = entries
+            .iter()
+            .filter(|entry| entry.file_name().to_str() == Some(name.as_str()))
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            matches.len() == 1,
+            "refusing to encrypt ambiguous env file name {name}"
+        );
+        let path = matches[0].path();
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("inspect env file {}", path.display()))?;
+        anyhow::ensure!(
+            metadata.file_type().is_file(),
+            "refusing to encrypt non-regular env file {}",
+            path.display()
+        );
+        fs::read_to_string(&path)
+            .with_context(|| format!("read env file {} before encryption", path.display()))?;
+        match env_label_for_dotenv_name(&name) {
+            Ok(label) => targets.push(EnvEncryptTarget {
+                name,
+                path,
+                env: label,
+            }),
+            Err(err) => skipped.push(format!("Skipped {name}: {err}")),
+        }
+    }
+    Ok(EnvEncryptResolution { targets, skipped })
 }
 
 pub fn fix_doctor_ignore(path: &str, options: FixDoctorIgnoreOptions) -> Result<ActionResult> {
@@ -1329,6 +1524,7 @@ fn build_project_status(root: &Path) -> ProjectStatus {
         ai_safety_applied: ai_safety_applied_from(&checks),
         npm_hardening: build_npm_status_from(&checks.npm),
         skills: build_skills_status(root),
+        env_files: checks.env_files.clone(),
         ignore_fix_targets: ignore_fix_target_statuses(root)
             .into_iter()
             .map(|entry| IgnoreFixTargetDto {
@@ -1361,10 +1557,19 @@ fn collect_project_check_status(root: &Path) -> ProjectCheckStatus {
         ignore: collect_ignore_status(root),
         claude: collect_claude_permissions_status(root),
         codex: collect_codex_config_status(root),
-        env: collect_env_status(root),
+        env_files: collect_env_file_statuses(root),
         npm: npm_hardening::status(root),
         workflows: workflow_hardening::scan_workflows(root),
     }
+}
+
+/// Env files the in-place encrypt fix would touch (anything not fully encrypted).
+fn env_encrypt_targets(files: &[EnvFileStatus]) -> Vec<String> {
+    files
+        .iter()
+        .filter(|file| file.state != EnvFileState::Encrypted)
+        .map(|file| file.name.clone())
+        .collect()
 }
 
 fn has_all_managed_ai_hooks(root: &Path) -> bool {
@@ -1504,6 +1709,21 @@ fn build_recommended_fixes(
             default_selected: true,
         });
     }
+    let env_targets = env_encrypt_targets(&checks.env_files);
+    if policy_exists && !env_targets.is_empty() {
+        fixes.push(RecommendedFixDto {
+            id: "env_encrypt".into(),
+            severity: "warn".into(),
+            message: format!(
+                "Encrypt {} env file(s) in place with file-name-derived environment keys",
+                env_targets.len()
+            ),
+            requires_policy: true,
+            // Opt-in: encrypting .env changes the local dev workflow
+            // (values must be read via `shk env run` / dotenvx afterwards).
+            default_selected: false,
+        });
+    }
     if npm_hardening_desktop_applicable(&checks.npm) && !npm_hardening_settings_ok(&checks.npm) {
         fixes.push(RecommendedFixDto {
             id: "npm_hardening".into(),
@@ -1570,19 +1790,23 @@ fn build_doctor_status_from(checks: &ProjectCheckStatus) -> DoctorStatus {
             message: "Codex config needs sandbox or hook hardening".into(),
         });
     }
-    for file in &checks.env.plaintext_env_files {
-        issues.push(DoctorIssue {
-            id: format!("env:{file}"),
-            severity: "warn".into(),
-            message: format!("Plaintext env file detected: {file}"),
-        });
-    }
-    for file in &checks.env.mixed_env_files {
-        issues.push(DoctorIssue {
-            id: format!("env_mixed:{file}"),
-            severity: "warn".into(),
-            message: format!("Encrypted env file contains plaintext values: {file}"),
-        });
+    for file in &checks.env_files {
+        match file.state {
+            EnvFileState::Encrypted => {}
+            EnvFileState::Plaintext => issues.push(DoctorIssue {
+                id: format!("env:{}", file.name),
+                severity: "warn".into(),
+                message: format!("Plaintext env file detected: {}", file.name),
+            }),
+            EnvFileState::Mixed => issues.push(DoctorIssue {
+                id: format!("env_mixed:{}", file.name),
+                severity: "warn".into(),
+                message: format!(
+                    "Encrypted env file contains plaintext values: {}",
+                    file.name
+                ),
+            }),
+        }
     }
     for rec in npm_auto_recommendations(&checks.npm) {
         issues.push(DoctorIssue {
@@ -1620,8 +1844,8 @@ fn build_doctor_status_from(checks: &ProjectCheckStatus) -> DoctorStatus {
         claude_deny_ok: !checks.claude.settings_exists || checks.claude.deny_ok,
         claude_sandbox_ok: !checks.claude.settings_exists || checks.claude.sandbox_ok,
         codex_config_ok,
-        env_applicable: checks.env.has_env_files,
-        env_ok: checks.env.plaintext_env_files.is_empty() && checks.env.mixed_env_files.is_empty(),
+        env_applicable: !checks.env_files.is_empty(),
+        env_ok: env_encrypt_targets(&checks.env_files).is_empty(),
         npm_ok: npm_doctor_ok(&checks.npm),
         workflows_applicable: !checks.workflows.is_empty(),
         workflows_ok: checks.workflows.iter().all(|s| s.ok()),
@@ -2159,6 +2383,279 @@ mod tests {
     }
 
     #[test]
+    fn project_status_reports_env_files_without_values() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(".env"),
+            "API_KEY=placeholder\nDB_URL=localhost\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join(".env.production"),
+            "DOTENV_PUBLIC_KEY=pub\nTOKEN=encrypted:ciphertext\n",
+        )
+        .unwrap();
+
+        let status = build_project_status(dir.path());
+        assert_eq!(status.env_files.len(), 2);
+
+        let plain = &status.env_files[0];
+        assert_eq!(plain.name, ".env");
+        assert_eq!(plain.state, EnvFileState::Plaintext);
+        assert_eq!(plain.plaintext_keys, vec!["API_KEY", "DB_URL"]);
+
+        let encrypted = &status.env_files[1];
+        assert_eq!(encrypted.name, ".env.production");
+        assert_eq!(encrypted.state, EnvFileState::Encrypted);
+        assert!(encrypted.plaintext_keys.is_empty());
+        assert_eq!(encrypted.encrypted_key_count, 1);
+
+        let serialized = serde_json::to_string(&status.env_files).unwrap();
+        assert!(
+            !serialized.contains("placeholder") && !serialized.contains("localhost"),
+            "env file reports must never carry values: {serialized}"
+        );
+        // Wire format contract with the desktop frontend.
+        assert!(
+            serialized.contains(r#""state":"plaintext""#),
+            "{serialized}"
+        );
+        assert!(
+            serialized.contains(r#""state":"encrypted""#),
+            "{serialized}"
+        );
+        assert!(serialized.contains(r#""plaintextKeys""#), "{serialized}");
+        assert!(
+            serialized.contains(r#""encryptedKeyCount""#),
+            "{serialized}"
+        );
+    }
+
+    #[test]
+    fn recommended_fixes_offer_opt_in_env_encrypt() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "\n").unwrap();
+        fs::write(dir.path().join(".env"), "API_KEY=plain\n").unwrap();
+
+        let checks = collect_project_check_status(dir.path());
+        let fixes = build_recommended_fixes(&checks, true, false);
+        let env_fix = fixes
+            .iter()
+            .find(|fix| fix.id == "env_encrypt")
+            .expect("env_encrypt fix offered");
+        assert!(env_fix.requires_policy);
+        assert!(
+            !env_fix.default_selected,
+            "in-place encryption must stay opt-in"
+        );
+
+        // Without a policy the fix is not offered and apply is rejected.
+        let no_policy_fixes = build_recommended_fixes(&checks, false, false);
+        assert!(no_policy_fixes.iter().all(|fix| fix.id != "env_encrypt"));
+        let err = validate_recommended_fixes(
+            &ApplyRecommendedFixesOptions {
+                fix_ids: vec!["env_encrypt".into()],
+                ignore_targets: vec![],
+                env_targets: Some(vec![]),
+            },
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("requires shk.toml"));
+    }
+
+    #[test]
+    fn env_encrypt_selection_distinguishes_legacy_and_explicit_empty_payloads() {
+        let legacy: ApplyRecommendedFixesOptions = serde_json::from_value(serde_json::json!({
+            "fixIds": ["env_encrypt"],
+            "ignoreTargets": []
+        }))
+        .unwrap();
+        assert_eq!(legacy.env_targets, None);
+
+        let explicit: ApplyRecommendedFixesOptions = serde_json::from_value(serde_json::json!({
+            "fixIds": ["env_encrypt"],
+            "ignoreTargets": [],
+            "envTargets": []
+        }))
+        .unwrap();
+        assert_eq!(explicit.env_targets, Some(vec![]));
+
+        let err = validate_recommended_fixes(&explicit, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("requires at least one target"), "{err}");
+    }
+
+    #[test]
+    fn recommended_fixes_skip_env_encrypt_when_fully_encrypted() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "\n").unwrap();
+        fs::write(
+            dir.path().join(".env"),
+            "DOTENV_PUBLIC_KEY=pub\nTOKEN=encrypted:ciphertext\n",
+        )
+        .unwrap();
+
+        let checks = collect_project_check_status(dir.path());
+        let fixes = build_recommended_fixes(&checks, true, false);
+        assert!(fixes.iter().all(|fix| fix.id != "env_encrypt"));
+    }
+
+    #[test]
+    fn env_encrypt_infers_conventional_environment_names() {
+        assert_eq!(env_label_for_dotenv_name(".env").unwrap(), "default");
+        assert_eq!(env_label_for_dotenv_name(".env.local").unwrap(), "default");
+        assert_eq!(
+            env_label_for_dotenv_name(".env.production").unwrap(),
+            "production"
+        );
+        assert_eq!(
+            env_label_for_dotenv_name(".env.production.local").unwrap(),
+            "production"
+        );
+        assert!(env_label_for_dotenv_name(".env.production.eu").is_err());
+    }
+
+    #[test]
+    fn env_encrypt_skips_uninferrable_names_without_blocking_valid_targets() {
+        let project = tempfile::tempdir().unwrap();
+        fs::write(project.path().join(".env"), "API_KEY=plain\n").unwrap();
+        fs::write(project.path().join(".env.pre-prod"), "API_KEY=plain\n").unwrap();
+
+        let names = env_encrypt_targets(&collect_env_file_statuses(project.path()));
+        let resolution = resolve_env_encrypt_target_paths(project.path(), names).unwrap();
+
+        assert_eq!(resolution.targets.len(), 1);
+        assert_eq!(resolution.targets[0].name, ".env");
+        assert_eq!(resolution.targets[0].env, "default");
+        assert_eq!(resolution.skipped.len(), 1);
+        assert!(resolution.skipped[0].contains("Skipped .env.pre-prod"));
+        assert!(resolution.skipped[0].contains("shk env encrypt --env <name>"));
+    }
+
+    #[test]
+    fn env_encrypt_fails_when_every_plaintext_file_requires_manual_selection() {
+        let project = tempfile::tempdir().unwrap();
+        fs::write(project.path().join(".env.backup.2024"), "API_KEY=plain\n").unwrap();
+
+        let err = encrypt_env_files_in_place(project.path(), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Skipped .env.backup.2024"), "{err}");
+        assert!(err.contains("shk env encrypt --env <name>"), "{err}");
+    }
+
+    #[test]
+    fn select_env_encrypt_names_defaults_to_every_eligible_file_when_omitted() {
+        let eligible = vec![".env".to_string(), ".env.production".to_string()];
+        assert_eq!(
+            select_env_encrypt_names(eligible.clone(), None).unwrap(),
+            eligible
+        );
+    }
+
+    #[test]
+    fn select_env_encrypt_names_rejects_an_explicit_empty_selection() {
+        let eligible = vec![".env".to_string()];
+        let err = select_env_encrypt_names(eligible, Some(&[]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("requires at least one target"), "{err}");
+    }
+
+    #[test]
+    fn select_env_encrypt_names_narrows_dedupes_and_keeps_server_order() {
+        let eligible = vec![
+            ".env".to_string(),
+            ".env.ci".to_string(),
+            ".env.production".to_string(),
+        ];
+        let requested = vec![
+            ".env.production".to_string(),
+            ".env".to_string(),
+            ".env".to_string(),
+        ];
+        assert_eq!(
+            select_env_encrypt_names(eligible, Some(&requested)).unwrap(),
+            vec![".env".to_string(), ".env.production".to_string()]
+        );
+    }
+
+    #[test]
+    fn select_env_encrypt_names_rejects_ineligible_requests() {
+        let eligible = vec![".env".to_string()];
+        for stale in [".env.production", ".env.example", "../.env", ".env\u{ff}"] {
+            let requested = [stale.to_string()];
+            let err = select_env_encrypt_names(eligible.clone(), Some(&requested))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("not eligible for encryption"),
+                "{stale}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn env_encrypt_fix_rejects_stale_client_selection() {
+        let project = tempfile::tempdir().unwrap();
+        fs::write(project.path().join(".env"), "API_KEY=plain\n").unwrap();
+
+        let requested = [".env.production".to_string()];
+        let err = encrypt_env_files_in_place(project.path(), Some(&requested))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not eligible for encryption"), "{err}");
+        assert_eq!(
+            fs::read_to_string(project.path().join(".env")).unwrap(),
+            "API_KEY=plain\n",
+            "nothing may be encrypted when the selection is stale"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn env_encrypt_fix_refuses_symlinked_files_before_writing() {
+        use std::os::unix::fs::symlink;
+
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let source = outside.path().join("shared.env");
+        fs::write(&source, "API_KEY=plain\n").unwrap();
+        symlink(&source, project.path().join(".env")).unwrap();
+
+        let err = encrypt_env_files_in_place(project.path(), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("non-regular env file"), "{err}");
+        assert_eq!(fs::read_to_string(&source).unwrap(), "API_KEY=plain\n");
+        assert!(project.path().join(".env").is_symlink());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn env_encrypt_fix_refuses_lossy_filename_collisions() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let project = tempfile::tempdir().unwrap();
+        let non_utf8 = OsString::from_vec(b".env.\xff".to_vec());
+        fs::write(project.path().join(non_utf8), "FIRST=plain\n").unwrap();
+        fs::write(project.path().join(".env.�"), "SECOND=plain\n").unwrap();
+
+        let names = env_encrypt_targets(&collect_env_file_statuses(project.path()));
+        let err = resolve_env_encrypt_target_paths(project.path(), names)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ambiguous env file name"), "{err}");
+        assert_eq!(
+            fs::read_to_string(project.path().join(".env.�")).unwrap(),
+            "SECOND=plain\n"
+        );
+    }
+
+    #[test]
     fn doctor_status_skips_env_check_when_no_env_files() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("README.md"), "demo\n").unwrap();
@@ -2388,6 +2885,7 @@ mod tests {
             ApplyRecommendedFixesOptions {
                 fix_ids: vec!["npm_hardening".to_string(), "ignore".to_string()],
                 ignore_targets: vec![],
+                env_targets: None,
             },
         )
         .unwrap_err();
@@ -2580,6 +3078,7 @@ mod tests {
             ApplyRecommendedFixesOptions {
                 fix_ids: vec!["ai_claude_deny".to_string()],
                 ignore_targets: vec![],
+                env_targets: None,
             },
         )
         .unwrap();
@@ -2615,6 +3114,7 @@ mod tests {
             ApplyRecommendedFixesOptions {
                 fix_ids: vec!["ai_claude_deny".to_string()],
                 ignore_targets: vec![],
+                env_targets: None,
             },
         )
         .unwrap();

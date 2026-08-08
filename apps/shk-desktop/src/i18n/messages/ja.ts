@@ -329,6 +329,7 @@ export const ja: Messages = {
         ignore: "機密ファイルの除外",
         git: "コミット前チェック",
         ai: "AIエディターの安全設定",
+        env: "env ファイルの暗号化",
         npm: "npmの安全設定",
         skills: "エージェントスキル（任意）",
       },
@@ -348,6 +349,7 @@ export const ja: Messages = {
       npmAlreadyOk: "自動で適用できる npm の安全設定はすでに設定済みです。",
       npmNoChanges: "チェック内容が現在の設定と一致しています。",
       selectIgnoreTarget: "適用先を1つ以上選んでください。",
+      selectEnvTarget: "暗号化する env ファイルを1つ以上選んでください。",
       selectAiSetting: "適用する AI 設定を1つ以上選んでください。",
     },
     policy: {
@@ -405,6 +407,7 @@ export const ja: Messages = {
         "未設定・要確認の項目をまとめて直す一括適用です。チェックを外した項目は今回の適用対象から外れます。",
       applySelected: "選択した推奨修正をまとめて適用",
       ignoreTargetsLabel: "ignore の適用先",
+      envTargetsLabel: "暗号化する env ファイル",
       available: "{{count}} 件の推奨修正",
       selectionHint:
         "ここは推奨修正の適用対象リストです。下の各設定カードは個別の状態確認と単独適用に使います。",
@@ -419,6 +422,7 @@ export const ja: Messages = {
         ai_codex_sandbox: "Codex サンドボックス設定",
         workflows: "GitHub Actions checkout の堅牢化",
         npm_hardening: "npm サプライチェーン対策",
+        env_encrypt: "平文 .env ファイルを環境別の鍵で暗号化",
       },
     },
     aiHooks: {
@@ -492,6 +496,17 @@ export const ja: Messages = {
       env: "env ファイル",
       workflows: "ワークフロー checkout",
       npm: "npm 対策",
+      envFiles: {
+        title: "env ファイル",
+        states: {
+          plaintext: "平文",
+          mixed: "一部平文あり",
+          encrypted: "暗号化済み",
+        },
+        plaintextKeys: "平文のキー:",
+        encryptedCount: "暗号化済み {{count}} 件",
+        moreKeys: "ほか {{count}} 件",
+      },
     },
     action: {
       failed: "操作に失敗しました",
@@ -515,6 +530,10 @@ export const ja: Messages = {
         "No changes were required for the selected fixes": "変更は不要でした（すでに設定済み）",
         "Required ignore patterns are already present": "除外パターンはすでに揃っています",
         Appended: "除外パターンを追記しました",
+        Encrypted: "env ファイルをその場で暗号化しました",
+        "Partially encrypted env files; review remaining items":
+          "一部の env ファイルのみ暗号化しました（残りを確認してください）",
+        "No plaintext env files to encrypt": "暗号化が必要な env ファイルはありません",
       },
       resultDetails: {},
     },

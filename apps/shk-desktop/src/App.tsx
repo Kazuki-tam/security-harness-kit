@@ -339,7 +339,7 @@ function App() {
 
   const setupHandlers = activeProject
     ? {
-        onQuickSetup: (fixIds: string[], ignoreTargets: string[]) =>
+        onQuickSetup: (fixIds: string[], ignoreTargets: string[], envTargets: string[]) =>
           runSetupAction(async (): Promise<ActionResult> => {
             const path = activeProject.path;
             let status = await fetchProjectStatus(path);
@@ -360,7 +360,7 @@ function App() {
                 details: [],
               };
             }
-            return applyRecommendedFixes(path, { fixIds: ids, ignoreTargets });
+            return applyRecommendedFixes(path, { fixIds: ids, ignoreTargets, envTargets });
           }),
         onInitPolicy: (request: { strict: boolean; force: boolean }) =>
           runSetupAction(() => initPolicy(activeProject.path, request)),

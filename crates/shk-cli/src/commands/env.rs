@@ -114,6 +114,7 @@ pub fn dotenvx_import_keys(cwd: &Path, file: &Path) -> Result<()> {
 }
 
 pub fn encrypt(cwd: &Path, args: EnvEncryptArgs) -> Result<()> {
+    ensure_regular_env_encrypt_input(&args.file)?;
     let (_project_root, project, stores) = load_env_context(cwd)?;
     let private_key_name = env_key_name(args.key.as_ref(), &args.env)?;
     let public_key_name = private_to_public_key_name(&private_key_name);
@@ -1337,6 +1338,17 @@ fn env_encrypt_output_path(args: &EnvEncryptArgs) -> Result<&Path> {
         .ok_or_else(|| anyhow!("--output or --in-place is required for `shk env encrypt`"))
 }
 
+fn ensure_regular_env_encrypt_input(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspect env input {}", path.display()))?;
+    ensure!(
+        metadata.file_type().is_file(),
+        "refusing to encrypt non-regular env file {}",
+        path.display()
+    );
+    Ok(())
+}
+
 fn private_to_public_key_name(private_key_name: &str) -> String {
     if private_key_name == PRIVATE_KEY_PREFIX {
         DOTENV_PUBLIC_KEY_PREFIX.to_string()
@@ -1473,6 +1485,9 @@ fn encrypt_dotenv_body(body: &str, public_key_name: &str, public_key: &str) -> R
     let mut out = Vec::new();
     // Keep the managed marker at the top, before preserving original comments or blank lines.
     push_shk_public_key_header(&mut out, public_key_name, public_key);
+    let mut existing_public_key_differs = false;
+    let mut saw_public_key = false;
+    let mut saw_encrypted_value = false;
 
     for raw_line in body.lines() {
         let line = raw_line.trim_start();
@@ -1490,15 +1505,19 @@ fn encrypt_dotenv_body(body: &str, public_key_name: &str, public_key: &str) -> R
                 "refusing to encrypt dotenv file containing {key}; store private keys outside the env file"
             );
         }
-        if key == public_key_name {
-            continue;
-        }
         if is_dotenvx_public_key_name(key) {
+            saw_public_key = true;
+            let existing = parse_env_value(raw_value)
+                .with_context(|| format!("parse existing {key} while encrypting dotenv"))?;
+            if key != public_key_name || existing != public_key {
+                existing_public_key_differs = true;
+            }
             continue;
         }
         let value = parse_env_value(raw_value)
             .with_context(|| format!("parse {key} while encrypting dotenv"))?;
         if value.starts_with(DOTENV_ENCRYPTED_PREFIX) {
+            saw_encrypted_value = true;
             out.push(format!("{key}=\"{value}\""));
             continue;
         }
@@ -1510,6 +1529,23 @@ fn encrypt_dotenv_body(body: &str, public_key_name: &str, public_key: &str) -> R
             format!("{DOTENV_ENCRYPTED_PREFIX}{encrypted}")
         };
         out.push(format!("{key}=\"{encrypted_value}\""));
+    }
+    // Re-encrypting a file whose existing ciphertext was produced under a
+    // different public key would rewrite the header while keeping values that
+    // the stored private key cannot decrypt. Refuse instead of producing an
+    // undecryptable file. (A stale header over all-plaintext values is fine.)
+    if saw_encrypted_value && !saw_public_key {
+        bail!(
+            "refusing to encrypt: file contains encrypted values but no DOTENV_PUBLIC_KEY* header; \
+             restore the matching public-key header or decrypt the file with its original key first"
+        );
+    }
+    if existing_public_key_differs && saw_encrypted_value {
+        bail!(
+            "refusing to encrypt: file already contains values encrypted for a different {public_key_name}; \
+             import the matching private key (`shk env key import` / `shk env dotenvx import-keys`) \
+             or decrypt the file with its original key first"
+        );
     }
     Ok(format!("{}\n", out.join("\n")))
 }
@@ -2257,6 +2293,89 @@ mod tests {
             "{encrypted_again}"
         );
         assert!(encrypted_again.contains("API_KEY=\"encrypted:already\""));
+    }
+
+    #[test]
+    fn encrypt_rejects_ciphertext_from_a_different_public_key() {
+        let keypair = Keypair::generate();
+        let other = Keypair::generate();
+        let body = format!(
+            "DOTENV_PUBLIC_KEY=\"{}\"\nAPI_KEY=\"encrypted:made-with-other-key\"\nNEW_KEY=plain\n",
+            other.public_key(),
+        );
+
+        let err = encrypt_dotenv_body(&body, "DOTENV_PUBLIC_KEY", &keypair.public_key())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("different DOTENV_PUBLIC_KEY"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn encrypt_rejects_ciphertext_with_a_different_public_key_name() {
+        let keypair = Keypair::generate();
+        let body = format!(
+            "DOTENV_PUBLIC_KEY_PRODUCTION=\"{}\"\nAPI_KEY=\"encrypted:made-for-production\"\nNEW_KEY=plain\n",
+            keypair.public_key(),
+        );
+
+        let err = encrypt_dotenv_body(&body, "DOTENV_PUBLIC_KEY", &keypair.public_key())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("different DOTENV_PUBLIC_KEY"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn encrypt_rejects_ciphertext_without_a_public_key_header() {
+        let keypair = Keypair::generate();
+        let err = encrypt_dotenv_body(
+            "TOKEN=\"encrypted:ciphertext\"\nNEW_KEY=plain\n",
+            "DOTENV_PUBLIC_KEY",
+            &keypair.public_key(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no DOTENV_PUBLIC_KEY"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn encrypt_rejects_symlinked_input() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.env");
+        let link = dir.path().join(".env");
+        std::fs::write(&source, "API_KEY=plain\n").unwrap();
+        symlink(&source, &link).unwrap();
+
+        let err = ensure_regular_env_encrypt_input(&link)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("non-regular env file"), "{err}");
+    }
+
+    #[test]
+    fn encrypt_allows_stale_public_key_header_over_plaintext_values() {
+        let keypair = Keypair::generate();
+        let other = Keypair::generate();
+        let body = format!(
+            "DOTENV_PUBLIC_KEY=\"{}\"\nAPI_KEY=plain\n",
+            other.public_key(),
+        );
+
+        let encrypted =
+            encrypt_dotenv_body(&body, "DOTENV_PUBLIC_KEY", &keypair.public_key()).unwrap();
+        assert!(
+            encrypted.contains(&format!("DOTENV_PUBLIC_KEY=\"{}\"", keypair.public_key())),
+            "{encrypted}"
+        );
+        assert!(encrypted.contains("API_KEY=\"encrypted:"), "{encrypted}");
     }
 
     #[test]
