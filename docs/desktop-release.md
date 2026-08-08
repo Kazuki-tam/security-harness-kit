@@ -84,6 +84,24 @@ runner's certificate store:
 The thumbprint may include spaces or colons; release scripts normalize it before
 passing it to Tauri. Invalid thumbprints fail before bundling starts.
 
+### Releasing without Windows Authenticode signing
+
+When macOS signing is configured but Windows Authenticode signing is not yet
+available, a signed release can explicitly opt in to shipping an **unsigned**
+Windows NSIS installer by setting the repository variable
+`SHK_ALLOW_UNSIGNED_WINDOWS=true`.
+
+The opt-in is deliberately narrow:
+
+- It only applies when **no** Windows signing mode is configured. An invalid or
+  mixed Windows signing configuration still fails the release.
+- Signature verification still runs; it accepts `NotSigned` artifacts only
+  under the opt-in and still rejects broken or tampered signatures.
+- macOS Developer ID signing and notarization remain required.
+
+Remove the variable once Authenticode signing is configured so future releases
+fail loudly instead of silently shipping unsigned Windows installers.
+
 ## Release Gates
 
 The unsigned workflow fails if updater signing secrets are missing and verifies
