@@ -8,7 +8,8 @@ if [[ ! -d "$artifacts_dir" ]]; then
   exit 1
 fi
 
-shopt -s nullglob globstar
+# macOS ships bash 3.2, which has no globstar; keep this script 3.2-compatible.
+shopt -s nullglob
 dmg_files=( "${artifacts_dir}"/*.dmg )
 app_archives=( "${artifacts_dir}"/*.app.tar.gz )
 
@@ -46,11 +47,10 @@ for archive in "${app_archives[@]}"; do
   tar -xzf "$archive" -C "$archive_dir"
 
   app_count=0
-  apps=( "$archive_dir"/**/*.app )
-  for app in "${apps[@]}"; do
+  while IFS= read -r -d '' app; do
     verify_app "$app"
     app_count=$((app_count + 1))
-  done
+  done < <(find "$archive_dir" -type d -name "*.app" -print0)
 
   if ((app_count == 0)); then
     echo "no .app bundle found in $(basename "$archive")" >&2
