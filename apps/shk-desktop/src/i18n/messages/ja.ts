@@ -462,6 +462,17 @@ export const ja: Messages = {
       cliNotFoundBody:
         "スキャンフックは「AI エディターが操作を実行する前に shk が自動で検査する」仕組みです。ただし、この機能が動くには shk コマンドをパソコンに別途インストールする必要があります。デスクトップアプリだけでは自動検査は行えません。リアルタイム保護を有効にするには、shk コマンドラインツールをインストールしてください。",
     },
+    envEncrypt: {
+      title: "env ファイルの暗号化",
+      description:
+        "平文の env ファイルを環境別の鍵でその場で暗号化し、シークレットが平文のままディスクに残らないようにします。",
+      encryptSelected: "選択した env ファイルを暗号化",
+      policyRequired: "ポリシー作成後に利用できます",
+      targetsLabel: "暗号化する env ファイル",
+      workflowNote:
+        "暗号化すると、ファイルから値を直接読めなくなります。以後は shk env run（dotenvx 互換）経由で復号して利用してください。秘密鍵はプロジェクト内ではなく、設定されたシークレットストアに保存されます。",
+      allEncrypted: "すべての env ファイルは暗号化済みです。",
+    },
     npm: {
       title: "npm の安全設定",
       description:

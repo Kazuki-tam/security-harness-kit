@@ -363,6 +363,15 @@ export type Messages = {
       cliNotFoundTitle: string;
       cliNotFoundBody: string;
     };
+    envEncrypt: {
+      title: string;
+      description: string;
+      encryptSelected: string;
+      policyRequired: string;
+      targetsLabel: string;
+      workflowNote: string;
+      allEncrypted: string;
+    };
     npm: {
       title: string;
       description: string;

@@ -1,5 +1,6 @@
 import { AlertTriangle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { useEnvTargetSelection } from "../hooks/useEnvTargetSelection";
 import { useI18n } from "../i18n";
 import {
   aiHookSelectionFromStatus,
@@ -35,6 +36,7 @@ export function ProjectSetupPanel({
   onFixDoctorIgnore,
   onInstallPreCommit,
   onInstallAiHooks,
+  onEncryptEnv,
   onApplyNpmHardening,
   onInstallSkills,
 }: Props) {
@@ -49,6 +51,14 @@ export function ProjectSetupPanel({
   const projectSkills = projectSkillStatuses(status);
   const skillsInstalled = projectSkillsInstalled(status);
   const pendingQuickSetup = countPendingQuickSetup(status);
+
+  const {
+    eligibleTargets: eligibleEnvTargets,
+    selectedTargets: selectedEnvTargets,
+    toggleTarget: toggleEnvTarget,
+  } = useEnvTargetSelection(status);
+  const envApplicable = status.envFiles.length > 0;
+  const envReady = eligibleEnvTargets.length === 0;
 
   const [selectedIgnoreTargets, setSelectedIgnoreTargets] =
     useState<string[]>(DEFAULT_IGNORE_TARGETS);
@@ -144,6 +154,8 @@ export function ProjectSetupPanel({
   const gitDisabled = running || !policyExists || !status.hooks.preCommit.isGitRepo || gitReady;
   const ignoreDisabled =
     running || !policyExists || ignoreReady || selectedIgnoreTargets.length === 0;
+  const envEncryptDisabled =
+    running || !policyExists || envReady || selectedEnvTargets.length === 0;
   const npmSelectionChanged = npmHardeningEnabled !== npmSettingsOk;
   const npmPrimaryDisabled = running || !npmSelectionChanged;
   const npmStatusLabel = npmSelectionChanged
@@ -413,6 +425,78 @@ export function ProjectSetupPanel({
               />
             </ul>
           </SetupActionCard>
+
+          {envApplicable && (
+            <SetupActionCard
+              title={m.envEncrypt.title}
+              description={m.envEncrypt.description}
+              statusLabel={
+                !policyExists
+                  ? m.envEncrypt.policyRequired
+                  : envReady
+                    ? m.statusReady
+                    : m.statusNeedsAttention
+              }
+              statusTone={!policyExists ? "neutral" : envReady ? "ok" : "warn"}
+              primaryLabel={m.envEncrypt.encryptSelected}
+              onPrimary={() => onEncryptEnv(selectedEnvTargets)}
+              primaryLoading={running}
+              primaryDisabled={envEncryptDisabled}
+              primaryDisabledReason={
+                !policyExists
+                  ? m.hints.policyFirst
+                  : envReady
+                    ? m.envEncrypt.allEncrypted
+                    : selectedEnvTargets.length === 0
+                      ? m.hints.selectEnvTarget
+                      : undefined
+              }
+            >
+              <p className="mb-2 text-[11px] font-medium text-text">{m.envEncrypt.targetsLabel}</p>
+              <ul className="mb-3 grid gap-1.5">
+                {status.envFiles.map((file, index) => {
+                  const stateLabel = m.doctor.envFiles.states[file.state];
+                  if (file.state === "encrypted") {
+                    return (
+                      <li
+                        key={`${file.name}:${index}`}
+                        className="flex items-center justify-between rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-[11px]"
+                      >
+                        <code className="font-medium text-text">{file.name}</code>
+                        <span className="text-emerald-300">{stateLabel}</span>
+                      </li>
+                    );
+                  }
+                  const checked = selectedEnvTargets.includes(file.name);
+                  return (
+                    <li key={`${file.name}:${index}`}>
+                      <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-border bg-surface-3/50 px-3 py-2 text-[11px] text-muted">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5"
+                          checked={checked}
+                          disabled={running || !policyExists}
+                          onChange={() => toggleEnvTarget(file.name)}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <code className="block font-medium text-text">{file.name}</code>
+                          <span className="text-[10px] text-faint">{stateLabel}</span>
+                        </span>
+                      </label>
+                    </li>
+                  );
+                })}
+              </ul>
+              <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[11px] text-amber-100">
+                <AlertTriangle
+                  size={14}
+                  aria-hidden="true"
+                  className="mt-0.5 shrink-0 text-amber-300"
+                />
+                <p>{m.envEncrypt.workflowNote}</p>
+              </div>
+            </SetupActionCard>
+          )}
 
           {hasNpmProjects && (
             <SetupActionCard

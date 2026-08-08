@@ -467,6 +467,17 @@ export const en: Messages = {
       cliNotFoundBody:
         "Scan hooks work by telling your AI editor to run a security check before each action. For this to work, the shk command must be installed separately on your computer — the desktop app alone cannot perform these checks. Install the shk command line tool to activate real-time protection.",
     },
+    envEncrypt: {
+      title: "Env file encryption",
+      description:
+        "Encrypt plaintext env files in place with per-environment keys so secrets are not left readable on disk.",
+      encryptSelected: "Encrypt selected env files",
+      policyRequired: "Create a policy first",
+      targetsLabel: "Env files to encrypt",
+      workflowNote:
+        "After encryption, values can no longer be read directly from the file. Run commands through shk env run (dotenvx-compatible) to load them. Private keys are stored in the configured secret store, not in the project.",
+      allEncrypted: "All env files are already encrypted.",
+    },
     npm: {
       title: "npm safety settings",
       description:

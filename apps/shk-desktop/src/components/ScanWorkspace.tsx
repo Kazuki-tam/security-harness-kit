@@ -294,6 +294,7 @@ export function ScanWorkspace({
                   onFixDoctorIgnore={setupHandlers.onFixDoctorIgnore}
                   onInstallPreCommit={setupHandlers.onInstallPreCommit}
                   onInstallAiHooks={setupHandlers.onInstallAiHooks}
+                  onEncryptEnv={setupHandlers.onEncryptEnv}
                   onApplyNpmHardening={setupHandlers.onApplyNpmHardening}
                   onInstallSkills={setupHandlers.onInstallSkills}
                 />
