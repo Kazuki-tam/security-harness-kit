@@ -369,6 +369,14 @@ function App() {
         onInstallPreCommit: () => runSetupAction(() => installPreCommitHook(activeProject.path)),
         onInstallAiHooks: (selection: AiHookSetupSelection) =>
           runSetupAction(() => applyAiHookSettings(activeProject.path, selection)),
+        onEncryptEnv: (targets: string[]) =>
+          runSetupAction(() =>
+            applyRecommendedFixes(activeProject.path, {
+              fixIds: ["env_encrypt"],
+              ignoreTargets: [],
+              envTargets: targets,
+            }),
+          ),
         onApplyNpmHardening: (enabled: boolean) =>
           runSetupAction(() => applyNpmHardening(activeProject.path, { enabled })),
         onInstallSkills: () =>

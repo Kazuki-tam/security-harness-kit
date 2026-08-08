@@ -182,6 +182,7 @@ export type SetupHandlers = {
   onFixDoctorIgnore: (targets: string[]) => void;
   onInstallPreCommit: () => void;
   onInstallAiHooks: (selection: AiHookSetupSelection) => void;
+  onEncryptEnv: (targets: string[]) => void;
   onApplyNpmHardening: (enabled: boolean) => void;
   onInstallSkills: () => void;
 };

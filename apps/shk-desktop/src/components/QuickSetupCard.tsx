@@ -1,11 +1,11 @@
 import { CheckCircle2, ChevronDown, ChevronUp } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useEnvTargetSelection } from "../hooks/useEnvTargetSelection";
 import { useI18n } from "../i18n";
 import {
   buildQuickSetupSteps,
   defaultQuickSetupIgnoreTargets,
   defaultRecommendedFixIds,
-  envEncryptTargets,
   quickSetupCanApply,
 } from "../setup/plan";
 import type { ProjectStatus } from "../types";
@@ -34,14 +34,17 @@ export function QuickSetupCard({ status, running, onQuickSetup, onOpenAdvanced }
     [status, policyExists],
   );
 
-  const eligibleEnvTargets = useMemo(() => envEncryptTargets(status), [status]);
+  const {
+    eligibleTargets: eligibleEnvTargets,
+    selectedTargets: selectedEnvTargets,
+    toggleTarget: toggleEnvTarget,
+  } = useEnvTargetSelection(status);
 
   const [customizeOpen, setCustomizeOpen] = useState(false);
   const [selectedFixIds, setSelectedFixIds] = useState<string[]>(defaultSelected);
   const [selectedIgnoreTargets, setSelectedIgnoreTargets] = useState<string[]>(
     defaultQuickSetupIgnoreTargets(),
   );
-  const [selectedEnvTargets, setSelectedEnvTargets] = useState<string[]>(eligibleEnvTargets);
   const projectPathRef = useRef(status.path);
 
   useEffect(() => {
@@ -49,15 +52,8 @@ export function QuickSetupCard({ status, running, onQuickSetup, onOpenAdvanced }
       projectPathRef.current = status.path;
       setSelectedFixIds(defaultSelected);
       setSelectedIgnoreTargets(defaultQuickSetupIgnoreTargets());
-      setSelectedEnvTargets(eligibleEnvTargets);
     }
-  }, [status.path, defaultSelected, eligibleEnvTargets]);
-
-  // Drop selections for files that were encrypted or removed since the last
-  // status refresh; deliberately never re-add files the user unchecked.
-  useEffect(() => {
-    setSelectedEnvTargets((prev) => prev.filter((name) => eligibleEnvTargets.includes(name)));
-  }, [eligibleEnvTargets]);
+  }, [status.path, defaultSelected]);
 
   useEffect(() => {
     setSelectedFixIds((prev) => {
@@ -89,12 +85,6 @@ export function QuickSetupCard({ status, running, onQuickSetup, onOpenAdvanced }
 
   const toggleIgnoreTarget = (name: string) => {
     setSelectedIgnoreTargets((prev) =>
-      prev.includes(name) ? prev.filter((target) => target !== name) : [...prev, name],
-    );
-  };
-
-  const toggleEnvTarget = (name: string) => {
-    setSelectedEnvTargets((prev) =>
       prev.includes(name) ? prev.filter((target) => target !== name) : [...prev, name],
     );
   };
