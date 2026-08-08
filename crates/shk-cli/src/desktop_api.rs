@@ -2644,8 +2644,8 @@ mod tests {
         fs::write(project.path().join(non_utf8), "FIRST=plain\n").unwrap();
         fs::write(project.path().join(".env.�"), "SECOND=plain\n").unwrap();
 
-        let statuses = collect_env_file_statuses(project.path());
-        let err = resolve_env_encrypt_target_paths(project.path(), &statuses)
+        let names = env_encrypt_targets(&collect_env_file_statuses(project.path()));
+        let err = resolve_env_encrypt_target_paths(project.path(), names)
             .unwrap_err()
             .to_string();
         assert!(err.contains("ambiguous env file name"), "{err}");
