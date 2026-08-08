@@ -111,7 +111,9 @@ The unsigned workflow fails if updater signing secrets are missing and verifies
 that all five desktop target artifacts are present before publishing.
 
 The macOS **signed** release jobs fail unless Developer ID signing and notarization are
-configured. After bundling, the workflow verifies `.dmg` artifacts and extracted
+configured. Tauri notarizes the `.app` bundle but not the DMG built from it, so
+after bundling the workflow notarizes and staples each `.dmg` itself
+(`notarize-macos-dmg.sh`), then verifies `.dmg` artifacts and extracted
 `.app` bundles from updater archives with `codesign`, `spctl`, and
 `xcrun stapler validate`.
 

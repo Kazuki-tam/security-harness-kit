@@ -237,6 +237,14 @@ jobs:
             --target ${{ matrix.target }} \
             --config "../../target/tauri-updater-${{ matrix.target }}.json"
 
+      - name: notarize and staple macOS DMG
+        if: runner.os == 'macOS'
+        shell: bash
+        working-directory: .
+        run: |
+          ./.github/scripts/release/notarize-macos-dmg.sh \
+            "target/${{ matrix.target }}/release/bundle/dmg"
+
       - name: package desktop artifacts
         shell: bash
         working-directory: .
