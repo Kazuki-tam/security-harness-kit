@@ -5,4 +5,4 @@ onlyBuiltDependencies:
   - esbuild
 
 # shk-managed npm-hardening
-minimumReleaseAge: 10080
+minimumReleaseAge: 1440
