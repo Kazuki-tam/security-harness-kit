@@ -107,6 +107,15 @@ export type IgnoreFixTarget = {
   exists: boolean;
 };
 
+export type EnvFileState = "plaintext" | "mixed" | "encrypted";
+
+export type EnvFileReport = {
+  name: string;
+  state: EnvFileState;
+  plaintextKeys: string[];
+  encryptedKeyCount: number;
+};
+
 export type ProjectStatus = {
   path: string;
   policy: PolicyStatus;
@@ -116,6 +125,7 @@ export type ProjectStatus = {
   aiSafetyApplied: AiSafetyAppliedStatus;
   npmHardening: NpmHardeningStatus;
   skills: SkillStatus[];
+  envFiles: EnvFileReport[];
   ignoreFixTargets: IgnoreFixTarget[];
   recommendedFixes: RecommendedFix[];
   cliInstalled: boolean;
@@ -143,6 +153,8 @@ export type FixDoctorIgnoreOptions = {
 export type ApplyRecommendedFixesOptions = {
   fixIds: string[];
   ignoreTargets: string[];
+  /** Explicit env files the env_encrypt fix should touch. */
+  envTargets: string[];
 };
 
 export type ApplyNpmHardeningOptions = {
@@ -165,7 +177,7 @@ export type ApplyAiHookSettingsOptions = {
 export type AiHookSetupSelection = ApplyAiHookSettingsOptions;
 
 export type SetupHandlers = {
-  onQuickSetup: (fixIds: string[], ignoreTargets: string[]) => void;
+  onQuickSetup: (fixIds: string[], ignoreTargets: string[], envTargets: string[]) => void;
   onInitPolicy: (request: InitPolicyOptions) => void;
   onFixDoctorIgnore: (targets: string[]) => void;
   onInstallPreCommit: () => void;

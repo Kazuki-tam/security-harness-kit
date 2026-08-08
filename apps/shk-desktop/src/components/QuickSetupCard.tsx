@@ -5,6 +5,7 @@ import {
   buildQuickSetupSteps,
   defaultQuickSetupIgnoreTargets,
   defaultRecommendedFixIds,
+  envEncryptTargets,
   quickSetupCanApply,
 } from "../setup/plan";
 import type { ProjectStatus } from "../types";
@@ -14,7 +15,7 @@ import { Button } from "./Button";
 type Props = {
   status: ProjectStatus;
   running: boolean;
-  onQuickSetup: (fixIds: string[], ignoreTargets: string[]) => void;
+  onQuickSetup: (fixIds: string[], ignoreTargets: string[], envTargets: string[]) => void;
   onOpenAdvanced?: () => void;
 };
 
@@ -33,11 +34,14 @@ export function QuickSetupCard({ status, running, onQuickSetup, onOpenAdvanced }
     [status, policyExists],
   );
 
+  const eligibleEnvTargets = useMemo(() => envEncryptTargets(status), [status]);
+
   const [customizeOpen, setCustomizeOpen] = useState(false);
   const [selectedFixIds, setSelectedFixIds] = useState<string[]>(defaultSelected);
   const [selectedIgnoreTargets, setSelectedIgnoreTargets] = useState<string[]>(
     defaultQuickSetupIgnoreTargets(),
   );
+  const [selectedEnvTargets, setSelectedEnvTargets] = useState<string[]>(eligibleEnvTargets);
   const projectPathRef = useRef(status.path);
 
   useEffect(() => {
@@ -45,8 +49,15 @@ export function QuickSetupCard({ status, running, onQuickSetup, onOpenAdvanced }
       projectPathRef.current = status.path;
       setSelectedFixIds(defaultSelected);
       setSelectedIgnoreTargets(defaultQuickSetupIgnoreTargets());
+      setSelectedEnvTargets(eligibleEnvTargets);
     }
-  }, [status.path, defaultSelected]);
+  }, [status.path, defaultSelected, eligibleEnvTargets]);
+
+  // Drop selections for files that were encrypted or removed since the last
+  // status refresh; deliberately never re-add files the user unchecked.
+  useEffect(() => {
+    setSelectedEnvTargets((prev) => prev.filter((name) => eligibleEnvTargets.includes(name)));
+  }, [eligibleEnvTargets]);
 
   useEffect(() => {
     setSelectedFixIds((prev) => {
@@ -60,12 +71,14 @@ export function QuickSetupCard({ status, running, onQuickSetup, onOpenAdvanced }
   }, [fixes, defaultSelected]);
 
   const ignoreSelected = selectedFixIds.includes("ignore");
+  const envEncryptSelected = selectedFixIds.includes("env_encrypt");
   const applyDisabled =
     running ||
     allDone ||
     (policyExists &&
       (selectedFixIds.length === 0 ||
         (ignoreSelected && selectedIgnoreTargets.length === 0) ||
+        (envEncryptSelected && selectedEnvTargets.length === 0) ||
         !quickSetupCanApply(status)));
 
   const toggleFix = (id: string) => {
@@ -76,6 +89,12 @@ export function QuickSetupCard({ status, running, onQuickSetup, onOpenAdvanced }
 
   const toggleIgnoreTarget = (name: string) => {
     setSelectedIgnoreTargets((prev) =>
+      prev.includes(name) ? prev.filter((target) => target !== name) : [...prev, name],
+    );
+  };
+
+  const toggleEnvTarget = (name: string) => {
+    setSelectedEnvTargets((prev) =>
       prev.includes(name) ? prev.filter((target) => target !== name) : [...prev, name],
     );
   };
@@ -186,6 +205,39 @@ export function QuickSetupCard({ status, running, onQuickSetup, onOpenAdvanced }
                   />
                 </div>
               )}
+              {envEncryptSelected && eligibleEnvTargets.length > 0 && (
+                <div className="grid gap-2">
+                  <p className="text-[11px] font-medium text-text">
+                    {messages.setup.recommendedFixes.envTargetsLabel}
+                  </p>
+                  <ul className="grid gap-1.5">
+                    {status.envFiles
+                      .filter((file) => file.state !== "encrypted")
+                      .map((file, index) => {
+                        const checked = selectedEnvTargets.includes(file.name);
+                        return (
+                          <li key={`${file.name}:${index}`}>
+                            <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-border/70 bg-surface-3/30 px-3 py-1.5 text-[11px] text-muted">
+                              <input
+                                type="checkbox"
+                                className="mt-0.5"
+                                checked={checked}
+                                disabled={running}
+                                onChange={() => toggleEnvTarget(file.name)}
+                              />
+                              <span className="min-w-0 flex-1">
+                                <code className="block font-medium text-text">{file.name}</code>
+                                <span className="text-[10px] text-faint">
+                                  {messages.setup.doctor.envFiles.states[file.state]}
+                                </span>
+                              </span>
+                            </label>
+                          </li>
+                        );
+                      })}
+                  </ul>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -198,7 +250,7 @@ export function QuickSetupCard({ status, running, onQuickSetup, onOpenAdvanced }
             size="sm"
             loading={running}
             disabled={applyDisabled}
-            onClick={() => onQuickSetup(selectedFixIds, selectedIgnoreTargets)}
+            onClick={() => onQuickSetup(selectedFixIds, selectedIgnoreTargets, selectedEnvTargets)}
           >
             {primaryLabel}
           </Button>
@@ -217,8 +269,22 @@ export function QuickSetupCard({ status, running, onQuickSetup, onOpenAdvanced }
 
       {allDone && <p className="mt-2 text-[11px] text-emerald-200/90">{m.allCompleteHint}</p>}
 
-      {applyDisabled && !running && !allDone && policyExists && selectedFixIds.length === 0 && (
-        <p className="mt-2 text-[11px] text-amber-200/90">{m.nothingSelected}</p>
+      {applyDisabled && !running && !allDone && policyExists && (
+        <>
+          {selectedFixIds.length === 0 && (
+            <p className="mt-2 text-[11px] text-amber-200/90">{m.nothingSelected}</p>
+          )}
+          {ignoreSelected && selectedIgnoreTargets.length === 0 && (
+            <p className="mt-2 text-[11px] text-amber-200/90">
+              {messages.setup.hints.selectIgnoreTarget}
+            </p>
+          )}
+          {envEncryptSelected && selectedEnvTargets.length === 0 && (
+            <p className="mt-2 text-[11px] text-amber-200/90">
+              {messages.setup.hints.selectEnvTarget}
+            </p>
+          )}
+        </>
       )}
     </section>
   );

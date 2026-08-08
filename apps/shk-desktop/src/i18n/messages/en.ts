@@ -334,6 +334,7 @@ export const en: Messages = {
         ignore: "Exclude sensitive files",
         git: "Pre-commit check",
         ai: "AI editor safety",
+        env: "Env file encryption",
         npm: "npm safety settings",
         skills: "Agent skills (optional)",
       },
@@ -353,6 +354,7 @@ export const en: Messages = {
       npmAlreadyOk: "npm safety settings that can be applied automatically are already configured.",
       npmNoChanges: "Checkbox matches the current configuration.",
       selectIgnoreTarget: "Select at least one target file.",
+      selectEnvTarget: "Select at least one env file to encrypt.",
       selectAiSetting: "Select at least one AI setting to apply.",
     },
     policy: {
@@ -404,6 +406,7 @@ export const en: Messages = {
         "Bulk-apply items that are missing or need attention. Unchecked items are skipped for this run.",
       applySelected: "Apply selected recommended fixes",
       ignoreTargetsLabel: "Ignore targets",
+      envTargetsLabel: "Env files to encrypt",
       available: "{{count}} recommended fixes",
       selectionHint:
         "This list controls the bulk recommended-fix run. The setup cards below show each setting's current state and let you apply one setting at a time.",
@@ -418,6 +421,7 @@ export const en: Messages = {
         ai_codex_sandbox: "Codex sandbox hardening",
         workflows: "GitHub Actions checkout hardening",
         npm_hardening: "npm supply-chain hardening",
+        env_encrypt: "Encrypt plaintext .env files with per-environment keys",
       },
     },
     gitHook: {
@@ -497,6 +501,17 @@ export const en: Messages = {
       env: "Env file hygiene",
       workflows: "Workflow checkout",
       npm: "npm hardening",
+      envFiles: {
+        title: "Env files",
+        states: {
+          plaintext: "Plaintext",
+          mixed: "Partially encrypted",
+          encrypted: "Encrypted",
+        },
+        plaintextKeys: "Plaintext keys:",
+        encryptedCount: "{{count}} encrypted value(s)",
+        moreKeys: "+{{count}} more",
+      },
     },
     action: {
       failed: "Action failed",
@@ -521,6 +536,10 @@ export const en: Messages = {
         "No changes were required for the selected fixes": "No changes needed (already configured)",
         "Required ignore patterns are already present": "Ignore patterns already present",
         Appended: "Ignore patterns appended",
+        Encrypted: "Env files encrypted in place",
+        "Partially encrypted env files; review remaining items":
+          "Some env files were encrypted (review remaining items)",
+        "No plaintext env files to encrypt": "No plaintext env files to encrypt",
       },
       resultDetails: {},
     },

@@ -8,6 +8,7 @@ import {
   buildQuickSetupSteps,
   defaultQuickSetupIgnoreTargets,
   defaultRecommendedFixIds,
+  envEncryptTargets,
   npmSettingsReady,
   projectSkillsInstalled,
   quickSetupCanApply,
@@ -80,6 +81,7 @@ function status(overrides: Partial<ProjectStatus> = {}): ProjectStatus {
       recommendations: [],
     },
     skills: [],
+    envFiles: [],
     ignoreFixTargets: [{ name: ".gitignore", exists: true }],
     cliInstalled: false,
     recommendedFixes: [
@@ -117,9 +119,43 @@ describe("buildQuickSetupSteps", () => {
       { id: "ignore", done: false, pending: true },
       { id: "git", done: false, pending: true },
       { id: "ai", done: false, pending: true },
+      { id: "env", done: true, pending: false },
       { id: "npm", done: false, pending: true },
       { id: "skills", done: false, pending: false },
     ]);
+  });
+
+  it("marks plaintext env files as pending when the encrypt fix is offered", () => {
+    const current = status({
+      doctor: { ...status().doctor, envApplicable: true, envOk: false },
+      recommendedFixes: [
+        ...status().recommendedFixes,
+        fix("env_encrypt", { requiresPolicy: true, defaultSelected: false }),
+      ],
+    });
+
+    expect(buildQuickSetupSteps(current).find((step) => step.id === "env")).toEqual({
+      id: "env",
+      done: false,
+      pending: true,
+    });
+  });
+
+  it("treats encrypted or absent env files as done", () => {
+    const encrypted = status({
+      doctor: { ...status().doctor, envApplicable: true, envOk: true },
+    });
+    const absent = status({
+      doctor: { ...status().doctor, envApplicable: false, envOk: true },
+    });
+
+    for (const current of [encrypted, absent]) {
+      expect(buildQuickSetupSteps(current).find((step) => step.id === "env")).toEqual({
+        id: "env",
+        done: true,
+        pending: false,
+      });
+    }
   });
 
   it("recognizes completed optional setup areas", () => {
@@ -255,14 +291,38 @@ describe("quickSetupCanApply", () => {
     ).toBe(true);
   });
 
-  it("requires at least one default recommended fix once a policy exists", () => {
+  it("stays applicable when only opt-in fixes remain", () => {
     expect(
       quickSetupCanApply(
         status({
-          recommendedFixes: [fix("manual_choice", { defaultSelected: false })],
+          recommendedFixes: [fix("env_encrypt", { requiresPolicy: true, defaultSelected: false })],
         }),
       ),
-    ).toBe(false);
+    ).toBe(true);
+  });
+
+  it("has nothing to apply when no fixes are offered", () => {
+    expect(quickSetupCanApply(status({ recommendedFixes: [] }))).toBe(false);
+  });
+});
+
+describe("envEncryptTargets", () => {
+  it("lists non-encrypted env files in report order", () => {
+    const current = status({
+      envFiles: [
+        { name: ".env", state: "plaintext", plaintextKeys: ["API_KEY"], encryptedKeyCount: 0 },
+        { name: ".env.ci", state: "encrypted", plaintextKeys: [], encryptedKeyCount: 2 },
+        { name: ".env.production", state: "mixed", plaintextKeys: ["PLAIN"], encryptedKeyCount: 1 },
+      ],
+    });
+    expect(envEncryptTargets(current)).toEqual([".env", ".env.production"]);
+  });
+
+  it("is empty when every env file is already encrypted", () => {
+    const current = status({
+      envFiles: [{ name: ".env", state: "encrypted", plaintextKeys: [], encryptedKeyCount: 1 }],
+    });
+    expect(envEncryptTargets(current)).toEqual([]);
   });
 });
 

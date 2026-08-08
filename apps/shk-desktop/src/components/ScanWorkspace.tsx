@@ -239,6 +239,7 @@ export function ScanWorkspace({
               <DoctorPanel
                 doctor={projectStatus.data.doctor}
                 npmApplicable={projectStatus.data.npmHardening.hasProjects}
+                envFiles={projectStatus.data.envFiles}
                 onOpenSetup={() => setTab("setup")}
               />
               <div id="audit-panel">

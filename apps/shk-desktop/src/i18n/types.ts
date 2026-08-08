@@ -277,7 +277,7 @@ export type Messages = {
       openAdvanced: string;
       allCompleteHint: string;
       nothingSelected: string;
-      steps: Record<"policy" | "ignore" | "git" | "ai" | "npm" | "skills", string>;
+      steps: Record<"policy" | "ignore" | "git" | "ai" | "env" | "npm" | "skills", string>;
     };
     advanced: {
       title: string;
@@ -294,6 +294,7 @@ export type Messages = {
       npmAlreadyOk: string;
       npmNoChanges: string;
       selectIgnoreTarget: string;
+      selectEnvTarget: string;
       selectAiSetting: string;
     };
     policy: {
@@ -324,6 +325,7 @@ export type Messages = {
       description: string;
       applySelected: string;
       ignoreTargetsLabel: string;
+      envTargetsLabel: string;
       available: string;
       selectionHint: string;
       rowSelected: string;
@@ -392,6 +394,17 @@ export type Messages = {
       env: string;
       workflows: string;
       npm: string;
+      envFiles: {
+        title: string;
+        states: {
+          plaintext: string;
+          mixed: string;
+          encrypted: string;
+        };
+        plaintextKeys: string;
+        encryptedCount: string;
+        moreKeys: string;
+      };
     };
     action: {
       failed: string;
