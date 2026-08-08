@@ -241,6 +241,21 @@ SHK_REQUIRE_WINDOWS_CODESIGN=true \
   ./.github/scripts/release/check-desktop-signing.sh >/dev/null
 echo "ok: configured Windows signing still validated when opt-in is set"
 
+if ./.github/scripts/release/notarize-macos-dmg.sh /nonexistent >/dev/null 2>&1; then
+  echo "FAIL: notarize without Apple credentials should fail" >&2
+  exit 1
+fi
+echo "ok: notarize without Apple credentials rejected"
+
+notarize_tmp="$(mktemp -d)"
+if APPLE_ID=apple-id APPLE_PASSWORD=app-password APPLE_TEAM_ID=TEAMID \
+  ./.github/scripts/release/notarize-macos-dmg.sh "$notarize_tmp" >/dev/null 2>&1; then
+  echo "FAIL: notarize with no DMG artifacts should fail" >&2
+  exit 1
+fi
+rm -rf "$notarize_tmp"
+echo "ok: notarize with no DMG artifacts rejected"
+
 tmpdir="$(mktemp -d)"
 case "$(uname -s)" in
   Darwin)
