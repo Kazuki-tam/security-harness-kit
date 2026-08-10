@@ -186,7 +186,7 @@ fn audit_log_is_readable(project_path: &str) -> Option<bool> {
         Err(_) => return None,
     }
     match std::fs::symlink_metadata(shk_dir.join("audit.log")) {
-        Ok(meta) if meta.file_type().is_file() => Some(true),
+        Ok(meta) if audit_log_metadata_is_safe(&meta) => Some(true),
         Ok(_) => None,
         Err(err) if err.kind() == ErrorKind::NotFound => Some(false),
         Err(_) => None,
@@ -201,7 +201,26 @@ fn open_audit_log(log: &Path) -> Option<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW);
     }
-    options.open(log).ok()
+    let file = options.open(log).ok()?;
+    // Re-check the opened descriptor so a path swap between the earlier
+    // inspection and `open` cannot turn an unsafe target into a readable one.
+    let metadata = file.metadata().ok()?;
+    audit_log_metadata_is_safe(&metadata).then_some(file)
+}
+
+fn audit_log_metadata_is_safe(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_file() && !metadata_has_multiple_links(metadata)
+}
+
+#[cfg(unix)]
+fn metadata_has_multiple_links(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.nlink() > 1
+}
+
+#[cfg(not(unix))]
+fn metadata_has_multiple_links(_metadata: &std::fs::Metadata) -> bool {
+    false
 }
 
 /// Whether the byte before `offset` is a newline, i.e. whether the cursor
@@ -552,6 +571,21 @@ mod tests {
 
         let mut cursor = LogCursor::default();
         assert!(read_from(root.path(), &mut cursor).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_to_read_a_hard_linked_audit_log() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("target.log");
+        std::fs::write(&target, "{\"event\":\"blocked\",\"tool\":\"cursor\"}\n").unwrap();
+        std::fs::create_dir_all(root.path().join(".shk")).unwrap();
+        std::fs::hard_link(&target, root.path().join(".shk").join("audit.log")).unwrap();
+
+        let mut cursor = LogCursor::default();
+        assert!(read_from(root.path(), &mut cursor).is_empty());
+        assert_eq!(cursor, LogCursor::default());
     }
 
     #[test]

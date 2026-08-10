@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { sendNotification } from "@tauri-apps/plugin-notification";
@@ -31,11 +31,11 @@ export function useBlockedNotifications({ projects, settings, labels }: Options)
   const settingsRef = useRef(settings);
   const labelsRef = useRef(labels);
   const projectsRef = useRef(projects);
-  useEffect(() => {
+  useLayoutEffect(() => {
     settingsRef.current = settings;
     labelsRef.current = labels;
     projectsRef.current = projects;
-  });
+  }, [labels, projects, settings]);
 
   // Serialized so the effect re-runs only when membership actually changes,
   // and so paths containing spaces survive the round trip.
@@ -61,7 +61,15 @@ export function useBlockedNotifications({ projects, settings, labels }: Options)
       // suppress every notification. The Rust side reports `Granted`
       // unconditionally on desktop and `notify` performs no permission check;
       // macOS itself prompts on the first banner and owns the answer.
-      notify: sendNotification,
+      notify: (content) => {
+        try {
+          sendNotification(content);
+        } catch (error) {
+          // A disabled or temporarily unavailable OS notification service must
+          // not escape the batch timer and destabilize the React event loop.
+          console.warn("failed to send blocked activity notification", error);
+        }
+      },
     });
 
     const unlistenPromise = listen<BlockedNotificationEvent[]>(BLOCKED_EVENT, (event) => {

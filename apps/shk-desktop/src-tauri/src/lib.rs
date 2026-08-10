@@ -15,6 +15,7 @@ use blocked_watcher::{BLOCKED_EVENT, BlockedWatcher};
 use project_launcher::{ProjectAppKind, open_project_in_app_path};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use tauri::async_runtime::spawn_blocking;
 use tauri::{Emitter, Manager};
@@ -435,11 +436,39 @@ fn updater_builder() -> tauri_plugin_updater::Builder {
 /// couple of seconds of latency for a dependency-free, cross-platform watcher.
 const BLOCKED_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
+#[derive(Clone, Default)]
+struct BlockedWatcherShutdown {
+    inner: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl BlockedWatcherShutdown {
+    /// Wait until the next poll is due, returning `false` when app shutdown
+    /// has started. The condition variable makes shutdown immediate instead
+    /// of leaving the worker asleep for the full polling interval.
+    fn wait_for_next_poll(&self) -> bool {
+        let (stopping, wake) = &*self.inner;
+        let stopping = stopping.lock().unwrap_or_else(|err| err.into_inner());
+        if *stopping {
+            return false;
+        }
+        let (stopping, _) = wake
+            .wait_timeout(stopping, BLOCKED_POLL_INTERVAL)
+            .unwrap_or_else(|err| err.into_inner());
+        !*stopping
+    }
+
+    fn stop(&self) {
+        let (stopping, wake) = &*self.inner;
+        *stopping.lock().unwrap_or_else(|err| err.into_inner()) = true;
+        wake.notify_all();
+    }
+}
+
 fn spawn_blocked_watcher(app: &tauri::AppHandle) {
     let app = app.clone();
+    let shutdown = app.state::<BlockedWatcherShutdown>().inner().clone();
     std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(BLOCKED_POLL_INTERVAL);
+        while shutdown.wait_for_next_poll() {
             let events = app.state::<BlockedWatcher>().drain_new_events();
             if events.is_empty() {
                 continue;
@@ -452,12 +481,13 @@ fn spawn_blocked_watcher(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(updater_builder().build())
         .manage(BlockedWatcher::default())
+        .manage(BlockedWatcherShutdown::default())
         .setup(|app| {
             spawn_blocked_watcher(app.handle());
             Ok(())
@@ -484,8 +514,14 @@ pub fn run() {
             mask_file,
             open_ai_tool,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running shk desktop app");
+        .build(tauri::generate_context!())
+        .expect("error while building shk desktop app");
+
+    app.run(|app, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            app.state::<BlockedWatcherShutdown>().stop();
+        }
+    });
 }
 
 #[cfg(test)]
@@ -512,5 +548,16 @@ mod tests {
         let err = AppError::Message("scan path is empty".into());
         let json = serde_json::to_string(&err).unwrap();
         assert!(json.contains("scan path is empty"));
+    }
+
+    #[test]
+    fn blocked_watcher_shutdown_interrupts_wait() {
+        let shutdown = BlockedWatcherShutdown::default();
+        let worker_shutdown = shutdown.clone();
+        let worker = std::thread::spawn(move || worker_shutdown.wait_for_next_poll());
+
+        shutdown.stop();
+
+        assert!(!worker.join().unwrap());
     }
 }
