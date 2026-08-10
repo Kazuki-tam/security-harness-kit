@@ -41,7 +41,7 @@ With `shk`, you can:
 The **shk Desktop** app (`apps/shk-desktop`) provides a local GUI for project
 scanning, AI-oriented masking, setup automation, and audit review. Installers
 are published from GitHub Releases; macOS builds are Developer ID signed and
-notarized as of `desktop-v0.6.1`.
+notarized as of `desktop-v0.6.0`.
 
 While it is open it also raises an OS notification when a hook blocks AI
 activity in any of your projects.

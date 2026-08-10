@@ -165,7 +165,7 @@ Intel macOS, Apple Silicon macOS, Linux x86_64/aarch64, and Windows x86_64 are s
 
 The desktop app is distributed separately from the CLI. Releases are published
 from `desktop-vX.Y.Z` (or combined `shk-vX.Y.Z`) tags as `shk-desktop_*` assets
-on GitHub Releases. Starting with `desktop-v0.6.1`, macOS builds are Developer
+on GitHub Releases. Starting with `desktop-v0.6.0`, macOS builds are Developer
 ID signed, notarized, and stapled. Windows installers are currently **not**
 Authenticode-signed (see [Windows SmartScreen](#windows-smartscreen) below).
 
@@ -196,7 +196,7 @@ sha256sum -c shk-desktop.sha256sum
 
 ### macOS
 
-Installers from `desktop-v0.6.1` onward are Developer ID signed and notarized;
+Installers from `desktop-v0.6.0` onward are Developer ID signed and notarized;
 Gatekeeper opens them without workarounds. If you still run an older unsigned
 early access build, replace it with a signed `.dmg` install — the in-app
 updater also migrates existing installs because all releases share the same
@@ -242,7 +242,7 @@ key, independent of OS code signing.
 
 ### Unsigned early access builds (historical)
 
-Before `desktop-v0.6.1`, builds were published unsigned from
+Before `desktop-v0.6.0`, builds were published unsigned from
 `desktop-unsigned-vX.Y.Z` tags (last: `desktop-unsigned-v0.5.5`). Those
 required Gatekeeper / SmartScreen workarounds documented in their release
 notes. The unsigned release path still exists for maintainers but is no longer
