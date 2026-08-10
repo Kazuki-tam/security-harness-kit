@@ -35,7 +35,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.4",
     "jsdom": "^30.0.1",
-    "oxfmt": "^0.54.0",
+    "oxfmt": "^0.62.0",
     "oxlint": "^1.76.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^6.0.3",
