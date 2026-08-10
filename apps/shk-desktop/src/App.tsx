@@ -175,11 +175,12 @@ function App() {
       singleProjectTitle: messages.notifications.singleProjectTitle,
       multiProjectTitle: messages.notifications.multiProjectTitle,
       moreCount: messages.notifications.moreCount,
+      unknownReason: messages.notifications.unknownReason,
+      unknownProject: messages.notifications.unknownProject,
       reasonLabels: messages.audit.reasonLabels,
       actionCategories: messages.audit.actionCategories,
       toolNames: messages.audit.toolNames,
     },
-    onOpenProject: showProject,
   });
 
   const openFolder = useCallback(async () => {
@@ -434,6 +435,10 @@ function App() {
           project={activeProject}
           reserveWindowControls={!showSidebar}
           preferredApp={preferredProjectApp}
+          notifications={{
+            settings: notificationSettings,
+            onChange: updateNotificationSettings,
+          }}
           onOpenInApp={openProjectInAppHandler}
           onShowHelp={() => setHelpOpen(true)}
         />
@@ -458,10 +463,6 @@ function App() {
             onDismissActionFeedback={dismissActionFeedback}
             onScan={runScan}
             setupHandlers={setupHandlers}
-            notifications={{
-              settings: notificationSettings,
-              onChange: updateNotificationSettings,
-            }}
           />
         ) : (
           <WelcomeScreen

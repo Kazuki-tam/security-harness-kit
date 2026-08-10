@@ -18,6 +18,10 @@ describe("window drag regions", () => {
           view="welcome"
           project={null}
           preferredApp="cursor"
+          notifications={{
+            settings: { enabled: true, actionGuard: true, findingThreshold: true },
+            onChange: vi.fn(),
+          }}
           onOpenInApp={vi.fn()}
           onShowHelp={vi.fn()}
         />

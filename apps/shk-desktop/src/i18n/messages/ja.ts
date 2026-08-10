@@ -307,11 +307,12 @@ export const ja: Messages = {
     description:
       "アプリの起動中にAIの操作がブロックされたら通知します。すべてのプロジェクトに適用されます。",
     enabled: "ブロック時に通知する",
-    actionGuard: "危険な操作",
-    findingThreshold: "シークレット・個人情報",
+    reasonsLegend: "通知する種類",
     singleProjectTitle: "{{project}} でブロックしました",
     multiProjectTitle: "AIの操作を {{count}} 件ブロックしました",
     moreCount: "ほか {{count}} 件",
+    unknownReason: "AIの操作をブロックしました",
+    unknownProject: "プロジェクト",
   },
   setup: {
     statusReady: "設定済み",

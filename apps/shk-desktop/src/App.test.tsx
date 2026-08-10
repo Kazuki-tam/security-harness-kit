@@ -20,18 +20,10 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn().mockResolvedValue(() => undefined),
 }));
 
-vi.mock("@tauri-apps/api/window", () => ({
-  getCurrentWindow: () => ({
-    unminimize: vi.fn().mockResolvedValue(undefined),
-    setFocus: vi.fn().mockResolvedValue(undefined),
-  }),
-}));
-
 vi.mock("@tauri-apps/plugin-notification", () => ({
   isPermissionGranted: vi.fn().mockResolvedValue(true),
   requestPermission: vi.fn().mockResolvedValue("granted"),
   sendNotification: vi.fn(),
-  onAction: vi.fn().mockResolvedValue({ unregister: vi.fn() }),
 }));
 
 describe("App", () => {

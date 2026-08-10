@@ -9,6 +9,14 @@ export type RefreshAuditOptions = {
   silent?: boolean;
 };
 
+/**
+ * How long live blocks are collected before the panel reloads. A refresh
+ * re-reads and parses the whole audit log (including rotated archives), which
+ * costs hundreds of milliseconds on a mature project, so a burst of blocks must
+ * not turn into a refresh every couple of seconds.
+ */
+const LIVE_REFRESH_DEBOUNCE_MS = 10_000;
+
 export function useAuditReport(projectPath: string, refreshToken?: string | null) {
   const [auditState, setAuditState] = useState<AuditState>({ status: "idle" });
   const requestIdRef = useRef(0);
@@ -32,14 +40,24 @@ export function useAuditReport(projectPath: string, refreshToken?: string | null
     void refreshAudit();
   }, [refreshAudit, refreshToken]);
 
-  // Keep the panel in step with the notification: a block that raised a banner
-  // should already be listed by the time the user comes back to the window.
+  // Keep the panel in step with the notifications: a block that raised a banner
+  // should be listed by the time the user comes back to the window.
   useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
     const unlistenPromise = listen<BlockedNotificationEvent[]>(BLOCKED_EVENT, (event) => {
       if (!event.payload?.some((blocked) => blocked.project_path === projectPath)) return;
-      void refreshAudit({ silent: true });
+      timer ??= setTimeout(() => {
+        timer = null;
+        // Nothing to keep in step with while the window is hidden; the panel
+        // reloads anyway when the project is next opened.
+        if (document.visibilityState === "hidden") return;
+        void refreshAudit({ silent: true });
+      }, LIVE_REFRESH_DEBOUNCE_MS);
     });
+
     return () => {
+      if (timer !== null) clearTimeout(timer);
       void unlistenPromise.then((unlisten) => unlisten()).catch(() => {});
     };
   }, [projectPath, refreshAudit]);

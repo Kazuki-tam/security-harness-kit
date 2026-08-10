@@ -260,11 +260,13 @@ export type Messages = {
     title: string;
     description: string;
     enabled: string;
-    actionGuard: string;
-    findingThreshold: string;
+    /** Groups the per-reason filters; the labels come from `audit.reasonLabels`. */
+    reasonsLegend: string;
     singleProjectTitle: string;
     multiProjectTitle: string;
     moreCount: string;
+    unknownReason: string;
+    unknownProject: string;
   };
   setup: {
     statusReady: string;

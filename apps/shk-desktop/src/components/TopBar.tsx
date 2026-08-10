@@ -1,8 +1,10 @@
 import { CircleHelp } from "lucide-react";
 import { useI18n } from "../i18n";
+import type { NotificationControls } from "../notifications";
 import type { ProjectApp } from "../projectApp";
 import type { Project } from "../types";
 import { LanguageSwitcher } from "./LanguageSwitcher";
+import { NotificationMenu } from "./NotificationMenu";
 import { OpenInAppMenu } from "./OpenInAppMenu";
 import { UpdateButton } from "./UpdateButton";
 
@@ -11,6 +13,7 @@ type Props = {
   project: Project | null;
   reserveWindowControls?: boolean;
   preferredApp: ProjectApp;
+  notifications: NotificationControls;
   onOpenInApp: (app: ProjectApp) => void;
   onShowHelp: () => void;
 };
@@ -20,6 +23,7 @@ export function TopBar({
   project,
   reserveWindowControls = false,
   preferredApp,
+  notifications,
   onOpenInApp,
   onShowHelp,
 }: Props) {
@@ -58,6 +62,7 @@ export function TopBar({
           <CircleHelp size={15} aria-hidden="true" />
         </button>
         <UpdateButton />
+        <NotificationMenu settings={notifications.settings} onChange={notifications.onChange} />
         <LanguageSwitcher />
         <OpenInAppMenu preferredApp={preferredApp} onSelect={onOpenInApp} />
       </div>

@@ -310,11 +310,12 @@ export const en: Messages = {
     description:
       "Notify me when AI activity is blocked while the app is open. Applies to every project.",
     enabled: "Notify on blocks",
-    actionGuard: "Risky actions",
-    findingThreshold: "Secrets and PII",
+    reasonsLegend: "Notify about",
     singleProjectTitle: "Blocked in {{project}}",
     multiProjectTitle: "{{count}} AI actions blocked",
     moreCount: "+{{count}} more",
+    unknownReason: "AI activity blocked",
+    unknownProject: "a project",
   },
   setup: {
     statusReady: "Ready",

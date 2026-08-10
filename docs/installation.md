@@ -208,6 +208,29 @@ Windows installers are currently not Authenticode-signed, so SmartScreen may
 show **Windows protected your PC**. Choose **More info → Run anyway** if you
 trust the release checksum and attestation.
 
+### Blocked-activity notifications
+
+While the app is open it tails `.shk/audit.log` for every project in the
+sidebar and raises an OS notification when a hook blocks AI activity, so an
+agent running in the background is visible without switching to the app. The
+bell menu in the top bar turns notifications off, or narrows them to one kind
+of block; both kinds are on by default.
+
+Details worth knowing:
+
+- Only blocks recorded **after** a project appears in the sidebar are
+  announced — existing history never produces a backlog of notifications.
+- Blocks arriving within a few seconds collapse into a single notification.
+- Notification text is limited to the block reason, the risky-action category,
+  and the AI tool. File paths are deliberately left out, because notifications
+  render on the lock screen and are persisted by the OS; use the **Blocked AI
+  activity** panel to see them.
+- Turning notifications off stops the banners, not the tailing: the audit panel
+  still updates while the app is open.
+- The first block prompts for OS notification permission. On macOS this
+  requires an installed, signed build — a `tauri dev` binary does not show
+  notifications.
+
 ### In-app updates
 
 The desktop app checks `desktop-latest/latest.json` on GitHub for updater

@@ -1,36 +1,27 @@
 import { useCallback, useState } from "react";
 import {
-  DEFAULT_NOTIFICATION_SETTINGS,
-  parseNotificationSettings,
+  readNotificationSettings,
+  writeNotificationSettings,
   type NotificationSettings,
 } from "../notifications";
 
-const SETTINGS_KEY = "shk.desktop.blockedNotifications.v1";
-
-function loadSettings(): NotificationSettings {
-  if (typeof window === "undefined") return DEFAULT_NOTIFICATION_SETTINGS;
-  try {
-    return parseNotificationSettings(window.localStorage.getItem(SETTINGS_KEY));
-  } catch {
-    return DEFAULT_NOTIFICATION_SETTINGS;
-  }
-}
-
-/** App-wide preferences for blocked-activity notifications. */
+/**
+ * App-wide preferences for blocked-activity notifications.
+ *
+ * Call this once, at the top of the tree: it is plain `useState`, so a second
+ * call would create a copy that `useBlockedNotifications` never sees.
+ */
 export function useNotificationSettings() {
-  const [settings, setSettings] = useState<NotificationSettings>(loadSettings);
+  const [notificationSettings, setSettings] =
+    useState<NotificationSettings>(readNotificationSettings);
 
-  const updateSettings = useCallback((patch: Partial<NotificationSettings>) => {
+  const updateNotificationSettings = useCallback((patch: Partial<NotificationSettings>) => {
     setSettings((prev) => {
       const next = { ...prev, ...patch };
-      try {
-        window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
-      } catch {
-        /* ignore quota errors */
-      }
+      writeNotificationSettings(next);
       return next;
     });
   }, []);
 
-  return { notificationSettings: settings, updateNotificationSettings: updateSettings };
+  return { notificationSettings, updateNotificationSettings };
 }

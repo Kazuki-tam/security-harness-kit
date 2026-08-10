@@ -1,32 +1,7 @@
-import { formatActionCategory, formatToolName } from "./audit";
-import { interpolate } from "./i18n/interpolate";
-
 /** Tauri event carrying blocks appended to a watched project's audit log. */
 export const BLOCKED_EVENT = "shk://blocked";
 
-/** A `blocked` audit entry forwarded live by the Rust watcher. */
-export type BlockedNotificationEvent = {
-  project_path: string;
-  ts?: string | null;
-  tool?: string | null;
-  hook?: string | null;
-  reason?: string | null;
-  action_category?: string | null;
-  display_path?: string | null;
-  max_severity?: string | null;
-};
-
-export type NotificationSettings = {
-  enabled: boolean;
-  actionGuard: boolean;
-  findingThreshold: boolean;
-};
-
-export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
-  enabled: true,
-  actionGuard: true,
-  findingThreshold: true,
-};
+export const NOTIFICATION_SETTINGS_KEY = "shk.desktop.blockedNotifications.v1";
 
 /**
  * Window over which blocks are collected into a single notification. An agent
@@ -35,23 +10,63 @@ export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
  */
 export const NOTIFICATION_DEBOUNCE_MS = 3000;
 
+/**
+ * A `blocked` audit entry forwarded live by the Rust watcher.
+ *
+ * The watcher deliberately does not forward the blocked file path: the audit
+ * report can hide paths on request, and a notification renders on the lock
+ * screen and is persisted by the OS.
+ */
+export type BlockedNotificationEvent = {
+  project_path: string;
+  tool?: string | null;
+  reason?: string | null;
+  action_category?: string | null;
+};
+
+export type NotificationSettings = {
+  enabled: boolean;
+  actionGuard: boolean;
+  findingThreshold: boolean;
+};
+
+/** Settings plus their updater, as passed to the UI that renders the toggles. */
+export type NotificationControls = {
+  settings: NotificationSettings;
+  onChange: (patch: Partial<NotificationSettings>) => void;
+};
+
+export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
+  enabled: true,
+  actionGuard: true,
+  findingThreshold: true,
+};
+
 export type BlockedNotificationLabels = {
   /** Title for blocks that all came from one project. */
   singleProjectTitle: string;
   /** Title when blocks span several projects. */
   multiProjectTitle: string;
-  /** Body for a single block: reason, what was blocked, and the AI tool. */
+  /** Suffix naming how many further blocks the batch collapsed into this one. */
   moreCount: string;
+  /** Stands in for a block whose reason has no label we recognise. */
+  unknownReason: string;
+  /** Stands in for a project that is no longer registered. */
+  unknownProject: string;
   reasonLabels: Record<string, string>;
   actionCategories: Record<string, string>;
   toolNames: Record<string, string>;
 };
 
+/**
+ * Notifications are display-only. `tauri-plugin-notification` registers just
+ * `notify` / `request_permission` / `is_permission_granted` on desktop — the
+ * click callback (`onAction`) exists only on iOS and Android — so there is no
+ * payload to route a click back to a project.
+ */
 export type BlockedNotificationContent = {
   title: string;
   body: string;
-  /** Project the notification should open when clicked, if unambiguous. */
-  projectPath?: string;
 };
 
 export function parseNotificationSettings(raw: string | null): NotificationSettings {
@@ -75,6 +90,24 @@ export function parseNotificationSettings(raw: string | null): NotificationSetti
 
 function asBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
+}
+
+export function readNotificationSettings(): NotificationSettings {
+  if (typeof window === "undefined") return DEFAULT_NOTIFICATION_SETTINGS;
+  try {
+    return parseNotificationSettings(window.localStorage.getItem(NOTIFICATION_SETTINGS_KEY));
+  } catch (error) {
+    console.warn("failed to read notification settings", error);
+    return DEFAULT_NOTIFICATION_SETTINGS;
+  }
+}
+
+export function writeNotificationSettings(next: NotificationSettings): void {
+  try {
+    window.localStorage.setItem(NOTIFICATION_SETTINGS_KEY, JSON.stringify(next));
+  } catch (error) {
+    console.warn("failed to save notification settings", error);
+  }
 }
 
 export function shouldNotifyForEvent(
@@ -111,46 +144,116 @@ export function summarizeBlockedBatch(
 
   if (paths.length > 1) {
     return {
-      title: interpolate(labels.multiProjectTitle, { count: events.length }),
+      title: interpolateCount(labels.multiProjectTitle, events.length),
       body: paths.map(projectNameFor).join(", "),
     };
   }
 
-  const projectPath = paths[0];
-  const title = interpolate(labels.singleProjectTitle, {
-    count: events.length,
-    project: projectNameFor(projectPath),
-  });
+  const title = labels.singleProjectTitle.replace("{{project}}", projectNameFor(paths[0]));
 
   // Newest last in the log, and the newest block is what the user just hit.
   const [latest] = events.slice(-1);
   const lines = [describeBlockedEvent(latest, labels)];
   if (events.length > 1) {
-    lines.push(interpolate(labels.moreCount, { count: events.length - 1 }));
+    lines.push(interpolateCount(labels.moreCount, events.length - 1));
   }
 
-  return { title, body: lines.join(" · "), projectPath };
+  return { title, body: lines.join(" · ") };
 }
 
+function interpolateCount(template: string, count: number): string {
+  return template.replace("{{count}}", String(count));
+}
+
+/**
+ * Describe one block for a notification body.
+ *
+ * Only values with a label we recognise are rendered. The audit log is written
+ * by the CLI, but a cloned repository can ship a crafted one, and a banner from
+ * a signed, notarized app is a credible surface for planted text — so unknown
+ * identifiers are replaced rather than echoed.
+ */
 export function describeBlockedEvent(
   event: BlockedNotificationEvent,
   labels: BlockedNotificationLabels,
 ): string {
-  const reason = event.reason ?? "";
-  const parts = [labels.reasonLabels[reason] ?? reason].filter(Boolean);
+  const parts = [knownLabel(event.reason, labels.reasonLabels) ?? labels.unknownReason];
 
-  const detail =
-    event.reason === "action_guard"
-      ? formatActionCategory(event.action_category ?? undefined, labels.actionCategories)
-      : (event.display_path ?? "—");
-  if (detail && detail !== "—") {
-    parts.push(detail);
+  if (event.reason === "action_guard") {
+    const category = knownLabel(event.action_category, labels.actionCategories);
+    if (category) parts.push(category);
   }
 
-  const tool = formatToolName(event.tool ?? undefined, labels.toolNames);
-  if (tool !== "—") {
-    parts.push(tool);
-  }
+  const tool = knownLabel(event.tool, labels.toolNames);
+  if (tool) parts.push(tool);
 
   return parts.join(" · ");
+}
+
+/**
+ * Look up an identifier's label. Own keys only, so an id like `constructor`
+ * cannot reach through to `Object.prototype`.
+ */
+function knownLabel(
+  id: string | null | undefined,
+  labels: Record<string, string>,
+): string | undefined {
+  if (!id || !Object.prototype.hasOwnProperty.call(labels, id)) return undefined;
+  return labels[id];
+}
+
+export type BlockedNotificationBatcher = {
+  /** Buffer freshly received blocks and arm the coalescing window. */
+  push: (events: BlockedNotificationEvent[]) => void;
+  /** Drop anything buffered and disarm, e.g. on unmount. */
+  cancel: () => void;
+};
+
+/**
+ * Coalesce blocks arriving within `debounceMs` into a single notification.
+ *
+ * Settings and labels are read through callbacks at flush time so a preference
+ * the user changes mid-window takes effect, and so the caller can keep them in
+ * refs without rebuilding the batcher.
+ */
+export function createBlockedNotificationBatcher({
+  getSettings,
+  getLabels,
+  projectNameFor,
+  notify,
+  debounceMs = NOTIFICATION_DEBOUNCE_MS,
+}: {
+  getSettings: () => NotificationSettings;
+  getLabels: () => BlockedNotificationLabels;
+  projectNameFor: (path: string) => string;
+  notify: (content: BlockedNotificationContent) => void;
+  debounceMs?: number;
+}): BlockedNotificationBatcher {
+  let pending: BlockedNotificationEvent[] = [];
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  function flush() {
+    timer = null;
+    const batch = notifiableEvents(pending, getSettings());
+    // Cleared unconditionally: a batch the user has since filtered out, or one
+    // the OS refuses to show, must not accumulate into the next window.
+    pending = [];
+    const content = summarizeBlockedBatch(batch, projectNameFor, getLabels());
+    if (content) notify(content);
+  }
+
+  return {
+    push(events) {
+      if (events.length === 0) return;
+      pending.push(...events);
+      // Trailing edge of a fixed window, not a sliding one: a sustained burst
+      // still notifies every `debounceMs` rather than staying silent.
+      timer ??= setTimeout(flush, debounceMs);
+    },
+    cancel() {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+      pending = [];
+    },
+  };
 }
