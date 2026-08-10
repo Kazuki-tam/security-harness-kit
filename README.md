@@ -43,7 +43,11 @@ scanning, AI-oriented masking, setup automation, and audit review. Installers
 are published from GitHub Releases; macOS builds are Developer ID signed and
 notarized as of `desktop-v0.6.0`.
 
+While it is open it also raises an OS notification when a hook blocks AI
+activity in any of your projects.
+
 - Download and install: [Installation → Desktop App](docs/installation.md#desktop-app)
+- Notification behaviour: [Blocked-activity notifications](docs/installation.md#blocked-activity-notifications)
 - Maintainer release process: [Desktop Release](docs/desktop-release.md)
 
 ## Installation
@@ -244,7 +248,7 @@ shk ci init github
 shk ci init github --upload-sarif
 shk ci init github --dry-run
 shk ci init github --mode audit
-shk ci init github --shk-version v0.6.0
+shk ci init github --shk-version v0.6.1
 
 shk skills install
 shk skills install --tool claude-code --global

@@ -256,6 +256,18 @@ export type Messages = {
     actionCategories: Record<string, string>;
     severityLabels: Record<string, string>;
   };
+  notifications: {
+    title: string;
+    description: string;
+    enabled: string;
+    /** Groups the per-reason filters; the labels come from `audit.reasonLabels`. */
+    reasonsLegend: string;
+    singleProjectTitle: string;
+    multiProjectTitle: string;
+    moreCount: string;
+    unknownReason: string;
+    unknownProject: string;
+  };
   setup: {
     statusReady: string;
     statusMissing: string;

@@ -119,7 +119,7 @@ Release assets are also covered by GitHub artifact attestations.
 For CI or security-sensitive environments, install from a pinned release tag and verify both the checksum and GitHub artifact attestation before placing the binary on `PATH`:
 
 ```bash
-version=v0.6.0
+version=v0.6.1
 target=x86_64-unknown-linux-gnu
 asset="shk-cli-${target}.tar.xz"
 repo=Kazuki-tam/security-harness-kit
@@ -184,13 +184,13 @@ See [`desktop-release.md`](desktop-release.md) for maintainer release steps.
 Download from the release page for your tag, for example:
 
 ```text
-https://github.com/Kazuki-tam/security-harness-kit/releases/tag/desktop-v0.6.0
+https://github.com/Kazuki-tam/security-harness-kit/releases/tag/desktop-v0.6.1
 ```
 
 Verify checksums when available:
 
 ```bash
-curl -LO https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-v0.6.0/shk-desktop.sha256sum
+curl -LO https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-v0.6.1/shk-desktop.sha256sum
 sha256sum -c shk-desktop.sha256sum
 ```
 
@@ -207,6 +207,32 @@ Tauri updater signing keys.
 Windows installers are currently not Authenticode-signed, so SmartScreen may
 show **Windows protected your PC**. Choose **More info → Run anyway** if you
 trust the release checksum and attestation.
+
+### Blocked-activity notifications
+
+While the app is open it tails `.shk/audit.log` for every project in the
+sidebar and raises an OS notification when a hook blocks AI activity, so an
+agent running in the background is visible without switching to the app. The
+bell menu in the top bar turns notifications off, or narrows them to one kind
+of block; both kinds are on by default.
+
+Details worth knowing:
+
+- Only blocks recorded **after** a project appears in the sidebar are
+  announced — existing history never produces a backlog of notifications.
+- Blocks arriving within a few seconds collapse into a single notification.
+- Notification text is limited to the block reason, the risky-action category,
+  and the AI tool. File paths are deliberately left out, because notifications
+  render on the lock screen and are persisted by the OS; use the **Blocked AI
+  activity** panel to see them.
+- Turning notifications off stops the banners, not the tailing: the audit panel
+  still updates while the app is open.
+- The first block prompts for OS notification permission (on macOS the
+  installed app appears as **shk**; a `tauri dev` binary sends through the
+  **Terminal** identity instead, so allow Terminal notifications when testing).
+- No banner but blocks listed in the panel almost always means macOS is
+  suppressing display: check Focus mode, and the per-app notification style in
+  System Settings → Notifications.
 
 ### In-app updates
 

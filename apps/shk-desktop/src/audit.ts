@@ -159,7 +159,7 @@ export function auditHasBlockedEvents(report: AuditReport): boolean {
 /** Localize tool identifiers used by the audit log (e.g. `cursor` → `Cursor`). */
 export function formatToolName(toolId: string | undefined, names: Record<string, string>): string {
   if (!toolId) return "—";
-  return names[toolId] ?? toolId;
+  return ownLabel(names, toolId) ?? toolId;
 }
 
 /** Localize action-guard categories such as `environment_dump`. Falls back to the raw id. */
@@ -168,7 +168,16 @@ export function formatActionCategory(
   labels: Record<string, string>,
 ): string {
   if (!category) return "—";
-  return labels[category] ?? category;
+  return ownLabel(labels, category) ?? category;
+}
+
+/**
+ * Own keys only. The audit log is written by the CLI but a cloned repository
+ * can ship a crafted one, and an id like `constructor` would otherwise reach
+ * `Object.prototype` and yield a value React refuses to render.
+ */
+function ownLabel(labels: Record<string, string>, id: string): string | undefined {
+  return Object.prototype.hasOwnProperty.call(labels, id) ? labels[id] : undefined;
 }
 
 /** Return the most actionable severity in the recent blocked rows. */

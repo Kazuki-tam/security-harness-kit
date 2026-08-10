@@ -8,6 +8,7 @@
     "core:window:allow-start-dragging",
     "dialog:allow-open",
     "dialog:allow-save",
+    "notification:allow-notify",
     "process:allow-restart",
     "updater:default"
   ]

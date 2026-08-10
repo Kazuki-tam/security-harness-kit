@@ -8,6 +8,8 @@ import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ScanWorkspace } from "./components/ScanWorkspace";
+import { useBlockedNotifications } from "./hooks/useBlockedNotifications";
+import { useNotificationSettings } from "./hooks/useNotificationSettings";
 import { usePreferredAiTool } from "./hooks/usePreferredAiTool";
 import { usePreferredProjectApp } from "./hooks/usePreferredProjectApp";
 import { useProjects } from "./hooks/useProjects";
@@ -59,6 +61,7 @@ function App() {
   const requestTrackerRef = useRef(createRequestTracker());
   const { preferredProjectApp, setPreferredProjectApp } = usePreferredProjectApp();
   const { preferredAiTool, setPreferredAiTool } = usePreferredAiTool();
+  const { notificationSettings, updateNotificationSettings } = useNotificationSettings();
   const activeProject = currentView === "project" ? selectedProject : null;
 
   const currentScanState: ScanState = selectedId
@@ -164,6 +167,21 @@ function App() {
     },
     [selectProject],
   );
+
+  useBlockedNotifications({
+    projects,
+    settings: notificationSettings,
+    labels: {
+      singleProjectTitle: messages.notifications.singleProjectTitle,
+      multiProjectTitle: messages.notifications.multiProjectTitle,
+      moreCount: messages.notifications.moreCount,
+      unknownReason: messages.notifications.unknownReason,
+      unknownProject: messages.notifications.unknownProject,
+      reasonLabels: messages.audit.reasonLabels,
+      actionCategories: messages.audit.actionCategories,
+      toolNames: messages.audit.toolNames,
+    },
+  });
 
   const openFolder = useCallback(async () => {
     try {
@@ -417,6 +435,10 @@ function App() {
           project={activeProject}
           reserveWindowControls={!showSidebar}
           preferredApp={preferredProjectApp}
+          notifications={{
+            settings: notificationSettings,
+            onChange: updateNotificationSettings,
+          }}
           onOpenInApp={openProjectInAppHandler}
           onShowHelp={() => setHelpOpen(true)}
         />

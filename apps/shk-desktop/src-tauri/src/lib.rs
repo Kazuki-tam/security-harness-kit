@@ -8,12 +8,17 @@ use shk_core::ScanJsonReport;
 use shk_core::masker::MaskJsonOutput;
 use shk_core::policy::ColorMode;
 use shk_core::scanner::{ScanOptions, scan_path as scan_target_path};
+mod blocked_watcher;
 mod project_launcher;
 
+use blocked_watcher::{BLOCKED_EVENT, BlockedWatcher};
 use project_launcher::{ProjectAppKind, open_project_in_app_path};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 use tauri::async_runtime::spawn_blocking;
+use tauri::{Emitter, Manager};
 
 #[derive(Debug, thiserror::Error)]
 enum AppError {
@@ -138,6 +143,19 @@ async fn audit_report(
     options: AuditReportOptions,
 ) -> Result<desktop_api::AuditReport, AppError> {
     run_blocking(move || desktop_api::audit_report(&path, options).map_err(map_err)).await
+}
+
+/// Replace the set of projects whose audit logs are tailed for live blocks.
+///
+/// `async` so Tauri keeps it off the main thread: registering a project stats
+/// its log, which can block for seconds on an unresponsive network volume.
+#[tauri::command]
+async fn watch_blocked_projects(
+    paths: Vec<String>,
+    watcher: tauri::State<'_, BlockedWatcher>,
+) -> Result<(), AppError> {
+    watcher.set_watched(paths);
+    Ok(())
 }
 
 #[tauri::command]
@@ -414,11 +432,66 @@ fn updater_builder() -> tauri_plugin_updater::Builder {
     }
 }
 
+/// Interval between audit-log polls. Blocks are human-paced, so this trades a
+/// couple of seconds of latency for a dependency-free, cross-platform watcher.
+const BLOCKED_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Default)]
+struct BlockedWatcherShutdown {
+    inner: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl BlockedWatcherShutdown {
+    /// Wait until the next poll is due, returning `false` when app shutdown
+    /// has started. The condition variable makes shutdown immediate instead
+    /// of leaving the worker asleep for the full polling interval.
+    fn wait_for_next_poll(&self) -> bool {
+        let (stopping, wake) = &*self.inner;
+        let stopping = stopping.lock().unwrap_or_else(|err| err.into_inner());
+        if *stopping {
+            return false;
+        }
+        let (stopping, _) = wake
+            .wait_timeout(stopping, BLOCKED_POLL_INTERVAL)
+            .unwrap_or_else(|err| err.into_inner());
+        !*stopping
+    }
+
+    fn stop(&self) {
+        let (stopping, wake) = &*self.inner;
+        *stopping.lock().unwrap_or_else(|err| err.into_inner()) = true;
+        wake.notify_all();
+    }
+}
+
+fn spawn_blocked_watcher(app: &tauri::AppHandle) {
+    let app = app.clone();
+    let shutdown = app.state::<BlockedWatcherShutdown>().inner().clone();
+    std::thread::spawn(move || {
+        while shutdown.wait_for_next_poll() {
+            let events = app.state::<BlockedWatcher>().drain_new_events();
+            if events.is_empty() {
+                continue;
+            }
+            // A closed window (or a frontend that never listens) is not an
+            // error worth surfacing; the next poll simply carries on.
+            let _ = app.emit(BLOCKED_EVENT, events);
+        }
+    });
+}
+
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(updater_builder().build())
+        .manage(BlockedWatcher::default())
+        .manage(BlockedWatcherShutdown::default())
+        .setup(|app| {
+            spawn_blocked_watcher(app.handle());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             scan_path,
             project_status,
@@ -431,6 +504,7 @@ pub fn run() {
             apply_npm_hardening,
             install_skills,
             audit_report,
+            watch_blocked_projects,
             clear_audit_log,
             clone_repository,
             open_in_ide,
@@ -440,8 +514,14 @@ pub fn run() {
             mask_file,
             open_ai_tool,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running shk desktop app");
+        .build(tauri::generate_context!())
+        .expect("error while building shk desktop app");
+
+    app.run(|app, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            app.state::<BlockedWatcherShutdown>().stop();
+        }
+    });
 }
 
 #[cfg(test)]
@@ -468,5 +548,16 @@ mod tests {
         let err = AppError::Message("scan path is empty".into());
         let json = serde_json::to_string(&err).unwrap();
         assert!(json.contains("scan path is empty"));
+    }
+
+    #[test]
+    fn blocked_watcher_shutdown_interrupts_wait() {
+        let shutdown = BlockedWatcherShutdown::default();
+        let worker_shutdown = shutdown.clone();
+        let worker = std::thread::spawn(move || worker_shutdown.wait_for_next_poll());
+
+        shutdown.stop();
+
+        assert!(!worker.join().unwrap());
     }
 }
