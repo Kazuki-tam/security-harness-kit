@@ -16,9 +16,30 @@ vi.mock("@tauri-apps/api/webview", () => ({
   }),
 }));
 
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn().mockResolvedValue(() => undefined),
+}));
+
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    unminimize: vi.fn().mockResolvedValue(undefined),
+    setFocus: vi.fn().mockResolvedValue(undefined),
+  }),
+}));
+
+vi.mock("@tauri-apps/plugin-notification", () => ({
+  isPermissionGranted: vi.fn().mockResolvedValue(true),
+  requestPermission: vi.fn().mockResolvedValue("granted"),
+  sendNotification: vi.fn(),
+  onAction: vi.fn().mockResolvedValue({ unregister: vi.fn() }),
+}));
+
 describe("App", () => {
   beforeEach(() => {
     invokeMock.mockReset();
+    // Commands are promises in the app; a bare `vi.fn()` would return
+    // undefined and break fire-and-forget callers such as the audit watcher.
+    invokeMock.mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: { writeText: vi.fn().mockResolvedValue(undefined) },

@@ -1,6 +1,7 @@
 import {
   AlertTriangle,
   ArrowRight,
+  Bell,
   ChevronDown,
   ChevronUp,
   RefreshCcw,
@@ -22,11 +23,17 @@ import {
 } from "../audit";
 import { useAuditLogReset } from "../hooks/useAuditLogReset";
 import { useI18n } from "../i18n";
+import type { NotificationSettings } from "../notifications";
 import { asSeverity, severityBadge, severityDot, type Severity } from "../scan";
 import type { AuditCountRow, AuditRecentRow, AuditState } from "../types";
 import { formatRelativeTime } from "../utils";
 import { Button } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
+
+type NotificationControls = {
+  settings: NotificationSettings;
+  onChange: (patch: Partial<NotificationSettings>) => void;
+};
 
 type Props = {
   projectPath: string;
@@ -34,6 +41,7 @@ type Props = {
   onRefresh: (options?: { silent?: boolean }) => void;
   onOpenSetup?: () => void;
   onOpenFindings?: () => void;
+  notifications?: NotificationControls;
 };
 
 export function AuditPanel({
@@ -42,6 +50,7 @@ export function AuditPanel({
   onRefresh,
   onOpenSetup,
   onOpenFindings,
+  notifications,
 }: Props) {
   const { messages } = useI18n();
   const m = messages.audit;
@@ -61,6 +70,7 @@ export function AuditPanel({
         onRefresh={onRefresh}
         onOpenSetup={onOpenSetup}
         onOpenFindings={onOpenFindings}
+        notifications={notifications}
         reset={reset}
       />
       <ConfirmDialog
@@ -81,12 +91,14 @@ function AuditPanelBody({
   onRefresh,
   onOpenSetup,
   onOpenFindings,
+  notifications,
   reset,
 }: {
   auditState: AuditState;
   onRefresh: (options?: { silent?: boolean }) => void;
   onOpenSetup?: () => void;
   onOpenFindings?: () => void;
+  notifications?: NotificationControls;
   reset: ReturnType<typeof useAuditLogReset>;
 }) {
   const { locale, messages, t } = useI18n();
@@ -101,6 +113,7 @@ function AuditPanelBody({
         busy={loading}
         onRefresh={() => onRefresh()}
         refreshLabel={m.refresh}
+        notifications={notifications}
       >
         {loading && <p className="mt-3 text-[12px] text-muted">{m.loading}</p>}
       </PanelShell>
@@ -146,6 +159,7 @@ function AuditPanelBody({
       onReset={report.log_exists ? reset.requestConfirm : undefined}
       resetLabel={m.resetLog}
       resetBusy={reset.busy}
+      notifications={notifications}
     >
       {reset.error && (
         <div className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-[12px] text-red-100">
@@ -222,6 +236,7 @@ function PanelShell({
   onReset,
   resetLabel,
   resetBusy,
+  notifications,
   children,
 }: {
   title: string;
@@ -233,6 +248,7 @@ function PanelShell({
   onReset?: () => void;
   resetLabel?: string;
   resetBusy?: boolean;
+  notifications?: NotificationControls;
   children: ReactNode;
 }) {
   return (
@@ -274,8 +290,79 @@ function PanelShell({
           </Button>
         </div>
       </div>
+      {notifications && (
+        <NotificationSettingsRow
+          settings={notifications.settings}
+          onChange={notifications.onChange}
+        />
+      )}
       {children}
     </section>
+  );
+}
+
+/**
+ * App-wide notification preferences, surfaced here because this is where the
+ * blocks they announce are listed.
+ */
+function NotificationSettingsRow({ settings, onChange }: NotificationControls) {
+  const { messages } = useI18n();
+  const m = messages.notifications;
+
+  return (
+    <div className="mb-3 rounded-lg border border-border bg-surface-3/40 px-3 py-2.5">
+      <label className="flex cursor-pointer items-start gap-2 text-[12px]">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={settings.enabled}
+          onChange={(event) => onChange({ enabled: event.target.checked })}
+        />
+        <span className="min-w-0 flex-1">
+          <span className="inline-flex items-center gap-1.5 font-medium text-white">
+            <Bell size={13} className="text-white/60" aria-hidden="true" />
+            {m.enabled}
+          </span>
+          <span className="mt-0.5 block text-[11px] text-muted">{m.description}</span>
+        </span>
+      </label>
+      {settings.enabled && (
+        <fieldset className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5 border-0 p-0 pl-6">
+          <legend className="sr-only">{m.title}</legend>
+          <ReasonToggle
+            label={m.actionGuard}
+            checked={settings.actionGuard}
+            onChange={(actionGuard) => onChange({ actionGuard })}
+          />
+          <ReasonToggle
+            label={m.findingThreshold}
+            checked={settings.findingThreshold}
+            onChange={(findingThreshold) => onChange({ findingThreshold })}
+          />
+        </fieldset>
+      )}
+    </div>
+  );
+}
+
+function ReasonToggle({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-white/80">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+      />
+      {label}
+    </label>
   );
 }
 

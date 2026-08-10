@@ -256,6 +256,16 @@ export type Messages = {
     actionCategories: Record<string, string>;
     severityLabels: Record<string, string>;
   };
+  notifications: {
+    title: string;
+    description: string;
+    enabled: string;
+    actionGuard: string;
+    findingThreshold: string;
+    singleProjectTitle: string;
+    multiProjectTitle: string;
+    moreCount: string;
+  };
   setup: {
     statusReady: string;
     statusMissing: string;

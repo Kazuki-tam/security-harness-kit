@@ -8,12 +8,16 @@ use shk_core::ScanJsonReport;
 use shk_core::masker::MaskJsonOutput;
 use shk_core::policy::ColorMode;
 use shk_core::scanner::{ScanOptions, scan_path as scan_target_path};
+mod blocked_watcher;
 mod project_launcher;
 
+use blocked_watcher::{BLOCKED_EVENT, BlockedWatcher};
 use project_launcher::{ProjectAppKind, open_project_in_app_path};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 use tauri::async_runtime::spawn_blocking;
+use tauri::{Emitter, Manager};
 
 #[derive(Debug, thiserror::Error)]
 enum AppError {
@@ -138,6 +142,12 @@ async fn audit_report(
     options: AuditReportOptions,
 ) -> Result<desktop_api::AuditReport, AppError> {
     run_blocking(move || desktop_api::audit_report(&path, options).map_err(map_err)).await
+}
+
+/// Replace the set of projects whose audit logs are tailed for live blocks.
+#[tauri::command]
+fn watch_blocked_projects(paths: Vec<String>, watcher: tauri::State<'_, BlockedWatcher>) {
+    watcher.set_watched(paths);
 }
 
 #[tauri::command]
@@ -414,11 +424,37 @@ fn updater_builder() -> tauri_plugin_updater::Builder {
     }
 }
 
+/// Interval between audit-log polls. Blocks are human-paced, so this trades a
+/// couple of seconds of latency for a dependency-free, cross-platform watcher.
+const BLOCKED_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+fn spawn_blocked_watcher(app: &tauri::AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(BLOCKED_POLL_INTERVAL);
+            let events = app.state::<BlockedWatcher>().drain_new_events();
+            if events.is_empty() {
+                continue;
+            }
+            // A closed window (or a frontend that never listens) is not an
+            // error worth surfacing; the next poll simply carries on.
+            let _ = app.emit(BLOCKED_EVENT, events);
+        }
+    });
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(updater_builder().build())
+        .manage(BlockedWatcher::default())
+        .setup(|app| {
+            spawn_blocked_watcher(app.handle());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             scan_path,
             project_status,
@@ -431,6 +467,7 @@ pub fn run() {
             apply_npm_hardening,
             install_skills,
             audit_report,
+            watch_blocked_projects,
             clear_audit_log,
             clone_repository,
             open_in_ide,

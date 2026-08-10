@@ -305,6 +305,17 @@ export const en: Messages = {
       info: "Info",
     },
   },
+  notifications: {
+    title: "Desktop notifications",
+    description:
+      "Notify me when AI activity is blocked while the app is open. Applies to every project.",
+    enabled: "Notify on blocks",
+    actionGuard: "Risky actions",
+    findingThreshold: "Secrets and PII",
+    singleProjectTitle: "Blocked in {{project}}",
+    multiProjectTitle: "{{count}} AI actions blocked",
+    moreCount: "+{{count}} more",
+  },
   setup: {
     statusReady: "Ready",
     statusMissing: "Missing",

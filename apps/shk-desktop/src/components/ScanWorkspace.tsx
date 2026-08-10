@@ -11,6 +11,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { auditHasBlockedEvents } from "../audit";
 import { useAuditReport } from "../hooks/useAuditReport";
 import { useI18n } from "../i18n";
+import type { NotificationSettings } from "../notifications";
 import { actionableCount, type ScanState, type Severity, visibleScanResult } from "../scan";
 import { countPendingQuickSetup } from "../setup/plan";
 import type { ActionState, Project, ProjectStatusState, SetupHandlers } from "../types";
@@ -34,6 +35,10 @@ type Props = {
   onDismissActionFeedback: () => void;
   onScan: () => void;
   setupHandlers?: SetupHandlers;
+  notifications?: {
+    settings: NotificationSettings;
+    onChange: (patch: Partial<NotificationSettings>) => void;
+  };
 };
 
 export function ScanWorkspace({
@@ -44,6 +49,7 @@ export function ScanWorkspace({
   onDismissActionFeedback,
   onScan,
   setupHandlers,
+  notifications,
 }: Props) {
   const { messages, t } = useI18n();
   const m = messages.scan;
@@ -249,6 +255,7 @@ export function ScanWorkspace({
                   onRefresh={(options) => void refreshAudit(options)}
                   onOpenSetup={() => setTab("setup")}
                   onOpenFindings={report ? () => setTab("findings") : undefined}
+                  notifications={notifications}
                 />
               </div>
               {!projectStatus.data.policy.exists && (

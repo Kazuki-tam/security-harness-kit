@@ -8,6 +8,8 @@ import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ScanWorkspace } from "./components/ScanWorkspace";
+import { useBlockedNotifications } from "./hooks/useBlockedNotifications";
+import { useNotificationSettings } from "./hooks/useNotificationSettings";
 import { usePreferredAiTool } from "./hooks/usePreferredAiTool";
 import { usePreferredProjectApp } from "./hooks/usePreferredProjectApp";
 import { useProjects } from "./hooks/useProjects";
@@ -59,6 +61,7 @@ function App() {
   const requestTrackerRef = useRef(createRequestTracker());
   const { preferredProjectApp, setPreferredProjectApp } = usePreferredProjectApp();
   const { preferredAiTool, setPreferredAiTool } = usePreferredAiTool();
+  const { notificationSettings, updateNotificationSettings } = useNotificationSettings();
   const activeProject = currentView === "project" ? selectedProject : null;
 
   const currentScanState: ScanState = selectedId
@@ -164,6 +167,20 @@ function App() {
     },
     [selectProject],
   );
+
+  useBlockedNotifications({
+    projects,
+    settings: notificationSettings,
+    labels: {
+      singleProjectTitle: messages.notifications.singleProjectTitle,
+      multiProjectTitle: messages.notifications.multiProjectTitle,
+      moreCount: messages.notifications.moreCount,
+      reasonLabels: messages.audit.reasonLabels,
+      actionCategories: messages.audit.actionCategories,
+      toolNames: messages.audit.toolNames,
+    },
+    onOpenProject: showProject,
+  });
 
   const openFolder = useCallback(async () => {
     try {
@@ -441,6 +458,10 @@ function App() {
             onDismissActionFeedback={dismissActionFeedback}
             onScan={runScan}
             setupHandlers={setupHandlers}
+            notifications={{
+              settings: notificationSettings,
+              onChange: updateNotificationSettings,
+            }}
           />
         ) : (
           <WelcomeScreen

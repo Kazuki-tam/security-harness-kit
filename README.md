@@ -43,6 +43,13 @@ scanning, AI-oriented masking, setup automation, and audit review. Installers
 are published from GitHub Releases; macOS builds are Developer ID signed and
 notarized as of `desktop-v0.6.0`.
 
+While the app is open it tails `.shk/audit.log` for every project in the
+sidebar and raises an OS notification when a hook blocks AI activity, so a
+background agent tripping the action guard is visible without opening the app.
+Bursts within a few seconds collapse into one notification, only blocks
+recorded after the app started are announced, and the toggles live in the
+**Blocked AI activity** panel.
+
 - Download and install: [Installation → Desktop App](docs/installation.md#desktop-app)
 - Maintainer release process: [Desktop Release](docs/desktop-release.md)
 
