@@ -119,7 +119,7 @@ Release assets are also covered by GitHub artifact attestations.
 For CI or security-sensitive environments, install from a pinned release tag and verify both the checksum and GitHub artifact attestation before placing the binary on `PATH`:
 
 ```bash
-version=v0.6.0
+version=v0.6.1
 target=x86_64-unknown-linux-gnu
 asset="shk-cli-${target}.tar.xz"
 repo=Kazuki-tam/security-harness-kit
@@ -165,7 +165,7 @@ Intel macOS, Apple Silicon macOS, Linux x86_64/aarch64, and Windows x86_64 are s
 
 The desktop app is distributed separately from the CLI. Releases are published
 from `desktop-vX.Y.Z` (or combined `shk-vX.Y.Z`) tags as `shk-desktop_*` assets
-on GitHub Releases. Starting with `desktop-v0.6.0`, macOS builds are Developer
+on GitHub Releases. Starting with `desktop-v0.6.1`, macOS builds are Developer
 ID signed, notarized, and stapled. Windows installers are currently **not**
 Authenticode-signed (see [Windows SmartScreen](#windows-smartscreen) below).
 
@@ -184,19 +184,19 @@ See [`desktop-release.md`](desktop-release.md) for maintainer release steps.
 Download from the release page for your tag, for example:
 
 ```text
-https://github.com/Kazuki-tam/security-harness-kit/releases/tag/desktop-v0.6.0
+https://github.com/Kazuki-tam/security-harness-kit/releases/tag/desktop-v0.6.1
 ```
 
 Verify checksums when available:
 
 ```bash
-curl -LO https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-v0.6.0/shk-desktop.sha256sum
+curl -LO https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-v0.6.1/shk-desktop.sha256sum
 sha256sum -c shk-desktop.sha256sum
 ```
 
 ### macOS
 
-Installers from `desktop-v0.6.0` onward are Developer ID signed and notarized;
+Installers from `desktop-v0.6.1` onward are Developer ID signed and notarized;
 Gatekeeper opens them without workarounds. If you still run an older unsigned
 early access build, replace it with a signed `.dmg` install — the in-app
 updater also migrates existing installs because all releases share the same
@@ -242,7 +242,7 @@ key, independent of OS code signing.
 
 ### Unsigned early access builds (historical)
 
-Before `desktop-v0.6.0`, builds were published unsigned from
+Before `desktop-v0.6.1`, builds were published unsigned from
 `desktop-unsigned-vX.Y.Z` tags (last: `desktop-unsigned-v0.5.5`). Those
 required Gatekeeper / SmartScreen workarounds documented in their release
 notes. The unsigned release path still exists for maintainers but is no longer

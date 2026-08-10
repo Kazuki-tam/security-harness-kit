@@ -41,7 +41,7 @@ With `shk`, you can:
 The **shk Desktop** app (`apps/shk-desktop`) provides a local GUI for project
 scanning, AI-oriented masking, setup automation, and audit review. Installers
 are published from GitHub Releases; macOS builds are Developer ID signed and
-notarized as of `desktop-v0.6.0`.
+notarized as of `desktop-v0.6.1`.
 
 While it is open it also raises an OS notification when a hook blocks AI
 activity in any of your projects.
@@ -248,7 +248,7 @@ shk ci init github
 shk ci init github --upload-sarif
 shk ci init github --dry-run
 shk ci init github --mode audit
-shk ci init github --shk-version v0.6.0
+shk ci init github --shk-version v0.6.1
 
 shk skills install
 shk skills install --tool claude-code --global
