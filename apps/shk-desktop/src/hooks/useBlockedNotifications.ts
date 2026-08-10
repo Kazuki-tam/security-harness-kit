@@ -1,11 +1,7 @@
 import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-} from "@tauri-apps/plugin-notification";
+import { sendNotification } from "@tauri-apps/plugin-notification";
 import {
   BLOCKED_EVENT,
   createBlockedNotificationBatcher,
@@ -59,9 +55,13 @@ export function useBlockedNotifications({ projects, settings, labels }: Options)
       getSettings: () => settingsRef.current,
       getLabels: () => labelsRef.current,
       projectNameFor: (path) => projectNameFor(projectsRef.current, path, labelsRef.current),
-      notify: (content) => {
-        void withNotificationPermission(() => sendNotification(content));
-      },
+      // No permission gate. On desktop the plugin's `isPermissionGranted` /
+      // `requestPermission` delegate to the WebView's `window.Notification`,
+      // which WKWebView does not implement — so they report "denied" and would
+      // suppress every notification. The Rust side reports `Granted`
+      // unconditionally on desktop and `notify` performs no permission check;
+      // macOS itself prompts on the first banner and owns the answer.
+      notify: sendNotification,
     });
 
     const unlistenPromise = listen<BlockedNotificationEvent[]>(BLOCKED_EVENT, (event) => {
@@ -87,32 +87,4 @@ function projectNameFor(
   // Never fall back to the raw path: it would put a filesystem location on the
   // lock screen, which is exactly what the payload avoids carrying.
   return projects.find((project) => project.path === path)?.name ?? labels.unknownProject;
-}
-
-/**
- * Granted permission is cached; a denial is not, so enabling notifications in
- * system settings takes effect without a restart. Concurrent callers share one
- * request so the OS is never asked twice at once.
- */
-let permissionGranted = false;
-let permissionRequest: Promise<boolean> | null = null;
-
-async function withNotificationPermission(send: () => void): Promise<void> {
-  if (!permissionGranted) {
-    permissionRequest ??= (async () => {
-      try {
-        return (await isPermissionGranted()) || (await requestPermission()) === "granted";
-      } catch (error) {
-        console.warn("failed to resolve notification permission", error);
-        return false;
-      }
-    })();
-    try {
-      permissionGranted = await permissionRequest;
-    } finally {
-      permissionRequest = null;
-    }
-    if (!permissionGranted) return;
-  }
-  send();
 }

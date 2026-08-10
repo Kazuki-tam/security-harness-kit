@@ -10,6 +10,27 @@ export const NOTIFICATION_SETTINGS_KEY = "shk.desktop.blockedNotifications.v1";
  */
 export const NOTIFICATION_DEBOUNCE_MS = 3000;
 
+/** Keep untrusted project labels compact enough for an OS notification. */
+const MAX_PROJECT_NAME_CHARS = 80;
+const MAX_PROJECTS_IN_BODY = 3;
+
+/** Invisible/control ranges that can reorder or disguise notification text. */
+const UNSAFE_NOTIFICATION_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x00, 0x1f],
+  [0x7f, 0x9f],
+  [0xad, 0xad],
+  [0x34f, 0x34f],
+  [0x61c, 0x61c],
+  [0x180e, 0x180e],
+  [0x200b, 0x200b],
+  [0x202a, 0x202e],
+  [0x2060, 0x2060],
+  [0x2066, 0x2069],
+  [0xfeff, 0xfeff],
+  [0xe0000, 0xe007f],
+  [0xe0100, 0xe01ef],
+];
+
 /**
  * A `blocked` audit entry forwarded live by the Rust watcher.
  *
@@ -141,15 +162,24 @@ export function summarizeBlockedBatch(
   if (events.length === 0) return null;
 
   const paths = [...new Set(events.map((event) => event.project_path))];
+  const projectNames = paths.map((path) =>
+    safeProjectName(projectNameFor(path), labels.unknownProject),
+  );
 
   if (paths.length > 1) {
+    const visibleNames = projectNames.slice(0, MAX_PROJECTS_IN_BODY);
+    if (projectNames.length > visibleNames.length) {
+      visibleNames.push(
+        interpolateCount(labels.moreCount, projectNames.length - visibleNames.length),
+      );
+    }
     return {
       title: interpolateCount(labels.multiProjectTitle, events.length),
-      body: paths.map(projectNameFor).join(", "),
+      body: visibleNames.join(", "),
     };
   }
 
-  const title = labels.singleProjectTitle.replace("{{project}}", projectNameFor(paths[0]));
+  const title = labels.singleProjectTitle.replace("{{project}}", projectNames[0]);
 
   // Newest last in the log, and the newest block is what the user just hit.
   const [latest] = events.slice(-1);
@@ -163,6 +193,31 @@ export function summarizeBlockedBatch(
 
 function interpolateCount(template: string, count: number): string {
   return template.replace("{{count}}", String(count));
+}
+
+/**
+ * Project names may originate in cloned repository names or user-controlled
+ * local storage. Strip characters that can spoof a signed app's notification,
+ * normalize whitespace, and bound the result without splitting code points.
+ */
+export function safeProjectName(name: string, fallback: string): string {
+  const safeCharacters = Array.from(name, (character) => {
+    if (character === "\r" || character === "\n" || character === "\t") return " ";
+    const codePoint = character.codePointAt(0);
+    if (
+      codePoint !== undefined &&
+      UNSAFE_NOTIFICATION_RANGES.some(([start, end]) => codePoint >= start && codePoint <= end)
+    ) {
+      return "";
+    }
+    return character;
+  });
+  const cleaned = safeCharacters.join("").replace(/\s+/gu, " ").trim();
+  if (!cleaned) return fallback;
+
+  const characters = Array.from(cleaned);
+  if (characters.length <= MAX_PROJECT_NAME_CHARS) return cleaned;
+  return `${characters.slice(0, MAX_PROJECT_NAME_CHARS).join("")}…`;
 }
 
 /**

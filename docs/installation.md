@@ -227,9 +227,12 @@ Details worth knowing:
   activity** panel to see them.
 - Turning notifications off stops the banners, not the tailing: the audit panel
   still updates while the app is open.
-- The first block prompts for OS notification permission. On macOS this
-  requires an installed, signed build — a `tauri dev` binary does not show
-  notifications.
+- The first block prompts for OS notification permission (on macOS the
+  installed app appears as **shk**; a `tauri dev` binary sends through the
+  **Terminal** identity instead, so allow Terminal notifications when testing).
+- No banner but blocks listed in the panel almost always means macOS is
+  suppressing display: check Focus mode, and the per-app notification style in
+  System Settings → Notifications.
 
 ### In-app updates
 

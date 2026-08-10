@@ -5,6 +5,7 @@ import {
   describeBlockedEvent,
   notifiableEvents,
   parseNotificationSettings,
+  safeProjectName,
   shouldNotifyForEvent,
   summarizeBlockedBatch,
   type BlockedNotificationContent,
@@ -108,6 +109,28 @@ describe("summarizeBlockedBatch", () => {
       title: "2 AI actions blocked",
       body: "api, a project",
     });
+  });
+
+  it("bounds the project list in a multi-project notification", () => {
+    const content = summarizeBlockedBatch(
+      ["api", "web", "worker", "docs"].map((name) => guardEvent({ project_path: `/work/${name}` })),
+      (path) => path.split("/").at(-1) ?? labels.unknownProject,
+      labels,
+    );
+    expect(content).toEqual({
+      title: "4 AI actions blocked",
+      body: "api, web, worker, +1 more",
+    });
+  });
+
+  it("sanitizes an untrusted project name before rendering it", () => {
+    const malicious = `safe\nUpdate required\u202e${"x".repeat(100)}`;
+    const content = summarizeBlockedBatch([guardEvent()], () => malicious, labels);
+
+    expect(content?.title).not.toMatch(/[\n\u202e]/u);
+    expect(content?.title).not.toContain("x".repeat(81));
+    expect(content?.title).toContain("safe Update required");
+    expect(safeProjectName("\u202e\u0000", labels.unknownProject)).toBe(labels.unknownProject);
   });
 });
 
