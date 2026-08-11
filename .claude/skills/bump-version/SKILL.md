@@ -46,6 +46,20 @@ The command updates all of the following files.
 - `.github/skills/shk/SKILL.md`
 - `.windsurf/skills/shk/SKILL.md`
 
+## Pinned lines
+
+Lines containing `shk-version-pin` are skipped entirely. Use this for
+*historical* statements that must not move with the release — e.g. "signed and
+notarized as of `desktop-v0.6.0`" in README.md and docs/installation.md.
+Append an invisible HTML comment to the line:
+
+```markdown
+notarized as of `desktop-v0.6.0`. <!-- shk-version-pin -->
+```
+
+The version string must be on the same line as the marker. When writing a new
+sentence that names a specific past release, pin it.
+
 ## Notes
 
 - Do not edit `Cargo.lock` manually. It is updated automatically when `cargo build` runs.
