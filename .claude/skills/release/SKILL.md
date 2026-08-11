@@ -15,9 +15,10 @@ is `.github/workflows/release.yml`; maintainer docs live in
 
 ## 1. Pre-flight (on a clean, up-to-date `main`)
 
-The version bump must already be merged (use the `bump-version` skill; note it
-blindly rewrites version strings, so confirm the *historical* signing-milestone
-sentences in README.md and docs/installation.md still say `desktop-v0.6.0`).
+The version bump must already be merged (use the `bump-version` skill).
+Historical statements — e.g. the `desktop-v0.6.0` signing milestone in
+README.md and docs/installation.md — carry a `<!-- shk-version-pin -->` marker
+that bump-version respects; pin any new sentence that names a past release.
 
 ```bash
 RELEASE_COMPONENT=<cli|desktop|both> RELEASE_VERSION=X.Y.Z \
