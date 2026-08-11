@@ -599,4 +599,13 @@ if "$mirror_script" select "$mirror_empty" >/dev/null 2>&1; then
 fi
 echo "ok: mirror selection requires CLI archives"
 
+bash -c 'source "$1"; require_same_commit shk-v1.2.3 source-sha v1.2.3 source-sha' _ "$mirror_script"
+echo "ok: mirror accepts a tag at the source commit"
+
+if bash -c 'source "$1"; require_same_commit shk-v1.2.3 source-sha v1.2.3 other-sha' _ "$mirror_script" >/dev/null 2>&1; then
+  echo "FAIL: mirror tag at a different commit should be rejected" >&2
+  exit 1
+fi
+echo "ok: mirror rejects a tag at a different commit"
+
 echo "release script tests passed"

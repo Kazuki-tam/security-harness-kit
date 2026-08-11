@@ -33,6 +33,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 source "${ROOT}/.github/scripts/release/common.sh"
 
 RELEASE_WORKFLOW="release.yml"
+MIRROR_WORKDIR=""
+RELEASE_WORKFLOW_DISABLED_BY_SCRIPT=false
 
 usage() {
   sed -n 's/^#   //p' "${BASH_SOURCE[0]}"
@@ -148,6 +150,35 @@ reenable_release_workflow() {
     echo "re-enabled ${RELEASE_WORKFLOW}"
   else
     shk_error "failed to re-enable ${RELEASE_WORKFLOW}; run: gh workflow enable ${RELEASE_WORKFLOW}"
+    return 1
+  fi
+}
+
+cleanup_mirror() {
+  local status=$?
+
+  if [[ "$RELEASE_WORKFLOW_DISABLED_BY_SCRIPT" == true ]]; then
+    if ! reenable_release_workflow; then
+      status=1
+    fi
+  fi
+  if [[ -n "$MIRROR_WORKDIR" && -d "$MIRROR_WORKDIR" ]]; then
+    rm -rf "$MIRROR_WORKDIR"
+  fi
+
+  trap - EXIT
+  exit "$status"
+}
+
+require_same_commit() {
+  local source_tag="$1"
+  local source_sha="$2"
+  local mirror_tag="$3"
+  local mirror_sha="$4"
+
+  if [[ "$mirror_sha" != "$source_sha" ]]; then
+    shk_error "tag ${mirror_tag} already exists at ${mirror_sha}, not ${source_sha} (${source_tag}); refusing to mirror"
+    exit 1
   fi
 }
 
@@ -162,75 +193,85 @@ run_mirror() {
     exit 1
   fi
 
-  local workdir
-  workdir="$(mktemp -d)"
+  MIRROR_WORKDIR="$(mktemp -d)"
+  trap cleanup_mirror EXIT
   echo "downloading CLI assets from ${source_tag}"
-  gh release download "$source_tag" --dir "$workdir" \
+  gh release download "$source_tag" --dir "$MIRROR_WORKDIR" \
     -p 'shk-cli-*' -p 'sha256.sum' -p 'shk.rb' -p 'source.tar.gz' -p 'source.tar.gz.sha256'
 
   local assets=()
   local line
   while IFS= read -r line; do
     assets+=("$line")
-  done < <(select_assets "$workdir")
-  verify_checksums "$workdir"
-
-  if gh release view "$mirror_tag" >/dev/null 2>&1; then
-    echo "mirror release ${mirror_tag} already exists; refreshing assets"
-    gh release upload "$mirror_tag" "${assets[@]}" --clobber
-    rm -rf "$workdir"
-    return
-  fi
+  done < <(select_assets "$MIRROR_WORKDIR")
+  verify_checksums "$MIRROR_WORKDIR"
 
   local commit_sha
   commit_sha="$(commit_for_tag "$source_tag")"
 
   local existing_sha=""
   if existing_sha="$(commit_for_tag "$mirror_tag" 2>/dev/null)"; then
-    if [[ "$existing_sha" != "$commit_sha" ]]; then
-      shk_error "tag ${mirror_tag} already exists at ${existing_sha}, not ${commit_sha}; refusing to mirror"
-      exit 1
-    fi
+    require_same_commit "$source_tag" "$commit_sha" "$mirror_tag" "$existing_sha"
   fi
 
-  # Creating a v* tag outside Actions re-triggers the Release workflow; park
-  # it until the mirror release exists.
-  echo "disabling ${RELEASE_WORKFLOW} while the mirror tag is created"
-  gh workflow disable "$RELEASE_WORKFLOW"
-  trap reenable_release_workflow EXIT
+  if gh release view "$mirror_tag" >/dev/null 2>&1; then
+    echo "mirror release ${mirror_tag} already exists; refreshing assets"
+    gh release upload "$mirror_tag" "${assets[@]}" --clobber
+    return
+  fi
 
   if [[ -z "$existing_sha" ]]; then
+    # Creating a v* tag outside Actions re-triggers the Release workflow; park
+    # it until the mirror release exists. Preserve a workflow that was already
+    # disabled instead of enabling it as an accidental side effect.
+    local workflow_state
+    # `gh workflow view` has no --json flag; the REST endpoint reports
+    # "active" / "disabled_manually".
+    workflow_state="$(gh api "repos/{owner}/{repo}/actions/workflows/${RELEASE_WORKFLOW}" --jq .state)"
+    if [[ "$workflow_state" == "active" ]]; then
+      echo "disabling ${RELEASE_WORKFLOW} while the mirror tag is created"
+      gh workflow disable "$RELEASE_WORKFLOW"
+      RELEASE_WORKFLOW_DISABLED_BY_SCRIPT=true
+    else
+      echo "${RELEASE_WORKFLOW} is already ${workflow_state}; leaving it unchanged"
+    fi
+
     gh api --method POST "repos/{owner}/{repo}/git/refs" \
       -f ref="refs/tags/${mirror_tag}" \
       -f sha="$commit_sha" >/dev/null
     echo "created tag ${mirror_tag} at ${commit_sha}"
   fi
 
-  mirror_notes_for "$source_tag" > "${workdir}/mirror-notes.md"
+  mirror_notes_for "$source_tag" > "${MIRROR_WORKDIR}/mirror-notes.md"
   gh release create "$mirror_tag" "${assets[@]}" \
     --title "$mirror_tag" \
-    --notes-file "${workdir}/mirror-notes.md" \
+    --notes-file "${MIRROR_WORKDIR}/mirror-notes.md" \
     --latest=false \
     --verify-tag
   echo "mirror release ${mirror_tag} published with ${#assets[@]} assets"
-  rm -rf "$workdir"
 }
 
-case "${1:-}" in
-  tag)
-    mirror_tag_for "${2:?usage: mirror-cli-release.sh tag <source-tag>}"
-    ;;
-  notes)
-    mirror_notes_for "${2:?usage: mirror-cli-release.sh notes <source-tag>}"
-    ;;
-  select)
-    select_assets "${2:?usage: mirror-cli-release.sh select <assets-dir>}"
-    ;;
-  run)
-    run_mirror "${2:?usage: mirror-cli-release.sh run <source-tag>}"
-    ;;
-  *)
-    usage >&2
-    exit 1
-    ;;
-esac
+main() {
+  case "${1:-}" in
+    tag)
+      mirror_tag_for "${2:?usage: mirror-cli-release.sh tag <source-tag>}"
+      ;;
+    notes)
+      mirror_notes_for "${2:?usage: mirror-cli-release.sh notes <source-tag>}"
+      ;;
+    select)
+      select_assets "${2:?usage: mirror-cli-release.sh select <assets-dir>}"
+      ;;
+    run)
+      run_mirror "${2:?usage: mirror-cli-release.sh run <source-tag>}"
+      ;;
+    *)
+      usage >&2
+      exit 1
+      ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
