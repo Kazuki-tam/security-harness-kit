@@ -43,7 +43,7 @@ const BARE_VERSION_FILES: &[&str] = &[
 // must not move with the current version. Append an HTML comment containing
 // the marker — `<!-- shk-version-pin -->` — to such a line and bump-version
 // leaves the whole line untouched.
-const VERSION_PIN_MARKER: &str = "shk-version-pin";
+const VERSION_PIN_MARKER: &str = "<!-- shk-version-pin -->";
 
 // Files where the v-prefixed version string (e.g. "v0.3.7") appears.
 const V_VERSION_FILES: &[&str] = &[
@@ -253,6 +253,14 @@ fn read_workspace_version(root: &Path) -> Result<String> {
 
 fn replace_in_file(path: &Path, old: &str, new: &str) -> Result<usize> {
     let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let (updated, count) = replace_unpinned(&content, old, new);
+    if let Some(updated) = updated {
+        fs::write(path, updated).with_context(|| format!("write {}", path.display()))?;
+    }
+    Ok(count)
+}
+
+fn replace_unpinned(content: &str, old: &str, new: &str) -> (Option<String>, usize) {
     let mut count = 0usize;
     let updated: String = content
         .split_inclusive('\n')
@@ -266,10 +274,7 @@ fn replace_in_file(path: &Path, old: &str, new: &str) -> Result<usize> {
             line.replace(old, new)
         })
         .collect();
-    if count > 0 {
-        fs::write(path, updated).with_context(|| format!("write {}", path.display()))?;
-    }
-    Ok(count)
+    ((count > 0).then_some(updated), count)
 }
 
 fn import_gitleaks_rules(args: ImportArgs) -> Result<()> {
@@ -753,6 +758,29 @@ mod tests {
             fs::read_to_string(&path).expect("read pinned fixture"),
             content
         );
+    }
+
+    #[test]
+    fn version_bump_requires_the_complete_pin_comment() {
+        let content = "the marker is called shk-version-pin; install v0.5.5\n";
+
+        let (updated, count) = replace_unpinned(content, "v0.5.5", "v0.5.6");
+
+        assert_eq!(count, 1);
+        assert_eq!(
+            updated.as_deref(),
+            Some("the marker is called shk-version-pin; install v0.5.6\n")
+        );
+    }
+
+    #[test]
+    fn version_bump_preserves_an_unterminated_pinned_line() {
+        let content = "historical v0.5.5 <!-- shk-version-pin -->";
+
+        let (updated, count) = replace_unpinned(content, "v0.5.5", "v0.5.6");
+
+        assert_eq!(count, 0);
+        assert_eq!(updated, None);
     }
 
     #[test]

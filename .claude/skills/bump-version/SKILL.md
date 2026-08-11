@@ -48,7 +48,7 @@ The command updates all of the following files.
 
 ## Pinned lines
 
-Lines containing `shk-version-pin` are skipped entirely. Use this for
+Lines containing the exact `<!-- shk-version-pin -->` comment are skipped entirely. Use this for
 *historical* statements that must not move with the release — e.g. "signed and
 notarized as of `desktop-v0.6.0`" in README.md and docs/installation.md.
 Append an invisible HTML comment to the line:
