@@ -543,4 +543,69 @@ RELEASE_VERSION="$current_version" \
   ./.github/scripts/release/verify-unsigned-desktop-assets.sh "$unsigned_assets" >/dev/null
 echo "ok: unsigned desktop asset verification"
 
+mirror_script=./.github/scripts/release/mirror-cli-release.sh
+
+assert_output "mirror tag for combined release" "v1.2.3" "$mirror_script" tag shk-v1.2.3
+assert_output "mirror tag for cli-prefixed release" "v1.2.3" "$mirror_script" tag cli-v1.2.3
+
+if "$mirror_script" tag "v1.2.3" >/dev/null 2>&1; then
+  echo "FAIL: plain v tag should not need a mirror" >&2
+  exit 1
+fi
+echo "ok: mirror rejects plain v tag"
+
+if "$mirror_script" tag "desktop-v1.2.3" >/dev/null 2>&1; then
+  echo "FAIL: desktop tag should not resolve to a CLI mirror" >&2
+  exit 1
+fi
+echo "ok: mirror rejects desktop tag"
+
+if "$mirror_script" tag "shk-vnot-a-version" >/dev/null 2>&1; then
+  echo "FAIL: non-semver source tag should be rejected" >&2
+  exit 1
+fi
+echo "ok: mirror rejects non-semver source tag"
+
+mirror_notes="$("$mirror_script" notes shk-v1.2.3)"
+assert_contains "mirror notes download path" "$mirror_notes" "releases/download/v1.2.3"
+assert_contains "mirror notes canonical tag" "$mirror_notes" "releases/tag/shk-v1.2.3"
+
+mirror_assets="$tmpdir/mirror-assets"
+mkdir -p "$mirror_assets"
+printf 'archive\n' > "$mirror_assets/shk-cli-x86_64-apple-darwin.tar.xz"
+printf 'checksum\n' > "$mirror_assets/shk-cli-x86_64-apple-darwin.tar.xz.sha256"
+printf 'installer\n' > "$mirror_assets/shk-cli-installer.sh"
+printf 'sums\n' > "$mirror_assets/sha256.sum"
+printf 'formula\n' > "$mirror_assets/shk.rb"
+printf 'source\n' > "$mirror_assets/source.tar.gz"
+printf 'desktop\n' > "$mirror_assets/shk-desktop_1.2.3_x86_64-apple-darwin_1.2.3_x64.dmg"
+printf 'updater\n' > "$mirror_assets/latest.json"
+mirror_selected="$("$mirror_script" select "$mirror_assets")"
+assert_contains "mirror selects CLI archive" "$mirror_selected" "shk-cli-x86_64-apple-darwin.tar.xz"
+assert_contains "mirror selects installer" "$mirror_selected" "shk-cli-installer.sh"
+assert_contains "mirror selects Homebrew formula" "$mirror_selected" "shk.rb"
+if [[ "$mirror_selected" == *".dmg"* || "$mirror_selected" == *"latest.json"* ]]; then
+  echo "FAIL: mirror selection must exclude desktop assets" >&2
+  exit 1
+fi
+echo "ok: mirror selection excludes desktop assets"
+
+mirror_empty="$tmpdir/mirror-empty"
+mkdir -p "$mirror_empty"
+printf 'sums\n' > "$mirror_empty/sha256.sum"
+if "$mirror_script" select "$mirror_empty" >/dev/null 2>&1; then
+  echo "FAIL: mirror selection without CLI archives should fail" >&2
+  exit 1
+fi
+echo "ok: mirror selection requires CLI archives"
+
+bash -c 'source "$1"; require_same_commit shk-v1.2.3 source-sha v1.2.3 source-sha' _ "$mirror_script"
+echo "ok: mirror accepts a tag at the source commit"
+
+if bash -c 'source "$1"; require_same_commit shk-v1.2.3 source-sha v1.2.3 other-sha' _ "$mirror_script" >/dev/null 2>&1; then
+  echo "FAIL: mirror tag at a different commit should be rejected" >&2
+  exit 1
+fi
+echo "ok: mirror rejects a tag at a different commit"
+
 echo "release script tests passed"
