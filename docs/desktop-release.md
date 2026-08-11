@@ -125,6 +125,35 @@ Pull request CI runs desktop `tauri build --no-bundle` smoke tests on Linux,
 macOS, and Windows. Signed installer bundling remains release-only because it
 needs production signing secrets.
 
+## Combined releases and the CLI mirror
+
+Combined (`shk-vX.Y.Z`) and CLI-prefixed (`cli-vX.Y.Z`) tags publish every
+asset under that tag, but the cargo-dist-generated install channels — the
+shell/PowerShell installers, the Homebrew formula, and the npm package — embed
+download URLs that follow cargo-dist's own `vX.Y.Z` convention, because the
+workflow's `dist build` calls carry no announcement tag and cargo-dist cannot
+parse the `shk-v*` / `cli-v*` conventions at all. Without a `vX.Y.Z` release,
+all three channels 404 (this bit `shk-v0.6.1`, the first combined release).
+
+After a combined or `cli-v*` release goes green, mirror the CLI assets:
+
+```bash
+./.github/scripts/release/mirror-cli-release.sh run shk-vX.Y.Z
+```
+
+The script downloads the CLI assets from the canonical release, verifies their
+checksums, creates the `vX.Y.Z` tag at the same commit, and publishes a
+non-latest mirror release with byte-identical assets (so the SHA-256 values in
+the already-published Homebrew formula still match). It temporarily disables
+the Release workflow while the tag is created — a `v*` tag push would
+otherwise re-trigger it and fail on the duplicate npm publish — and re-enables
+it on exit.
+
+This is a maintainer-side step by design: the "Protect release tags" ruleset
+only lets repository admins create `v*` refs, so the workflow's own
+`GITHUB_TOKEN` cannot create the mirror tag from CI. Plain `vX.Y.Z` CLI
+releases need no mirror.
+
 ## Release Checklist
 
 1. Update versions with `cargo run -p xtask -- bump-version X.Y.Z` so
@@ -140,6 +169,9 @@ needs production signing secrets.
    combined CLI and desktop release.
 5. After publishing, verify the GitHub release assets, `shk-desktop.sha256sum`,
    `shk-desktop-latest.json`, and the `desktop-latest` updater metadata.
+6. For `shk-vX.Y.Z` (or `cli-vX.Y.Z`) releases, run the
+   [CLI mirror](#combined-releases-and-the-cli-mirror) so the installers,
+   Homebrew formula, and npm package resolve.
 
 ### Unsigned release checklist
 
