@@ -811,13 +811,102 @@ fn has_long_ascii_sequence(value: &str, min_run: usize) -> bool {
     false
 }
 
+/// Prefixes bundlers inline into client-side JavaScript at build time. A value
+/// so named ships in the public bundle by construction (Vite's own docs say
+/// these "should not contain sensitive information").
+const BROWSER_PUBLIC_ENV_PREFIXES: &[&str] = &[
+    "NEXT_PUBLIC_",
+    "VITE_",
+    "REACT_APP_",
+    "EXPO_PUBLIC_",
+    "GATSBY_",
+    "NUXT_PUBLIC_",
+    "VUE_APP_",
+    "PUBLIC_",
+];
+
+/// Name-based guard for name-heuristic rules (`env.sensitive_assignment`,
+/// `secret.generic_api_key`); vendor-format rules keep matching the value
+/// independently of what the variable is called.
+///
+/// - `*_PATH` / `*_FILE` / `*_DIR` names hold a location, not the secret
+///   itself: `SSH_KEY_PATH` is a filename, and the key it points at is
+///   covered by the private-key rules when that file is scanned.
+/// - Browser-public build prefixes are excluded unless the name also says
+///   SECRET/PASSWORD/PRIVATE — `NEXT_PUBLIC_STRIPE_SECRET_KEY` is a
+///   misconfiguration worth reporting, not a public value.
+fn env_key_is_public_by_construction(key: &str) -> bool {
+    let key = key.to_ascii_uppercase();
+    if ["_PATH", "_FILE", "_DIR"]
+        .iter()
+        .any(|suffix| key.ends_with(suffix))
+    {
+        return true;
+    }
+    ["SECRET", "PASSWORD", "PASSWD", "PRIVATE"]
+        .iter()
+        .all(|marker| !key.contains(marker))
+        && BROWSER_PUBLIC_ENV_PREFIXES
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+}
+
+/// Numeric values are benign only when the name identifies metadata about a
+/// credential. A numeric password or API key can still be a real credential
+/// and must not be suppressed merely because it contains one character class.
+fn env_numeric_value_is_metadata(key: &str) -> bool {
+    let key = key.to_ascii_uppercase();
+    [
+        "_EXPIRY",
+        "_EXPIRES",
+        "_EXPIRATION",
+        "_TTL",
+        "_PORT",
+        "_TIMEOUT",
+        "_TIMESTAMP",
+        "_VERSION",
+    ]
+    .iter()
+    .any(|suffix| key.ends_with(suffix))
+}
+
+/// The identifier characters immediately before `match_start`, for rules whose
+/// regex starts matching mid-identifier (`API_KEY` inside `NEXT_PUBLIC_API_KEY`).
+fn identifier_prefix(content: &str, match_start: usize) -> &str {
+    let head = &content[..match_start];
+    let start = head
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !(c.is_ascii_alphanumeric() || *c == '_'))
+        .map_or(0, |(index, c)| index + c.len_utf8());
+    &head[start..]
+}
+
+fn generic_api_key_name_is_public(content: &str, match_start: usize, matched: &str) -> bool {
+    let key_in_match: String = matched
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    let full_key = format!(
+        "{}{}",
+        identifier_prefix(content, match_start),
+        key_in_match
+    );
+    env_key_is_public_by_construction(&full_key)
+}
+
 fn env_assignment_valid(candidate: &str) -> bool {
     // Dotenv semantics: the value is everything after the first `=`, so
     // base64 padding (`=`) and URL values containing `:` stay intact.
-    let value = match candidate.split_once('=') {
-        Some((_, v)) => v.trim().trim_matches(|c| c == '"' || c == '\''),
+    let (key, value) = match candidate.split_once('=') {
+        Some((k, v)) => (k, v.trim().trim_matches(|c| c == '"' || c == '\'')),
         None => return false,
     };
+    // The key is the last word before `=` (skipping an `export` prefix).
+    let key = key.split_whitespace().next_back().unwrap_or("");
+    if env_key_is_public_by_construction(key) {
+        return false;
+    }
     let lower = value.to_ascii_lowercase();
 
     // Placeholder / non-secret values common in templates and docs.
@@ -834,6 +923,11 @@ fn env_assignment_valid(candidate: &str) -> bool {
             "true" | "false" | "null" | "none" | "undefined" | "disabled" | "enabled"
         )
     {
+        return false;
+    }
+    // Credential metadata often contains only a port, timestamp, or duration.
+    // Do not generalize this to the credential itself: numeric secrets exist.
+    if value.chars().all(|c| c.is_ascii_digit()) && env_numeric_value_is_metadata(key) {
         return false;
     }
 
@@ -1419,6 +1513,15 @@ pub fn scan_content(content: &str, rel_path: &str, cfg: &RuleEngineConfig) -> Ve
             {
                 continue;
             }
+            // This rule matches mid-identifier (`API_KEY` inside
+            // `NEXT_PUBLIC_API_KEY`), so the browser-public name guard needs
+            // the characters before the match; validators only see the
+            // matched text.
+            if r.id == "secret.generic_api_key"
+                && generic_api_key_name_is_public(content, m.start(), m.as_str())
+            {
+                continue;
+            }
             let index = line_index.get_or_insert_with(|| LineIndex::new(content));
             let (line, column) = index.line_col(m.start());
             out.push(RuleMatch {
@@ -1688,6 +1791,96 @@ mod tests {
         assert!(
             !m.iter().any(|x| x.rule_id == "env.sensitive_assignment"),
             "{m:?}"
+        );
+    }
+
+    #[test]
+    fn env_assignment_skips_browser_public_prefixes() {
+        let cfg = RuleEngineConfig::default();
+        // not real credentials: synthetic detector fixture values only
+        let text = concat!(
+            "NEXT_PUBLIC_ANALYTICS_TOKEN=phc-aB3dE5gH7jK9mN2pQ4sT\n",
+            "VITE_API_KEY=vk-aB3dE5gH7jK9mN2pQ4sT\n",
+            "REACT_APP_MAPS_TOKEN=maps-aB3dE5gH7jK9mN2p\n",
+        );
+        let m = scan_content(text, ".env", &cfg);
+        assert!(
+            !m.iter().any(|x| x.rule_id == "env.sensitive_assignment"),
+            "{m:?}"
+        );
+        assert!(
+            !m.iter().any(|x| x.rule_id == "secret.generic_api_key"),
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn env_assignment_public_prefix_with_secret_name_still_fires() {
+        let cfg = RuleEngineConfig::default();
+        // NEXT_PUBLIC_ + SECRET is a misconfiguration, not a public value.
+        // not real credentials: synthetic detector fixture values only
+        let text = "NEXT_PUBLIC_STRIPE_SECRET_KEY=sk-aB3dE5gH7jK9mN2pQ4sT\n";
+        let m = scan_content(text, ".env", &cfg);
+        assert!(
+            m.iter().any(|x| x.rule_id == "env.sensitive_assignment"),
+            "{m:?}"
+        );
+        assert!(
+            m.iter().any(|x| x.rule_id == "secret.generic_api_key"),
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn generic_api_key_guard_sees_prefix_outside_dotenv_files() {
+        let cfg = RuleEngineConfig::default();
+        // In source files the env rule is gated off, but the generic rule
+        // still runs; the name guard must look left of the match.
+        let code = "const config = { NEXT_PUBLIC_API_KEY: \"pk19d8e37a6c45bf28\" };\n";
+        let m = scan_content(code, "src/config.ts", &cfg);
+        assert!(
+            !m.iter().any(|x| x.rule_id == "secret.generic_api_key"),
+            "{m:?}"
+        );
+        // Without a public prefix the same shape still matches.
+        let code = "const config = { STRIPE_API_KEY: \"pk19d8e37a6c45bf28\" };\n";
+        let m = scan_content(code, "src/config.ts", &cfg);
+        assert!(
+            m.iter().any(|x| x.rule_id == "secret.generic_api_key"),
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn env_assignment_skips_path_file_dir_names() {
+        let cfg = RuleEngineConfig::default();
+        let text = concat!(
+            "TOKEN_FILE=/run/secrets/github-token\n",
+            "SSH_PRIVATE_KEY_PATH=/home/ci/keys/deploy.pem\n",
+            "SECRETS_DIR=/etc/app/secrets-store\n",
+        );
+        let m = scan_content(text, ".env", &cfg);
+        assert!(
+            !m.iter().any(|x| x.rule_id == "env.sensitive_assignment"),
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn env_assignment_skips_pure_numeric_values() {
+        let cfg = RuleEngineConfig::default();
+        let text = "API_KEY_EXPIRY=1928374650\n";
+        let m = scan_content(text, ".env", &cfg);
+        assert!(
+            !m.iter().any(|x| x.rule_id == "env.sensitive_assignment"),
+            "{m:?}"
+        );
+
+        let numeric_credential = concat!("API", "_KEY", "=1928374650\n");
+        let m = scan_content(numeric_credential, ".env", &cfg);
+        assert!(
+            m.iter().any(|x| x.rule_id == "env.sensitive_assignment"),
+            "numeric credentials must not be suppressed: {m:?}"
         );
     }
 

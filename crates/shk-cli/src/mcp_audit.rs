@@ -273,20 +273,32 @@ enum CandidateRead {
 }
 
 fn read_candidate(candidate: &Candidate) -> CandidateRead {
-    match fs::symlink_metadata(&candidate.path) {
+    read_scoped_utf8(&candidate.path, &candidate.scope_root)
+}
+
+/// Reads a UTF-8 file through the same bounded, scope-confined path for both
+/// MCP configuration files and credential-carrying files referenced by them.
+/// Metadata is checked on the opened handle so a path replacement cannot
+/// bypass the regular-file, size, or hard-link checks.
+fn read_scoped_utf8(path: &Path, scope_root: &Path) -> CandidateRead {
+    match fs::symlink_metadata(path) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return CandidateRead::Missing;
         }
         Err(_) => return CandidateRead::Unreadable,
     }
-    let Ok(canonical) = fs::canonicalize(&candidate.path) else {
+    let Ok(canonical) = fs::canonicalize(path) else {
         return CandidateRead::Unreadable;
     };
-    if !canonical.starts_with(&candidate.scope_root) {
+    let canonical_scope = fs::canonicalize(scope_root).unwrap_or_else(|_| scope_root.to_path_buf());
+    if !canonical.starts_with(canonical_scope) {
         return CandidateRead::Unreadable;
     }
-    let Ok(metadata) = fs::metadata(&canonical) else {
+    let Ok(file) = fs::File::open(&canonical) else {
+        return CandidateRead::Unreadable;
+    };
+    let Ok(metadata) = file.metadata() else {
         return CandidateRead::Unreadable;
     };
     if !metadata.is_file()
@@ -295,9 +307,6 @@ fn read_candidate(candidate: &Candidate) -> CandidateRead {
     {
         return CandidateRead::Unreadable;
     }
-    let Ok(file) = fs::File::open(&canonical) else {
-        return CandidateRead::Unreadable;
-    };
     let mut bytes = Vec::new();
     if file
         .take(MAX_CONFIG_BYTES + 1)
@@ -591,6 +600,18 @@ fn check_entry(
                 "args",
                 findings,
             )?;
+            for reference in env_file_references(args) {
+                audit_env_file(
+                    root,
+                    home,
+                    reference,
+                    &entry.source_file,
+                    &server,
+                    &client,
+                    &file,
+                    findings,
+                )?;
+            }
         }
         McpTransport::Http { url, headers } => {
             if is_insecure_remote_http(url) {
@@ -677,6 +698,112 @@ fn scan_literals<'a>(
         finding.line = 1;
         finding.column = 1;
         finding.value_hash = None;
+        finding.context_before.clear();
+        finding.context_after.clear();
+        findings.push(finding);
+    }
+    Ok(())
+}
+
+/// Paths named by `--env-file <path>` / `--env-file=<path>` arguments
+/// (docker run, node --env-file): the file is a credential carrier the
+/// config itself never shows.
+fn env_file_references(args: &[String]) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "--env-file" || arg == "--envfile" {
+            if let Some(path) = args.get(index + 1) {
+                out.push(path.as_str());
+                index += 2;
+                continue;
+            }
+        } else if let Some(path) = arg
+            .strip_prefix("--env-file=")
+            .or_else(|| arg.strip_prefix("--envfile="))
+        {
+            out.push(path);
+        }
+        index += 1;
+    }
+    out
+}
+
+fn resolve_env_file(reference: &str, source_file: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    let reference = reference.trim();
+    if reference.is_empty() || is_reference(reference) {
+        return None;
+    }
+    if let Some(rest) = reference.strip_prefix("~/") {
+        return home.map(|home| home.join(rest));
+    }
+    let path = Path::new(reference);
+    if path.is_absolute() {
+        return Some(path.to_path_buf());
+    }
+    // Relative paths resolve against the config's own directory: the project
+    // root for project configs, the home directory for user-scoped ones.
+    source_file.parent().map(|parent| parent.join(path))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn audit_env_file(
+    root: &Path,
+    home: Option<&Path>,
+    reference: &str,
+    source_file: &Path,
+    server: &str,
+    client: &str,
+    config_label: &str,
+    findings: &mut Vec<Finding>,
+) -> Result<()> {
+    let Some(path) = resolve_env_file(reference, source_file, home) else {
+        return Ok(());
+    };
+    let scope_root = if source_file.starts_with(root) {
+        root
+    } else if let Some(home) = home.filter(|home| source_file.starts_with(home)) {
+        home
+    } else {
+        // Parsed entries should always originate from one of the selected
+        // scopes. Refuse to follow a reference if that invariant is broken.
+        return Ok(());
+    };
+    let (canonical, mut content) = match read_scoped_utf8(&path, scope_root) {
+        // A missing file means the server gets nothing; only an existing file
+        // that cannot be safely read becomes a finding.
+        CandidateRead::Missing => return Ok(()),
+        CandidateRead::Unreadable => {
+            findings.push(context_finding(
+                "mcp.env_file_unreadable",
+                Severity::Low,
+                config_label,
+                server,
+                client,
+                "an --env-file reference could not be safely read",
+                0.9,
+            ));
+            return Ok(());
+        }
+        CandidateRead::Content { canonical, content } => (canonical, content),
+    };
+    // `audit()` passes canonical bases, while focused unit callers may not
+    // (notably macOS temp paths under `/var` -> `/private/var`). Normalize the
+    // display bases so successful reads still receive stable relative labels.
+    let canonical_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let canonical_home = home.map(|home| fs::canonicalize(home).unwrap_or_else(|_| home.into()));
+    let label = display_label(&canonical_root, canonical_home.as_deref(), &canonical);
+    let result = scan_string(root, &label, &content, ScanOptions::default());
+    content.zeroize();
+    for mut finding in result?
+        .findings
+        .into_iter()
+        .filter(|finding| finding.kind == "secret" || finding.kind == "env")
+    {
+        finding.message =
+            format!("plaintext secret in MCP server \"{server}\" ({client}) env-file");
+        finding.file = label.clone();
         finding.context_before.clear();
         finding.context_after.clear();
         findings.push(finding);
@@ -1265,6 +1392,168 @@ mod tests {
                 .iter()
                 .any(|f| f.rule_id == "secret.openai_api_key")
         );
+    }
+
+    #[test]
+    fn env_file_reference_is_scanned_for_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_path = dir.path().join("server.env");
+        // not real credentials: synthetic detector fixture values only
+        let synthetic = format!("{}{}", "sk-proj-", "zbcdefghijklmnopqrstuvwxyz0123456789");
+        fs::write(
+            &env_path,
+            format!("OPENAI_API_KEY={synthetic}\nDB_PASSWORD=hunter2-Prod98\n"),
+        )
+        .unwrap();
+
+        for args in [
+            vec!["--env-file".to_string(), env_path.display().to_string()],
+            vec![format!("--env-file={}", env_path.display())],
+        ] {
+            let mut entry = stdio("node", &["server.js"]);
+            entry.source_file = dir.path().join(".mcp.json");
+            let McpTransport::Stdio {
+                args: entry_args, ..
+            } = &mut entry.transport
+            else {
+                unreachable!();
+            };
+            entry_args.extend(args);
+            let mut findings = Vec::new();
+            check_entry(dir.path(), None, &entry, &mut findings).unwrap();
+            assert!(
+                findings.iter().any(|f| {
+                    f.rule_id == "secret.openai_api_key"
+                        && f.file == "server.env"
+                        && f.message.contains("env-file")
+                }),
+                "{findings:?}"
+            );
+            // Dotenv name-heuristic findings from the referenced file count too.
+            assert!(
+                findings
+                    .iter()
+                    .any(|f| f.rule_id == "env.sensitive_assignment"),
+                "{findings:?}"
+            );
+            assert!(
+                !serde_json::to_string(&findings).unwrap().contains("zbcdef"),
+                "raw value leaked: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn env_file_relative_reference_resolves_against_config_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // not real credentials: synthetic detector fixture values only
+        let synthetic = format!("{}{}", "sk-proj-", "ybcdefghijklmnopqrstuvwxyz0123456789");
+        fs::write(
+            dir.path().join("server.env"),
+            format!("OPENAI_API_KEY={synthetic}\n"),
+        )
+        .unwrap();
+        let mut entry = stdio("node", &["server.js", "--env-file", "server.env"]);
+        entry.source_file = dir.path().join(".mcp.json");
+        let mut findings = Vec::new();
+        check_entry(dir.path(), None, &entry, &mut findings).unwrap();
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "secret.openai_api_key"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn env_file_missing_reference_and_oversized_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut entry = stdio("node", &["--env-file", "does-not-exist.env"]);
+        entry.source_file = dir.path().join(".mcp.json");
+        let mut findings = Vec::new();
+        check_entry(dir.path(), None, &entry, &mut findings).unwrap();
+        assert!(findings.is_empty(), "{findings:?}");
+
+        let oversized = dir.path().join("big.env");
+        fs::write(&oversized, vec![b' '; MAX_CONFIG_BYTES as usize + 1]).unwrap();
+        let mut entry = stdio("node", &["--env-file", "big.env"]);
+        entry.source_file = dir.path().join(".mcp.json");
+        let mut findings = Vec::new();
+        check_entry(dir.path(), None, &entry, &mut findings).unwrap();
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "mcp.env_file_unreadable"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn env_file_reference_cannot_escape_selected_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir(&project).unwrap();
+        let outside = dir.path().join("outside.env");
+        // not real credentials: synthetic detector fixture values only
+        let synthetic = concat!("API", "_KEY=outside-synthetic-value-123456\n");
+        fs::write(&outside, synthetic).unwrap();
+        let mut entry = stdio("node", &["--env-file", "../outside.env"]);
+        entry.source_file = project.join(".mcp.json");
+
+        let mut findings = Vec::new();
+        check_entry(&project, None, &entry, &mut findings).unwrap();
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "mcp.env_file_unreadable"),
+            "{findings:?}"
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.kind == "secret" || f.kind == "env"),
+            "out-of-scope content was scanned: {findings:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn env_file_reference_rejects_hard_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original.env");
+        let linked = dir.path().join("linked.env");
+        let synthetic = concat!("API", "_KEY=synthetic-hard-link-value-123456\n");
+        fs::write(&original, synthetic).unwrap();
+        fs::hard_link(&original, &linked).unwrap();
+        let mut entry = stdio("node", &["--env-file", "linked.env"]);
+        entry.source_file = dir.path().join(".mcp.json");
+
+        let mut findings = Vec::new();
+        check_entry(dir.path(), None, &entry, &mut findings).unwrap();
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "mcp.env_file_unreadable"),
+            "{findings:?}"
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.kind == "secret" || f.kind == "env"),
+            "hard-linked content was scanned: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn env_file_variable_reference_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut entry = stdio("node", &["--env-file", "${ENV_FILE}"]);
+        entry.source_file = dir.path().join(".mcp.json");
+        let mut findings = Vec::new();
+        check_entry(dir.path(), None, &entry, &mut findings).unwrap();
+        assert!(findings.is_empty(), "{findings:?}");
     }
 
     #[test]

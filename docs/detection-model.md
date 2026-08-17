@@ -37,11 +37,14 @@ The rule engine supports these kinds:
 |------|-------|
 | `secret` | API keys, tokens, database URLs, private keys, and similar sensitive credentials. |
 | `pii` | Personal information patterns. |
-| `env` | Env-related rules and hints. The built-in `env.sensitive_assignment` rule flags dotenv-style assignments of sensitive variable names (`*PASSWORD*`, `*SECRET*`, `*TOKEN*`, `*API_KEY*`, `*PRIVATE_KEY*`, `*ACCESS_KEY*`, `*CREDENTIAL*`) with non-placeholder values. Env rules only apply to dotenv-style files (file name starting with `.env` or ending in `.env`), so source code reading the environment (e.g. `DB_PASSWORD = os.environ[...]`) is not flagged. `.env.example` and `.env.sample` files are skipped, and `[rules] env = false` disables the kind. |
+| `env` | Env-related rules and hints. The built-in `env.sensitive_assignment` rule flags dotenv-style assignments of sensitive variable names (`*PASSWORD*`, `*SECRET*`, `*TOKEN*`, `*API_KEY*`, `*PRIVATE_KEY*`, `*ACCESS_KEY*`, `*CREDENTIAL*`) with non-placeholder values. Env rules only apply to dotenv-style files (file name starting with `.env` or ending in `.env`), so source code reading the environment (e.g. `DB_PASSWORD = os.environ[...]`) is not flagged. `.env.example` and `.env.sample` files are skipped, and `[rules] env = false` disables the kind. Names that are public or non-secret by construction are excluded: browser build prefixes (`NEXT_PUBLIC_`, `VITE_`, `REACT_APP_`, `EXPO_PUBLIC_`, `GATSBY_`, `NUXT_PUBLIC_`, `VUE_APP_`, `PUBLIC_`) are inlined into client bundles — unless the name also contains `SECRET`/`PASSWORD`/`PRIVATE`, which is reported as a misconfiguration — and `*_PATH`/`*_FILE`/`*_DIR` names hold a location, not the secret itself. Pure-digit values are skipped. Vendor-format `secret.*` rules keep matching values independently of the name. |
 | `ai-context` | AI-context-oriented rules. |
 | `ignore` | Scanner skip notices and policy warnings. |
 | `git` | Git-related findings. |
 | `mcp` | MCP server configuration findings produced by `shk mcp audit`. |
+
+Pure-digit values are ignored only for metadata names such as expiry, TTL, port, timeout,
+timestamp, or version. All-digit credentials remain reportable.
 
 Not every kind is used by every command or built-in rule set.
 
@@ -112,12 +115,22 @@ subject of the finding is the server entry rather than a text position.
 | `mcp.secret_in_url` | `high` | Sensitive query parameter names in a server URL. |
 | `mcp.unknown_transport` | `info` | Entries declaring neither a command nor a URL. |
 | `mcp.config_unreadable` | `low` | Files that cannot be read or parsed, including entries rejected by the read limits below. |
+| `mcp.env_file_unreadable` | `low` | An existing `--env-file` target that cannot be safely read (oversized or not a regular file). |
 
 Configured argument, process-variable, header, and URL values additionally pass through the
 built-in secret rules, so a plaintext credential in a server definition is reported with its normal
 `secret.*` rule id and kind `secret`, with the message rewritten to name the server, client, and
 field. References such as `${VAR}`, `$VAR`, and `${input:token}` are recognised as indirection and
 are not treated as plaintext values. Existing `[[allowlist]]` entries apply.
+
+A plaintext file named by a server's `--env-file` argument is a credential carrier the config
+itself never shows, so the audit follows the reference and scans the file's content with the same
+secret and dotenv rules (subject to the same 1 MiB read limit). This local file read is the one
+exception to "the audit only reads the configuration files"; the audit still never starts a
+server, expands a variable, or touches the network. Relative paths resolve against the config
+file's directory, `${VAR}`-style references are not followed, and resolved targets must remain
+inside the selected project or home scope. A missing target is skipped — only an existing file
+that escapes the scope or cannot be safely read becomes `mcp.env_file_unreadable`.
 
 Reads are bounded before parsing: 1 MiB per file, 1,000 server entries per file, and resolved paths
 must stay inside the selected project or home scope. Escaping symbolic links, oversized files,
