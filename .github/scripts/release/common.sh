@@ -20,6 +20,65 @@ shk_require_semver() {
   fi
 }
 
+# Retry a command with bounded exponential backoff.
+# Usage: shk_retry <attempts> <initial-delay-seconds> <max-delay-seconds> <command...>
+shk_retry() {
+  local attempts="$1"
+  local delay="$2"
+  local max_delay="$3"
+  shift 3
+  local attempt=1
+  while true; do
+    if "$@"; then
+      return 0
+    fi
+    if [[ "$attempt" -ge "$attempts" ]]; then
+      return 1
+    fi
+    echo "retrying after transient failure (${attempt}/${attempts}): $1" >&2
+    sleep "$delay"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+    if [[ "$delay" -gt "$max_delay" ]]; then
+      delay="$max_delay"
+    fi
+  done
+}
+
+# Resolve the commit a GitHub tag points at, dereferencing annotated tags. The
+# ref API is called once so a concurrently modified tag cannot produce a mixed
+# object SHA/type pair.
+shk_commit_for_tag() {
+  local tag="$1"
+  local retry_attempts="${2:-5}"
+  local object sha type
+  object="$(shk_retry "$retry_attempts" 2 16 gh api \
+    "repos/{owner}/{repo}/git/ref/tags/${tag}" \
+    --jq '[.object.sha, .object.type] | @tsv')"
+  IFS=$'\t' read -r sha type <<<"$object"
+  if [[ -z "$sha" || -z "$type" ]]; then
+    shk_error "could not resolve tag object: ${tag}"
+    return 1
+  fi
+  if [[ "$type" == "tag" ]]; then
+    sha="$(shk_retry "$retry_attempts" 2 16 gh api \
+      "repos/{owner}/{repo}/git/tags/${sha}" --jq .object.sha)"
+  fi
+  printf '%s\n' "$sha"
+}
+
+shk_verify_sha256_file() {
+  local checksum_file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -c "$checksum_file" >/dev/null
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 -c "$checksum_file" >/dev/null
+  else
+    shk_error "sha256sum or shasum is required"
+    return 1
+  fi
+}
+
 shk_require_env() {
   local label="$1"
   shift

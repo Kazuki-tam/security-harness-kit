@@ -214,8 +214,15 @@ pub fn run() -> Result<()> {
                 color_enabled: color,
             })?,
         },
-        Commands::Doctor { cmd, json } => match cmd {
-            None => doctor::run_all(&cwd, json)?,
+        Commands::Doctor { cmd, json, strict } => match cmd {
+            None => doctor::run_all(&cwd, json, strict)?,
+            Some(_) if strict => {
+                return Err(exit::CliExit::message(
+                    2,
+                    "--strict is only supported by the full `shk doctor` suite",
+                )
+                .into());
+            }
             Some(DoctorCmd::Version) => version_check::run(json)?,
             Some(DoctorCmd::Ignore { path, fix }) => {
                 let p = doctor::doctor_ignore_path(path);

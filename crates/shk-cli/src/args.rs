@@ -187,6 +187,9 @@ pub enum Commands {
         cmd: Option<DoctorCmd>,
         #[arg(long)]
         json: bool,
+        /// Return exit code 1 when the full doctor suite reports advisory warnings.
+        #[arg(long)]
+        strict: bool,
     },
     /// Hook installation (Git pre-commit and AI editor hooks)
     Hooks {

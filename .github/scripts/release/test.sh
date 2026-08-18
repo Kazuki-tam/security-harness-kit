@@ -7,6 +7,8 @@ source ./.github/scripts/release/common.sh
 
 current_version="$(shk_workspace_version)"
 
+release_workflow="$(<.github/workflows/release.yml)"
+
 assert_output() {
   local description="$1"
   local expected="$2"
@@ -32,6 +34,13 @@ assert_contains() {
     exit 1
   fi
 }
+
+assert_contains "CLI channel verification covers every CLI-producing tag" \
+  "$release_workflow" "needs.prepare.outputs.build_cli == 'true'"
+if [[ "$release_workflow" == *"startsWith(needs.prepare.outputs.release_tag, 'v')"* ]]; then
+  echo "FAIL: CLI channel verification must not skip combined or cli-v tags" >&2
+  exit 1
+fi
 
 resolve_tag() {
   env GITHUB_EVENT_NAME=push GITHUB_REF="refs/tags/$1" GITHUB_REF_NAME="$1" \
@@ -542,6 +551,125 @@ done
 RELEASE_VERSION="$current_version" \
   ./.github/scripts/release/verify-unsigned-desktop-assets.sh "$unsigned_assets" >/dev/null
 echo "ok: unsigned desktop asset verification"
+
+channel_fixture="$tmpdir/cli-channel-artifacts"
+mkdir -p "$channel_fixture/npm/package"
+for channel_archive in \
+  shk-cli-aarch64-apple-darwin.tar.xz \
+  shk-cli-aarch64-unknown-linux-gnu.tar.xz \
+  shk-cli-x86_64-apple-darwin.tar.xz \
+  shk-cli-x86_64-pc-windows-msvc.zip \
+  shk-cli-x86_64-unknown-linux-gnu.tar.xz; do
+  printf 'archive %s\n' "$channel_archive" > "$channel_fixture/$channel_archive"
+  channel_digest="$(fixture_sha256 "$channel_fixture/$channel_archive")"
+  printf '%s  %s\n' "$channel_digest" "$channel_archive" \
+    > "$channel_fixture/$channel_archive.sha256"
+done
+for channel_archive in \
+  shk-cli-aarch64-apple-darwin.tar.xz \
+  shk-cli-aarch64-unknown-linux-gnu.tar.xz \
+  shk-cli-x86_64-apple-darwin.tar.xz \
+  shk-cli-x86_64-pc-windows-msvc.zip \
+  shk-cli-x86_64-unknown-linux-gnu.tar.xz; do
+  target="${channel_archive#shk-cli-}"
+  target="${target%.tar.xz}"
+  target="${target%.zip}"
+  jq -n --arg archive "$channel_archive" \
+    '{artifacts: {archive: {kind: "executable-zip", name: $archive}}}' \
+    > "$channel_fixture/${target}-dist-manifest.json"
+done
+printf '%s\n' "https://github.com/Kazuki-tam/security-harness-kit/releases/download/v${current_version}" \
+  > "$channel_fixture/shk-cli-installer.sh"
+printf '%s\n' "https://github.com/Kazuki-tam/security-harness-kit/releases/download/v${current_version}" \
+  > "$channel_fixture/shk-cli-installer.ps1"
+printf '%s\n' "url \"https://github.com/Kazuki-tam/security-harness-kit/releases/download/v${current_version}/shk-cli-x86_64-unknown-linux-gnu.tar.xz\"" \
+  > "$channel_fixture/shk.rb"
+printf '%s\n' "https://github.com/Kazuki-tam/security-harness-kit/releases/download/v${current_version}" \
+  > "$channel_fixture/npm/package/install.js"
+printf '{"name":"security-harness-kit","version":"%s"}\n' "$current_version" \
+  > "$channel_fixture/npm/package/package.json"
+tar -czf "$channel_fixture/shk-cli-npm-package.tar.gz" -C "$channel_fixture/npm" package
+./.github/scripts/release/verify-cli-channel-artifacts.sh \
+  "$channel_fixture" "$current_version" >/dev/null
+echo "ok: CLI channel artifact references verified"
+
+sed -i.bak "s|releases/download/v${current_version}|releases/download/shk-v${current_version}|" \
+  "$channel_fixture/shk.rb"
+rm "$channel_fixture/shk.rb.bak"
+if ./.github/scripts/release/verify-cli-channel-artifacts.sh \
+  "$channel_fixture" "$current_version" >/dev/null 2>&1; then
+  echo "FAIL: non-cargo-dist Homebrew download tag should fail" >&2
+  exit 1
+fi
+echo "ok: non-cargo-dist CLI channel tag rejected"
+
+sed -i.bak "s|releases/download/shk-v${current_version}|releases/download/v${current_version}|" \
+  "$channel_fixture/shk.rb"
+rm "$channel_fixture/shk.rb.bak"
+
+printf '%s\n' \
+  "https://github.com/third-party/project/releases/download/shk-v${current_version}/asset" \
+  >> "$channel_fixture/shk.rb"
+./.github/scripts/release/verify-cli-channel-artifacts.sh \
+  "$channel_fixture" "$current_version" >/dev/null
+echo "ok: unrelated third-party release URLs ignored"
+
+printf '{"name":"security-harness-kit","version":"9.9.9"}\n' \
+  > "$channel_fixture/npm/package/package.json"
+tar -czf "$channel_fixture/shk-cli-npm-package.tar.gz" -C "$channel_fixture/npm" package
+if ./.github/scripts/release/verify-cli-channel-artifacts.sh \
+  "$channel_fixture" "$current_version" >/dev/null 2>&1; then
+  echo "FAIL: mismatched npm package identity should fail" >&2
+  exit 1
+fi
+echo "ok: mismatched npm package identity rejected"
+
+printf '{"name":"security-harness-kit","version":"%s"}\n' "$current_version" \
+  > "$channel_fixture/npm/package/package.json"
+ln -s /etc/passwd "$channel_fixture/npm/package/unsafe-link"
+tar -czf "$channel_fixture/shk-cli-npm-package.tar.gz" -C "$channel_fixture/npm" package
+if ./.github/scripts/release/verify-cli-channel-artifacts.sh \
+  "$channel_fixture" "$current_version" >/dev/null 2>&1; then
+  echo "FAIL: npm package link entry should fail" >&2
+  exit 1
+fi
+echo "ok: npm package link entry rejected"
+rm "$channel_fixture/npm/package/unsafe-link"
+tar -czf "$channel_fixture/shk-cli-npm-package.tar.gz" -C "$channel_fixture/npm" package
+
+rm "$channel_fixture/shk-cli-aarch64-apple-darwin.tar.xz"
+if ./.github/scripts/release/verify-cli-channel-artifacts.sh \
+  "$channel_fixture" "$current_version" >/dev/null 2>&1; then
+  echo "FAIL: missing required CLI platform archive should fail" >&2
+  exit 1
+fi
+echo "ok: missing required CLI platform archive rejected"
+
+printf 'archive %s\n' "shk-cli-aarch64-apple-darwin.tar.xz" \
+  > "$channel_fixture/shk-cli-aarch64-apple-darwin.tar.xz"
+channel_digest="$(fixture_sha256 "$channel_fixture/shk-cli-aarch64-apple-darwin.tar.xz")"
+printf '%s  %s\n' "$channel_digest" "shk-cli-aarch64-apple-darwin.tar.xz" \
+  > "$channel_fixture/shk-cli-aarch64-apple-darwin.tar.xz.sha256"
+jq -n \
+  '{artifacts: {archive: {kind: "executable-zip", name: "shk-cli-riscv64gc-unknown-linux-gnu.tar.xz"}}}' \
+  > "$channel_fixture/riscv64gc-unknown-linux-gnu-dist-manifest.json"
+if ./.github/scripts/release/verify-cli-channel-artifacts.sh \
+  "$channel_fixture" "$current_version" >/dev/null 2>&1; then
+  echo "FAIL: a dist manifest target without an archive should fail" >&2
+  exit 1
+fi
+echo "ok: dist manifest target automatically requires an archive"
+rm "$channel_fixture/riscv64gc-unknown-linux-gnu-dist-manifest.json"
+
+cp "$channel_fixture/aarch64-apple-darwin-dist-manifest.json" \
+  "$channel_fixture/duplicate-dist-manifest.json"
+if ./.github/scripts/release/verify-cli-channel-artifacts.sh \
+  "$channel_fixture" "$current_version" >/dev/null 2>&1; then
+  echo "FAIL: duplicate executable archives across dist manifests should fail" >&2
+  exit 1
+fi
+echo "ok: duplicate dist manifest archive rejected"
+rm "$channel_fixture/duplicate-dist-manifest.json"
 
 mirror_script=./.github/scripts/release/mirror-cli-release.sh
 

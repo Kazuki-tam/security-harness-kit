@@ -355,9 +355,14 @@ Run project diagnostics.
 ```bash
 shk doctor
 shk doctor --json
+shk doctor --strict
 ```
 
-`shk doctor` runs the available diagnostics for the current directory. The full check includes Git hooks, managed AI hooks, ignore coverage, plaintext env files, GitHub Actions checkout hardening, and npm/package-manager supply-chain hardening when `package.json` is present.
+`shk doctor` runs the available diagnostics for the current directory. The full check includes the running and PATH-resolved `shk` executables, Git hooks, managed AI hooks, ignore coverage, plaintext env files, GitHub Actions checkout hardening, and npm/package-manager supply-chain hardening when `package.json` is present.
+
+When distinct `shk` executables are present on PATH (for example, separate installer, Homebrew, and npm installations), doctor reports the first executable PATH would select and the shadowed locations. Paths that resolve to the same binary through symlinks are deduplicated, and shadowed executables are never run.
+
+Advisory warnings remain non-blocking by default. `shk doctor --strict` exits `1` when any advisory warning is present, making the full suite suitable for CI; runtime or configuration errors retain their error exit behavior. JSON output includes `ok`, `strict`, `warningCount`, `shkExecutable`, and metadata-only `envSecretStore` fields. Configuration failures are also emitted as valid JSON and exit `2`. The full suite performs static 1Password configuration checks only; use `shk doctor env` when an explicit live `op --version` / `op whoami` check is wanted. `--strict` applies to the full suite, not doctor subcommands.
 
 ### `shk doctor ignore`
 
