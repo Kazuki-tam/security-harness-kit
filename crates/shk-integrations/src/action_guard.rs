@@ -18,7 +18,61 @@ const SECRET_PATH_PATTERNS: &[&str] = &[
     "**/*credential*",
 ];
 
-const SECRET_READ_COMMANDS: &[&str] = &["cat", "head", "tail", "less", "more", "source"];
+// Keep both bare and nested forms: this module's lightweight wildcard matcher
+// does not treat a leading `**/` as matching zero path components.
+const SHELL_HISTORY_PATH_PATTERNS: &[&str] = &[
+    ".zsh_history",
+    "**/.zsh_history",
+    ".bash_history",
+    "**/.bash_history",
+    ".sh_history",
+    "**/.sh_history",
+    ".history",
+    "**/.history",
+    ".local/share/fish/fish_history",
+    "**/.local/share/fish/fish_history",
+    "consolehost_history.txt",
+    "visual studio code host_history.txt",
+    "**/powershell/psreadline/*_history.txt",
+];
+
+// This intentionally covers common direct readers and filters, not every
+// possible interpreter or shell composition. Custom loaders remain tunable
+// through `[action_guard].deny` and are documented as a guard limitation.
+const SENSITIVE_FILE_ACCESS_COMMANDS: &[&str] = &[
+    "cat",
+    "bat",
+    "head",
+    "tail",
+    "less",
+    "more",
+    "source",
+    "sed",
+    "awk",
+    "grep",
+    "egrep",
+    "fgrep",
+    "rg",
+    "strings",
+    "cut",
+    "sort",
+    "uniq",
+    "wc",
+    "dd",
+    "cp",
+    "jq",
+    "yq",
+    "python",
+    "python3",
+    "node",
+    "ruby",
+    "perl",
+    "get-content",
+    "gc",
+    "type",
+    "powershell",
+    "pwsh",
+];
 const ENVIRONMENT_DUMP_COMMANDS: &[&str] = &["printenv"];
 const PYTHON_ENV_READ_PATTERNS: &[&str] = &[
     "os.environ",
@@ -79,11 +133,37 @@ const CLAUDE_SECRET_DENY_ENTRIES: &[&str] = &[
     "Read(**/*secret*)",
     "Read(**/*password*)",
     "Read(**/*credential*)",
+    "Read(.zsh_history)",
+    "Read(**/.zsh_history)",
+    "Read(.bash_history)",
+    "Read(**/.bash_history)",
+    "Read(.sh_history)",
+    "Read(**/.sh_history)",
+    "Read(.history)",
+    "Read(**/.history)",
+    "Read(.local/share/fish/fish_history)",
+    "Read(**/.local/share/fish/fish_history)",
+    "Read(ConsoleHost_history.txt)",
+    "Read(Visual Studio Code Host_history.txt)",
+    "Read(**/PowerShell/PSReadLine/*_history.txt)",
     "Write(**/*token*)",
     "Write(**/*key*)",
     "Write(**/*secret*)",
     "Write(**/*password*)",
     "Write(**/*credential*)",
+    "Write(.zsh_history)",
+    "Write(**/.zsh_history)",
+    "Write(.bash_history)",
+    "Write(**/.bash_history)",
+    "Write(.sh_history)",
+    "Write(**/.sh_history)",
+    "Write(.history)",
+    "Write(**/.history)",
+    "Write(.local/share/fish/fish_history)",
+    "Write(**/.local/share/fish/fish_history)",
+    "Write(ConsoleHost_history.txt)",
+    "Write(Visual Studio Code Host_history.txt)",
+    "Write(**/PowerShell/PSReadLine/*_history.txt)",
     "Bash(cat .env:*)",
     "Bash(cat ./.env:*)",
     "Bash(head .env:*)",
@@ -222,6 +302,19 @@ const ANTIGRAVITY_SECRET_DENY_ENTRIES: &[&str] = &[
     "read_file(**/*secret*)",
     "read_file(**/*password*)",
     "read_file(**/*credential*)",
+    "read_file(.zsh_history)",
+    "read_file(**/.zsh_history)",
+    "read_file(.bash_history)",
+    "read_file(**/.bash_history)",
+    "read_file(.sh_history)",
+    "read_file(**/.sh_history)",
+    "read_file(.history)",
+    "read_file(**/.history)",
+    "read_file(.local/share/fish/fish_history)",
+    "read_file(**/.local/share/fish/fish_history)",
+    "read_file(ConsoleHost_history.txt)",
+    "read_file(Visual Studio Code Host_history.txt)",
+    "read_file(**/PowerShell/PSReadLine/*_history.txt)",
     "write_file(.git/)",
     "command(cat .env)",
     "command(cat tokens/.*)",
@@ -594,10 +687,12 @@ fn detect_builtin_command(command: &str, profile: ActionGuardProfile) -> Option<
     // `/usr/bin/curl`, …) cannot bypass the command categories below.
     let cmd = command_basename(words.first().copied().unwrap_or_default());
 
-    if profile.includes(ActionCategory::SecretDumpCommand) && secret_dump_command(cmd, &words) {
+    if profile.includes(ActionCategory::SecretDumpCommand)
+        && sensitive_file_access_command(&normalized, cmd, &words)
+    {
         return Some(guard_match(
             ActionCategory::SecretDumpCommand,
-            "shk action guard: command reads sensitive local files",
+            "shk action guard: command accesses sensitive local files",
         ));
     }
 
@@ -1294,8 +1389,15 @@ fn normalize_action_pattern(raw: &str) -> String {
     }
 }
 
-fn secret_dump_command(cmd: &str, words: &[&str]) -> bool {
-    SECRET_READ_COMMANDS.contains(&cmd) && words.iter().skip(1).any(|w| is_secret_path(w))
+fn sensitive_file_access_command(command: &str, cmd: &str, words: &[&str]) -> bool {
+    if !SENSITIVE_FILE_ACCESS_COMMANDS.contains(&cmd) {
+        return false;
+    }
+    words.iter().skip(1).any(|word| is_secret_path(word))
+        || shell_tokens(command)
+            .iter()
+            .skip(1)
+            .any(|word| is_secret_path(word))
 }
 
 fn environment_dump_command(command: &str, words: &[&str]) -> bool {
@@ -1519,6 +1621,7 @@ fn is_secret_path(raw: &str) -> bool {
     }
     SECRET_PATH_PATTERNS
         .iter()
+        .chain(SHELL_HISTORY_PATH_PATTERNS.iter())
         .any(|pattern| wildcard_match(&pattern.to_ascii_lowercase(), &lower))
 }
 
@@ -1683,6 +1786,80 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_common_shell_history_paths() {
+        for path in [
+            ".zsh_history",
+            "./.bash_history",
+            "/home/demo/.sh_history",
+            "~/.history",
+            ".local/share/fish/fish_history",
+            "/home/demo/.local/share/fish/fish_history",
+            r"C:\Users\demo\.bash_history",
+            r"C:\Users\demo\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt",
+            "/home/demo/.local/share/powershell/PSReadLine/Visual Studio Code Host_history.txt",
+            "ConsoleHost_history.txt",
+        ] {
+            assert!(is_secret_path(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn history_lookalikes_are_not_sensitive_paths() {
+        for path in [
+            "docs/history.md",
+            "src/history.rs",
+            ".zsh_history.example",
+            "fixtures/fish_history.txt",
+            ".local/share/fish/config.fish",
+            "docs/consolehost_history.txt.md",
+            "fixtures/powershell/history.txt",
+        ] {
+            assert!(!is_secret_path(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn blocks_native_shell_history_reads_and_writes() {
+        for tool_name in ["Read", "Write"] {
+            let input = serde_json::json!({
+                "tool_name": tool_name,
+                "tool_input": { "file_path": "/home/demo/.zsh_history" }
+            })
+            .to_string();
+            assert_eq!(
+                detect_dangerous_action(&input).unwrap().unwrap().category,
+                "secret_file_access",
+                "{tool_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn blocks_common_shell_history_read_commands() {
+        for command in [
+            "cat ~/.zsh_history",
+            "sed -n '1,50p' ~/.zsh_history",
+            "rg API_KEY ~/.bash_history",
+            "grep TOKEN /home/demo/.sh_history",
+            "awk 'NR < 50' .history",
+            "strings ~/.zsh_history",
+            "dd if=~/.bash_history",
+            "python -c \"print(open('~/.zsh_history').read())\"",
+            "bash -c \"tail ~/.zsh_history\"",
+            r"Get-Content C:\Users\demo\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt",
+            r"pwsh -Command Get-Content C:\Users\demo\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt",
+            r#"Get-Content "C:\Users\demo\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\Visual Studio Code Host_history.txt""#,
+        ] {
+            let input = bash_payload(command);
+            assert_eq!(
+                detect_dangerous_action(&input).unwrap().unwrap().category,
+                "secret_dump_command",
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
     fn antigravity_deny_entries_use_action_target_resource_format() {
         let entries = antigravity_recommended_deny_entries();
         assert!(!entries.is_empty());
@@ -1697,6 +1874,40 @@ mod tests {
         }
         assert!(entries.contains(&"command(rm -rf)"));
         assert!(entries.contains(&"read_file(**/.env)"));
+        assert!(entries.contains(&"read_file(.zsh_history)"));
+        assert!(entries.contains(&"read_file(**/.local/share/fish/fish_history)"));
+        assert!(entries.contains(&"read_file(ConsoleHost_history.txt)"));
+        assert!(entries.contains(&"read_file(**/PowerShell/PSReadLine/*_history.txt)"));
+    }
+
+    #[test]
+    fn recommended_deny_entries_cover_every_shell_history_path() {
+        let claude_entries = claude_recommended_deny_entries();
+        let antigravity_entries = antigravity_recommended_deny_entries();
+
+        for path in SHELL_HISTORY_PATH_PATTERNS {
+            let claude_read = format!("Read({path})");
+            let claude_write = format!("Write({path})");
+            let antigravity_read = format!("read_file({path})");
+            assert!(
+                claude_entries
+                    .iter()
+                    .any(|entry| entry.eq_ignore_ascii_case(&claude_read)),
+                "missing Claude read deny for {path}"
+            );
+            assert!(
+                claude_entries
+                    .iter()
+                    .any(|entry| entry.eq_ignore_ascii_case(&claude_write)),
+                "missing Claude write deny for {path}"
+            );
+            assert!(
+                antigravity_entries
+                    .iter()
+                    .any(|entry| entry.eq_ignore_ascii_case(&antigravity_read)),
+                "missing Antigravity read deny for {path}"
+            );
+        }
     }
 
     #[test]
@@ -2363,5 +2574,12 @@ mod tests {
             "Bash(cat .env:*)"
         ));
         assert!(!claude_deny_entry_covers("Write(.env)", "Read(.env)"));
+
+        let entries = claude_recommended_deny_entries();
+        assert!(entries.contains(&"Read(.zsh_history)"));
+        assert!(entries.contains(&"Read(**/.local/share/fish/fish_history)"));
+        assert!(entries.contains(&"Write(**/.bash_history)"));
+        assert!(entries.contains(&"Read(ConsoleHost_history.txt)"));
+        assert!(entries.contains(&"Write(**/PowerShell/PSReadLine/*_history.txt)"));
     }
 }

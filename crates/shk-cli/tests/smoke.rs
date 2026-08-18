@@ -2281,6 +2281,15 @@ fn hooks_install_ai_claude_apply_deny_merges_without_duplicates() {
         deny.iter().any(|v| v == "Bash(psql:*)"),
         "database guard deny should be installed: {deny:?}"
     );
+    assert!(
+        deny.iter().any(|v| v == "Read(**/.zsh_history)"),
+        "shell history deny should be installed: {deny:?}"
+    );
+    assert!(
+        deny.iter()
+            .any(|v| v == "Read(**/PowerShell/PSReadLine/*_history.txt)"),
+        "PSReadLine history deny should be installed: {deny:?}"
+    );
     let prompt_hooks = settings["hooks"]["UserPromptSubmit"].as_array().unwrap();
     assert_eq!(
         prompt_hooks.len(),
@@ -2616,6 +2625,11 @@ fn hooks_install_ai_antigravity_apply_deny_prints_permission_guidance() {
     assert!(stdout.contains("Recommended Deny list entries"), "{stdout}");
     assert!(stdout.contains("command(rm -rf)"), "{stdout}");
     assert!(stdout.contains("read_file(**/.env)"), "{stdout}");
+    assert!(stdout.contains("read_file(**/.zsh_history)"), "{stdout}");
+    assert!(
+        stdout.contains("read_file(**/PowerShell/PSReadLine/*_history.txt)"),
+        "{stdout}"
+    );
 
     let hooks =
         std::fs::read_to_string(dir.path().join(".agents/hooks.json")).expect("hooks written");
@@ -2926,6 +2940,40 @@ fn hook_mode_claude_blocks_db_mutation_action() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("direct_db_mutation"), "{stdout}");
+}
+
+#[test]
+fn hook_mode_claude_blocks_shell_history_reads() {
+    use std::io::Write;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "sed -n '1,20p' ~/.zsh_history"
+        }
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args(["scan", ".", "--hook-mode", "claude-code"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("hook scan");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("secret_dump_command"), "{stdout}");
 }
 
 #[test]

@@ -94,6 +94,15 @@ In pre-hook mode, `shk scan --hook-mode <tool>` checks the AI tool payload for d
 
 The initial guard blocks sensitive file reads/writes, `.env` dump commands, environment dump commands such as `printenv`, `env`, `export -p`, `set | ...`, shell `-c` environment dumps, and common interpreter environment reads such as Python `os.environ`, Node `process.env`, Ruby `ENV`, and Perl `%ENV`, destructive recursive removal, direct database mutation commands, privilege or system changes, external transfer commands, and package manager operations. Projects can tune it with `[action_guard]` in `shk.toml`, including `profile`, `allow`, and `deny` patterns. In `strict` profile, opaque execution such as `bash -c`, `python -c`, and `node -e` is blocked rather than deeply interpreted. Audit mode still records findings without blocking.
 
+Common zsh, bash, sh, fish, and PowerShell PSReadLine history files are treated as sensitive
+paths. Supported nested shell payloads are inspected recursively; the strict profile additionally
+rejects opaque execution whose contents are otherwise safe.
+
+Shell-history protection is path- and command-based rather than a complete shell interpreter.
+Custom history locations and indirect loading through an unrecognized command remain intentional
+limitations. Add project-specific `[action_guard].deny` patterns when those paths or workflows
+need to be covered.
+
 ## MCP Configuration Audit
 
 `shk mcp audit` uses a separate detection model from content scanning. Instead of matching text in
