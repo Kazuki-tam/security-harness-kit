@@ -42,10 +42,11 @@ cargo build --release
 | Code | Meaning | Commands |
 |------|---------|----------|
 | `0` | No findings above threshold / success | `shk scan`, `shk scan --staged`, `shk mcp audit`, `shk mask`, `shk clipboard scan`, `shk clipboard mask`, `shk doctor`, `shk audit`, `shk scan --audit` |
-| `1` | Findings at or above the fail threshold | `shk scan`, `shk scan --staged`, `shk mcp audit`, `shk clipboard scan` |
-| `2` | Blocking AI pre-hook triggered / runtime or config error | `shk scan --hook-mode <tool>` (block), `shk scan --staged` outside a Git repo, invalid `shk mcp audit` arguments/path, `shk clipboard …` when the OS clipboard is unavailable |
+| `1` | Findings at or above the fail threshold / strict doctor warnings | `shk scan`, `shk scan --staged`, `shk mcp audit`, `shk clipboard scan`, `shk doctor --strict` |
+| `2` | Blocking AI pre-hook triggered / runtime or config error | `shk scan --hook-mode <tool>` (block), `shk scan --staged` outside a Git repo, invalid `shk mcp audit` arguments/path, invalid `shk doctor --strict` usage, `shk clipboard …` when the OS clipboard is unavailable |
 
 - `--audit` mode **always exits 0** (log-only; never blocks).
+- Plain `shk doctor` keeps advisory warnings non-blocking; `shk doctor --strict` exits 1 when one or more advisory warnings are reported.
 - `--log-blocked` keeps pre-hook blocking behavior, writes metadata-only blocked-event entries to `.shk/audit.log`, and lets post hooks write non-blocking audit entries.
 - Post-execution hooks (`--post`) **always exit 0** — data is already in the AI's context.
 - Exit code 2 from a blocking pre-hook causes the AI tool to abort the pending operation.

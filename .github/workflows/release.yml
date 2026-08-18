@@ -303,6 +303,12 @@ jobs:
         shell: bash
         run: ./.github/scripts/release/verify-cli-installer-checksums.sh target/distrib
 
+      - name: verify CLI channel artifact references
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: ./.github/scripts/release/verify-cli-channel-artifacts.sh target/distrib "${RELEASE_VERSION}"
+
       - name: upload global artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -355,10 +361,6 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
-
-      - name: remove internal dist manifests
-        shell: bash
-        run: rm -f release-assets/*-dist-manifest.json
 
       - name: generate release body
         shell: bash
@@ -594,3 +596,30 @@ jobs:
             exit 0
           fi
           npm publish "${pkg}" --provenance --access public
+
+  verify-cli-channels:
+    name: verify published CLI channels
+    runs-on: ubuntu-22.04
+    needs: [prepare, publish-homebrew-formula, publish-npm-package]
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.prepare.outputs.build_cli == 'true' &&
+        needs.publish-homebrew-formula.result == 'success' &&
+        needs.publish-npm-package.result == 'success'
+      }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: verify installer, Homebrew, and npm channels
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: ./.github/scripts/release/verify-cli-channels.sh "${RELEASE_TAG}"

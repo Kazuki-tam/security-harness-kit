@@ -212,6 +212,7 @@ shk clipboard mask
 shk clipboard mask --write
 
 shk doctor
+shk doctor --strict
 shk doctor ignore --fix
 shk doctor env --dotenvx
 shk doctor workflows --fix
@@ -248,7 +249,7 @@ shk ci init github
 shk ci init github --upload-sarif
 shk ci init github --dry-run
 shk ci init github --mode audit
-shk ci init github --shk-version v0.6.1
+shk ci init github --shk-version v0.6.2
 
 shk skills install
 shk skills install --tool claude-code --global

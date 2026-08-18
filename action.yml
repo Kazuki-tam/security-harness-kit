@@ -34,7 +34,7 @@ inputs:
   shk-version:
     description: shk release tag to install, or `latest`.
     required: false
-    default: v0.6.1
+    default: v0.6.2
 
 outputs:
   sarif-file:

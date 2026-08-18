@@ -93,6 +93,7 @@ shk-cli-installer.ps1
 shk-winget-manifests.zip
 shk.rb
 shk-cli-npm-package.tar.gz
+*-dist-manifest.json
 *.sha256
 shk-sbom.cdx.json
 ```
@@ -119,7 +120,7 @@ Release assets are also covered by GitHub artifact attestations.
 For CI or security-sensitive environments, install from a pinned release tag and verify both the checksum and GitHub artifact attestation before placing the binary on `PATH`:
 
 ```bash
-version=v0.6.1
+version=v0.6.2
 target=x86_64-unknown-linux-gnu
 asset="shk-cli-${target}.tar.xz"
 repo=Kazuki-tam/security-harness-kit
@@ -185,13 +186,13 @@ See [`desktop-release.md`](desktop-release.md) for maintainer release steps.
 Download from the release page for your tag, for example:
 
 ```text
-https://github.com/Kazuki-tam/security-harness-kit/releases/tag/desktop-v0.6.1
+https://github.com/Kazuki-tam/security-harness-kit/releases/tag/desktop-v0.6.2
 ```
 
 Verify checksums when available:
 
 ```bash
-curl -LO https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-v0.6.1/shk-desktop.sha256sum
+curl -LO https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-v0.6.2/shk-desktop.sha256sum
 sha256sum -c shk-desktop.sha256sum
 ```
 

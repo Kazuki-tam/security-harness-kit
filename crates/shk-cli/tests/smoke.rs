@@ -4750,6 +4750,22 @@ fn doctor_env_reports_unsupported_secret_store_without_onepassword_diagnostics()
 }
 
 #[test]
+fn doctor_env_warns_for_dotenvx_private_key_file_without_dotenvx_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".env.keys"), "PLACEHOLDER=example\n").unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["doctor", "env", dir.path().to_str().unwrap()])
+        .output()
+        .expect("doctor env");
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("plaintext env files detected"), "{stdout}");
+    assert!(stdout.contains(".env.keys"), "{stdout}");
+}
+
+#[test]
 fn doctor_env_skips_dotenvx_encrypted_files() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -5460,6 +5476,170 @@ fn doctor_reports_missing_npm_hardening_for_package_json_project() {
     assert!(stdout.contains("minimumReleaseAge"), "{stdout}");
     assert!(stdout.contains(".npmrc"), "{stdout}");
     assert!(stdout.contains("days"), "{stdout}");
+}
+
+#[test]
+fn doctor_strict_exits_one_for_advisory_warnings_without_error_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let path_dir = tempfile::tempdir().unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["doctor", "--strict"])
+        .env("PATH", path_dir.path())
+        .current_dir(dir.path())
+        .output()
+        .expect("doctor --strict");
+
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stdout.contains("doctor strict: failing"), "{stdout}");
+    assert!(!stderr.contains("Error:"), "{stderr}");
+}
+
+#[test]
+fn doctor_json_reports_strict_and_warning_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let path_dir = tempfile::tempdir().unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["doctor", "--json"])
+        .env("PATH", path_dir.path())
+        .current_dir(dir.path())
+        .output()
+        .expect("doctor --json");
+
+    assert!(out.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["strict"], false);
+    assert_eq!(report["ok"], false);
+    assert!(report["warningCount"].as_u64().unwrap() > 0);
+    assert!(report["shkExecutable"]["candidates"].is_array());
+    assert_eq!(report["envSecretStore"]["backend"], "keyring");
+    assert_eq!(report["envSecretStore"]["warningCount"], 0);
+}
+
+#[test]
+fn doctor_strict_json_emits_report_before_exit_one() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let path_dir = tempfile::tempdir().unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["doctor", "--json", "--strict"])
+        .env("PATH", path_dir.path())
+        .current_dir(dir.path())
+        .output()
+        .expect("doctor --json --strict");
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        out.stderr.is_empty(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["strict"], true);
+    assert_eq!(report["ok"], false);
+    assert!(report["warningCount"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn doctor_json_emits_structured_configuration_error() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "[scan").unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["doctor", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("doctor --json with invalid policy");
+
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["error"]["kind"], "configuration");
+    assert!(
+        report["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("parse shk.toml")
+    );
+}
+
+#[test]
+fn doctor_json_always_warns_for_dotenvx_private_key_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::write(dir.path().join(".env.keys"), "PLACEHOLDER=example\n").unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["doctor", "--json", "--strict"])
+        .current_dir(dir.path())
+        .output()
+        .expect("doctor --json --strict");
+
+    assert_eq!(out.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let keys = report["envFiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["name"] == ".env.keys")
+        .expect(".env.keys status");
+    assert_eq!(keys["state"], "plaintext");
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_json_does_not_run_onepassword_live_checks() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("op-was-run");
+    let op = dir.path().join("op");
+    std::fs::write(
+        dir.path().join("shk.toml"),
+        "[env]\nsecret_store = \"1password\"\nproject_id = \"acme/app\"\n[env.onepassword]\nvault = \"test\"\n",
+    )
+    .unwrap();
+    std::fs::write(&op, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    let mut permissions = std::fs::metadata(&op).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&op, permissions).unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["doctor", "--json"])
+        .env("SHK_OP_PATH", &op)
+        .current_dir(dir.path())
+        .output()
+        .expect("doctor --json");
+
+    assert!(out.status.success());
+    assert!(!marker.exists(), "doctor --json unexpectedly launched op");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["envSecretStore"]["liveChecksPerformed"], false);
+}
+
+#[test]
+fn doctor_strict_rejects_subcommands_with_runtime_error_exit() {
+    let out = Command::new(shk_bin())
+        .args(["doctor", "--strict", "version"])
+        .output()
+        .expect("doctor --strict version");
+
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("--strict is only supported by the full `shk doctor` suite")
+    );
 }
 
 #[test]

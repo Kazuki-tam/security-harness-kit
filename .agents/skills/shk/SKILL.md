@@ -45,6 +45,7 @@ shk hooks install-ai --dry-run       # preview changes
 shk ci init github --dry-run         # preview GitHub Actions workflow
 shk ci init github --upload-sarif    # upload findings to GitHub code scanning
 shk doctor                           # full project diagnostics
+shk doctor --strict                  # fail on advisory warnings (CI)
 shk doctor ignore --fix              # fix missing .gitignore entries
 shk doctor env --dotenvx             # include dotenvx artifact checks
 shk doctor workflows --fix           # add persist-credentials: false to checkout
@@ -293,7 +294,7 @@ shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
 shk ci init github --upload-sarif
-shk ci init github --shk-version v0.6.1
+shk ci init github --shk-version v0.6.2
 shk ci init github --output .github/workflows/security.yml --force
 ```
 
@@ -444,6 +445,7 @@ Apply these rules regardless of whether shk reports findings:
 ```bash
 shk doctor                   # full suite: hooks, ignore, env, AI tool status
 shk doctor --json
+shk doctor --strict          # exit 1 when the full suite reports warnings
 shk doctor ignore            # check .gitignore / AI tool ignore coverage
 shk doctor ignore --fix      # append missing patterns to .gitignore
 shk doctor env               # detect plaintext .env secrets
@@ -452,6 +454,11 @@ shk doctor workflows         # check actions/checkout persist-credentials
 shk doctor workflows --fix   # add persist-credentials: false (needs shk.toml)
 shk doctor version           # check for shk updates
 ```
+
+The full suite also reports distinct `shk` executables on PATH without executing
+shadowed candidates. Plain `shk doctor` keeps warnings advisory; `--strict` exits 1
+when warnings are present. JSON includes `ok`, `strict`, `warningCount`,
+`shkExecutable`, and metadata-only `envSecretStore` fields.
 
 `shk doctor ignore` checks `.gitignore` plus AI-oriented ignore files such as
 `.cursorignore`, `.cursorindexingignore`, `.codeiumignore`, `.clineignore`,

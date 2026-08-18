@@ -1,4 +1,5 @@
 use crate::env_store::{OpPathSource, collect_onepassword_doctor_status};
+use crate::exit::CliExit;
 use crate::{npm_hardening, safety, workflow_hardening};
 use anyhow::Result;
 use serde_json::Value;
@@ -10,6 +11,8 @@ use shk_integrations::{
     MANAGED_MARKER_SH, RISKY_APPROVAL_POLICY, RISKY_DEFAULT_PERMISSIONS, RISKY_SANDBOX_MODE,
     claude_deny_entry_covers, claude_recommended_deny_entries,
 };
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -91,6 +94,41 @@ pub struct CodexConfigStatus {
     pub approval_ok: bool,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShkExecutableCandidate {
+    pub path: PathBuf,
+    pub resolved_path: PathBuf,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShkExecutableStatus {
+    pub current_executable: Option<PathBuf>,
+    pub current_resolved_path: Option<PathBuf>,
+    pub current_matches_path_candidate: bool,
+    pub active_on_path: Option<PathBuf>,
+    pub candidates: Vec<ShkExecutableCandidate>,
+    pub multiple_distinct: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SecretStoreDoctorStatus {
+    backend: String,
+    backend_supported: bool,
+    warning_count: usize,
+    live_checks_performed: bool,
+    one_password: Option<OnePasswordDoctorSummary>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OnePasswordDoctorSummary {
+    project_id_ok: bool,
+    vault_ok: bool,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 enum EnvFileEncryptionState {
     Plaintext,
@@ -123,11 +161,22 @@ pub fn collect_ignore_status(root: &Path) -> IgnoreStatus {
 }
 
 pub fn collect_env_file_statuses(root: &Path) -> Vec<EnvFileStatus> {
+    collect_env_file_statuses_matching(root, is_native_env_candidate_name)
+}
+
+fn collect_doctor_env_file_statuses(root: &Path) -> Vec<EnvFileStatus> {
+    collect_env_file_statuses_matching(root, is_doctor_env_candidate_name)
+}
+
+fn collect_env_file_statuses_matching(
+    root: &Path,
+    candidate: fn(&str) -> bool,
+) -> Vec<EnvFileStatus> {
     let mut files = Vec::new();
     if let Ok(entries) = fs::read_dir(root) {
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            if is_native_env_candidate_name(&name) && e.path().is_file() {
+            if candidate(&name) && e.path().is_file() {
                 let content = fs::read_to_string(e.path()).unwrap_or_default();
                 files.push(env_file_status(name, &content));
             }
@@ -135,6 +184,10 @@ pub fn collect_env_file_statuses(root: &Path) -> Vec<EnvFileStatus> {
     }
     files.sort_by(|a, b| a.name.cmp(&b.name));
     files
+}
+
+fn is_doctor_env_candidate_name(name: &str) -> bool {
+    name == DOTENVX_PRIVATE_KEY_FILE || is_native_env_candidate_name(name)
 }
 
 fn is_native_env_candidate_name(name: &str) -> bool {
@@ -308,6 +361,10 @@ fn normalize_ignore_fix_targets(targets: &[String]) -> Result<Vec<String>> {
 
 fn collect_ignore_status_result(root: &Path) -> Result<IgnoreStatus> {
     let (policy, _) = Policy::load_from_dir(root)?;
+    collect_ignore_status_with_policy(root, &policy)
+}
+
+fn collect_ignore_status_with_policy(root: &Path, policy: &Policy) -> Result<IgnoreStatus> {
     let combined = read_ignore_candidate_files(root)?;
     let missing_patterns = policy
         .doctor
@@ -438,6 +495,10 @@ pub fn collect_claude_permissions_status(root: &Path) -> ClaudePermissionsStatus
 
 fn run_claude_permissions_check(root: &Path) {
     let status = collect_claude_permissions_status(root);
+    print_claude_permissions_status(&status);
+}
+
+fn print_claude_permissions_status(status: &ClaudePermissionsStatus) {
     if !status.settings_exists {
         return;
     }
@@ -584,6 +645,10 @@ fn codex_hooks_feature_enabled(features: Option<&toml::Value>) -> bool {
 
 fn run_codex_config_check(root: &Path) {
     let snapshot = snapshot_codex_config(root);
+    print_codex_config_snapshot(&snapshot);
+}
+
+fn print_codex_config_snapshot(snapshot: &CodexConfigSnapshot) {
     if !snapshot.status.config_exists {
         return;
     }
@@ -593,17 +658,17 @@ fn run_codex_config_check(root: &Path) {
         println!("codex config: hooks feature disabled (`features.hooks = false`)");
     }
 
-    let Some(value) = snapshot.value else {
+    let Some(value) = snapshot.value.as_ref() else {
         println!("codex config: unable to read or parse {CONFIG_REL_PATH}");
         return;
     };
-    print_codex_string_setting(&value, "sandbox_mode", Some(RISKY_SANDBOX_MODE));
+    print_codex_string_setting(value, "sandbox_mode", Some(RISKY_SANDBOX_MODE));
     print_codex_string_setting(
-        &value,
+        value,
         "default_permissions",
         Some(RISKY_DEFAULT_PERMISSIONS),
     );
-    print_codex_string_setting(&value, "approval_policy", Some(RISKY_APPROVAL_POLICY));
+    print_codex_string_setting(value, "approval_policy", Some(RISKY_APPROVAL_POLICY));
 }
 
 fn print_codex_string_setting(value: &toml::Value, key: &str, risky_value: Option<&str>) {
@@ -656,16 +721,18 @@ fn directory_pattern_covers(existing: &str, required: &str) -> bool {
 }
 
 pub fn run_env(root: &Path, dotenvx: bool) -> Result<()> {
+    run_env_with_warning_count(root, dotenvx).map(|_| ())
+}
+
+fn run_env_with_warning_count(root: &Path, dotenvx: bool) -> Result<usize> {
     let (policy, _) = Policy::load_from_dir(root)?;
-    print_secret_store_status(root, &policy)?;
+    let mut warning_count = print_secret_store_status(root, &policy)?;
     let mut env_files = Vec::new();
     let mut mixed_env_files = Vec::new();
     for e in fs::read_dir(root)? {
         let e = e?;
         let name = e.file_name().to_string_lossy().to_string();
-        if (name == ".env" || (name.starts_with(".env.") && name != ".env.example"))
-            && e.path().is_file()
-        {
+        if is_doctor_env_candidate_name(&name) && e.path().is_file() {
             let content = fs::read_to_string(e.path()).unwrap_or_default();
             match dotenv_encryption_state(&content) {
                 EnvFileEncryptionState::FullyEncrypted => {}
@@ -679,8 +746,11 @@ pub fn run_env(root: &Path, dotenvx: bool) -> Result<()> {
         }
     }
     if env_files.is_empty() && mixed_env_files.is_empty() {
-        println!("env: no plaintext .env / .env.* (except .env.example) at repo root");
+        println!(
+            "env: no plaintext .env / .env.* files (templates and .env.vault excluded) at repo root"
+        );
     } else if !env_files.is_empty() {
+        warning_count += 1;
         println!("env: plaintext env files detected (review + prefer dotenvx / secret manager):");
         for (name, _path, content) in env_files {
             let findings = scan_string(root, &name, &content, ScanOptions::default())?
@@ -699,6 +769,7 @@ pub fn run_env(root: &Path, dotenvx: bool) -> Result<()> {
     }
 
     if !mixed_env_files.is_empty() {
+        warning_count += 1;
         println!("env: encrypted env files contain plaintext values:");
         for (name, keys) in mixed_env_files {
             let preview = keys.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
@@ -720,10 +791,10 @@ pub fn run_env(root: &Path, dotenvx: bool) -> Result<()> {
     if dotenvx {
         run_dotenvx(root);
     }
-    Ok(())
+    Ok(warning_count)
 }
 
-fn print_secret_store_status(root: &Path, policy: &Policy) -> Result<()> {
+fn print_secret_store_status(root: &Path, policy: &Policy) -> Result<usize> {
     println!(
         "env secret store: {} (configured in shk.toml [env])",
         policy.env.secret_store
@@ -731,12 +802,12 @@ fn print_secret_store_status(root: &Path, policy: &Policy) -> Result<()> {
     match policy.env.secret_store.parse::<SecretStoreBackend>() {
         Ok(SecretStoreBackend::Keyring) => {
             println!("  backend: OS keyring (default)");
-            return Ok(());
+            return Ok(0);
         }
         Ok(SecretStoreBackend::OnePassword) => {}
         Err(err) => {
             println!("  warning: {err}");
-            return Ok(());
+            return Ok(1);
         }
     }
 
@@ -762,10 +833,11 @@ fn print_secret_store_status(root: &Path, policy: &Policy) -> Result<()> {
     }
 
     let status = collect_onepassword_doctor_status(policy)?;
+    let warning_count = onepassword_warning_count(policy, &status);
     if let Some(err) = &status.op_resolution_error {
         println!("  1Password CLI: not resolved ({err})");
         println!("  hint: install `op`, set SHK_OP_PATH, or add it to PATH");
-        return Ok(());
+        return Ok(warning_count);
     }
     if let Some(path) = &status.op_path {
         let source = status
@@ -791,7 +863,81 @@ fn print_secret_store_status(root: &Path, policy: &Policy) -> Result<()> {
     } else {
         println!("  warning: op sign-in check failed");
     }
-    Ok(())
+    Ok(warning_count)
+}
+
+fn print_secret_store_doctor_summary(status: &SecretStoreDoctorStatus) {
+    println!(
+        "env secret store: {} (static configuration check)",
+        status.backend
+    );
+    if !status.backend_supported {
+        println!("  warning: unsupported secret-store backend");
+        return;
+    }
+    if let Some(one_password) = &status.one_password {
+        if !one_password.project_id_ok {
+            println!("  warning: env.project_id is required for 1Password");
+        }
+        if !one_password.vault_ok {
+            println!("  warning: env.onepassword.vault is required for 1Password");
+        }
+        println!("  live op checks: skipped (run `shk doctor env` to verify sign-in)");
+    } else {
+        println!("  backend: OS keyring (default)");
+    }
+}
+
+fn print_env_file_statuses(env_files: &[EnvFileStatus]) {
+    let plaintext = env_files
+        .iter()
+        .filter(|status| status.state == EnvFileState::Plaintext)
+        .collect::<Vec<_>>();
+    let mixed = env_files
+        .iter()
+        .filter(|status| status.state == EnvFileState::Mixed)
+        .collect::<Vec<_>>();
+
+    if plaintext.is_empty() && mixed.is_empty() {
+        println!(
+            "env: no plaintext .env / .env.* files (templates and .env.vault excluded) at repo root"
+        );
+    }
+    if !plaintext.is_empty() {
+        println!(
+            "env: plaintext env files detected (review + prefer encryption / secret manager):"
+        );
+        for status in plaintext {
+            println!("  - {} (unsafe by default)", status.name);
+        }
+        println!("  recommendation: encrypt env files or migrate secrets to a secret manager");
+        println!("  recommendation: deny direct AI reads of .env files via tool-specific controls");
+    }
+    if !mixed.is_empty() {
+        println!("env: encrypted env files contain plaintext values:");
+        for status in mixed {
+            let preview = status
+                .plaintext_keys
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let suffix = if status.plaintext_keys.len() > 5 {
+                format!(" (+{} more)", status.plaintext_keys.len() - 5)
+            } else {
+                String::new()
+            };
+            println!(
+                "  - {} ({} plaintext key(s): {preview}{suffix})",
+                status.name,
+                status.plaintext_keys.len()
+            );
+        }
+        println!(
+            "  recommendation: run `shk env encrypt <file> --in-place` after editing encrypted env files"
+        );
+    }
 }
 
 fn dotenv_encryption_state(content: &str) -> EnvFileEncryptionState {
@@ -934,6 +1080,129 @@ pub fn has_shk_pre_commit(root: &Path) -> bool {
         .unwrap_or(false)
 }
 
+pub fn collect_shk_executable_status() -> ShkExecutableStatus {
+    collect_shk_executable_status_from(
+        std::env::var_os("PATH").as_deref(),
+        std::env::current_exe().ok(),
+        std::env::var_os("PATHEXT").as_deref(),
+    )
+}
+
+fn collect_shk_executable_status_from(
+    path: Option<&OsStr>,
+    current_executable: Option<PathBuf>,
+    pathext: Option<&OsStr>,
+) -> ShkExecutableStatus {
+    let mut candidates = Vec::new();
+    let mut resolved_seen = HashSet::new();
+    let names = shk_executable_names(pathext);
+
+    if let Some(path) = path {
+        for dir in std::env::split_paths(path) {
+            for name in &names {
+                let candidate = dir.join(name);
+                if !is_executable_file(&candidate) {
+                    continue;
+                }
+                let resolved_path =
+                    fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+                if resolved_seen.insert(resolved_path.clone()) {
+                    candidates.push(ShkExecutableCandidate {
+                        path: candidate,
+                        resolved_path,
+                    });
+                }
+            }
+        }
+    }
+
+    let current_resolved_path = current_executable
+        .as_ref()
+        .map(|path| fs::canonicalize(path).unwrap_or_else(|_| path.clone()));
+    let current_matches_path_candidate = current_resolved_path.as_ref().is_some_and(|current| {
+        candidates
+            .iter()
+            .any(|candidate| &candidate.resolved_path == current)
+    });
+    let active_on_path = candidates.first().map(|candidate| candidate.path.clone());
+    ShkExecutableStatus {
+        current_executable,
+        current_resolved_path,
+        current_matches_path_candidate,
+        active_on_path,
+        multiple_distinct: candidates.len() > 1,
+        candidates,
+    }
+}
+
+#[cfg(windows)]
+fn shk_executable_names(pathext: Option<&OsStr>) -> Vec<OsString> {
+    let pathext = pathext
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_string());
+    let mut names = Vec::new();
+    for extension in pathext.split(';') {
+        let extension = extension.trim();
+        if extension.is_empty() {
+            continue;
+        }
+        let extension = if extension.starts_with('.') {
+            extension.to_ascii_lowercase()
+        } else {
+            format!(".{}", extension.to_ascii_lowercase())
+        };
+        let name = OsString::from(format!("shk{extension}"));
+        if !names.iter().any(|existing| existing == &name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+#[cfg(not(windows))]
+fn shk_executable_names(_pathext: Option<&OsStr>) -> Vec<OsString> {
+    vec![OsString::from("shk")]
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+fn print_shk_executable_status(status: &ShkExecutableStatus) {
+    println!("shk executable:");
+    match &status.current_executable {
+        Some(path) => println!("  running: {}", path.display()),
+        None => println!("  running: unavailable"),
+    }
+    match &status.active_on_path {
+        Some(path) => println!("  first on PATH: {}", path.display()),
+        None => println!("  first on PATH: not found"),
+    }
+    if status.multiple_distinct {
+        println!("  warning: multiple distinct shk executable installations detected:");
+        for candidate in &status.candidates {
+            println!("    - {}", candidate.path.display());
+        }
+    } else {
+        println!("  PATH: OK (no shadowed shk executable detected)");
+    }
+}
+
 pub fn run_workflows(root: &Path, fix: bool, json: bool) -> Result<()> {
     let fixes = if fix {
         safety::require_project_policy(root, "doctor workflows --fix")?;
@@ -983,79 +1252,304 @@ fn print_workflow_status(statuses: &[workflow_hardening::WorkflowFileStatus]) {
     println!("  fix with `shk doctor workflows --fix`");
 }
 
-pub fn run_all(root: &Path, json: bool) -> Result<()> {
+struct DoctorReport {
+    hook_ok: bool,
+    ai_managed: bool,
+    npm: npm_hardening::NpmHardeningStatus,
+    workflows: Vec<workflow_hardening::WorkflowFileStatus>,
+    executable: ShkExecutableStatus,
+    ignore: IgnoreStatus,
+    claude: ClaudePermissionsStatus,
+    codex: CodexConfigSnapshot,
+    env_files: Vec<EnvFileStatus>,
+    secret_store: SecretStoreDoctorStatus,
+    warning_count: usize,
+}
+
+fn collect_doctor_report(root: &Path) -> Result<DoctorReport> {
+    let (policy, _) = Policy::load_from_dir(root)?;
     let hook_ok = has_shk_pre_commit(root);
     let ai_managed = has_managed_ai_hooks(root);
     let npm = npm_hardening::status(root);
     let workflows = workflow_hardening::scan_workflows(root);
+    let executable = collect_shk_executable_status();
+    let ignore = collect_ignore_status_with_policy(root, &policy)?;
+    let claude = collect_claude_permissions_status(root);
+    let codex = snapshot_codex_config(root);
+    let env_files = collect_doctor_env_file_statuses(root);
+    let secret_store = collect_secret_store_doctor_status(&policy);
+    let warning_count = doctor_warning_count(DoctorWarningInputs {
+        hook_ok,
+        ai_managed,
+        executable: &executable,
+        ignore: &ignore,
+        claude: &claude,
+        codex: &codex.status,
+        workflows: &workflows,
+        npm: &npm,
+        env_files: &env_files,
+        secret_store: &secret_store,
+    });
+    Ok(DoctorReport {
+        hook_ok,
+        ai_managed,
+        npm,
+        workflows,
+        executable,
+        ignore,
+        claude,
+        codex,
+        env_files,
+        secret_store,
+        warning_count,
+    })
+}
+
+pub fn run_all(root: &Path, json: bool, strict: bool) -> Result<()> {
+    let report = match collect_doctor_report(root) {
+        Ok(report) => report,
+        Err(err) if json => {
+            let value = serde_json::json!({
+                "ok": false,
+                "strict": strict,
+                "warningCount": 0,
+                "error": {
+                    "kind": "configuration",
+                    "message": format!("{err:#}"),
+                },
+            });
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            return Err(CliExit::silent(2).into());
+        }
+        Err(err) => return Err(err),
+    };
+    let warning_count = report.warning_count;
     if json {
         let v = serde_json::json!({
-            "git_pre_commit_shk": hook_ok,
-            "ai_managed_hooks": ai_managed,
+            "ok": warning_count == 0,
+            "strict": strict,
+            "warningCount": warning_count,
+            "git_pre_commit_shk": report.hook_ok,
+            "ai_managed_hooks": report.ai_managed,
+            "shkExecutable": report.executable,
+            "ignore": report.ignore,
+            "claudePermissions": report.claude,
+            "codexConfig": report.codex.status,
+            "envFiles": report.env_files,
+            "envSecretStore": report.secret_store,
             "workflows": {
-                "files": workflows,
-                "ok": workflows.iter().all(|s| s.ok()),
+                "files": report.workflows,
+                "ok": report.workflows.iter().all(|s| s.ok()),
             },
             "npm_supply_chain_hardening": {
-                "package_json_detected": npm.has_npm_projects(),
-                "package_dirs": npm.package_dirs,
-                "package_dirs_without_lockfile": npm.package_dirs_without_lockfile,
-                "package_managers": npm.package_managers.iter().map(|manager| manager.as_str()).collect::<Vec<_>>(),
-                "npmrc": npm.npmrc_path,
-                "pnpm_workspace": npm.pnpm_workspace_path,
-                "yarnrc": npm.yarnrc_path,
-                "bunfig": npm.bunfig_path,
-                "ignore_scripts": npm.ignore_scripts_ok,
-                "min_release_age": npm.min_release_age,
-                "min_release_age_ok": npm.min_release_age_ok,
-                "pnpm_min_release_age_minutes": npm.pnpm_min_release_age_minutes,
-                "pnpm_min_release_age_ok": npm.pnpm_min_release_age_ok,
-                "yarn_min_release_age_minutes": npm.yarn_min_release_age_minutes,
-                "yarn_min_release_age_ok": npm.yarn_min_release_age_ok,
-                "bun_min_release_age_seconds": npm.bun_min_release_age_seconds,
-                "bun_min_release_age_ok": npm.bun_min_release_age_ok,
-                "package_scripts_ok": npm.package_scripts_ok(),
-                "age_gates_ok": npm.age_gates_ok(),
+                "package_json_detected": report.npm.has_npm_projects(),
+                "package_dirs": report.npm.package_dirs,
+                "package_dirs_without_lockfile": report.npm.package_dirs_without_lockfile,
+                "package_managers": report.npm.package_managers.iter().map(|manager| manager.as_str()).collect::<Vec<_>>(),
+                "npmrc": report.npm.npmrc_path,
+                "pnpm_workspace": report.npm.pnpm_workspace_path,
+                "yarnrc": report.npm.yarnrc_path,
+                "bunfig": report.npm.bunfig_path,
+                "ignore_scripts": report.npm.ignore_scripts_ok,
+                "min_release_age": report.npm.min_release_age,
+                "min_release_age_ok": report.npm.min_release_age_ok,
+                "pnpm_min_release_age_minutes": report.npm.pnpm_min_release_age_minutes,
+                "pnpm_min_release_age_ok": report.npm.pnpm_min_release_age_ok,
+                "yarn_min_release_age_minutes": report.npm.yarn_min_release_age_minutes,
+                "yarn_min_release_age_ok": report.npm.yarn_min_release_age_ok,
+                "bun_min_release_age_seconds": report.npm.bun_min_release_age_seconds,
+                "bun_min_release_age_ok": report.npm.bun_min_release_age_ok,
+                "package_scripts_ok": report.npm.package_scripts_ok(),
+                "age_gates_ok": report.npm.age_gates_ok(),
                 "dependabot": {
-                    "configured": npm.dependabot.configured,
-                    "config_path": npm.dependabot.config_path,
-                    "cooldown_days": npm.dependabot.cooldown_days,
-                    "cooldown_ok": npm.dependabot.cooldown_ok,
+                    "configured": report.npm.dependabot.configured,
+                    "config_path": report.npm.dependabot.config_path,
+                    "cooldown_days": report.npm.dependabot.cooldown_days,
+                    "cooldown_ok": report.npm.dependabot.cooldown_ok,
                 },
                 "renovate": {
-                    "configured": npm.renovate.configured,
-                    "config_path": npm.renovate.config_path,
-                    "cooldown_days": npm.renovate.cooldown_days,
-                    "cooldown_ok": npm.renovate.cooldown_ok,
+                    "configured": report.npm.renovate.configured,
+                    "config_path": report.npm.renovate.config_path,
+                    "cooldown_days": report.npm.renovate.cooldown_days,
+                    "cooldown_ok": report.npm.renovate.cooldown_ok,
                 },
-                "dependency_bot_cooldown_ok": npm.dependency_bot_cooldown_ok(),
-                "ok": npm.ok(),
+                "dependency_bot_cooldown_ok": report.npm.dependency_bot_cooldown_ok(),
+                "ok": report.npm.ok(),
             },
         });
         println!("{}", serde_json::to_string_pretty(&v)?);
-        return Ok(());
+        return finish_doctor(strict, warning_count);
     }
     println!("doctor:");
     println!(
         "  Git pre-commit (shk): {}",
-        if hook_ok { "detected" } else { "not installed" }
+        if report.hook_ok {
+            "detected"
+        } else {
+            "not installed"
+        }
     );
     println!(
         "  AI managed hooks (shk): {}",
-        if ai_managed {
+        if report.ai_managed {
             "present"
         } else {
             "not found — run `shk hooks install-ai`"
         }
     );
     println!();
-    run_ignore(root, false)?;
+    print_shk_executable_status(&report.executable);
     println!();
-    run_env(root, false)?;
+    print_ignore_status(&report.ignore.missing_patterns);
+    print_claude_permissions_status(&report.claude);
+    print_codex_config_snapshot(&report.codex);
     println!();
-    print_workflow_status(&workflows);
+    print_secret_store_doctor_summary(&report.secret_store);
+    print_env_file_statuses(&report.env_files);
     println!();
-    print_npm_hardening_check(&npm);
+    print_workflow_status(&report.workflows);
+    println!();
+    print_npm_hardening_check(&report.npm);
+    println!();
+    if warning_count == 0 {
+        println!("doctor summary: OK (no advisory warnings)");
+    } else {
+        println!("doctor summary: {warning_count} advisory warning(s)");
+        if strict {
+            println!("doctor strict: failing because advisory warnings were reported");
+        }
+    }
+    finish_doctor(strict, warning_count)
+}
+
+struct DoctorWarningInputs<'a> {
+    hook_ok: bool,
+    ai_managed: bool,
+    executable: &'a ShkExecutableStatus,
+    ignore: &'a IgnoreStatus,
+    claude: &'a ClaudePermissionsStatus,
+    codex: &'a CodexConfigStatus,
+    workflows: &'a [workflow_hardening::WorkflowFileStatus],
+    npm: &'a npm_hardening::NpmHardeningStatus,
+    env_files: &'a [EnvFileStatus],
+    secret_store: &'a SecretStoreDoctorStatus,
+}
+
+fn doctor_warning_count(inputs: DoctorWarningInputs<'_>) -> usize {
+    let mut warnings = 0usize;
+    warnings += usize::from(!inputs.hook_ok);
+    warnings += usize::from(!inputs.ai_managed);
+    warnings += usize::from(inputs.executable.multiple_distinct);
+    warnings += usize::from(!inputs.ignore.missing_patterns.is_empty());
+    if inputs.claude.settings_exists {
+        warnings += usize::from(!inputs.claude.deny_ok);
+        warnings += usize::from(!inputs.claude.sandbox_ok);
+    }
+    if inputs.codex.config_exists {
+        warnings += usize::from(!inputs.codex.hooks_enabled);
+        warnings += usize::from(!inputs.codex.sandbox_ok);
+        warnings += usize::from(!inputs.codex.approval_ok);
+    }
+    warnings += usize::from(inputs.workflows.iter().any(|status| !status.ok()));
+    warnings += usize::from(!inputs.npm.ok());
+    warnings += env_file_warning_count(inputs.env_files);
+    warnings += inputs.secret_store.warning_count;
+    warnings
+}
+
+fn env_file_warning_count(env_files: &[EnvFileStatus]) -> usize {
+    usize::from(
+        env_files
+            .iter()
+            .any(|status| status.state == EnvFileState::Plaintext),
+    ) + usize::from(
+        env_files
+            .iter()
+            .any(|status| status.state == EnvFileState::Mixed),
+    )
+}
+
+fn collect_secret_store_doctor_status(policy: &Policy) -> SecretStoreDoctorStatus {
+    let backend = policy.env.secret_store.clone();
+    match policy.env.secret_store.parse::<SecretStoreBackend>() {
+        Ok(SecretStoreBackend::Keyring) => SecretStoreDoctorStatus {
+            backend,
+            backend_supported: true,
+            warning_count: 0,
+            live_checks_performed: false,
+            one_password: None,
+        },
+        Err(_) => SecretStoreDoctorStatus {
+            backend,
+            backend_supported: false,
+            warning_count: 1,
+            live_checks_performed: false,
+            one_password: None,
+        },
+        Ok(SecretStoreBackend::OnePassword) => {
+            let project_id_ok = policy
+                .env
+                .project_id
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty());
+            let vault_ok = policy
+                .env
+                .onepassword
+                .vault
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty());
+            SecretStoreDoctorStatus {
+                backend,
+                backend_supported: true,
+                warning_count: usize::from(!project_id_ok) + usize::from(!vault_ok),
+                live_checks_performed: false,
+                one_password: Some(OnePasswordDoctorSummary {
+                    project_id_ok,
+                    vault_ok,
+                }),
+            }
+        }
+    }
+}
+
+fn onepassword_warning_count(
+    policy: &Policy,
+    status: &crate::env_store::OnePasswordDoctorStatus,
+) -> usize {
+    let mut warnings = 0usize;
+    warnings += usize::from(
+        policy
+            .env
+            .project_id
+            .as_ref()
+            .is_none_or(|value| value.trim().is_empty()),
+    );
+    warnings += usize::from(
+        policy
+            .env
+            .onepassword
+            .vault
+            .as_ref()
+            .is_none_or(|value| value.trim().is_empty()),
+    );
+    warnings += usize::from(status.op_resolution_error.is_some());
+    if status.op_resolution_error.is_none() {
+        warnings += usize::from(
+            status
+                .op_version
+                .as_ref()
+                .is_some_and(|_| !status.op_version_ok)
+                || status.op_version_error.is_some(),
+        );
+        warnings += usize::from(!status.op_signed_in);
+    }
+    warnings
+}
+
+fn finish_doctor(strict: bool, warning_count: usize) -> Result<()> {
+    if strict && warning_count > 0 {
+        return Err(CliExit::silent(1).into());
+    }
     Ok(())
 }
 
@@ -1187,6 +1681,114 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    #[cfg(unix)]
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_status_detects_distinct_path_entries_without_running_them() {
+        let first = tempdir().unwrap();
+        let second = tempdir().unwrap();
+        make_executable(&first.path().join("shk"));
+        make_executable(&second.path().join("shk"));
+        let path = std::env::join_paths([first.path(), second.path()]).unwrap();
+
+        let status = collect_shk_executable_status_from(Some(&path), None, None);
+
+        assert!(status.multiple_distinct);
+        assert_eq!(status.candidates.len(), 2);
+        assert_eq!(status.active_on_path, Some(first.path().join("shk")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_status_deduplicates_symlinks_to_the_same_binary() {
+        use std::os::unix::fs::symlink;
+
+        let real = tempdir().unwrap();
+        let linked = tempdir().unwrap();
+        let binary = real.path().join("shk");
+        make_executable(&binary);
+        symlink(&binary, linked.path().join("shk")).unwrap();
+        let path = std::env::join_paths([linked.path(), real.path()]).unwrap();
+
+        let status = collect_shk_executable_status_from(Some(&path), Some(binary.clone()), None);
+
+        assert!(!status.multiple_distinct);
+        assert_eq!(status.candidates.len(), 1);
+        assert_eq!(status.active_on_path, Some(linked.path().join("shk")));
+        assert!(status.current_matches_path_candidate);
+        assert_eq!(
+            status.current_resolved_path,
+            Some(fs::canonicalize(binary).unwrap())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_status_keeps_running_binary_mismatch_informational() {
+        let running = tempdir().unwrap();
+        let path_dir = tempdir().unwrap();
+        let running_binary = running.path().join("shk");
+        make_executable(&running_binary);
+        make_executable(&path_dir.path().join("shk"));
+        let path = std::env::join_paths([path_dir.path()]).unwrap();
+
+        let status =
+            collect_shk_executable_status_from(Some(&path), Some(running_binary.clone()), None);
+
+        assert!(!status.multiple_distinct);
+        assert!(!status.current_matches_path_candidate);
+        assert_eq!(
+            status.current_resolved_path,
+            Some(fs::canonicalize(running_binary).unwrap())
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn executable_status_respects_windows_pathext_order() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("shk.exe"), "native").unwrap();
+        fs::write(dir.path().join("shk.cmd"), "wrapper").unwrap();
+        let path = std::env::join_paths([dir.path()]).unwrap();
+
+        let status =
+            collect_shk_executable_status_from(Some(&path), None, Some(OsStr::new(".EXE;.CMD")));
+
+        assert!(status.multiple_distinct);
+        assert_eq!(status.candidates.len(), 2);
+        assert_eq!(status.active_on_path, Some(dir.path().join("shk.exe")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn executable_status_does_not_warn_for_single_npm_cmd_wrapper() {
+        let path_dir = tempdir().unwrap();
+        let running_dir = tempdir().unwrap();
+        fs::write(path_dir.path().join("shk.cmd"), "wrapper").unwrap();
+        let running_binary = running_dir.path().join("shk.exe");
+        fs::write(&running_binary, "native").unwrap();
+        let path = std::env::join_paths([path_dir.path()]).unwrap();
+
+        let status = collect_shk_executable_status_from(
+            Some(&path),
+            Some(running_binary),
+            Some(OsStr::new(".CMD")),
+        );
+
+        assert!(!status.multiple_distinct);
+        assert_eq!(status.candidates.len(), 1);
+        assert!(!status.current_matches_path_candidate);
+    }
+
     #[test]
     fn doctor_ignore_path_defaults_to_dot() {
         assert_eq!(doctor_ignore_path(None), PathBuf::from("."));
@@ -1280,6 +1882,19 @@ mod tests {
         assert_eq!(mixed.state, EnvFileState::Mixed);
         assert_eq!(mixed.plaintext_keys, vec!["PLAIN"]);
         assert_eq!(mixed.encrypted_key_count, 1);
+    }
+
+    #[test]
+    fn doctor_env_statuses_include_dotenvx_private_key_file() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join(".env.keys"), "PLACEHOLDER=example\n").unwrap();
+        fs::write(dir.path().join(".env.vault"), "encrypted metadata\n").unwrap();
+
+        let files = collect_doctor_env_file_statuses(dir.path());
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, ".env.keys");
+        assert_eq!(files[0].state, EnvFileState::Plaintext);
     }
 
     #[test]

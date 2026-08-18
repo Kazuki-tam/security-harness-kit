@@ -123,26 +123,10 @@ verify_checksums() {
     cd "$dir"
     for sum_file in *.sha256; do
       [[ -f "$sum_file" ]] || continue
-      if command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 -c "$sum_file" >/dev/null
-      else
-        sha256sum -c "$sum_file" >/dev/null
-      fi
+      shk_verify_sha256_file "$sum_file"
       echo "checksum ok: ${sum_file%.sha256}"
     done
   )
-}
-
-# Resolve the commit a tag points at, dereferencing annotated tags.
-commit_for_tag() {
-  local tag="$1"
-  local sha type
-  sha="$(gh api "repos/{owner}/{repo}/git/ref/tags/${tag}" --jq .object.sha)"
-  type="$(gh api "repos/{owner}/{repo}/git/ref/tags/${tag}" --jq .object.type)"
-  if [[ "$type" == "tag" ]]; then
-    sha="$(gh api "repos/{owner}/{repo}/git/tags/${sha}" --jq .object.sha)"
-  fi
-  printf '%s\n' "$sha"
 }
 
 reenable_release_workflow() {
@@ -207,16 +191,17 @@ run_mirror() {
   verify_checksums "$MIRROR_WORKDIR"
 
   local commit_sha
-  commit_sha="$(commit_for_tag "$source_tag")"
+  commit_sha="$(shk_commit_for_tag "$source_tag")"
 
   local existing_sha=""
-  if existing_sha="$(commit_for_tag "$mirror_tag" 2>/dev/null)"; then
+  if existing_sha="$(shk_commit_for_tag "$mirror_tag" 2 2>/dev/null)"; then
     require_same_commit "$source_tag" "$commit_sha" "$mirror_tag" "$existing_sha"
   fi
 
   if gh release view "$mirror_tag" >/dev/null 2>&1; then
     echo "mirror release ${mirror_tag} already exists; refreshing assets"
     gh release upload "$mirror_tag" "${assets[@]}" --clobber
+    "${ROOT}/.github/scripts/release/verify-cli-channels.sh" "$source_tag"
     return
   fi
 
@@ -249,6 +234,7 @@ run_mirror() {
     --latest=false \
     --verify-tag
   echo "mirror release ${mirror_tag} published with ${#assets[@]} assets"
+  "${ROOT}/.github/scripts/release/verify-cli-channels.sh" "$source_tag"
 }
 
 main() {

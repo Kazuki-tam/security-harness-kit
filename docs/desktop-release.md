@@ -135,7 +135,9 @@ workflow's `dist build` calls carry no announcement tag and cargo-dist cannot
 parse the `shk-v*` / `cli-v*` conventions at all. Without a `vX.Y.Z` release,
 all three channels 404 (this bit `shk-v0.6.1`, the first combined release).
 
-After a combined or `cli-v*` release goes green, mirror the CLI assets:
+For a combined or `cli-v*` release, the published-channel verification job
+intentionally fails until the required mirror exists. After the publish jobs
+complete, mirror the CLI assets, then rerun the failed verification job:
 
 ```bash
 ./.github/scripts/release/mirror-cli-release.sh run shk-vX.Y.Z
@@ -147,7 +149,16 @@ non-latest mirror release with byte-identical assets (so the SHA-256 values in
 the already-published Homebrew formula still match). It temporarily disables
 the Release workflow while the tag is created — a `v*` tag push would
 otherwise re-trigger it and fail on the duplicate npm publish — and re-enables
-it on exit.
+it on exit. Before returning, it also verifies the published installer,
+Homebrew, and npm channels against the mirror tag, commit, embedded download
+URLs, and archive checksums.
+
+All CLI-producing tags run the same published-channel verification in the
+release workflow after Homebrew and npm publishing. To rerun it manually:
+
+```bash
+./.github/scripts/release/verify-cli-channels.sh vX.Y.Z
+```
 
 This is a maintainer-side step by design: the "Protect release tags" ruleset
 only lets repository admins create `v*` refs, so the workflow's own
@@ -171,7 +182,8 @@ releases need no mirror.
    `shk-desktop-latest.json`, and the `desktop-latest` updater metadata.
 6. For `shk-vX.Y.Z` (or `cli-vX.Y.Z`) releases, run the
    [CLI mirror](#combined-releases-and-the-cli-mirror) so the installers,
-   Homebrew formula, and npm package resolve.
+   Homebrew formula, and npm package resolve; the mirror command now verifies
+   all three published channels before it succeeds.
 
 ### Unsigned release checklist
 
