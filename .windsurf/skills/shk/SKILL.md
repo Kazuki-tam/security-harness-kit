@@ -324,9 +324,12 @@ skipped silently.
 
 Rules: `mcp.npx_auto_install`, `mcp.unpinned_package`, `mcp.shell_wrapper`,
 `mcp.local_unpinned_executable`, `mcp.broad_filesystem_scope`, `mcp.http_no_tls`,
-`mcp.secret_in_url`, `mcp.unknown_transport`, `mcp.config_unreadable`. Argument, header, URL, and
+`mcp.secret_in_url`, `mcp.unknown_transport`, `mcp.config_unreadable`,
+`mcp.env_file_unreadable`. Argument, header, URL, and
 process-variable values also pass through the secret rules, while `${VAR}`, `$VAR`, and
-`${input:token}` references are not treated as plaintext. Reports never contain raw values.
+`${input:token}` references are not treated as plaintext. A plaintext file named by a server's
+`--env-file` argument is read locally and scanned the same way — the one file-read the audit
+performs beyond the configs themselves. Reports never contain raw values.
 
 Exit codes:
 - 0: no finding at or above threshold (default `high`)
