@@ -1,0 +1,5 @@
+{
+  "name": "security-harness-kit",
+  "user": "ubuntu",
+  "install": "bash .cursor/install.sh"
+}
