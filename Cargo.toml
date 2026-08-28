@@ -39,7 +39,7 @@ tempfile = "3"
 libc = "0.2"
 zeroize = "1.8"
 dialoguer = "0.12"
-quick-xml = "0.41"
+quick-xml = "0.42"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 pdf-extract = "0.12.0"
 encoding_rs = "0.8"
