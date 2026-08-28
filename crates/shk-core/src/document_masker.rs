@@ -435,8 +435,7 @@ struct XmlMaskContext<'a> {
 }
 
 fn decode_xml_text(text: &BytesText<'_>) -> Result<String> {
-    let decoded = text.decode().context("decode XML text")?;
-    Ok(unescape(decoded.as_ref())
+    Ok(unescape(text.as_ref())
         .context("unescape XML text")?
         .into_owned())
 }
@@ -498,7 +497,7 @@ fn mask_xml_text(
                     )?;
                 }
                 Event::CData(cdata) => {
-                    let decoded = String::from_utf8_lossy(cdata.as_ref()).to_string();
+                    let decoded = cdata.as_ref().to_owned();
                     push_text_item(
                         &mut items,
                         decoded,
@@ -586,7 +585,7 @@ fn extract_xml_text(xml: &[u8], text_group: TextGroupKind) -> Result<String> {
                 decoded.zeroize();
             }
             Event::CData(cdata) => {
-                let mut decoded = String::from_utf8_lossy(cdata.as_ref()).to_string();
+                let mut decoded = cdata.as_ref().to_owned();
                 if group_depth.is_some() {
                     group_text.push_str(&decoded);
                 } else {
@@ -684,20 +683,17 @@ fn split_masked_text(masked: &str, original_lengths: &[usize]) -> Vec<String> {
     out
 }
 
-fn starts_text_group(name: &[u8], kind: TextGroupKind) -> bool {
+fn starts_text_group(name: &str, kind: TextGroupKind) -> bool {
     let local = local_name(name);
     match kind {
-        TextGroupKind::Docx => local == b"p",
-        TextGroupKind::Xlsx => local == b"si" || local == b"is",
-        TextGroupKind::Pptx => local == b"p",
+        TextGroupKind::Docx => local == "p",
+        TextGroupKind::Xlsx => local == "si" || local == "is",
+        TextGroupKind::Pptx => local == "p",
     }
 }
 
-fn local_name(name: &[u8]) -> &[u8] {
-    name.iter()
-        .position(|b| *b == b':')
-        .map(|idx| &name[idx + 1..])
-        .unwrap_or(name)
+fn local_name(name: &str) -> &str {
+    name.split_once(':').map(|(_, local)| local).unwrap_or(name)
 }
 
 #[cfg(test)]
@@ -945,7 +941,7 @@ mod tests {
             match reader.read_event_into(&mut buf)? {
                 Event::Eof => break,
                 Event::Text(text) => out.push_str(&decode_xml_text(&text)?),
-                Event::CData(cdata) => out.push_str(&String::from_utf8_lossy(cdata.as_ref())),
+                Event::CData(cdata) => out.push_str(cdata.as_ref()),
                 _ => {}
             }
             buf.clear();
