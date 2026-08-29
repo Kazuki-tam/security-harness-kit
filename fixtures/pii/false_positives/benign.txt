@@ -12,3 +12,5 @@ CI structural key: - name: build
 Another CI structural key: - name: checkout repository
 Retina asset path: icons/128x128@2x.png
 Another asset path: assets/logo@3x.jpeg
+US-style date: 04-01-2024
+European-style date: 01-04-2024
