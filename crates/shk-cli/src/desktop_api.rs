@@ -16,6 +16,7 @@ use crate::hooks::{
 use crate::npm_hardening;
 use crate::policy_cmd;
 use crate::safety;
+use crate::shk_executable;
 use crate::workflow_hardening;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,8 @@ use shk_core::git;
 use shk_core::masker::MaskJsonOutput;
 use shk_core::policy::Policy;
 use shk_integrations::{MANAGED_MARKER_JSON, MANAGED_MARKER_SH};
+use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1437,9 +1440,11 @@ pub fn install_skills(path: &str, options: InstallSkillsOptions) -> Result<Actio
 }
 
 fn is_shk_cli_installed() -> bool {
-    shk_executable_search_dirs()
-        .iter()
-        .any(|dir| dir_contains_shk_executable(dir))
+    !shk_executable::candidates_in_dirs(
+        shk_executable_search_dirs(),
+        std::env::var_os("PATHEXT").as_deref(),
+    )
+    .is_empty()
 }
 
 /// `PATH` entries first, then the install locations documented in
@@ -1450,34 +1455,38 @@ fn is_shk_cli_installed() -> bool {
 /// installer into `~/.cargo/bin` or by Homebrew is invisible to a plain `PATH`
 /// lookup even though the user's shell finds it.
 fn shk_executable_search_dirs() -> Vec<PathBuf> {
-    let path_dirs = std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).collect())
-        .unwrap_or_default();
+    let path = std::env::var_os("PATH");
     let cargo_home = std::env::var_os("CARGO_HOME")
         .filter(|cargo_home| !cargo_home.is_empty())
         .map(PathBuf::from);
-    shk_search_dirs_from(path_dirs, cargo_home, desktop_home_dir())
+    shk_search_dirs_from(path.as_deref(), cargo_home, desktop_home_dir())
 }
 
 fn shk_search_dirs_from(
-    path_dirs: Vec<PathBuf>,
+    path: Option<&OsStr>,
     cargo_home: Option<PathBuf>,
     home: Option<PathBuf>,
 ) -> Vec<PathBuf> {
-    let mut dirs = path_dirs;
+    let mut dirs: Vec<_> = path
+        .map(std::env::split_paths)
+        .into_iter()
+        .flatten()
+        .collect();
     // Script installer: `$CARGO_HOME/bin`, or `~/.cargo/bin` when unset.
     if let Some(cargo_home) = cargo_home {
         dirs.push(cargo_home.join("bin"));
-    }
-    if let Some(home) = home {
+    } else if let Some(home) = home {
         dirs.push(home.join(".cargo").join("bin"));
-        dirs.push(home.join(".local").join("bin"));
     }
-    if !cfg!(windows) {
-        // Homebrew on Apple silicon and Intel respectively.
-        dirs.push(PathBuf::from("/opt/homebrew/bin"));
-        dirs.push(PathBuf::from("/usr/local/bin"));
-    }
+    // Homebrew's Apple silicon prefix.
+    #[cfg(target_os = "macos")]
+    dirs.push(PathBuf::from("/opt/homebrew/bin"));
+    // Intel Homebrew and npm's default global prefix both land here, and the
+    // desktop app ships for Linux too, so this is not macOS-only.
+    #[cfg(not(windows))]
+    dirs.push(PathBuf::from("/usr/local/bin"));
+    let mut seen = HashSet::new();
+    dirs.retain(|dir| seen.insert(dir.clone()));
     dirs
 }
 
@@ -1486,33 +1495,6 @@ fn desktop_home_dir() -> Option<PathBuf> {
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
         .or_else(dirs::home_dir)
-}
-
-fn dir_contains_shk_executable(dir: &Path) -> bool {
-    is_executable_file(&dir.join("shk")) || {
-        #[cfg(windows)]
-        {
-            is_executable_file(&dir.join("shk.exe"))
-        }
-        #[cfg(not(windows))]
-        {
-            false
-        }
-    }
-}
-
-#[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::metadata(path)
-        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(windows)]
-fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
 }
 
 pub fn resolve_project_root(path: &str) -> Result<PathBuf> {
@@ -2058,39 +2040,66 @@ mod tests {
     }
 
     #[test]
-    fn shk_search_dirs_cover_documented_install_locations_outside_path() {
+    fn shk_search_dirs_prefer_cargo_home_and_preserve_path_order() {
         let home = PathBuf::from("/home/tester");
         let cargo_home = PathBuf::from("/opt/cargo");
-        let dirs = shk_search_dirs_from(
-            vec![PathBuf::from("/usr/bin")],
-            Some(cargo_home.clone()),
-            Some(home.clone()),
-        );
+        let path = std::env::join_paths(["/usr/bin", "/custom/bin"]).unwrap();
+        let dirs = shk_search_dirs_from(Some(&path), Some(cargo_home.clone()), Some(home.clone()));
 
-        assert_eq!(dirs.first(), Some(&PathBuf::from("/usr/bin")));
-        for expected in [
-            cargo_home.join("bin"),
-            home.join(".cargo").join("bin"),
-            home.join(".local").join("bin"),
-        ] {
-            assert!(
-                dirs.contains(&expected),
-                "{expected:?} missing from {dirs:?}"
-            );
-        }
-        if !cfg!(windows) {
-            assert!(
-                dirs.contains(&PathBuf::from("/opt/homebrew/bin")),
-                "{dirs:?}"
-            );
-            assert!(dirs.contains(&PathBuf::from("/usr/local/bin")), "{dirs:?}");
-        }
+        assert_eq!(
+            &dirs[..3],
+            [
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/custom/bin"),
+                cargo_home.join("bin"),
+            ]
+        );
+        assert!(!dirs.contains(&home.join(".cargo").join("bin")), "{dirs:?}");
     }
 
     #[test]
-    fn shk_search_dirs_tolerate_missing_home_and_cargo_home() {
-        let dirs = shk_search_dirs_from(vec![PathBuf::from("/usr/bin")], None, None);
-        assert!(dirs.contains(&PathBuf::from("/usr/bin")), "{dirs:?}");
+    fn shk_search_dirs_use_default_cargo_bin_only_when_cargo_home_is_missing() {
+        let home = PathBuf::from("/home/tester");
+        let dirs = shk_search_dirs_from(None, None, Some(home.clone()));
+        assert_eq!(dirs.first(), Some(&home.join(".cargo").join("bin")));
+    }
+
+    #[test]
+    fn shk_search_dirs_deduplicate_without_reordering() {
+        let cargo_bin = PathBuf::from("/opt/cargo/bin");
+        let path = std::env::join_paths(["/usr/bin", "/opt/cargo/bin", "/usr/bin"]).unwrap();
+        let dirs = shk_search_dirs_from(Some(&path), Some(PathBuf::from("/opt/cargo")), None);
+
+        assert_eq!(
+            &dirs[..2],
+            [PathBuf::from("/usr/bin"), cargo_bin],
+            "{dirs:?}"
+        );
+        assert_eq!(
+            dirs.iter()
+                .filter(|dir| **dir == PathBuf::from("/usr/bin"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn shk_search_dirs_tolerate_missing_path_home_and_cargo_home() {
+        let dirs = shk_search_dirs_from(None, None, None);
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            dirs,
+            [
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/usr/local/bin")
+            ]
+        );
+        // The desktop app ships for Linux, where npm's default global prefix
+        // puts `shk` in /usr/local/bin and a launcher's PATH may not have it.
+        #[cfg(all(not(target_os = "macos"), not(windows)))]
+        assert_eq!(dirs, [PathBuf::from("/usr/local/bin")]);
+        #[cfg(windows)]
+        assert!(dirs.is_empty(), "{dirs:?}");
     }
 
     #[cfg(unix)]
@@ -2102,20 +2111,9 @@ mod tests {
         let cargo_bin = home.path().join(".cargo").join("bin");
         write_shk_executable(&cargo_bin);
 
-        let dirs = shk_search_dirs_from(
-            vec![PathBuf::from("/usr/bin")],
-            None,
-            Some(home.path().to_path_buf()),
-        );
-        assert!(dirs.iter().any(|dir| dir_contains_shk_executable(dir)));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn non_executable_shk_file_is_not_treated_as_installed() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("shk"), "not executable").unwrap();
-        assert!(!dir_contains_shk_executable(dir.path()));
+        let path = std::env::join_paths(["/usr/bin"]).unwrap();
+        let dirs = shk_search_dirs_from(Some(&path), None, Some(home.path().to_path_buf()));
+        assert!(!shk_executable::candidates_in_dirs(dirs, None).is_empty());
     }
 
     #[test]
@@ -3570,10 +3568,13 @@ mod tests {
         let shk = dir.path().join("shk");
         fs::write(&shk, "#!/bin/sh\n").unwrap();
         fs::set_permissions(&shk, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(!dir_contains_shk_executable(dir.path()));
+        assert!(shk_executable::candidates_in_dirs([dir.path()], None).is_empty());
 
         fs::set_permissions(&shk, fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(dir_contains_shk_executable(dir.path()));
+        assert_eq!(
+            shk_executable::candidates_in_dirs([dir.path()], None),
+            [shk]
+        );
     }
 
     #[test]

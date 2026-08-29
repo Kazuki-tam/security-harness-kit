@@ -18,6 +18,7 @@ mod output;
 mod policy_cmd;
 mod safety;
 mod sarif;
+mod shk_executable;
 mod version_check;
 mod workflow_hardening;
 
