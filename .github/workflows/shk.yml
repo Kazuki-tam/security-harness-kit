@@ -27,7 +27,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          SHK_VERSION=v0.3.14
+          SHK_VERSION=v0.6.3
           REPO=Kazuki-tam/security-harness-kit
           mkdir -p "$HOME/.cargo/bin"
           case "$(uname -s)-$(uname -m)" in
@@ -49,4 +49,5 @@ jobs:
       - name: Run shk
         shell: bash
         run: |
-          shk scan . --json --fail-on high
+          shk scan --json --fail-on high -- .
+

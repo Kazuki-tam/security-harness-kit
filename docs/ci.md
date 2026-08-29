@@ -116,7 +116,7 @@ jobs:
             *) echo "unsupported runner" >&2; exit 1 ;;
           esac
           ASSET="shk-cli-${TARGET}.tar.xz"
-          gh release download v0.6.3 -R "$REPO" -p "$ASSET" -p "${ASSET}.sha256"
+          gh release download "$SHK_VERSION" -R "$REPO" -p "$ASSET" -p "${ASSET}.sha256"
           sha256sum -c "${ASSET}.sha256"
           gh attestation verify "$ASSET" -R "$REPO"
           TMP="$(mktemp -d)"
