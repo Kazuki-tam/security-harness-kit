@@ -514,8 +514,14 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "pii.ja.phone",
             severity: Severity::Medium,
             kind: Kind::Pii,
-            re: Regex::new(r"0\d{1,4}-\d{1,4}-\d{4}")
-                .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            // Covers ordinary 10/11-digit numbers, six-digit-suffix 0AB0
+            // services, and the documented 11/14-digit M2M groupings. Phone
+            // syntax is deliberately ASCII-only; mixed digit scripts are
+            // ambiguous identifiers rather than supported phone notation.
+            re: Regex::new(
+                r"(?:020-0[0-9]{5}-[0-9]{5}|020-[1-35-9][0-9]{2}-[0-9]{5}|0(?:120|170|180|570|990)-[0-9]{3}-[0-9]{3}|0[0-9]{1,4}-[0-9]{1,4}-[0-9]{4})",
+            )
+            .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Japanese phone number pattern detected",
             confidence: 0.75,
             validator: Some(japanese_phone_valid),
@@ -954,13 +960,89 @@ fn generic_api_key_valid(candidate: &str) -> bool {
 }
 
 fn japanese_phone_valid(candidate: &str) -> bool {
-    let groups: Vec<&str> = candidate.split('-').collect();
-    if groups.len() < 3 {
-        return true;
+    // The Japanese numbering plan uses 10/11-digit subscriber numbers plus
+    // 14-digit 0200 M2M numbers. Exact lengths reject date-like and arbitrary
+    // hyphenated numeric IDs without excluding the longer M2M allocation.
+    let digits: Vec<u32> = candidate.chars().filter_map(decimal_digit_value).collect();
+    let digit_count = digits.len();
+    if !matches!(digit_count, 10 | 11 | 14) {
+        return false;
     }
+
+    let groups: Vec<&str> = candidate.split('-').collect();
+    if groups.len() != 3 {
+        return false;
+    }
+    let group_lengths: Vec<usize> = groups
+        .iter()
+        .map(|group| group.chars().filter_map(decimal_digit_value).count())
+        .collect();
+
+    // 0AB0 service allocations are always 10 digits, written either 4-3-3 or
+    // 4-2-4. Without this check, the broad ordinary-number branch would accept
+    // an 11-digit e.g. 0120-123-4567.
+    const TEN_DIGIT_0AB0_PREFIXES: [[u32; 4]; 5] = [
+        [0, 1, 2, 0],
+        [0, 1, 7, 0],
+        [0, 1, 8, 0],
+        [0, 5, 7, 0],
+        [0, 9, 9, 0],
+    ];
+    if TEN_DIGIT_0AB0_PREFIXES
+        .iter()
+        .any(|prefix| digits.starts_with(prefix))
+        && (digit_count != 10 || !matches!(group_lengths[..], [4, 3, 3] | [4, 2, 4]))
+    {
+        return false;
+    }
+    if digits.starts_with(&[0, 8, 0, 0]) && (digit_count != 11 || group_lengths != [4, 3, 4]) {
+        return false;
+    }
+
+    // 0200 is the canonical 3-6-5, 14-digit M2M allocation. Legacy 020C
+    // M2M numbers use 3-3-5 (C excludes 0 and 4), while 0204 paging numbers
+    // use 4-3-4. Validate grouping so moving a hyphen cannot bypass the
+    // allocation-specific constraints.
+    if digits.starts_with(&[0, 2, 0, 0]) {
+        if digit_count != 14 || group_lengths != [3, 6, 5] {
+            return false;
+        }
+    } else if digits.starts_with(&[0, 2, 0, 4]) {
+        if digit_count != 11 || group_lengths != [4, 3, 4] {
+            return false;
+        }
+    } else if digits.starts_with(&[0, 2, 0])
+        && (digit_count != 11 || group_lengths != [3, 3, 5] || matches!(digits.get(3), Some(0 | 4)))
+    {
+        return false;
+    }
+
     !groups[1..]
         .iter()
         .all(|group| group.chars().all(|c| c == '0'))
+}
+
+fn japanese_phone_embedded_in_numeric_chain(content: &str, start: usize, end: usize) -> bool {
+    let left = &content[..start];
+    let right = &content[end..];
+
+    // The phone syntax itself is ASCII-only, but any adjacent Unicode numeric
+    // character means the regex found a substring of a larger numeric token.
+    let preceded_by_digit = left.chars().next_back().is_some_and(char::is_numeric);
+    let preceded_by_hyphenated_digit = left
+        .strip_suffix('-')
+        .and_then(|prefix| prefix.chars().next_back())
+        .is_some_and(char::is_numeric);
+    let followed_by_digit = right.chars().next().is_some_and(char::is_numeric);
+    let followed_by_hyphenated_digit = right
+        .strip_prefix('-')
+        .and_then(|suffix| suffix.chars().next())
+        .is_some_and(char::is_numeric);
+
+    preceded_by_digit
+        || preceded_by_hyphenated_digit
+        || followed_by_digit
+        || followed_by_hyphenated_digit
 }
 
 fn japanese_postal_code_valid(candidate: &str) -> bool {
@@ -1453,6 +1535,32 @@ fn scan_gitleaks_content<'a>(
     out
 }
 
+fn built_in_rule_match_is_valid(
+    rule: &CompiledRule,
+    content: &str,
+    matched: regex::Match<'_>,
+) -> bool {
+    if let Some(validate) = rule.validator
+        && !validate(matched.as_str())
+    {
+        return false;
+    }
+    // This rule matches mid-identifier (`API_KEY` inside
+    // `NEXT_PUBLIC_API_KEY`), so the browser-public name guard needs the
+    // characters before the match; validators only see the matched text.
+    if rule.id == "secret.generic_api_key"
+        && generic_api_key_name_is_public(content, matched.start(), matched.as_str())
+    {
+        return false;
+    }
+    if rule.id == "pii.ja.phone"
+        && japanese_phone_embedded_in_numeric_chain(content, matched.start(), matched.end())
+    {
+        return false;
+    }
+    true
+}
+
 /// Apply the same patterns used for detection, replacing hits with `[REDACTED]`.
 /// Used for JSON context lines so adjacent code does not leak secrets (spec §6).
 pub fn redact_line_for_display(line: &str, cfg: &RuleEngineConfig) -> String {
@@ -1461,7 +1569,15 @@ pub fn redact_line_for_display(line: &str, cfg: &RuleEngineConfig) -> String {
         if !rule_applies(r, cfg) {
             continue;
         }
-        s = r.re.replace_all(&s, "[REDACTED]").to_string();
+        let redacted = r.re.replace_all(&s, |captures: &regex::Captures<'_>| {
+            let matched = captures.get(0).expect("capture zero always exists");
+            if built_in_rule_match_is_valid(r, &s, matched) {
+                "[REDACTED]".to_string()
+            } else {
+                matched.as_str().to_string()
+            }
+        });
+        s = redacted.into_owned();
     }
     if cfg.secrets {
         let lowercase_line = s.to_ascii_lowercase();
@@ -1508,18 +1624,7 @@ pub fn scan_content(content: &str, rel_path: &str, cfg: &RuleEngineConfig) -> Ve
             continue;
         }
         for m in r.re.find_iter(content) {
-            if let Some(validate) = r.validator
-                && !validate(m.as_str())
-            {
-                continue;
-            }
-            // This rule matches mid-identifier (`API_KEY` inside
-            // `NEXT_PUBLIC_API_KEY`), so the browser-public name guard needs
-            // the characters before the match; validators only see the
-            // matched text.
-            if r.id == "secret.generic_api_key"
-                && generic_api_key_name_is_public(content, m.start(), m.as_str())
-            {
+            if !built_in_rule_match_is_valid(r, content, m) {
                 continue;
             }
             let index = line_index.get_or_insert_with(|| LineIndex::new(content));
@@ -2251,6 +2356,20 @@ secret_key = "0123456789abcdef0123456789abcdef""#;
     }
 
     #[test]
+    fn redact_line_uses_japanese_phone_validation_and_context_guards() {
+        let cfg = RuleEngineConfig::default();
+
+        let date = redact_line_for_display("release date: 04-01-2024", &cfg);
+        assert_eq!(date, "release date: 04-01-2024");
+
+        let numeric_id = redact_line_for_display("id: 7-090-1234-5678-9", &cfg);
+        assert_eq!(numeric_id, "id: 7-090-1234-5678-9");
+
+        let phone = redact_line_for_display("電話090-1234-5678です", &cfg);
+        assert_eq!(phone, "電話[REDACTED]です");
+    }
+
+    #[test]
     fn english_name_rule_ignores_structural_config_keys() {
         let cfg = RuleEngineConfig::default();
         let yaml = "\
@@ -2352,6 +2471,147 @@ jobs:
         );
         assert!(m.iter().any(|x| x.rule_id == "pii.en.phone"), "{m:?}");
         assert!(!m.iter().any(|x| x.rule_id == "pii.ja.passport"), "{m:?}");
+    }
+
+    #[test]
+    fn japanese_phone_rejects_hyphenated_dates() {
+        let cfg = RuleEngineConfig::default();
+        let m = scan_content(
+            "US date: 04-01-2024\nEuropean date: 01-04-2024",
+            "dates.txt",
+            &cfg,
+        );
+        assert!(!m.iter().any(|x| x.rule_id == "pii.ja.phone"), "{m:?}");
+    }
+
+    #[test]
+    fn japanese_phone_still_detects_ten_and_eleven_digit_numbers() {
+        let cfg = RuleEngineConfig::default();
+        // Synthetic detector fixtures only.
+        let m = scan_content(
+            concat!(
+                "fixed: 03-1234-5678\n",
+                "mobile: 090-1234-5678\n",
+                "toll-free: 0120-123-456\n",
+                "toll-free 4-2-4: 0120-86-2222\n",
+                "navigation: 0570-123-456\n",
+                "navigation 4-2-4: 0570-06-4964\n",
+                "telegong 4-2-4: 0180-99-1234\n",
+                "dial-q2 4-2-4: 0990-51-1234\n",
+                "toll-free-long: 0800-123-4567\n",
+                "電話090-2345-6789\n",
+                "phone_070-3456-7890",
+            ),
+            "contacts.txt",
+            &cfg,
+        );
+        assert_eq!(
+            m.iter().filter(|x| x.rule_id == "pii.ja.phone").count(),
+            11,
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn japanese_phone_detects_documented_m2m_lengths() {
+        let cfg = RuleEngineConfig::default();
+        // Synthetic detector fixtures only. 020C excludes C=0 and C=4.
+        let m = scan_content(
+            concat!(
+                "legacy M2M: 020-123-45678\n",
+                "14-digit M2M: 020-012345-67890\n",
+                "paging: 0204-123-4567",
+            ),
+            "devices.txt",
+            &cfg,
+        );
+        assert_eq!(
+            m.iter().filter(|x| x.rule_id == "pii.ja.phone").count(),
+            3,
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn japanese_phone_does_not_match_prefix_of_longer_number() {
+        let cfg = RuleEngineConfig::default();
+        let m = scan_content(
+            concat!(
+                "long suffix: 090-1234-56789\n",
+                "long prefix: 1090-1234-5678\n",
+                "hyphen chain: 7-090-1234-5678-9\n",
+                "full-width suffix: 090-1234-5678１\n",
+                "Arabic-Indic suffix: 090-1234-5678١",
+            ),
+            "ids.txt",
+            &cfg,
+        );
+        assert!(!m.iter().any(|x| x.rule_id == "pii.ja.phone"), "{m:?}");
+    }
+
+    #[test]
+    fn japanese_phone_rejects_non_ascii_and_mixed_digit_scripts() {
+        let cfg = RuleEngineConfig::default();
+        let m = scan_content(
+            concat!(
+                "full-width: ０９０-１２３４-５６７８\n",
+                "mixed: 0９０-００００-００００\n",
+                "Arabic-Indic: ٠٩٠-١٢٣٤-٥٦٧٨",
+            ),
+            "ids.txt",
+            &cfg,
+        );
+        assert!(!m.iter().any(|x| x.rule_id == "pii.ja.phone"), "{m:?}");
+    }
+
+    #[test]
+    fn japanese_phone_rejects_unsupported_lengths_and_m2m_prefixes() {
+        let cfg = RuleEngineConfig::default();
+        let m = scan_content(
+            concat!(
+                "short id: 012-34-5678\n",
+                "twelve-digit id: 0123-1234-5678\n",
+                "overlong 0120: 0120-123-4567\n",
+                "overlong 0570: 0570-123-4567\n",
+                "short 0800: 0800-123-456\n",
+                "reserved legacy M2M: 020-012-45678\n",
+                "reserved pager prefix: 020-412-45678\n",
+                "regrouped pager: 020-4123-4567\n",
+                "invalid 14-digit M2M: 020-112345-67890\n",
+                "short 0200: 0200-123-4567",
+            ),
+            "ids.txt",
+            &cfg,
+        );
+        assert!(!m.iter().any(|x| x.rule_id == "pii.ja.phone"), "{m:?}");
+    }
+
+    #[test]
+    fn japanese_phone_rejects_zero_padded_calendar_date_matrix() {
+        let rule = RULES
+            .iter()
+            .find(|rule| rule.id == "pii.ja.phone")
+            .expect("Japanese phone rule");
+        let validate = rule.validator.expect("Japanese phone validator");
+
+        for year in 1900..=2100 {
+            for month in 1..=12 {
+                for day in 1..=31 {
+                    for candidate in [
+                        format!("{month:02}-{day:02}-{year:04}"),
+                        format!("{day:02}-{month:02}-{year:04}"),
+                    ] {
+                        assert!(
+                            !rule
+                                .re
+                                .find_iter(&candidate)
+                                .any(|matched| validate(matched.as_str())),
+                            "date matched Japanese phone rule: {candidate}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
