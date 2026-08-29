@@ -1,5 +1,6 @@
 use crate::env_store::{OpPathSource, collect_onepassword_doctor_status};
 use crate::exit::CliExit;
+use crate::shk_executable;
 use crate::{npm_hardening, safety, workflow_hardening};
 use anyhow::Result;
 use serde_json::Value;
@@ -12,7 +13,7 @@ use shk_integrations::{
     claude_deny_entry_covers, claude_recommended_deny_entries,
 };
 use std::collections::HashSet;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -1095,23 +1096,15 @@ fn collect_shk_executable_status_from(
 ) -> ShkExecutableStatus {
     let mut candidates = Vec::new();
     let mut resolved_seen = HashSet::new();
-    let names = shk_executable_names(pathext);
 
     if let Some(path) = path {
-        for dir in std::env::split_paths(path) {
-            for name in &names {
-                let candidate = dir.join(name);
-                if !is_executable_file(&candidate) {
-                    continue;
-                }
-                let resolved_path =
-                    fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
-                if resolved_seen.insert(resolved_path.clone()) {
-                    candidates.push(ShkExecutableCandidate {
-                        path: candidate,
-                        resolved_path,
-                    });
-                }
+        for candidate in shk_executable::candidates_in_dirs(std::env::split_paths(path), pathext) {
+            let resolved_path = fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+            if resolved_seen.insert(resolved_path.clone()) {
+                candidates.push(ShkExecutableCandidate {
+                    path: candidate,
+                    resolved_path,
+                });
             }
         }
     }
@@ -1133,54 +1126,6 @@ fn collect_shk_executable_status_from(
         multiple_distinct: candidates.len() > 1,
         candidates,
     }
-}
-
-#[cfg(windows)]
-fn shk_executable_names(pathext: Option<&OsStr>) -> Vec<OsString> {
-    let pathext = pathext
-        .map(|value| value.to_string_lossy().into_owned())
-        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_string());
-    let mut names = Vec::new();
-    for extension in pathext.split(';') {
-        let extension = extension.trim();
-        if extension.is_empty() {
-            continue;
-        }
-        let extension = if extension.starts_with('.') {
-            extension.to_ascii_lowercase()
-        } else {
-            format!(".{}", extension.to_ascii_lowercase())
-        };
-        let name = OsString::from(format!("shk{extension}"));
-        if !names.iter().any(|existing| existing == &name) {
-            names.push(name);
-        }
-    }
-    names
-}
-
-#[cfg(not(windows))]
-fn shk_executable_names(_pathext: Option<&OsStr>) -> Vec<OsString> {
-    vec![OsString::from("shk")]
-}
-
-#[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::metadata(path)
-        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(windows)]
-fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
-}
-
-#[cfg(not(any(unix, windows)))]
-fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
 }
 
 fn print_shk_executable_status(status: &ShkExecutableStatus) {
