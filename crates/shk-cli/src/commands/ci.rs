@@ -222,18 +222,21 @@ fn verified_install_script(repo: &str, version: &str) -> String {
     let repo_q = shell_quote(repo);
     let version_q = shell_quote(&release_tag(version));
     let latest = version == "latest";
-    let download_cmd = if latest {
-        format!("gh release download -R {repo_q} -p \"$ASSET\" -p \"${{ASSET}}.sha256\"")
+    // `gh release download` with no tag resolves the latest release, so the
+    // pinned-tag variable only belongs in the script when a tag is pinned —
+    // emitting it unused makes the generated workflow fail shellcheck SC2034.
+    let (version_assignment, download_target) = if latest {
+        (String::new(), String::new())
     } else {
-        format!(
-            "gh release download {version_q} -R {repo_q} -p \"$ASSET\" -p \"${{ASSET}}.sha256\""
+        (
+            format!("          SHK_VERSION={version_q}\n"),
+            "\"$SHK_VERSION\" ".to_string(),
         )
     };
 
     format!(
         r#"          set -euo pipefail
-          SHK_VERSION={version_q}
-          REPO={repo_q}
+{version_assignment}          REPO={repo_q}
           mkdir -p "$HOME/.cargo/bin"
           case "$(uname -s)-$(uname -m)" in
             Linux-x86_64) TARGET=x86_64-unknown-linux-gnu ;;
@@ -243,7 +246,7 @@ fn verified_install_script(repo: &str, version: &str) -> String {
             *) echo "unsupported runner: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
           esac
           ASSET="shk-cli-${{TARGET}}.tar.xz"
-          {download_cmd}
+          gh release download {download_target}-R "$REPO" -p "$ASSET" -p "${{ASSET}}.sha256"
           sha256sum -c "${{ASSET}}.sha256"
           gh attestation verify "$ASSET" -R "$REPO"
           TMP="$(mktemp -d)"
@@ -305,6 +308,40 @@ mod tests {
         );
         assert!(workflow.contains(CHECKOUT_ACTION), "{workflow}");
         assert!(!workflow.contains("curl --proto"), "{workflow}");
+    }
+
+    #[test]
+    fn github_workflow_reads_the_pinned_tag_through_its_variable() {
+        // A bare `SHK_VERSION=` that nothing reads trips shellcheck SC2034,
+        // which fails actionlint for anyone linting the generated workflow.
+        let workflow = github_workflow(&args(CiModeArg::Blocking));
+        let expected_version = concat!("v", env!("CARGO_PKG_VERSION"));
+
+        assert!(
+            workflow.contains(&format!("SHK_VERSION={expected_version}")),
+            "{workflow}"
+        );
+        assert!(
+            workflow.contains(r#"gh release download "$SHK_VERSION" -R "$REPO""#),
+            "{workflow}"
+        );
+        assert!(
+            !workflow.contains(&format!("gh release download {expected_version}")),
+            "{workflow}"
+        );
+    }
+
+    #[test]
+    fn github_workflow_omits_the_version_variable_when_tracking_latest() {
+        let mut args = args(CiModeArg::Blocking);
+        args.shk_version = "latest".into();
+        let workflow = github_workflow(&args);
+
+        assert!(!workflow.contains("SHK_VERSION="), "{workflow}");
+        assert!(
+            workflow.contains(r#"gh release download -R "$REPO""#),
+            "{workflow}"
+        );
     }
 
     #[test]
