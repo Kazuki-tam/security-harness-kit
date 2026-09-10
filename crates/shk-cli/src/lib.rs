@@ -152,6 +152,10 @@ pub fn run() -> Result<()> {
             no_header,
             no_create_key,
             mode,
+            format,
+            sheet,
+            map,
+            check_remaining,
         } => commands::mask::run(commands::mask::MaskInvocation {
             project_root: cwd,
             file,
@@ -168,6 +172,10 @@ pub fn run() -> Result<()> {
             no_header,
             no_create_key,
             mode,
+            format,
+            sheet,
+            map,
+            check_remaining,
         })?,
         Commands::Clipboard { cmd } => match cmd {
             ClipboardCmd::Scan {
@@ -370,6 +378,9 @@ pub fn run() -> Result<()> {
                     commands::pseudonymize::key_import(&cwd, stdin)?
                 }
             },
+            PseudonymizeCmd::Restore { file, map, output } => {
+                commands::pseudonymize::restore(&cwd, file, map, output)?
+            }
         },
     }
     Ok(())

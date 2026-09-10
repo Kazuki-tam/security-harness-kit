@@ -390,6 +390,7 @@ fn default_required_patterns() -> Vec<String> {
         "*.p12".into(),
         "*.mobileprovision".into(),
         "*.log".into(),
+        "*.shk-map".into(),
     ]
 }
 
@@ -516,7 +517,7 @@ pub struct PseudonymizeSection {
     pub email_strip_subaddress: bool,
     #[serde(default)]
     pub columns: BTreeMap<String, String>,
-    /// Reserved for text-mode rule overrides (Phase 1b). Ignored in 0.7.0.
+    /// Optional text-mode rule overrides (`rule_id` → kind).
     #[serde(default)]
     pub rules: BTreeMap<String, String>,
 }
@@ -841,7 +842,8 @@ required_patterns = [
   "*.key",
   "*.p12",
   "*.mobileprovision",
-  "*.log"
+  "*.log",
+  "*.shk-map"
 ]
 
 # Native env secret store (default: OS keyring). Opt in to 1Password for team vault sharing.
@@ -951,7 +953,8 @@ required_patterns = [
   "*.key",
   "*.p12",
   "*.mobileprovision",
-  "*.log"
+  "*.log",
+  "*.shk-map"
 ]
 
 # Native env secret store (default: OS keyring). Opt in to 1Password for team vault sharing.

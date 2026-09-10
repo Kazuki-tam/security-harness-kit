@@ -1,21 +1,31 @@
-//! Deterministic local-first pseudonymization (Phase 1a: CSV / TSV table mode).
+//! Deterministic local-first pseudonymization (Phase 1b: table, text, maps).
 
+mod apply;
 mod columns;
 mod derive;
 mod kind;
+mod map;
 mod normalize;
 mod table;
+mod text;
+mod xlsx;
 
+pub use apply::{
+    CellAction, MapCollector, RestoreMapDocument, apply_cell, replacement_text, resolve_rule_kind,
+};
 pub use columns::{
     ColumnOverrides, ColumnPlan, ColumnSource, ResolvedColumn, infer_header, parse_columns_spec,
     resolve_columns,
 };
 pub use derive::{KeyMaterial, fingerprint, parse_stored_material, token};
 pub use kind::{Kind, ParseKindError};
+pub use map::{decrypt_map, encrypt_map, restore_text};
 pub use normalize::{NormalizeOutcome, NormalizeSettings, normalize_value};
 pub use table::{
     PseudonymizeJson, PseudonymizeMeta, TableOptions, TableResult, delimiter_for_path, run_table,
 };
+pub use text::{TextOptions, TextResult, run_office_text, run_text};
+pub use xlsx::run_xlsx;
 
 pub const NORM_V1: &str = "v1";
 pub const UNPARSED: &str = "[UNPARSED]";

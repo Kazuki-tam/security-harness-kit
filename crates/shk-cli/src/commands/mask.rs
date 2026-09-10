@@ -1,4 +1,4 @@
-use crate::args::{AiTool, PseudonymizeModeArg, RedactionMode, SeverityArg};
+use crate::args::{AiTool, PseudonymizeFormatArg, PseudonymizeModeArg, RedactionMode, SeverityArg};
 use crate::exit::CliExit;
 use crate::hook_output;
 use crate::safety;
@@ -28,6 +28,10 @@ pub struct MaskInvocation {
     pub no_header: bool,
     pub no_create_key: bool,
     pub mode: Option<PseudonymizeModeArg>,
+    pub format: Option<PseudonymizeFormatArg>,
+    pub sheet: Option<String>,
+    pub map: Option<PathBuf>,
+    pub check_remaining: bool,
 }
 
 pub fn run(inv: MaskInvocation) -> Result<()> {
@@ -40,9 +44,13 @@ pub fn run(inv: MaskInvocation) -> Result<()> {
         || inv.no_header
         || inv.no_create_key
         || inv.mode.is_some()
+        || inv.format.is_some()
+        || inv.sheet.is_some()
+        || inv.map.is_some()
+        || inv.check_remaining
     {
         bail!(
-            "`--yes`, `--dry-run`, `--columns`, `--no-header`, `--no-create-key`, and `--mode` require `--pseudonymize`"
+            "`--yes`, `--dry-run`, `--columns`, `--no-header`, `--no-create-key`, `--mode`, `--format`, `--sheet`, `--map`, and `--check-remaining` require `--pseudonymize`"
         );
     }
     if let Some(tool) = inv.hook_mode {
@@ -213,6 +221,10 @@ fn run_pseudonymize(inv: MaskInvocation) -> Result<()> {
         no_header: inv.no_header,
         no_create_key: inv.no_create_key,
         mode: inv.mode,
+        format: inv.format,
+        sheet: inv.sheet,
+        map: inv.map,
+        check_remaining: inv.check_remaining,
     })
 }
 

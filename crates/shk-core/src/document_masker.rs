@@ -683,6 +683,272 @@ fn split_masked_text(masked: &str, original_lengths: &[usize]) -> Vec<String> {
     out
 }
 
+/// Rewrite each OOXML text group (paragraph / shared string) by concatenating
+/// runs, applying `transform`, and writing the result back to the first text node.
+pub fn rewrite_ooxml_text_groups(
+    input: &Path,
+    output: &Path,
+    max_file_size_bytes: u64,
+    mut transform: impl FnMut(&str) -> Result<String>,
+) -> Result<()> {
+    let format = OoxmlFormat::from_path(&input.to_string_lossy()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unsupported Office document for text rewrite: {}",
+            input.display()
+        )
+    })?;
+    if paths_refer_to_same_target(input, output)? {
+        bail!("--output must not be the same as input for Office document rewriting");
+    }
+
+    let input_file =
+        File::open(input).with_context(|| format!("open input document {}", input.display()))?;
+    let mut archive = ZipArchive::new(input_file)
+        .with_context(|| format!("read {} zip container", format.label))?;
+    if archive.by_name(format.required_entry).is_err() {
+        bail!(
+            "unsupported {}: missing {}",
+            format.label,
+            format.required_entry
+        );
+    }
+
+    ensure_archive_entry_limit(archive.len())?;
+    let limits = ooxml_read_limits(max_file_size_bytes);
+
+    let output_parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let output_file = NamedTempFile::new_in(output_parent)
+        .with_context(|| format!("create temporary output in {}", output_parent.display()))?;
+    if let Ok(metadata) = std::fs::metadata(output) {
+        std::fs::set_permissions(output_file.path(), metadata.permissions())
+            .with_context(|| format!("preserve output permissions for {}", output.display()))?;
+    }
+    let mut writer = ZipWriter::new(output_file);
+    let mut declared_total = 0u64;
+    let mut actual_total = 0u64;
+
+    for idx in 0..archive.len() {
+        let mut entry = archive
+            .by_index(idx)
+            .with_context(|| format!("read zip entry {idx}"))?;
+        let name = entry.name().to_string();
+        let options = entry_options(&entry);
+
+        declared_total = declared_total
+            .checked_add(entry.size())
+            .context("Office document expanded size overflow")?;
+        if declared_total > limits.total_bytes {
+            bail!(
+                "Office document expanded size exceeds limit ({} bytes)",
+                limits.total_bytes
+            );
+        }
+
+        if entry.is_dir() {
+            writer
+                .add_directory(&name, options)
+                .with_context(|| format!("write directory entry {name}"))?;
+            continue;
+        }
+
+        writer
+            .start_file(&name, options)
+            .with_context(|| format!("write zip entry {name}"))?;
+
+        if (format.should_mask_entry)(&name) {
+            let remaining = limits.total_bytes.saturating_sub(actual_total);
+            let mut bytes =
+                read_entry_bounded(&mut entry, limits.entry_bytes.min(remaining), &name)?;
+            actual_total = actual_total
+                .checked_add(bytes.len() as u64)
+                .context("Office document expanded size overflow")?;
+            let rewritten = rewrite_xml_text_groups(&bytes, format.text_group, &mut transform)
+                .with_context(|| format!("rewrite XML entry {name}"))?;
+            bytes.zeroize();
+            writer
+                .write_all(&rewritten)
+                .with_context(|| format!("write rewritten XML entry {name}"))?;
+        } else {
+            copy_entry_bounded(
+                &mut entry,
+                &mut writer,
+                &mut actual_total,
+                limits.total_bytes,
+                &name,
+            )?;
+        }
+    }
+
+    let output_file = writer
+        .finish()
+        .with_context(|| format!("finish output {} zip container", format.label))?;
+    output_file
+        .as_file()
+        .sync_all()
+        .with_context(|| format!("sync output document {}", output.display()))?;
+    persist_named_temp_file(output_file, output)?;
+    Ok(())
+}
+
+fn rewrite_xml_text_groups(
+    xml: &[u8],
+    text_group: TextGroupKind,
+    transform: &mut impl FnMut(&str) -> Result<String>,
+) -> Result<Vec<u8>> {
+    let mut reader = Reader::from_reader(Cursor::new(xml));
+    reader.config_mut().trim_text(false);
+    let mut buf = Vec::new();
+    let mut items = Vec::new();
+    let mut group_depth: Option<usize> = None;
+    let mut group_text_items = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf).context("read XML event")? {
+            Event::Eof => break,
+            Event::Start(start) => {
+                if let Some(depth) = group_depth.as_mut() {
+                    *depth += 1;
+                } else if starts_text_group(start.name().as_ref(), text_group) {
+                    group_depth = Some(1);
+                    group_text_items.clear();
+                }
+                items.push(XmlItem::Event(Event::Start(start.into_owned())));
+            }
+            Event::End(end) => {
+                if let Some(depth) = group_depth {
+                    if depth == 1 {
+                        apply_group_transform(&mut items, &group_text_items, transform)?;
+                        group_depth = None;
+                        group_text_items.clear();
+                    } else {
+                        group_depth = Some(depth - 1);
+                    }
+                }
+                items.push(XmlItem::Event(Event::End(end.into_owned())));
+            }
+            Event::Text(text) => {
+                let decoded = decode_xml_text(&text)?;
+                push_rewrite_text_item(
+                    &mut items,
+                    decoded,
+                    false,
+                    group_depth,
+                    &mut group_text_items,
+                    transform,
+                )?;
+            }
+            Event::CData(cdata) => {
+                let decoded = cdata.as_ref().to_string();
+                push_rewrite_text_item(
+                    &mut items,
+                    decoded,
+                    true,
+                    group_depth,
+                    &mut group_text_items,
+                    transform,
+                )?;
+            }
+            event => items.push(XmlItem::Event(event.into_owned())),
+        }
+        buf.clear();
+    }
+
+    if !group_text_items.is_empty() {
+        apply_group_transform(&mut items, &group_text_items, transform)?;
+    }
+
+    let mut writer = Writer::new(Vec::with_capacity(xml.len()));
+    for item in items {
+        match item {
+            XmlItem::Event(event) => writer.write_event(event).context("write XML event")?,
+            XmlItem::Text {
+                is_cdata,
+                original,
+                replacement,
+            } => {
+                let text = replacement.as_deref().unwrap_or(&original);
+                if is_cdata {
+                    writer
+                        .write_event(Event::CData(BytesCData::new(text)))
+                        .context("write rewritten XML CDATA")?;
+                } else {
+                    writer
+                        .write_event(Event::Text(BytesText::new(text)))
+                        .context("write rewritten XML text")?;
+                }
+            }
+        }
+    }
+
+    Ok(writer.into_inner())
+}
+
+fn push_rewrite_text_item(
+    items: &mut Vec<XmlItem>,
+    original: String,
+    is_cdata: bool,
+    group_depth: Option<usize>,
+    group_text_items: &mut Vec<usize>,
+    transform: &mut impl FnMut(&str) -> Result<String>,
+) -> Result<()> {
+    let idx = items.len();
+    items.push(XmlItem::Text {
+        is_cdata,
+        original,
+        replacement: None,
+    });
+    if group_depth.is_some() {
+        group_text_items.push(idx);
+    } else if let XmlItem::Text {
+        original,
+        replacement,
+        ..
+    } = &mut items[idx]
+    {
+        let rewritten = transform(original)?;
+        original.zeroize();
+        *replacement = Some(rewritten);
+    }
+    Ok(())
+}
+
+fn apply_group_transform(
+    items: &mut [XmlItem],
+    text_item_indices: &[usize],
+    transform: &mut impl FnMut(&str) -> Result<String>,
+) -> Result<()> {
+    if text_item_indices.is_empty() {
+        return Ok(());
+    }
+    let mut combined = String::new();
+    for idx in text_item_indices {
+        if let XmlItem::Text { original, .. } = &items[*idx] {
+            combined.push_str(original);
+        }
+    }
+    let rewritten = transform(&combined)?;
+    combined.zeroize();
+    for (i, idx) in text_item_indices.iter().enumerate() {
+        if let XmlItem::Text {
+            original,
+            replacement,
+            ..
+        } = &mut items[*idx]
+        {
+            original.zeroize();
+            *replacement = Some(if i == 0 {
+                rewritten.clone()
+            } else {
+                String::new()
+            });
+        }
+    }
+    Ok(())
+}
+
 fn starts_text_group(name: &str, kind: TextGroupKind) -> bool {
     let local = local_name(name);
     match kind {
@@ -725,6 +991,21 @@ mod tests {
 
         let original = read_docx_document_xml(&input).unwrap();
         assert!(original.contains(&secret), "{original}");
+    }
+
+    #[test]
+    fn rewrite_ooxml_writes_longer_text_to_first_run() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("note.docx");
+        let output = dir.path().join("note.out.docx");
+        create_minimal_docx(&input, "hello").unwrap();
+        rewrite_ooxml_text_groups(&input, &output, 1024 * 1024, |text| {
+            Ok(text.replace("hello", "hello-token-longer-than-source"))
+        })
+        .unwrap();
+        let body = read_docx_document_xml(&output).unwrap();
+        assert!(body.contains("hello-token-longer-than-source"), "{body}");
+        assert!(!body.contains(">hello<"), "{body}");
     }
 
     #[test]

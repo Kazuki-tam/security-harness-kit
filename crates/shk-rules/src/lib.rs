@@ -398,6 +398,18 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             validator: Some(email_valid),
         },
         CompiledRule {
+            id: "pii.shk_plaintext_map",
+            severity: Severity::Critical,
+            kind: Kind::Pii,
+            re: Regex::new(
+                r"(?:email_|phone_|name_)[a-z2-7]{8,}.{0,240}(?:[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}|\+?[0-9][0-9\-() ]{7,})|(?:[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}|\+?[0-9][0-9\-() ]{7,}).{0,240}(?:email_|phone_|name_)[a-z2-7]{8,}",
+            )
+            .unwrap_or_else(|_| Regex::new("^$").unwrap()),
+            message: "Possible plaintext restore map (token plus original value)",
+            confidence: 0.92,
+            validator: None,
+        },
+        CompiledRule {
             id: "pii.credit_card",
             severity: Severity::Medium,
             kind: Kind::Pii,
@@ -2416,6 +2428,26 @@ jobs:
         );
         let email_findings = m.iter().filter(|x| x.rule_id == "pii.email").count();
         assert_eq!(email_findings, 2, "{m:?}");
+    }
+
+    #[test]
+    fn detects_plaintext_restore_map_on_one_line() {
+        let cfg = RuleEngineConfig::default();
+        let token = ["email_", "abcdefgh"].concat();
+        let addr = ["ada", "@", "example.com"].concat();
+        let leaked = format!("{token} {addr}");
+        let m = scan_content(&leaked, "map.json", &cfg);
+        assert!(
+            m.iter().any(|x| x.rule_id == "pii.shk_plaintext_map"),
+            "{m:?}"
+        );
+        let token_only = scan_content(&token, "tokens.txt", &cfg);
+        assert!(
+            !token_only
+                .iter()
+                .any(|x| x.rule_id == "pii.shk_plaintext_map"),
+            "{token_only:?}"
+        );
     }
 
     #[test]

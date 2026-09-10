@@ -79,12 +79,16 @@ pub fn token(
     Ok(format!("{}_{encoded}", kind.token_prefix()))
 }
 
-fn derive_kind_key(material: &KeyMaterial, kind: &Kind) -> Result<[u8; 32]> {
+pub(crate) fn derive_info_key(material: &KeyMaterial, info: &str) -> Result<[u8; 32]> {
     let hkdf = Hkdf::<Sha256>::new(Some(&material.salt), &material.master);
     let mut okm = [0u8; 32];
-    hkdf.expand(kind.hkdf_info().as_bytes(), &mut okm)
+    hkdf.expand(info.as_bytes(), &mut okm)
         .map_err(|_| anyhow!("HKDF expand failed"))?;
     Ok(okm)
+}
+
+fn derive_kind_key(material: &KeyMaterial, kind: &Kind) -> Result<[u8; 32]> {
+    derive_info_key(material, &kind.hkdf_info())
 }
 
 fn encode_base32_nopad(bytes: &[u8]) -> String {

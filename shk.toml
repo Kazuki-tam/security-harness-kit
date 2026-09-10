@@ -98,7 +98,8 @@ required_patterns = [
   "*.key",
   "*.p12",
   "*.mobileprovision",
-  "*.log"
+  "*.log",
+  "*.shk-map"
 ]
 
 # Allowlist / inline suppressions (spec §5.3). Prefer path-scoped rows; use value_hash only as an equality fingerprint.

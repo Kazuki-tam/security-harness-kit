@@ -161,9 +161,22 @@ pub enum Commands {
         /// Fail if this project has no pseudonymize key yet.
         #[arg(long)]
         no_create_key: bool,
-        /// Force table or text handling. text arrives in shk 0.8.0.
+        /// Force table or text handling.
         #[arg(long, value_enum)]
         mode: Option<PseudonymizeModeArg>,
+        /// Force CSV/TSV table parsing (useful for stdin).
+        #[arg(long, value_enum)]
+        format: Option<PseudonymizeFormatArg>,
+        /// Sheet name or 1-based index for xlsx table mode.
+        #[arg(long)]
+        sheet: Option<String>,
+        /// Encrypted restore map path. Must end with `.shk-map`.
+        #[arg(long, value_name = "PATH")]
+        map: Option<PathBuf>,
+        /// Scan the written output and exit 1 if PII or secrets remain.
+        /// This is a leftover check, not a sufficiency guarantee.
+        #[arg(long)]
+        check_remaining: bool,
     },
     /// Manage deterministic pseudonymization keys and restore maps
     Pseudonymize {
@@ -315,12 +328,28 @@ pub enum PseudonymizeModeArg {
     Text,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum PseudonymizeFormatArg {
+    Csv,
+    Tsv,
+}
+
 #[derive(Subcommand)]
 pub enum PseudonymizeCmd {
     /// Show, rotate, delete, or hand off the project pseudonymize key
     Key {
         #[command(subcommand)]
         cmd: PseudonymizeKeyCmd,
+    },
+    /// Restore originals from an encrypted `.shk-map`
+    Restore {
+        #[arg(long, value_name = "PATH")]
+        file: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        map: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
     },
 }
 
@@ -1163,6 +1192,13 @@ mod tests {
             "--no-create-key",
             "--mode",
             "table",
+            "--sheet",
+            "1",
+            "--map",
+            "out.shk-map",
+            "--check-remaining",
+            "--format",
+            "csv",
         ])
         .expect("pseudonymize flags should parse");
         let Commands::Mask {
@@ -1173,6 +1209,10 @@ mod tests {
             no_header,
             no_create_key,
             mode,
+            format,
+            sheet,
+            map,
+            check_remaining,
             ..
         } = cli.command
         else {
@@ -1185,6 +1225,10 @@ mod tests {
         assert!(no_header);
         assert!(no_create_key);
         assert_eq!(mode, Some(PseudonymizeModeArg::Table));
+        assert_eq!(format, Some(PseudonymizeFormatArg::Csv));
+        assert_eq!(sheet.as_deref(), Some("1"));
+        assert_eq!(map.as_deref(), Some(PathBuf::from("out.shk-map").as_path()));
+        assert!(check_remaining);
     }
 
     #[test]
@@ -1197,6 +1241,28 @@ mod tests {
                 cmd: PseudonymizeCmd::Key {
                     cmd: PseudonymizeKeyCmd::Show
                 }
+            }
+        ));
+    }
+
+    #[test]
+    fn pseudonymize_restore_parses() {
+        let cli = Cli::try_parse_from([
+            "shk",
+            "pseudonymize",
+            "restore",
+            "--file",
+            "in.csv",
+            "--map",
+            "out.shk-map",
+            "--output",
+            "restored.csv",
+        ])
+        .expect("restore should parse");
+        assert!(matches!(
+            cli.command,
+            Commands::Pseudonymize {
+                cmd: PseudonymizeCmd::Restore { .. }
             }
         ));
     }

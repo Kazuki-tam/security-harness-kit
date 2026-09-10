@@ -5234,6 +5234,7 @@ fn doctor_ignore_fix_adds_extended_recommended_patterns() {
     assert!(body.contains("*.p12"), "{body}");
     assert!(body.contains("*.mobileprovision"), "{body}");
     assert!(body.contains("*.log"), "{body}");
+    assert!(body.contains("*.shk-map"), "{body}");
 }
 
 #[test]
@@ -5250,6 +5251,7 @@ fn doctor_ignore_fix_accepts_equivalent_existing_patterns() {
         "*.p12",
         "*.mobileprovision",
         "*.log",
+        "*.shk-map",
         "",
     ]
     .join("\n");
@@ -6159,7 +6161,7 @@ fn mask_pseudonymize_rejects_non_utf8() {
 }
 
 #[test]
-fn mask_pseudonymize_rejects_xlsx_in_phase1a() {
+fn mask_pseudonymize_rejects_invalid_xlsx() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
     std::fs::write(dir.path().join("book.xlsx"), "not-a-real-xlsx").unwrap();
@@ -6174,6 +6176,77 @@ fn mask_pseudonymize_rejects_xlsx_in_phase1a() {
         .current_dir(dir.path())
         .output()
         .expect("xlsx");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mask_pseudonymize_text_dry_run() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::write(dir.path().join("notes.md"), "hello\n").unwrap();
+    let out = Command::new(shk_bin())
+        .args(["mask", "notes.md", "--pseudonymize", "--dry-run", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("text dry-run");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"mode\": \"text\""), "{stdout}");
+    assert!(stdout.contains("\"dry_run\": true"), "{stdout}");
+    assert!(!stdout.contains("masked_content"), "{stdout}");
+}
+
+#[test]
+fn mask_pseudonymize_rejects_map_without_shk_map_suffix() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::write(dir.path().join("notes.md"), "hello\n").unwrap();
+    let out = Command::new(shk_bin())
+        .args([
+            "mask",
+            "notes.md",
+            "--pseudonymize",
+            "--output",
+            "out.md",
+            "--map",
+            "out.json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("map suffix");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mask_pseudonymize_rejects_check_remaining_with_dry_run() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::write(dir.path().join("notes.md"), "hello\n").unwrap();
+    let out = Command::new(shk_bin())
+        .args([
+            "mask",
+            "notes.md",
+            "--pseudonymize",
+            "--dry-run",
+            "--check-remaining",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("check-remaining dry-run");
     assert_eq!(
         out.status.code(),
         Some(2),

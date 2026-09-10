@@ -1,12 +1,10 @@
+use super::apply::{CellAction, MapCollector, apply_cell, replacement_text};
 use super::columns::{
     ColumnOverrides, ColumnSource, ResolvedColumn, infer_header, resolve_columns,
 };
-use super::derive::{KeyMaterial, token};
-use super::kind::Kind;
-use super::normalize::{NormalizeOutcome, NormalizeSettings, normalize_value};
-use super::{
-    INFER_MATCH_THRESHOLD, INFER_SAMPLE_ROWS, UNPARSED, validate_norm, validate_token_bits,
-};
+use super::derive::KeyMaterial;
+use super::normalize::NormalizeSettings;
+use super::{INFER_MATCH_THRESHOLD, INFER_SAMPLE_ROWS, validate_norm, validate_token_bits};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -78,6 +76,7 @@ pub fn run_table<R: Read, W: Write>(
     mut output: Option<W>,
     options: &TableOptions,
     material: Option<&KeyMaterial>,
+    mut map: Option<&mut MapCollector>,
 ) -> Result<TableResult> {
     validate_norm(&options.norm).map_err(|err| anyhow::anyhow!(err))?;
     validate_token_bits(options.token_bits).map_err(|err| anyhow::anyhow!(err))?;
@@ -126,12 +125,12 @@ pub fn run_table<R: Read, W: Write>(
         options.cli_columns.as_ref(),
     )
     .map_err(|err| anyhow::anyhow!(err))?;
-    reject_phase1a_kinds(&columns)?;
 
     if options.dry_run {
         return Ok(TableResult {
-            meta: meta_from(
+            meta: meta_from_parts(
                 options,
+                "table",
                 &columns,
                 pending_rows.len() as u64,
                 BTreeMap::new(),
@@ -171,6 +170,7 @@ pub fn run_table<R: Read, W: Write>(
             options,
             &mut replaced,
             &mut unparsed,
+            map.as_deref_mut(),
         )?;
         writer.write_record(&out).context("write CSV row")?;
         rows_processed += 1;
@@ -186,8 +186,9 @@ pub fn run_table<R: Read, W: Write>(
     writer.flush().context("flush CSV output")?;
 
     Ok(TableResult {
-        meta: meta_from(
+        meta: meta_from_parts(
             options,
+            "table",
             &columns,
             rows_processed,
             replaced,
@@ -207,32 +208,34 @@ fn transform_row(
     options: &TableOptions,
     replaced: &mut BTreeMap<String, u64>,
     unparsed: &mut BTreeMap<String, u64>,
+    mut map: Option<&mut MapCollector>,
 ) -> Result<Vec<String>> {
     for column in columns {
         if column.index >= row.len() {
             continue;
         }
         let kind_key = column.kind.as_config_value();
-        match normalize_value(&column.kind, &row[column.index], options.settings) {
-            NormalizeOutcome::Missing => {}
-            NormalizeOutcome::Unparsed => {
-                row[column.index] = UNPARSED.to_string();
+        let action = apply_cell(
+            &column.kind,
+            &row[column.index],
+            material,
+            options.settings,
+            options.token_bits,
+            map.as_deref_mut(),
+        )?;
+        match &action {
+            CellAction::Keep => {}
+            CellAction::Unparsed => {
                 *unparsed.entry(kind_key).or_insert(0) += 1;
+                row[column.index] = replacement_text(&action, &row[column.index]);
             }
-            NormalizeOutcome::Value(normalized) => {
-                row[column.index] = token(material, &column.kind, &normalized, options.token_bits)?;
+            CellAction::Token(_) => {
                 *replaced.entry(kind_key).or_insert(0) += 1;
+                row[column.index] = replacement_text(&action, &row[column.index]);
             }
         }
     }
     Ok(row)
-}
-
-fn reject_phase1a_kinds(columns: &[ResolvedColumn]) -> Result<()> {
-    if columns.iter().any(|column| column.kind == Kind::Name) {
-        bail!("name kind is available in shk 0.8.0; omit it or upgrade");
-    }
-    Ok(())
 }
 
 fn record_to_row(record: &csv::StringRecord) -> Vec<String> {
@@ -249,8 +252,10 @@ fn record_to_row(record: &csv::StringRecord) -> Vec<String> {
         .collect()
 }
 
-fn meta_from(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn meta_from_parts(
     options: &TableOptions,
+    mode: &'static str,
     columns: &[ResolvedColumn],
     rows_processed: u64,
     replaced: BTreeMap<String, u64>,
@@ -260,7 +265,7 @@ fn meta_from(
 ) -> PseudonymizeMeta {
     PseudonymizeMeta {
         shk_version: options.shk_version.clone(),
-        mode: "table",
+        mode,
         norm: options.norm.clone(),
         token_bits: options.token_bits,
         key_fingerprint: material.map(KeyMaterial::fingerprint),
@@ -289,8 +294,9 @@ fn empty_result(
     material: Option<&KeyMaterial>,
 ) -> TableResult {
     TableResult {
-        meta: meta_from(
+        meta: meta_from_parts(
             options,
+            "table",
             &columns,
             0,
             BTreeMap::new(),
@@ -306,7 +312,7 @@ fn empty_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pseudonymize::parse_columns_spec;
+    use crate::pseudonymize::{Kind, UNPARSED, parse_columns_spec};
 
     fn options(cli: &str, dry_run: bool) -> TableOptions {
         TableOptions {
@@ -346,6 +352,7 @@ mod tests {
             Some(&mut first),
             &opts,
             Some(&material),
+            None,
         )
         .unwrap();
         let mut second = Vec::new();
@@ -354,6 +361,7 @@ mod tests {
             Some(&mut second),
             &opts,
             Some(&material),
+            None,
         )
         .unwrap();
         assert_eq!(first, second);
@@ -371,7 +379,14 @@ mod tests {
     #[test]
     fn dry_run_does_not_need_material() {
         let opts = options("Email:email", true);
-        let result = run_table(csv_body().as_bytes(), None::<&mut Vec<u8>>, &opts, None).unwrap();
+        let result = run_table(
+            csv_body().as_bytes(),
+            None::<&mut Vec<u8>>,
+            &opts,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(result.meta.dry_run);
         assert_eq!(result.columns[0].kind, Kind::Email);
     }
@@ -386,11 +401,38 @@ mod tests {
             ["090", "1234", "5678"].concat()
         );
         let mut out = Vec::new();
-        let result = run_table(input.as_bytes(), Some(&mut out), &opts, Some(&material)).unwrap();
+        let result = run_table(
+            input.as_bytes(),
+            Some(&mut out),
+            &opts,
+            Some(&material),
+            None,
+        )
+        .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("-"));
         assert!(text.contains(UNPARSED));
         assert_eq!(result.meta.unparsed.get("phone"), Some(&1));
         assert!(!text.contains("not-a-phone"));
+    }
+
+    #[test]
+    fn name_columns_are_tokenized() {
+        let material = material();
+        let opts = options("Name:name", false);
+        let input = "Name\nAda Lovelace\n";
+        let mut out = Vec::new();
+        let result = run_table(
+            input.as_bytes(),
+            Some(&mut out),
+            &opts,
+            Some(&material),
+            None,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("name_"), "{text}");
+        assert!(!text.contains("Ada"), "{text}");
+        assert_eq!(result.meta.replaced.get("name"), Some(&1));
     }
 }

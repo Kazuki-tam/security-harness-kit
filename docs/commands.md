@@ -300,13 +300,17 @@ Options:
 | `--min-severity <severity>` | Override `[mask].min_severity` for this run. Defaults to `medium`. |
 | `--hook-mode <tool>` | Read a hook payload from stdin and print tool-specific masked hook output. |
 | `--post` | Post-tool hook mode. Requires `--hook-mode <tool>`. |
-| `--pseudonymize` | Replace selected table columns with deterministic HMAC tokens instead of `[REDACTED]`. Requires `--output` unless `--dry-run`. CSV/TSV in this release. |
-| `--columns <SPEC>` | With `--pseudonymize`, set `Name:kind` pairs (example: `Email:email,Phone:phone`). |
+| `--pseudonymize` | Replace selected PII with deterministic HMAC tokens instead of `[REDACTED]`. Requires `--output` unless `--dry-run`. Supports CSV/TSV, xlsx table mode, and text mode (stdin, `.txt`, `.md`, `.docx`, `.pptx`, or `--mode text`). |
+| `--columns <SPEC>` | Table mode: set `Name:kind` pairs (example: `Email:email,Phone:phone,Name:name`). |
 | `--yes` | With `--pseudonymize`, skip confirmation prompts (required in non-TTY environments when a key must be created or columns are inferred). |
-| `--dry-run` | With `--pseudonymize`, print the column plan and do not write files or create a key. |
-| `--no-header` | With `--pseudonymize`, treat the first row as data and address columns as `0`, `1`, … |
+| `--dry-run` | With `--pseudonymize`, print the plan and do not write files or create a key. |
+| `--no-header` | Table mode: treat the first row as data and address columns as `0`, `1`, … |
 | `--no-create-key` | With `--pseudonymize`, fail if this project has no key yet. |
-| `--mode table\|text` | Override input classification. `text` arrives in shk 0.8.0. |
+| `--mode table\|text` | Override input classification. `.xlsx` defaults to table mode; `--mode text` scans extracted cell text. |
+| `--format csv\|tsv` | Force table parsing (useful for stdin). |
+| `--sheet <NAME\|N>` | xlsx table mode: sheet name or 1-based index. Defaults to the first sheet. |
+| `--map <PATH>` | Write or merge an encrypted restore map. Path must end with `.shk-map`. |
+| `--check-remaining` | After writing output, scan it and exit 1 if `pii.*` or `secret.*` detections remain. This is a leftover check, not a sufficiency guarantee. |
 
 Cannot be combined with `--pseudonymize`: `--hook-mode`, `--min-severity`, `--redaction`.
 
@@ -322,14 +326,23 @@ Office output is transactional: `shk` finalizes and syncs a sibling temporary ar
 
 `--pseudonymize` writes `<output>.shk-meta.json` beside the output. The sidecar records norm version, token width, key fingerprint, column kinds, and counts. It never includes original values or tokens. Tokens are project-local: the same input yields the same token only when the same stored key and salt are used. Rotate or delete the key when a project ends (`shk pseudonymize key rotate` / `delete`).
 
+`--json` with `--pseudonymize` prints that metadata only (`masked_content` and findings are omitted).
+
+Table mode replaces whole cells (`email`, `phone`, `name`, `custom:<label>`). Text mode ignores severity and allowlists: `email` / `phone` / `name` matches become tokens, `secret.*` and unmapped detections become `[REDACTED]`. xlsx table mode rewrites only selected cells (as inline strings) and leaves other ZIP entries untouched. `--map` writes ciphertext only; there is no plaintext map export. Restore uses the first-seen original when one token maps to several inputs:
+
 ```bash
 shk mask orders.csv --pseudonymize --columns "Email:email,Phone:phone" --output orders.pseudo.csv
+shk mask book.xlsx --pseudonymize --sheet 顧客 --columns "Email:email" --output book.pseudo.xlsx
+shk mask notes.md --pseudonymize --output notes.pseudo.md --map notes.shk-map
+shk mask --pseudonymize --format csv --columns "Email:email" --output stdin.pseudo.csv < rows.csv
 shk mask orders.csv --pseudonymize --dry-run
+shk mask out.pseudo.csv --pseudonymize --columns "Email:email" --output checked.csv --check-remaining
+shk pseudonymize restore --file notes.pseudo.md --map notes.shk-map --output notes.restored.md
 shk pseudonymize key show
 shk pseudonymize key export --instructions
 ```
 
-UTF-8 is required. Non-UTF-8 input (including Shift_JIS) exits 2 with a conversion hint. Output is still personal data for anyone who holds the key; confirm the receiving AI service's retention and training terms before upload.
+UTF-8 is required for text and CSV/TSV. Non-UTF-8 input (including Shift_JIS) exits 2 with a conversion hint. Output is still personal data for anyone who holds the key; confirm the receiving AI service's retention and training terms before upload. Keep `.shk-map` files out of git (default `doctor.ignore` includes `*.shk-map`). Do not treat `--check-remaining` as legal or completeness proof.
 
 ## `shk clipboard`
 
