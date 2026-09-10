@@ -52,8 +52,6 @@ pub struct MetaColumn {
     pub match_rate: Option<f64>,
 }
 
-pub type PseudonymizeJson = PseudonymizeMeta;
-
 #[derive(Debug, Clone)]
 pub struct TableResult {
     pub meta: PseudonymizeMeta,
@@ -127,12 +125,18 @@ pub fn run_table<R: Read, W: Write>(
     .map_err(|err| anyhow::anyhow!(err))?;
 
     if options.dry_run {
+        // Count the remaining rows so the plan reports the real table size.
+        let mut rows_processed = pending_rows.len() as u64;
+        for row in records {
+            row.context("read CSV row")?;
+            rows_processed += 1;
+        }
         return Ok(TableResult {
             meta: meta_from_parts(
                 options,
                 "table",
                 &columns,
-                pending_rows.len() as u64,
+                rows_processed,
                 BTreeMap::new(),
                 BTreeMap::new(),
                 material,
@@ -144,8 +148,10 @@ pub fn run_table<R: Read, W: Write>(
     }
 
     let material = material.expect("checked above");
+    // Exports are frequently ragged; keep every row exactly as wide as it came.
     let mut writer = csv::WriterBuilder::new()
         .delimiter(options.delimiter)
+        .flexible(true)
         .quote_style(csv::QuoteStyle::Necessary)
         .terminator(if options.crlf {
             csv::Terminator::CRLF
@@ -238,18 +244,9 @@ fn transform_row(
     Ok(row)
 }
 
+/// The csv reader already strips a leading UTF-8 BOM, so fields are used as-is.
 fn record_to_row(record: &csv::StringRecord) -> Vec<String> {
-    record
-        .iter()
-        .enumerate()
-        .map(|(idx, field)| {
-            if idx == 0 {
-                field.trim_start_matches('\u{feff}').to_string()
-            } else {
-                field.to_string()
-            }
-        })
-        .collect()
+    record.iter().map(str::to_string).collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -377,18 +374,19 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_does_not_need_material() {
+    fn dry_run_does_not_need_material_and_counts_every_row() {
         let opts = options("Email:email", true);
-        let result = run_table(
-            csv_body().as_bytes(),
-            None::<&mut Vec<u8>>,
-            &opts,
-            None,
-            None,
-        )
-        .unwrap();
+        let email = ["ada", "@", "example.com"].concat();
+        let mut body = String::from("\u{feff}Email\n");
+        for _ in 0..(INFER_SAMPLE_ROWS + 5) {
+            body.push_str(&email);
+            body.push('\n');
+        }
+        let result = run_table(body.as_bytes(), None::<&mut Vec<u8>>, &opts, None, None).unwrap();
         assert!(result.meta.dry_run);
         assert_eq!(result.columns[0].kind, Kind::Email);
+        assert_eq!(result.columns[0].name, "Email");
+        assert_eq!(result.meta.rows_processed, (INFER_SAMPLE_ROWS + 5) as u64);
     }
 
     #[test]
@@ -414,6 +412,33 @@ mod tests {
         assert!(text.contains(UNPARSED));
         assert_eq!(result.meta.unparsed.get("phone"), Some(&1));
         assert!(!text.contains("not-a-phone"));
+    }
+
+    #[test]
+    fn empty_input_crlf_and_short_rows() {
+        let material = material();
+        let mut opts = options("Email:email,Phone:phone", false);
+        let mut out = Vec::new();
+        let result = run_table(&b""[..], Some(&mut out), &opts, Some(&material), None).unwrap();
+        assert_eq!(result.meta.rows_processed, 0);
+        assert!(result.columns.is_empty() && result.has_header && out.is_empty());
+        assert!(run_table(&b"Email\n"[..], Some(&mut out), &opts, None, None).is_err());
+
+        opts.crlf = true;
+        let input = format!("Email,Phone\n{}\n", ["ada", "@", "example.com"].concat());
+        let mut out = Vec::new();
+        let result = run_table(
+            input.as_bytes(),
+            Some(&mut out),
+            &opts,
+            Some(&material),
+            None,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("\r\n"), "{text:?}");
+        assert_eq!(result.meta.replaced.get("email"), Some(&1));
+        assert_eq!(result.meta.replaced.get("phone"), None);
     }
 
     #[test]

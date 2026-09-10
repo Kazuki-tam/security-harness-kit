@@ -6272,3 +6272,249 @@ fn existing_mask_without_pseudonymize_still_prints_stdout() {
     );
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hello world\n");
 }
+
+#[test]
+fn mask_pseudonymize_rejects_format_for_xlsx_and_text_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::write(dir.path().join("book.xlsx"), "placeholder").unwrap();
+    std::fs::write(dir.path().join("notes.md"), "hello\n").unwrap();
+    for (file, extra) in [("book.xlsx", vec![]), ("notes.md", vec!["--mode", "text"])] {
+        let mut args = vec![file, "--pseudonymize", "--dry-run", "--format", "csv"];
+        args.extend(extra);
+        let out = Command::new(shk_bin())
+            .arg("mask")
+            .args(&args)
+            .current_dir(dir.path())
+            .output()
+            .expect("format conflict");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{file} stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("--format"),
+            "{file} stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn mask_pseudonymize_rejects_unmatched_cli_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::write(
+        dir.path().join("orders.csv"),
+        "Email,Note\nada@example.com,keep\n",
+    )
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args([
+            "mask",
+            "orders.csv",
+            "--pseudonymize",
+            "--dry-run",
+            "--columns",
+            "Emial:email",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("typo columns");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Emial"), "{stderr}");
+}
+
+#[test]
+fn mask_pseudonymize_unmatched_columns_does_not_echo_input() {
+    // Cover both an actual header and a data row inferred to be a header.
+    // Markers are deliberately non-sensitive; never put real secrets in fixtures.
+    for input in [
+        "Email,PRIVATE_HEADER_MARKER\n,keep\n",
+        "PRIVATE_DATA_MARKER,keep\nnext,keep\n",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+        std::fs::write(dir.path().join("input.csv"), input).unwrap();
+        let out = Command::new(shk_bin())
+            .args([
+                "mask",
+                "input.csv",
+                "--pseudonymize",
+                "--dry-run",
+                "--columns",
+                "Emial:email",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .expect("unmatched columns");
+        assert_eq!(out.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("Emial"));
+        for stream in [&out.stdout, &out.stderr] {
+            let text = String::from_utf8_lossy(stream);
+            assert!(!text.contains("PRIVATE_HEADER_MARKER"));
+            assert!(!text.contains("PRIVATE_DATA_MARKER"));
+        }
+    }
+}
+
+#[test]
+fn mask_pseudonymize_rejects_invalid_policy_kinds_before_running() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("shk.toml"),
+        "[pseudonymize.rules]\n\"pii.email\" = \"custom:Bad Label\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("notes.md"), "hello\n").unwrap();
+    let out = Command::new(shk_bin())
+        .args(["mask", "notes.md", "--pseudonymize", "--dry-run"])
+        .current_dir(dir.path())
+        .output()
+        .expect("invalid rules");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("[pseudonymize.rules]"), "{stderr}");
+}
+
+#[test]
+fn mask_pseudonymize_dry_run_counts_rows_beyond_the_sample() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let mut body = String::from("Email\n");
+    for i in 0..30 {
+        body.push_str(&format!("user{i}@example.com\n"));
+    }
+    std::fs::write(dir.path().join("orders.csv"), body).unwrap();
+    let out = Command::new(shk_bin())
+        .args([
+            "mask",
+            "orders.csv",
+            "--pseudonymize",
+            "--dry-run",
+            "--columns",
+            "Email:email",
+            "--json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("dry-run count");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"rows_processed\": 30"), "{stdout}");
+}
+
+#[test]
+fn pseudonymize_restore_missing_map_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::write(dir.path().join("notes.md"), "hello\n").unwrap();
+    let out = Command::new(shk_bin())
+        .args([
+            "pseudonymize",
+            "restore",
+            "--file",
+            "notes.md",
+            "--map",
+            "missing.shk-map",
+            "--output",
+            "restored.md",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("restore");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mask_pseudonymize_reads_tables_and_text_from_stdin() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let cases: [(&[&str], &str, &str); 3] = [
+        (
+            &["--format", "tsv", "--no-header", "--columns", "0:email"],
+            "ada@example.com\tkeep\n",
+            "\"mode\": \"table\"",
+        ),
+        (
+            &["--format", "csv", "--columns", "Email:email"],
+            "Email,Note\r\nada@example.com,keep\r\n",
+            "\"rows_processed\": 1",
+        ),
+        (&[], "plain text\n", "\"mode\": \"text\""),
+    ];
+    for (extra, input, needle) in cases {
+        let mut child = Command::new(shk_bin())
+            .args(["mask", "--pseudonymize", "--dry-run", "--json"])
+            .args(extra)
+            .current_dir(dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{extra:?} stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains(needle), "{extra:?}: {stdout}");
+        assert!(!stdout.contains("ada@"), "{stdout}");
+    }
+}
+
+#[test]
+fn mask_pseudonymize_only_flags_without_pseudonymize_exit_2() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "hello\n").unwrap();
+    let out = Command::new(shk_bin())
+        .args(["mask", "notes.txt", "--columns", "Email:email"])
+        .current_dir(dir.path())
+        .output()
+        .expect("flag without pseudonymize");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("require `--pseudonymize`"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

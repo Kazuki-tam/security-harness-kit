@@ -28,17 +28,18 @@ pub struct MapCollector {
 
 impl MapCollector {
     pub fn record(&mut self, token: String, kind: &Kind, original: String) {
-        let entry = self
-            .entries
+        self.entry_for(token, kind.as_config_value())
+            .push_original(original);
+    }
+
+    fn entry_for(&mut self, token: String, kind: String) -> &mut RestoreMapEntry {
+        self.entries
             .entry(token.clone())
             .or_insert_with(|| RestoreMapEntry {
                 token,
-                kind: kind.as_config_value(),
+                kind,
                 originals: Vec::new(),
-            });
-        if !entry.originals.iter().any(|item| item == &original) {
-            entry.originals.push(original);
-        }
+            })
     }
 
     pub fn into_document(self, norm: String, key_fingerprint: String) -> RestoreMapDocument {
@@ -52,19 +53,18 @@ impl MapCollector {
 
     pub fn merge(&mut self, other: RestoreMapDocument) {
         for entry in other.entries {
-            let dest = self
-                .entries
-                .entry(entry.token.clone())
-                .or_insert_with(|| RestoreMapEntry {
-                    token: entry.token,
-                    kind: entry.kind,
-                    originals: Vec::new(),
-                });
+            let dest = self.entry_for(entry.token, entry.kind);
             for original in entry.originals {
-                if !dest.originals.iter().any(|item| item == &original) {
-                    dest.originals.push(original);
-                }
+                dest.push_original(original);
             }
+        }
+    }
+}
+
+impl RestoreMapEntry {
+    fn push_original(&mut self, original: String) {
+        if !self.originals.contains(&original) {
+            self.originals.push(original);
         }
     }
 }
@@ -122,4 +122,23 @@ pub fn resolve_rule_kind(
         return Kind::parse(raw).map(Some).map_err(|err| err.0);
     }
     Ok(builtin_rule_kind(rule_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_rules_map_to_kinds_and_keep_passes_through() {
+        assert_eq!(builtin_rule_kind("pii.ja.phone"), Some(Kind::Phone));
+        assert_eq!(builtin_rule_kind("pii.en.name"), Some(Kind::Name));
+        assert_eq!(builtin_rule_kind("pii.credit_card"), None);
+        assert_eq!(replacement_text(&CellAction::Keep, "raw"), "raw");
+        let mut overrides = BTreeMap::new();
+        overrides.insert("pii.credit_card".to_string(), "custom:card".to_string());
+        assert_eq!(
+            resolve_rule_kind("pii.credit_card", &overrides).unwrap(),
+            Some(Kind::Custom("card".into()))
+        );
+    }
 }

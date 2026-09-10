@@ -70,10 +70,6 @@ impl Kind {
     pub fn hkdf_info(&self) -> String {
         format!("shk/pseudonymize/v1/{}", self.as_config_value())
     }
-
-    pub fn is_name(&self) -> bool {
-        matches!(self, Self::Name)
-    }
 }
 
 pub fn validate_custom_label(label: &str) -> Result<(), ParseKindError> {
@@ -120,6 +116,18 @@ mod tests {
         assert!(Kind::parse("custom:").is_err());
         assert!(Kind::parse("custom:1bad").is_err());
         assert!(Kind::parse("unknown").is_err());
+    }
+
+    #[test]
+    fn serializes_as_config_value_and_rejects_bad_labels() {
+        assert_eq!(
+            serde_json::to_string(&Kind::Custom("member_id".into())).unwrap(),
+            "\"custom:member_id\""
+        );
+        assert_eq!(serde_json::to_string(&Kind::Phone).unwrap(), "\"phone\"");
+        assert!(Kind::parse("custom:ab-c").is_err());
+        assert!(Kind::parse(&format!("custom:{}", "a".repeat(34))).is_err());
+        assert!(Kind::parse(&format!("custom:{}", "a".repeat(33))).is_ok());
     }
 
     #[test]

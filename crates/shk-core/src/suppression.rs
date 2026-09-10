@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 type HmacSha256 = Hmac<Sha256>;
 
-fn hex_lower(bytes: &[u8]) -> String {
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

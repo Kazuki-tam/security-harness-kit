@@ -31,6 +31,11 @@ pub fn is_missing(value: &str) -> bool {
     MISSING.contains(&value)
 }
 
+/// `is_missing` after the shared NFKC / whitespace normalization.
+pub fn is_missing_raw(raw: &str) -> bool {
+    is_missing(&normalize_common(raw))
+}
+
 fn normalize_common(input: &str) -> String {
     let nfkc: String = input.nfkc().collect();
     collapse_whitespace(&nfkc).trim().to_string()
@@ -146,7 +151,9 @@ fn valid_jp_domestic(digits: &str) -> bool {
         let fourth = rest.as_bytes().first();
         return n == 11 && !matches!(fourth, Some(b'0' | b'4')) && !all_zero(rest);
     }
-    !all_zero(&digits[1..])
+    // Only the 0200 M2M range is 14 digits; anything else that long is a
+    // number with an extension glued on.
+    matches!(n, 10 | 11) && !all_zero(&digits[1..])
 }
 
 fn all_zero(digits: &str) -> bool {
@@ -218,6 +225,66 @@ mod tests {
         assert_eq!(
             phone(&["+", "81", "-", "090", "-", "1234", "-", "5678"].concat()),
             expected
+        );
+    }
+
+    fn jp(digits: &str) -> NormalizeOutcome {
+        NormalizeOutcome::Value(format!("+81{}", &digits[1..]))
+    }
+
+    #[test]
+    fn phone_covers_jp_service_numbers_and_generic_e164() {
+        for digits in [
+            ["0120", "123", "456"].concat(),
+            ["0800", "123", "4567"].concat(),
+            ["0200", "12345", "67890"].concat(),
+            ["0204", "123", "4567"].concat(),
+            ["020", "1234", "5678"].concat(),
+        ] {
+            assert_eq!(phone(&digits), jp(&digits), "{digits}");
+        }
+        for digits in [
+            ["0120", "123", "4567"].concat(),
+            ["0200", "123", "4567"].concat(),
+            ["020", "0123", "4567"].concat(),
+            ["090", "1234", "5678", "123"].concat(),
+            ["0120", "000", "000"].concat(),
+            ["0000", "000", "000"].concat(),
+            ["+81", "12"].concat(),
+            ["+0", "12345678"].concat(),
+            ["+1", "234567"].concat(),
+        ] {
+            assert_eq!(phone(&digits), NormalizeOutcome::Unparsed, "{digits}");
+        }
+        let us = ["+1", " (415) ", "555", "-", "2671"].concat();
+        assert_eq!(
+            phone(&us),
+            NormalizeOutcome::Value(["+1", "415", "555", "2671"].concat())
+        );
+    }
+
+    #[test]
+    fn email_rejects_malformed_addresses() {
+        for raw in [
+            "@example.com",
+            "ada@",
+            "ada@localhost",
+            "ada@example.c0m",
+            "ada@.com",
+            "ada@exa_mple.com",
+        ] {
+            assert_eq!(email(raw), NormalizeOutcome::Unparsed, "{raw}");
+        }
+        let only_tag = ["+tag", "@", "example.com"].concat();
+        assert_eq!(
+            normalize_value(
+                &Kind::Email,
+                &only_tag,
+                NormalizeSettings {
+                    email_strip_subaddress: true,
+                },
+            ),
+            NormalizeOutcome::Unparsed
         );
     }
 

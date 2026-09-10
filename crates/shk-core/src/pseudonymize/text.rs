@@ -1,5 +1,6 @@
 use super::apply::{CellAction, MapCollector, apply_cell, replacement_text, resolve_rule_kind};
 use super::derive::KeyMaterial;
+use super::kind::Kind;
 use super::normalize::NormalizeSettings;
 use super::table::{MetaColumn, PseudonymizeMeta};
 use anyhow::{Context, Result};
@@ -37,32 +38,42 @@ pub fn run_text(
     let material = material.context("text mode requires key material unless --dry-run")?;
     let cfg = RuleEngineConfig {
         secrets: true,
-        pii: true,
-        pii_languages: vec!["en".into(), "ja".into()],
         env: false,
-        internal_terms: false,
         ai_context: false,
+        ..RuleEngineConfig::default()
     };
-    let mut matches = scan_content(input, "input.txt", &cfg);
-    matches.sort_by(|a, b| {
-        b.column
-            .cmp(&a.column)
-            .then_with(|| b.matched_text.len().cmp(&a.matched_text.len()))
+    // Resolve every span against the original input before changing any offsets.
+    let line_starts = line_starts(input);
+    let mut matches: Vec<_> = scan_content(input, "input.txt", &cfg)
+        .into_iter()
+        .filter_map(|item| {
+            find_match_span(
+                input,
+                &line_starts,
+                item.line,
+                item.column,
+                &item.matched_text,
+            )
+            .map(|span| (span, item))
+        })
+        .collect();
+    // Prefer secret redaction over overlapping PII, then the widest match.
+    matches.sort_by_key(|(span, item)| {
+        (
+            !item.rule_id.starts_with("secret."),
+            std::cmp::Reverse(span.1 - span.0),
+            span.0,
+        )
     });
 
-    let mut out = input.to_string();
     let mut replaced: BTreeMap<String, u64> = BTreeMap::new();
     let mut unparsed: BTreeMap<String, u64> = BTreeMap::new();
-    let mut used_spans: Vec<(usize, usize)> = Vec::new();
+    // start -> end of every accepted span; accepted spans never overlap.
+    let mut used_spans: BTreeMap<usize, usize> = BTreeMap::new();
 
-    for item in matches {
-        let Some(span) = find_match_span(&out, item.line, item.column, &item.matched_text) else {
-            continue;
-        };
-        if used_spans
-            .iter()
-            .any(|(start, end)| span.0 < *end && *start < span.1)
-        {
+    let mut edits = Vec::new();
+    for (span, item) in matches {
+        if overlaps(&used_spans, span) {
             continue;
         }
         let replacement = if item.rule_id.starts_with("secret.") {
@@ -70,9 +81,17 @@ pub fn run_text(
         } else if let Some(kind) = resolve_rule_kind(item.rule_id, &options.rule_overrides)
             .map_err(|err| anyhow::anyhow!(err))?
         {
+            // Name rules match `氏名: 山田太郎` / `Name: Ada Lovelace` with the
+            // label; keep the label in place and tokenize only the name so the
+            // token equals the table-mode token for the same person.
+            let (label, value) = if matches!(kind, Kind::Name) {
+                split_name_label(&item.matched_text)
+            } else {
+                ("", item.matched_text.as_str())
+            };
             let action = apply_cell(
                 &kind,
-                &item.matched_text,
+                value,
                 material,
                 options.settings,
                 options.token_bits,
@@ -87,13 +106,24 @@ pub fn run_text(
                 }
                 CellAction::Keep => {}
             }
-            replacement_text(&action, &item.matched_text)
+            format!("{label}{}", replacement_text(&action, value))
         } else {
             "[REDACTED]".to_string()
         };
-        out.replace_range(span.0..span.1, &replacement);
-        used_spans.push((span.0, span.0 + replacement.len()));
+        edits.push((span, replacement));
+        used_spans.insert(span.0, span.1);
     }
+
+    // One forward pass: spans are disjoint, so the output is input with holes.
+    edits.sort_by_key(|(span, _)| span.0);
+    let mut out = String::with_capacity(input.len());
+    let mut cursor = 0;
+    for ((start, end), replacement) in edits {
+        out.push_str(&input[cursor..start]);
+        out.push_str(&replacement);
+        cursor = end;
+    }
+    out.push_str(&input[cursor..]);
 
     Ok(TextResult {
         output: out,
@@ -140,17 +170,53 @@ pub fn run_office_text(
     })
 }
 
+/// Split a name-rule match into its label prefix (`氏名: `, `Name: `, `by `)
+/// and the name itself. The label is whatever precedes the separator, or the
+/// leading Japanese label word when no separator is present.
+fn split_name_label(matched: &str) -> (&str, &str) {
+    let name_start = match matched.find([':', '：', '#']) {
+        Some(sep) => sep + matched[sep..].chars().next().map_or(1, char::len_utf8),
+        None => ["氏名", "名前"]
+            .iter()
+            .find_map(|label| matched.starts_with(label).then_some(label.len()))
+            .or_else(|| {
+                // English labels without a separator are one word, then a space.
+                matched.find(char::is_whitespace)
+            })
+            .unwrap_or(0),
+    };
+    let name_start = name_start
+        + matched[name_start..]
+            .chars()
+            .take_while(|ch| ch.is_whitespace())
+            .map(char::len_utf8)
+            .sum::<usize>();
+    matched.split_at(name_start)
+}
+
+/// Byte offset at which each 1-based line begins.
+fn line_starts(content: &str) -> Vec<usize> {
+    std::iter::once(0)
+        .chain(content.match_indices('\n').map(|(idx, _)| idx + 1))
+        .collect()
+}
+
+/// Accepted spans are disjoint and sorted by start, so only the last span
+/// starting before `span.1` can reach into it.
+fn overlaps(used: &BTreeMap<usize, usize>, span: (usize, usize)) -> bool {
+    used.range(..span.1)
+        .next_back()
+        .is_some_and(|(_, end)| *end > span.0)
+}
+
 fn find_match_span(
     content: &str,
+    line_starts: &[usize],
     line: usize,
     column: usize,
     matched: &str,
 ) -> Option<(usize, usize)> {
-    let line_start = content
-        .split_inclusive('\n')
-        .take(line.saturating_sub(1))
-        .map(|part| part.len())
-        .sum::<usize>();
+    let line_start = *line_starts.get(line.checked_sub(1)?)?;
     let line_body = content.get(line_start..)?;
     let col = column.saturating_sub(1);
     let byte_col = line_body
@@ -165,9 +231,12 @@ fn find_match_span(
     {
         return Some((start, start + matched.len()));
     }
-    content[line_start..]
+    // Column and text disagree (a rule reporting a capture group, say): fall
+    // back to locating the text within the same line rather than dropping it.
+    let line_end = line_body.find('\n').unwrap_or(line_body.len());
+    line_body[..line_end]
         .find(matched)
-        .map(|rel| (line_start + rel, line_start + rel + matched.len()))
+        .map(|offset| (line_start + offset, line_start + offset + matched.len()))
 }
 
 fn text_meta(
@@ -186,7 +255,7 @@ fn text_meta(
         .map(|kind| MetaColumn {
             name: kind.clone(),
             kind: kind.clone(),
-            source: super::columns::ColumnSource::Config,
+            source: super::columns::ColumnSource::Rule,
             match_rate: None,
         })
         .collect();
@@ -209,7 +278,7 @@ fn text_meta(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pseudonymize::Kind;
+    use crate::pseudonymize::{ColumnSource, Kind};
 
     fn material() -> KeyMaterial {
         KeyMaterial::from_parts([0x21; 32], [0x43; 32])
@@ -228,6 +297,16 @@ mod tests {
     }
 
     #[test]
+    fn multiline_replacements_use_original_offsets() {
+        let email = ["ada", "@", "example.com"].concat();
+        let input = format!("{email}\nx {email}\n日本語 {email} {email}");
+        let result = run_text(&input, Some(&material()), &options(), None).unwrap();
+        assert!(!result.output.contains(&email));
+        assert_eq!(result.meta.replaced.get("email"), Some(&4));
+        assert_eq!(result.output.lines().count(), 3);
+    }
+
+    #[test]
     fn text_mode_tokens_email_and_redacts_secrets() {
         let email = ["ada", "@", "example.com"].concat();
         let secret = format!("sk-proj-{}abcdefghijklmnopqrstuvwxyz0123456789", "z");
@@ -239,6 +318,86 @@ mod tests {
         assert!(!result.output.contains(&secret), "{}", result.output);
         assert_eq!(result.meta.replaced.get("email"), Some(&1));
         assert_eq!(result.meta.mode, "text");
+    }
+
+    #[test]
+    fn unparsed_phones_redacted_cards_and_rule_overrides() {
+        let us_phone = ["555", "-", "123", "-", "4567"].concat();
+        let card = ["4111", "1111", "1111", "1111"].join(" ");
+        let input = format!("tel {us_phone} card {card}");
+        let result = run_text(&input, Some(&material()), &options(), None).unwrap();
+        assert!(result.output.contains("[UNPARSED]"), "{}", result.output);
+        assert!(result.output.contains("[REDACTED]"), "{}", result.output);
+        assert!(!result.output.contains("4111"), "{}", result.output);
+        assert_eq!(result.meta.unparsed.get("phone"), Some(&1));
+        assert_eq!(result.meta.columns[0].source, ColumnSource::Rule);
+
+        let mut overridden = options();
+        overridden
+            .rule_overrides
+            .insert("pii.credit_card".into(), "custom:card".into());
+        let result = run_text(&card, Some(&material()), &overridden, None).unwrap();
+        assert!(result.output.starts_with("card_"), "{}", result.output);
+        assert_eq!(result.meta.replaced.get("custom:card"), Some(&1));
+
+        overridden
+            .rule_overrides
+            .insert("pii.credit_card".into(), "custom:Bad".into());
+        assert!(run_text(&card, Some(&material()), &overridden, None).is_err());
+    }
+
+    #[test]
+    fn overlap_check_and_line_table_agree_with_linear_scan() {
+        let mut used = BTreeMap::new();
+        used.insert(10, 20);
+        used.insert(30, 40);
+        assert!(overlaps(&used, (15, 18)));
+        assert!(overlaps(&used, (5, 11)));
+        assert!(overlaps(&used, (19, 25)));
+        assert!(!overlaps(&used, (20, 30)));
+        assert!(!overlaps(&used, (0, 10)));
+        assert!(!overlaps(&used, (40, 50)));
+        let text = "ab\n日本\n\ncd";
+        assert_eq!(line_starts(text), vec![0, 3, 10, 11]);
+        let starts = line_starts(text);
+        assert_eq!(find_match_span(text, &starts, 4, 1, "cd"), Some((11, 13)));
+        assert_eq!(find_match_span(text, &starts, 2, 2, "本"), Some((6, 9)));
+        assert_eq!(find_match_span(text, &starts, 9, 1, "x"), None);
+        assert_eq!(find_match_span(text, &starts, 0, 1, "ab"), None);
+        // Wrong column but same line: recovered; text on another line: not.
+        assert_eq!(find_match_span(text, &starts, 4, 2, "cd"), Some((11, 13)));
+        assert_eq!(find_match_span(text, &starts, 1, 1, "cd"), None);
+    }
+
+    #[test]
+    fn name_labels_stay_and_only_the_name_is_tokenized() {
+        let material = material();
+        let ja = "氏名: 山田太郎";
+        let en = "Name: Ada Lovelace";
+        let result = run_text(&format!("{ja}\n{en}\n"), Some(&material), &options(), None).unwrap();
+        let expected_ja = replacement_text(
+            &apply_cell(
+                &Kind::Name,
+                "山田太郎",
+                &material,
+                NormalizeSettings::default(),
+                64,
+                None,
+            )
+            .unwrap(),
+            "山田太郎",
+        );
+        assert!(
+            result.output.starts_with(&format!("氏名: {expected_ja}\n")),
+            "{}",
+            result.output
+        );
+        assert!(result.output.contains("Name: name_"), "{}", result.output);
+        assert!(!result.output.contains("Ada"), "{}", result.output);
+        assert_eq!(result.meta.replaced.get("name"), Some(&2));
+        assert_eq!(split_name_label("氏名　山田太郎"), ("氏名　", "山田太郎"));
+        assert_eq!(split_name_label("by Ada Lovelace"), ("by ", "Ada Lovelace"));
+        assert_eq!(split_name_label("山田太郎"), ("", "山田太郎"));
     }
 
     #[test]

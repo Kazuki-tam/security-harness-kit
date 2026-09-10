@@ -3,15 +3,25 @@ use super::columns::{infer_header, resolve_columns};
 use super::derive::KeyMaterial;
 use super::table::{TableOptions, TableResult, meta_from_parts};
 use super::{INFER_MATCH_THRESHOLD, INFER_SAMPLE_ROWS};
+use crate::document_masker::{
+    copy_entry_bounded, decode_general_ref, decode_xml_text as decode_text, local_name,
+    read_entry_bounded,
+};
 use anyhow::{Context, Result, bail};
 use quick_xml::Reader;
-use quick_xml::events::{BytesStart, BytesText, Event};
-use std::collections::BTreeMap;
+use quick_xml::events::{BytesRef, BytesStart, BytesText, Event};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Write};
 use std::path::Path;
 use zip::ZipArchive;
-use zip::write::{FileOptions, ZipWriter};
+use zip::write::ZipWriter;
+
+const MAX_ARCHIVE_EXPANDED_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_XML_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_GRID_CELLS: usize = 1_000_000;
+const MAX_XLSX_ROWS: usize = 1_048_576;
+const MAX_XLSX_COLS: usize = 16_384;
 
 pub fn run_xlsx(
     input: &Path,
@@ -21,44 +31,86 @@ pub fn run_xlsx(
     material: Option<&KeyMaterial>,
     mut map: Option<&mut MapCollector>,
 ) -> Result<TableResult> {
+    if !options.dry_run && material.is_none() {
+        bail!("xlsx table mode requires key material unless --dry-run");
+    }
     let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
     let mut archive = ZipArchive::new(file).context("read xlsx zip container")?;
+    crate::document_masker::ensure_archive_entry_limit(archive.len())?;
+    let mut expanded_bytes = 0u64;
+    for index in 0..archive.len() {
+        expanded_bytes = expanded_bytes
+            .checked_add(archive.by_index(index)?.size())
+            .context("xlsx expanded size overflow")?;
+        if expanded_bytes > MAX_ARCHIVE_EXPANDED_BYTES {
+            bail!("xlsx expanded size exceeds 256 MiB limit");
+        }
+    }
     let workbook = read_zip_string(&mut archive, "xl/workbook.xml")?;
     let sheets = parse_workbook_sheets(&workbook)?;
     if sheets.is_empty() {
         bail!("xlsx workbook has no sheets");
     }
     let selected = select_sheet(&sheets, sheet)?;
-    let rels = read_zip_string(&mut archive, "xl/_rels/workbook.xml.rels").unwrap_or_default();
+    let rels = read_zip_string(&mut archive, "xl/_rels/workbook.xml.rels")?;
     let sheet_path = resolve_sheet_path(&rels, &selected.rel_id)
-        .unwrap_or_else(|| format!("xl/worksheets/sheet{}.xml", selected.index + 1));
-    let shared = read_zip_string(&mut archive, "xl/sharedStrings.xml").unwrap_or_default();
-    let shared_strings = parse_shared_strings(&shared);
+        .context("xlsx sheet relationship is missing or invalid")?;
+    let worksheet_paths = sheets
+        .iter()
+        .map(|sheet| {
+            resolve_sheet_path(&rels, &sheet.rel_id)
+                .with_context(|| format!("xlsx sheet relationship is missing: {}", sheet.name))
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+    let shared = if archive
+        .file_names()
+        .any(|name| name == "xl/sharedStrings.xml")
+    {
+        read_zip_string(&mut archive, "xl/sharedStrings.xml")?
+    } else {
+        String::new()
+    };
+    let shared_strings = parse_shared_strings(&shared)?;
     let sheet_xml =
         read_zip_string(&mut archive, &sheet_path).with_context(|| format!("read {sheet_path}"))?;
     let cells = parse_sheet_cells(&sheet_xml, &shared_strings)?;
-    let grid = cells_to_grid(&cells);
+    let mut grid = cells_to_grid(&cells)?;
+    // Blank rows above the table (a common export layout) are not the header.
+    let leading_blank = grid
+        .iter()
+        .take_while(|row| row.iter().all(String::is_empty))
+        .count();
+    grid.drain(..leading_blank);
 
     if grid.is_empty() {
+        if !options.dry_run {
+            let output = output.context("xlsx table mode requires --output")?;
+            write_xlsx_copy(
+                &mut archive,
+                output,
+                &sheet_path,
+                sheet_xml.as_bytes(),
+                &worksheet_paths,
+            )?;
+        }
         return Ok(empty_xlsx_result(options, material));
     }
 
-    let first = grid[0].clone();
     let has_header = if options.no_header {
         false
     } else {
-        infer_header(&first, INFER_MATCH_THRESHOLD)
+        infer_header(&grid[0], INFER_MATCH_THRESHOLD)
     };
-    let (headers, data_rows) = if has_header {
-        (first, grid[1..].to_vec())
+    let headers = if has_header {
+        grid.remove(0)
     } else {
-        let headers = (0..first.len()).map(|idx| idx.to_string()).collect();
-        (headers, grid)
+        (0..grid[0].len()).map(|idx| idx.to_string()).collect()
     };
-    let sample: Vec<Vec<String>> = data_rows.iter().take(INFER_SAMPLE_ROWS).cloned().collect();
+    let data_rows = grid;
+    let sample_len = data_rows.len().min(INFER_SAMPLE_ROWS);
     let columns = resolve_columns(
         &headers,
-        &sample,
+        &data_rows[..sample_len],
         &options.config_columns,
         options.cli_columns.as_ref(),
     )
@@ -80,13 +132,13 @@ pub fn run_xlsx(
             has_header,
         });
     }
-    let material = material.context("xlsx table mode requires key material unless --dry-run")?;
+    let material = material.expect("checked above");
     let output = output.context("xlsx table mode requires --output")?;
 
     let mut replaced: BTreeMap<String, u64> = BTreeMap::new();
     let mut unparsed: BTreeMap<String, u64> = BTreeMap::new();
     let mut new_values: BTreeMap<(usize, usize), String> = BTreeMap::new();
-    let data_offset = if has_header { 1 } else { 0 };
+    let data_offset = leading_blank + usize::from(has_header);
     for (row_idx, row) in data_rows.iter().enumerate() {
         for column in &columns {
             let Some(raw) = row.get(column.index) else {
@@ -122,6 +174,7 @@ pub fn run_xlsx(
         output,
         &sheet_path,
         rewritten_sheet.as_bytes(),
+        &worksheet_paths,
     )?;
 
     Ok(TableResult {
@@ -143,7 +196,6 @@ pub fn run_xlsx(
 struct SheetInfo {
     name: String,
     rel_id: String,
-    index: usize,
 }
 
 fn select_sheet<'a>(sheets: &'a [SheetInfo], spec: Option<&str>) -> Result<&'a SheetInfo> {
@@ -151,7 +203,7 @@ fn select_sheet<'a>(sheets: &'a [SheetInfo], spec: Option<&str>) -> Result<&'a S
         return Ok(&sheets[0]);
     };
     if let Ok(number) = spec.parse::<usize>() {
-        let idx = number.saturating_sub(1);
+        let idx = number.checked_sub(1).context("sheet numbers start at 1")?;
         return sheets
             .get(idx)
             .ok_or_else(|| anyhow::anyhow!("sheet `{spec}` not found"));
@@ -171,14 +223,8 @@ fn parse_workbook_sheets(xml: &str) -> Result<Vec<SheetInfo>> {
         match reader.read_event_into(&mut buf)? {
             Event::Empty(tag) | Event::Start(tag) if local_name(tag.name().as_ref()) == "sheet" => {
                 let name = attr(&tag, "name").unwrap_or_default();
-                let rel_id = attr(&tag, "id")
-                    .or_else(|| attr(&tag, "r:id"))
-                    .unwrap_or_default();
-                sheets.push(SheetInfo {
-                    name,
-                    rel_id,
-                    index: sheets.len(),
-                });
+                let rel_id = attr(&tag, "id").unwrap_or_default();
+                sheets.push(SheetInfo { name, rel_id });
             }
             Event::Eof => break,
             _ => {}
@@ -201,7 +247,9 @@ fn resolve_sheet_path(rels: &str, rel_id: &str) -> Option<String> {
             {
                 if attr(&tag, "Id").as_deref() == Some(rel_id) {
                     let target = attr(&tag, "Target")?;
-                    return Some(if target.starts_with("xl/") {
+                    return Some(if target.starts_with("/xl/") {
+                        target.trim_start_matches('/').to_string()
+                    } else if target.starts_with("xl/") {
                         target
                     } else {
                         format!("xl/{target}")
@@ -216,9 +264,9 @@ fn resolve_sheet_path(rels: &str, rel_id: &str) -> Option<String> {
     None
 }
 
-fn parse_shared_strings(xml: &str) -> Vec<String> {
+fn parse_shared_strings(xml: &str) -> Result<Vec<String>> {
     if xml.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
@@ -226,28 +274,84 @@ fn parse_shared_strings(xml: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
     let mut in_si = false;
+    // <rPh> holds the phonetic guide Japanese Excel adds; it is not cell text.
+    let mut in_phonetic = false;
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(tag)) if local_name(tag.name().as_ref()) == "si" => {
                 in_si = true;
                 current.clear();
             }
+            Ok(Event::Empty(tag)) if local_name(tag.name().as_ref()) == "si" => {
+                out.push(String::new());
+            }
             Ok(Event::End(tag)) if local_name(tag.name().as_ref()) == "si" => {
                 out.push(std::mem::take(&mut current));
                 in_si = false;
             }
-            Ok(Event::Text(text)) if in_si => {
-                current.push_str(&decode_text(&text));
+            Ok(Event::Start(tag)) if local_name(tag.name().as_ref()) == "rPh" => {
+                in_phonetic = true;
             }
-            Ok(Event::CData(cdata)) if in_si => {
+            Ok(Event::End(tag)) if local_name(tag.name().as_ref()) == "rPh" => {
+                in_phonetic = false;
+            }
+            Ok(Event::Text(text)) if in_si && !in_phonetic => {
+                current.push_str(&decode_text(&text)?);
+            }
+            Ok(Event::GeneralRef(reference)) if in_si && !in_phonetic => {
+                current.push_str(&resolve_cell_ref_entity(&reference)?);
+            }
+            Ok(Event::CData(cdata)) if in_si && !in_phonetic => {
                 current.push_str(cdata.as_ref());
             }
-            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::Eof) => break,
+            Err(err) => return Err(err.into()),
             _ => {}
         }
         buf.clear();
     }
-    out
+    Ok(out)
+}
+
+fn resolve_cell_ref_entity(reference: &BytesRef<'_>) -> Result<String> {
+    decode_general_ref(reference)?
+        .ok_or_else(|| anyhow::anyhow!("unsupported XML entity reference in worksheet"))
+}
+
+/// Tracks the coordinate of the cell being read. `<row r>` and `<c r>` are
+/// optional in OOXML: without them a row follows the previous row and a cell
+/// follows the previous cell.
+#[derive(Default)]
+struct CellCursor {
+    row: Option<usize>,
+    next_col: usize,
+}
+
+impl CellCursor {
+    fn enter_row(&mut self, tag: &BytesStart<'_>) -> Result<()> {
+        let explicit = attr(tag, "r")
+            .map(|raw| {
+                raw.parse::<usize>()
+                    .ok()
+                    .and_then(|n| n.checked_sub(1))
+                    .filter(|row| *row < MAX_XLSX_ROWS)
+                    .context("invalid xlsx row number")
+            })
+            .transpose()?;
+        self.row = Some(explicit.unwrap_or_else(|| self.row.map_or(0, |row| row + 1)));
+        self.next_col = 0;
+        Ok(())
+    }
+
+    fn enter_cell(&mut self, tag: &BytesStart<'_>) -> Result<(usize, usize)> {
+        let coord = match attr(tag, "r") {
+            Some(raw) => parse_cell_ref(&raw).context("invalid xlsx cell reference")?,
+            None => (self.row.context("xlsx cell outside a row")?, self.next_col),
+        };
+        self.row = Some(coord.0);
+        self.next_col = coord.1 + 1;
+        Ok(coord)
+    }
 }
 
 fn parse_sheet_cells(xml: &str, shared: &[String]) -> Result<Vec<((usize, usize), String)>> {
@@ -255,42 +359,58 @@ fn parse_sheet_cells(xml: &str, shared: &[String]) -> Result<Vec<((usize, usize)
     reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
     let mut cells = Vec::new();
-    let mut cell_ref = String::new();
+    let mut cursor = CellCursor::default();
+    let mut coord = (0, 0);
     let mut cell_type = String::new();
     let mut text = String::new();
     let mut in_value = false;
+    let mut in_phonetic = false;
     loop {
         match reader.read_event_into(&mut buf)? {
+            Event::Start(tag) | Event::Empty(tag) if local_name(tag.name().as_ref()) == "row" => {
+                cursor.enter_row(&tag)?;
+            }
             Event::Start(tag) | Event::Empty(tag) if local_name(tag.name().as_ref()) == "c" => {
-                cell_ref = attr(&tag, "r").unwrap_or_default();
+                coord = cursor.enter_cell(&tag)?;
                 cell_type = attr(&tag, "t").unwrap_or_default();
                 text.clear();
-                if matches!(reader.read_event_into(&mut buf), Ok(Event::Empty(_))) {
-                    // handled below via next events
-                }
+                in_value = false;
             }
+            Event::Start(tag) if local_name(tag.name().as_ref()) == "rPh" => in_phonetic = true,
+            Event::End(tag) if local_name(tag.name().as_ref()) == "rPh" => in_phonetic = false,
             Event::Start(tag) if matches!(local_name(tag.name().as_ref()), "v" | "t") => {
-                in_value = true;
+                in_value = !in_phonetic;
             }
             Event::End(tag) if matches!(local_name(tag.name().as_ref()), "v" | "t") => {
                 in_value = false;
             }
             Event::Text(value) if in_value => {
-                text.push_str(&decode_text(&value));
+                text.push_str(&decode_text(&value)?);
+            }
+            Event::GeneralRef(reference) if in_value => {
+                text.push_str(&resolve_cell_ref_entity(&reference)?);
             }
             Event::End(tag) if local_name(tag.name().as_ref()) == "c" => {
-                if let Some(coord) = parse_cell_ref(&cell_ref) {
-                    let value = if cell_type == "s" {
-                        text.parse::<usize>()
-                            .ok()
-                            .and_then(|idx| shared.get(idx).cloned())
-                            .unwrap_or_default()
+                let value = if cell_type == "s" {
+                    if text.trim().is_empty() {
+                        // `<c t="s"><v/></c>`: a shared cell with no index is empty.
+                        String::new()
                     } else {
-                        text.clone()
-                    };
+                        let index = text
+                            .trim()
+                            .parse::<usize>()
+                            .context("invalid shared string index")?;
+                        shared
+                            .get(index)
+                            .context("shared string index out of range")?
+                            .clone()
+                    }
+                } else {
+                    text.clone()
+                };
+                if !value.is_empty() {
                     cells.push((coord, value));
                 }
-                cell_ref.clear();
                 cell_type.clear();
                 text.clear();
             }
@@ -302,14 +422,23 @@ fn parse_sheet_cells(xml: &str, shared: &[String]) -> Result<Vec<((usize, usize)
     Ok(cells)
 }
 
-fn cells_to_grid(cells: &[((usize, usize), String)]) -> Vec<Vec<String>> {
+fn cells_to_grid(cells: &[((usize, usize), String)]) -> Result<Vec<Vec<String>>> {
+    if cells.is_empty() {
+        return Ok(Vec::new());
+    }
     let max_row = cells.iter().map(|((row, _), _)| *row).max().unwrap_or(0);
     let max_col = cells.iter().map(|((_, col), _)| *col).max().unwrap_or(0);
+    if (max_row + 1)
+        .checked_mul(max_col + 1)
+        .is_none_or(|count| count > MAX_GRID_CELLS)
+    {
+        bail!("xlsx table exceeds the supported grid size ({MAX_GRID_CELLS} cells)");
+    }
     let mut grid = vec![vec![String::new(); max_col + 1]; max_row + 1];
     for ((row, col), value) in cells {
         grid[*row][*col] = value.clone();
     }
-    grid
+    Ok(grid)
 }
 
 fn rewrite_sheet_cells(
@@ -324,51 +453,45 @@ fn rewrite_sheet_cells(
     let mut writer = quick_xml::Writer::new(Cursor::new(Vec::new()));
     let mut buf = Vec::new();
     let mut skip_depth = 0u32;
-    let mut pending: Option<String> = None;
+    let mut cursor = CellCursor::default();
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Eof => break,
+            Event::Start(tag) if skip_depth == 0 && local_name(tag.name().as_ref()) == "row" => {
+                cursor.enter_row(&tag)?;
+                writer.write_event(Event::Start(tag.into_owned()))?;
+            }
+            Event::Empty(tag) if skip_depth == 0 && local_name(tag.name().as_ref()) == "row" => {
+                cursor.enter_row(&tag)?;
+                writer.write_event(Event::Empty(tag.into_owned()))?;
+            }
+            Event::Empty(tag) if skip_depth == 0 && local_name(tag.name().as_ref()) == "c" => {
+                // Empty cells carry no value and are never replaced; keep the cursor in step.
+                cursor.enter_cell(&tag)?;
+                writer.write_event(Event::Empty(tag.into_owned()))?;
+            }
             Event::Start(tag) if skip_depth == 0 && local_name(tag.name().as_ref()) == "c" => {
-                let coord = attr(&tag, "r").and_then(|raw| parse_cell_ref(&raw));
-                if let Some(coord) = coord
-                    && let Some(value) = replacements.get(&coord)
-                {
+                let coord = cursor.enter_cell(&tag)?;
+                if let Some(value) = replacements.get(&coord) {
                     write_inline_cell(&mut writer, &tag, value)?;
-                    pending = Some(value.clone());
                     skip_depth = 1;
                     continue;
                 }
                 writer.write_event(Event::Start(tag.into_owned()))?;
             }
-            Event::Empty(tag) if skip_depth == 0 && local_name(tag.name().as_ref()) == "c" => {
-                let coord = attr(&tag, "r").and_then(|raw| parse_cell_ref(&raw));
-                if let Some(coord) = coord
-                    && let Some(value) = replacements.get(&coord)
-                {
-                    write_inline_cell(&mut writer, &tag, value)?;
-                    writer.write_event(Event::End(quick_xml::events::BytesEnd::new("c")))?;
-                    continue;
-                }
-                writer.write_event(Event::Empty(tag.into_owned()))?;
-            }
             Event::Start(_) if skip_depth > 0 => skip_depth += 1,
-            Event::End(tag) if skip_depth > 0 => {
+            Event::End(_) if skip_depth > 0 => {
                 skip_depth -= 1;
                 if skip_depth == 0 {
                     writer.write_event(Event::End(quick_xml::events::BytesEnd::new("c")))?;
-                    pending = None;
                 }
-                let _ = tag;
             }
-            Event::Text(_) | Event::CData(_) | Event::Empty(_) if skip_depth > 0 => {}
-            other if skip_depth == 0 => {
-                writer.write_event(other.into_owned())?;
-            }
-            _ => {}
+            // Everything else inside a replaced cell (old value, formula, rich text) is dropped.
+            _ if skip_depth > 0 => {}
+            other => writer.write_event(other.into_owned())?,
         }
         buf.clear();
     }
-    let _ = pending;
     let bytes = writer.into_inner().into_inner();
     String::from_utf8(bytes).context("xlsx sheet rewrite is not UTF-8")
 }
@@ -399,38 +522,160 @@ fn write_xlsx_copy(
     output: &Path,
     replace_name: &str,
     replacement: &[u8],
+    worksheet_paths: &BTreeSet<String>,
 ) -> Result<()> {
+    // Keep indices stable, but remove originals no longer referenced by any sheet.
+    let mut used = BTreeSet::new();
+    for idx in 0..archive.len() {
+        let name = archive.by_index(idx)?.name().to_string();
+        if worksheet_paths.contains(&name)
+            || (name.starts_with("xl/worksheets/") && name.ends_with(".xml"))
+        {
+            if name == replace_name {
+                collect_shared_indices(std::str::from_utf8(replacement)?, &mut used)?;
+            } else {
+                collect_shared_indices(&read_zip_string(archive, &name)?, &mut used)?;
+            }
+        }
+    }
+    let shared = if archive
+        .file_names()
+        .any(|name| name == "xl/sharedStrings.xml")
+    {
+        Some(prune_shared_strings(
+            &read_zip_string(archive, "xl/sharedStrings.xml")?,
+            &used,
+        )?)
+    } else {
+        None
+    };
     let parent = output
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let tmp = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("create temp xlsx in {}", parent.display()))?;
+    if let Ok(metadata) = std::fs::metadata(output) {
+        std::fs::set_permissions(tmp.path(), metadata.permissions())
+            .with_context(|| format!("preserve output permissions for {}", output.display()))?;
+    }
     let mut writer = ZipWriter::new(tmp);
+    // Declared sizes were pre-checked, but only the bytes actually inflated
+    // are trusted against the expanded-size cap.
+    let mut actual_total = 0u64;
     for idx in 0..archive.len() {
         let mut entry = archive.by_index(idx)?;
         let name = entry.name().to_string();
-        let options = FileOptions::<()>::default().compression_method(entry.compression());
+        let options = crate::document_masker::entry_options(&entry);
         if entry.is_dir() {
             writer.add_directory(&name, options)?;
             continue;
         }
         writer.start_file(&name, options)?;
-        if name == replace_name {
-            writer.write_all(replacement)?;
+        let rewritten: Option<&[u8]> = if name == "xl/sharedStrings.xml" && shared.is_some() {
+            shared.as_deref().map(str::as_bytes)
+        } else if name == replace_name {
+            Some(replacement)
         } else {
-            std::io::copy(&mut entry, &mut writer)?;
+            None
+        };
+        match rewritten {
+            Some(bytes) => {
+                writer.write_all(bytes)?;
+                actual_total = actual_total
+                    .checked_add(bytes.len() as u64)
+                    .context("xlsx expanded size overflow")?;
+            }
+            None => copy_entry_bounded(
+                &mut entry,
+                &mut writer,
+                &mut actual_total,
+                MAX_ARCHIVE_EXPANDED_BYTES,
+                &name,
+            )?,
         }
     }
     let tmp = writer.finish()?;
+    tmp.as_file()
+        .sync_all()
+        .with_context(|| format!("sync output workbook {}", output.display()))?;
     crate::fs_atomic::persist_named_temp_file(tmp, output)
+}
+
+fn collect_shared_indices(xml: &str, used: &mut BTreeSet<usize>) -> Result<()> {
+    let mut reader = Reader::from_str(xml);
+    let mut shared_cell = false;
+    let mut value = false;
+    loop {
+        match reader.read_event()? {
+            Event::Start(tag) if local_name(tag.name().as_ref()) == "c" => {
+                shared_cell = attr(&tag, "t").as_deref() == Some("s");
+            }
+            Event::Start(tag) if local_name(tag.name().as_ref()) == "v" => value = true,
+            Event::Text(text) if shared_cell && value => {
+                used.insert(
+                    decode_text(&text)?
+                        .parse()
+                        .context("invalid shared string index")?,
+                );
+            }
+            Event::GeneralRef(_) if shared_cell && value => {
+                bail!("invalid shared string index");
+            }
+            Event::End(tag) if local_name(tag.name().as_ref()) == "v" => value = false,
+            Event::End(tag) if local_name(tag.name().as_ref()) == "c" => shared_cell = false,
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn prune_shared_strings(xml: &str, used: &BTreeSet<usize>) -> Result<String> {
+    let mut reader = Reader::from_str(xml);
+    let mut writer = quick_xml::Writer::new(Vec::new());
+    let mut index = 0;
+    let mut skip_depth = 0;
+    loop {
+        let event = reader.read_event()?;
+        match event {
+            Event::Eof => break,
+            Event::Start(tag) if skip_depth == 0 && local_name(tag.name().as_ref()) == "sst" => {
+                let mut start = BytesStart::new("sst");
+                for attr in tag.attributes().flatten() {
+                    let name = local_name(attr.key.as_ref());
+                    if name != "count" && name != "uniqueCount" {
+                        start.push_attribute((attr.key.as_ref(), attr.value.as_ref()));
+                    }
+                }
+                writer.write_event(Event::Start(start))?;
+            }
+            Event::Start(tag) if skip_depth == 0 && local_name(tag.name().as_ref()) == "si" => {
+                if !used.contains(&index) {
+                    writer.write_event(Event::Empty(tag.into_owned()))?;
+                    skip_depth = 1;
+                } else {
+                    writer.write_event(Event::Start(tag.into_owned()))?;
+                }
+                index += 1;
+            }
+            Event::Empty(tag) if skip_depth == 0 && local_name(tag.name().as_ref()) == "si" => {
+                writer.write_event(Event::Empty(tag.into_owned()))?;
+                index += 1;
+            }
+            Event::Start(_) if skip_depth > 0 => skip_depth += 1,
+            Event::End(_) if skip_depth > 0 => skip_depth -= 1,
+            event if skip_depth == 0 => writer.write_event(event.into_owned())?,
+            _ => {}
+        }
+    }
+    String::from_utf8(writer.into_inner()).context("shared strings rewrite is not UTF-8")
 }
 
 fn read_zip_string(archive: &mut ZipArchive<File>, name: &str) -> Result<String> {
     let mut entry = archive.by_name(name)?;
-    let mut body = String::new();
-    entry.read_to_string(&mut body)?;
-    Ok(body)
+    let bytes = read_entry_bounded(&mut entry, MAX_XML_BYTES, name)?;
+    String::from_utf8(bytes).with_context(|| format!("xlsx entry {name} is not UTF-8"))
 }
 
 fn parse_cell_ref(raw: &str) -> Option<(usize, usize)> {
@@ -441,32 +686,26 @@ fn parse_cell_ref(raw: &str) -> Option<(usize, usize)> {
         if !byte.is_ascii_alphabetic() {
             return None;
         }
-        col = col * 26 + usize::from(byte.to_ascii_uppercase() - b'A' + 1);
+        col = col
+            .checked_mul(26)?
+            .checked_add(usize::from(byte.to_ascii_uppercase() - b'A' + 1))?;
     }
     let row = row_raw.parse::<usize>().ok()?;
-    Some((row.saturating_sub(1), col.saturating_sub(1)))
+    if row > MAX_XLSX_ROWS || col > MAX_XLSX_COLS {
+        return None;
+    }
+    Some((row.checked_sub(1)?, col.checked_sub(1)?))
 }
 
 fn attr(tag: &BytesStart<'_>, name: &str) -> Option<String> {
     tag.attributes()
         .flatten()
-        .find(|attr| {
-            let key = attr.key.as_ref();
-            key == name || key.ends_with(&format!(":{name}"))
+        .find(|attr| local_name(attr.key.as_ref()) == name)
+        .and_then(|attr| {
+            quick_xml::escape::unescape(attr.value.as_ref())
+                .ok()
+                .map(|value| value.into_owned())
         })
-        .map(|attr| attr.value.as_ref().to_string())
-}
-
-fn local_name(name: &str) -> &str {
-    name.rsplit_once(':')
-        .map(|(_, local)| local)
-        .unwrap_or(name)
-}
-
-fn decode_text(text: &BytesText<'_>) -> String {
-    quick_xml::escape::unescape(text.as_ref())
-        .map(|cow| cow.into_owned())
-        .unwrap_or_else(|_| text.as_ref().to_string())
 }
 
 fn empty_xlsx_result(options: &TableOptions, material: Option<&KeyMaterial>) -> TableResult {
@@ -491,9 +730,10 @@ mod tests {
     use super::*;
     use crate::pseudonymize::NormalizeSettings;
     use crate::pseudonymize::parse_columns_spec;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use tempfile::tempdir;
     use zip::CompressionMethod;
+    use zip::write::FileOptions;
 
     fn material() -> KeyMaterial {
         KeyMaterial::from_parts([0x77; 32], [0x88; 32])
@@ -515,23 +755,394 @@ mod tests {
         }
     }
 
-    fn create_xlsx(path: &Path, header: &str, value: &str) {
+    const WORKBOOK: &str = r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Customers" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+    const RELS: &str = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#;
+
+    /// Write an xlsx-shaped zip from raw entries; `dirs` adds directory entries.
+    fn build_xlsx(path: &Path, entries: &[(&str, String)], dirs: &[&str]) {
         let file = File::create(path).unwrap();
         let mut zip = ZipWriter::new(file);
         let opts = FileOptions::<()>::default().compression_method(CompressionMethod::Deflated);
-        zip.start_file("[Content_Types].xml", opts).unwrap();
-        zip.write_all(b"<Types/>").unwrap();
-        zip.start_file("xl/workbook.xml", opts).unwrap();
-        zip.write_all(br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Customers" sheetId="1" r:id="rId1"/></sheets></workbook>"#).unwrap();
-        zip.start_file("xl/_rels/workbook.xml.rels", opts).unwrap();
-        zip.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#).unwrap();
-        zip.start_file("xl/worksheets/sheet1.xml", opts).unwrap();
-        write!(
-            zip,
-            r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{header}</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>{value}</t></is></c></row></sheetData></worksheet>"#
+        for dir in dirs {
+            zip.add_directory(*dir, opts).unwrap();
+        }
+        for (name, body) in entries {
+            zip.start_file(*name, opts).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    fn create_xlsx(path: &Path, header: &str, value: &str) {
+        build_xlsx(
+            path,
+            &[
+                ("[Content_Types].xml", "<Types/>".into()),
+                ("xl/workbook.xml", WORKBOOK.into()),
+                ("xl/_rels/workbook.xml.rels", RELS.into()),
+                (
+                    "xl/sharedStrings.xml",
+                    format!("<sst><si><t>{value}</t></si></sst>"),
+                ),
+                (
+                    "xl/worksheets/sheet1.xml",
+                    format!(
+                        r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{header}</t></is></c></row><row r="2"><c r="A2" t="s"><v>0</v></c></row></sheetData></worksheet>"#
+                    ),
+                ),
+            ],
+            &[],
+        );
+    }
+
+    fn sheet_xml(path: &Path, name: &str) -> String {
+        let mut archive = ZipArchive::new(File::open(path).unwrap()).unwrap();
+        read_zip_string(&mut archive, name).unwrap()
+    }
+
+    #[test]
+    fn no_header_mode_counts_unparsed_missing_and_short_rows() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("raw.xlsx");
+        let output = dir.path().join("out.xlsx");
+        let email = ["ada", "@", "example.com"].concat();
+        build_xlsx(
+            &input,
+            &[
+                ("xl/workbook.xml", WORKBOOK.into()),
+                (
+                    "xl/_rels/workbook.xml.rels",
+                    RELS.replace("worksheets/", "/xl/worksheets/"),
+                ),
+                (
+                    "xl/worksheets/sheet1.xml",
+                    format!(
+                        r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{email}</t></is></c><c r="B1" t="inlineStr"><is><t>garbage</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>-</t></is></c><c r="B2" t="inlineStr"><is><t>NULL</t></is></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>{email}</t></is></c></row></sheetData></worksheet>"#
+                    ),
+                ),
+            ],
+            &["xl/", "xl/worksheets/"],
+        );
+        let mut opts = options();
+        opts.no_header = true;
+        opts.cli_columns = Some(parse_columns_spec("0:email,1:phone").unwrap());
+        let result = run_xlsx(&input, Some(&output), None, &opts, Some(&material()), None).unwrap();
+        assert!(!result.has_header);
+        assert_eq!(result.meta.rows_processed, 3);
+        assert_eq!(result.meta.replaced.get("email"), Some(&2));
+        assert_eq!(result.meta.unparsed.get("phone"), Some(&1));
+        let sheet = sheet_xml(&output, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("[UNPARSED]") && sheet.contains(">-<") && sheet.contains("NULL"));
+        assert!(!sheet.contains(&email), "{sheet}");
+    }
+
+    #[test]
+    fn empty_sheet_copies_the_workbook_and_reports_no_rows() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("empty.xlsx");
+        let output = dir.path().join("out.xlsx");
+        build_xlsx(
+            &input,
+            &[
+                ("xl/workbook.xml", WORKBOOK.into()),
+                (
+                    "xl/_rels/workbook.xml.rels",
+                    RELS.replace("Target=\"", "Target=\"xl/"),
+                ),
+                (
+                    "xl/worksheets/sheet1.xml",
+                    "<worksheet><sheetData/></worksheet>".into(),
+                ),
+            ],
+            &[],
+        );
+        let mut dry = options();
+        dry.dry_run = true;
+        let result = run_xlsx(&input, None, None, &dry, None, None).unwrap();
+        assert_eq!(result.meta.rows_processed, 0);
+        assert!(result.meta.dry_run);
+        run_xlsx(
+            &input,
+            Some(&output),
+            None,
+            &options(),
+            Some(&material()),
+            None,
         )
         .unwrap();
-        zip.finish().unwrap();
+        assert!(output.exists());
+        assert!(run_xlsx(&input, Some(&output), None, &options(), None, None).is_err());
+    }
+
+    #[test]
+    fn workbook_structure_errors_are_reported() {
+        let dir = tempdir().unwrap();
+        let no_sheets = dir.path().join("none.xlsx");
+        build_xlsx(
+            &no_sheets,
+            &[
+                ("xl/workbook.xml", "<workbook><sheets/></workbook>".into()),
+                ("xl/_rels/workbook.xml.rels", RELS.into()),
+            ],
+            &[],
+        );
+        assert!(run_xlsx(&no_sheets, None, None, &options(), None, None).is_err());
+
+        let bad_rel = dir.path().join("rel.xlsx");
+        build_xlsx(
+            &bad_rel,
+            &[
+                ("xl/workbook.xml", WORKBOOK.into()),
+                ("xl/_rels/workbook.xml.rels", "<Relationships/>".into()),
+            ],
+            &[],
+        );
+        assert!(run_xlsx(&bad_rel, None, None, &options(), None, None).is_err());
+
+        let ok = dir.path().join("ok.xlsx");
+        create_xlsx(&ok, "Email", "x");
+        for sheet in ["0", "2", "Missing"] {
+            assert!(
+                run_xlsx(&ok, None, Some(sheet), &options(), None, None).is_err(),
+                "{sheet}"
+            );
+        }
+        assert!(parse_cell_ref("A-1").is_none());
+        assert!(parse_cell_ref("A").is_none());
+        // Entity references are part of the cell text; malformed ones are errors.
+        assert!(parse_shared_strings("<sst><si><t>bad &#xZZ; entity</t></si></sst>").is_err());
+        assert_eq!(
+            parse_shared_strings("<sst><si><t>R&amp;D &lt;x&gt;</t></si></sst>").unwrap(),
+            vec!["R&D <x>"]
+        );
+        let cells = parse_sheet_cells(
+            r#"<worksheet><sheetData><row><c r="A1" t="inlineStr"><is><t>a&amp;b</t></is></c></row></sheetData></worksheet>"#,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(cells, vec![((0, 0), "a&b".into())]);
+        assert_eq!(
+            parse_shared_strings("<sst><si><t><![CDATA[cd]]></t></si></sst>").unwrap(),
+            vec!["cd"]
+        );
+    }
+
+    #[test]
+    fn escaped_cell_text_is_tokenized_as_the_real_value() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("amp.xlsx");
+        let output = dir.path().join("out.xlsx");
+        // The custom kind keeps the raw value, so the map original must be `R&D`.
+        create_xlsx(&input, "Team", "R&amp;D");
+        let mut opts = options();
+        opts.cli_columns = Some(parse_columns_spec("Team:custom:team").unwrap());
+        let mut collector = MapCollector::default();
+        run_xlsx(
+            &input,
+            Some(&output),
+            None,
+            &opts,
+            Some(&material()),
+            Some(&mut collector),
+        )
+        .unwrap();
+        let doc = collector.into_document("v1".into(), material().fingerprint());
+        assert_eq!(doc.entries.len(), 1);
+        assert_eq!(doc.entries[0].originals, vec!["R&D".to_string()]);
+    }
+
+    #[test]
+    fn phonetic_runs_implicit_positions_and_blank_rows() {
+        let email = ["ada", "@", "example.com"].concat();
+        // Japanese Excel stores a furigana guide next to the text; it is not part of the value.
+        assert_eq!(
+            parse_shared_strings(
+                r#"<sst><si><t>メールアドレス</t><rPh sb="0" eb="7"><t>メールアドレス</t></rPh><phoneticPr fontId="1"/></si></sst>"#
+            )
+            .unwrap(),
+            vec!["メールアドレス"]
+        );
+        // Cells and rows without `r` follow their predecessors; `<v/>` is an empty shared cell.
+        let cells = parse_sheet_cells(
+            r#"<worksheet><sheetData><row/><row r="3"><c t="inlineStr"><is><t>a</t></is></c><c t="s"><v/></c><c t="inlineStr"><is><t>c</t></is></c></row><row><c r="B4" t="inlineStr"><is><t>d</t></is></c><c t="inlineStr"><is><t>e</t></is></c></row></sheetData></worksheet>"#,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            cells,
+            vec![
+                ((2, 0), "a".into()),
+                ((2, 2), "c".into()),
+                ((3, 1), "d".into()),
+                ((3, 2), "e".into()),
+            ]
+        );
+
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("blank.xlsx");
+        let output = dir.path().join("out.xlsx");
+        build_xlsx(
+            &input,
+            &[
+                ("xl/workbook.xml", WORKBOOK.into()),
+                ("xl/_rels/workbook.xml.rels", RELS.into()),
+                (
+                    "xl/worksheets/sheet1.xml",
+                    format!(
+                        r#"<worksheet><sheetData><row r="1"/><row r="2"><c r="A2"/></row><row r="3"><c t="inlineStr"><is><t>Email</t></is></c></row><row r="4"><c t="inlineStr"><is><t>{email}</t></is></c></row></sheetData></worksheet>"#
+                    ),
+                ),
+            ],
+            &[],
+        );
+        let result = run_xlsx(
+            &input,
+            Some(&output),
+            None,
+            &options(),
+            Some(&material()),
+            None,
+        )
+        .unwrap();
+        assert!(result.has_header);
+        assert_eq!(result.meta.rows_processed, 1);
+        assert_eq!(result.meta.replaced.get("email"), Some(&1));
+        let sheet = sheet_xml(&output, "xl/worksheets/sheet1.xml");
+        assert!(
+            sheet.contains("<t>Email</t>") && sheet.contains("email_"),
+            "{sheet}"
+        );
+        assert!(!sheet.contains(&email), "{sheet}");
+    }
+
+    #[test]
+    fn shared_strings_used_by_other_sheets_survive_pruning() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("two.xlsx");
+        let output = dir.path().join("out.xlsx");
+        let email = ["ada", "@", "example.com"].concat();
+        build_xlsx(
+            &input,
+            &[
+                ("xl/workbook.xml", WORKBOOK.into()),
+                ("xl/_rels/workbook.xml.rels", RELS.into()),
+                ("xl/sharedStrings.xml", format!("<sst><si><t>{email}</t></si></sst>")),
+                (
+                    "xl/worksheets/sheet1.xml",
+                    r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Email</t></is></c></row><row r="2"><c r="A2" t="s"><v>0</v></c></row></sheetData></worksheet>"#.into(),
+                ),
+                (
+                    "xl/worksheets/sheet2.xml",
+                    r#"<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>"#.into(),
+                ),
+            ],
+            &[],
+        );
+        run_xlsx(
+            &input,
+            Some(&output),
+            None,
+            &options(),
+            Some(&material()),
+            None,
+        )
+        .unwrap();
+        assert!(sheet_xml(&output, "xl/sharedStrings.xml").contains(&email));
+        assert!(!sheet_xml(&output, "xl/worksheets/sheet1.xml").contains("<v>0</v>"));
+    }
+
+    #[test]
+    fn shared_strings_on_relationship_resolved_custom_sheet_paths_survive() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("custom-path.xlsx");
+        let output = dir.path().join("out.xlsx");
+        let workbook = r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Customers" sheetId="1" r:id="rId1"/><sheet name="Archive" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
+        let rels = r#"<Relationships><Relationship Id="rId1" Target="custom/active.xml"/><Relationship Id="rId2" Target="custom/archive.xml"/></Relationships>"#;
+        let email = ["ada", "@", "example.com"].concat();
+        let keep = "must survive";
+        build_xlsx(
+            &input,
+            &[
+                ("xl/workbook.xml", workbook.into()),
+                ("xl/_rels/workbook.xml.rels", rels.into()),
+                (
+                    "xl/sharedStrings.xml",
+                    format!(
+                        r#"<sst count="2" uniqueCount="2"><si><t>{email}</t></si><si><t>{keep}</t></si></sst>"#
+                    ),
+                ),
+                (
+                    "xl/custom/active.xml",
+                    r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Email</t></is></c></row><row r="2"><c r="A2" t="s"><v>0</v></c></row></sheetData></worksheet>"#.into(),
+                ),
+                (
+                    "xl/custom/archive.xml",
+                    r#"<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>1</v></c></row></sheetData></worksheet>"#.into(),
+                ),
+            ],
+            &[],
+        );
+        run_xlsx(
+            &input,
+            Some(&output),
+            None,
+            &options(),
+            Some(&material()),
+            None,
+        )
+        .unwrap();
+        let shared = sheet_xml(&output, "xl/sharedStrings.xml");
+        assert!(shared.contains(keep), "{shared}");
+        assert!(
+            !shared.contains(" count=") && !shared.contains(" uniqueCount="),
+            "{shared}"
+        );
+    }
+
+    #[test]
+    fn parses_shared_numeric_and_empty_cells_without_skipping_events() {
+        let xml = r#"<worksheet><sheetData><row><c r="A1" t="s"><v>0</v></c><c r="B1"/><c r="C1"><v>42</v></c></row></sheetData></worksheet>"#;
+        let cells = parse_sheet_cells(xml, &["Email".into()]).unwrap();
+        assert_eq!(cells, vec![((0, 0), "Email".into()), ((0, 2), "42".into())]);
+        assert!(parse_cell_ref("A0").is_none());
+        assert!(parse_cell_ref("1").is_none());
+        assert!(parse_cell_ref("ZZZZZZZZZZZZZZZZZZZZ1").is_none());
+        assert!(cells_to_grid(&[((1_048_575, 16_383), "x".into())]).is_err());
+        assert!(cells_to_grid(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn shared_strings_pruning_preserves_indices_and_referenced_runs() {
+        let xml = "<sst><si><t>unused original</t></si><si><r><t>kept</t></r></si><si/></sst>";
+        let used = BTreeSet::from([1]);
+        let clean = prune_shared_strings(xml, &used).unwrap();
+        assert!(!clean.contains("unused original"));
+        assert!(clean.contains("<r><t>kept</t></r>"));
+        assert_eq!(parse_shared_strings(&clean).unwrap(), vec!["", "kept", ""]);
+    }
+
+    #[test]
+    fn shared_string_original_is_removed_from_output_archive() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("shared.xlsx");
+        let output = dir.path().join("out.xlsx");
+        let email = ["ada", "@", "example.com"].concat();
+        create_xlsx(&input, "Email", &email);
+        run_xlsx(
+            &input,
+            Some(&output),
+            None,
+            &options(),
+            Some(&material()),
+            None,
+        )
+        .unwrap();
+        let mut archive = ZipArchive::new(File::open(output).unwrap()).unwrap();
+        assert!(
+            !read_zip_string(&mut archive, "xl/sharedStrings.xml")
+                .unwrap()
+                .contains(&email)
+        );
     }
 
     #[test]

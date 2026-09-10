@@ -399,14 +399,17 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
         },
         CompiledRule {
             id: "pii.shk_plaintext_map",
-            severity: Severity::Critical,
+            severity: Severity::High,
             kind: Kind::Pii,
+            // A whole pseudonymize token (13-26 base32 chars for 64-128 bit
+            // widths, word-bounded so identifiers like `email_template` do not
+            // match) on the same line as a real email or a delimited phone.
             re: Regex::new(
-                r"(?:email_|phone_|name_)[a-z2-7]{8,}.{0,240}(?:[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}|\+?[0-9][0-9\-() ]{7,})|(?:[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}|\+?[0-9][0-9\-() ]{7,}).{0,240}(?:email_|phone_|name_)[a-z2-7]{8,}",
+                r"\b(?:email|phone|name)_[a-z2-7]{13,26}\b[^\n]{0,240}?(?:[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}|\+[1-9][0-9]{7,14}\b|0[0-9]{1,4}-[0-9]{1,4}-[0-9]{4}\b)|(?:[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}|\+[1-9][0-9]{7,14}\b|0[0-9]{1,4}-[0-9]{1,4}-[0-9]{4}\b)[^\n]{0,240}?\b(?:email|phone|name)_[a-z2-7]{13,26}\b",
             )
             .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible plaintext restore map (token plus original value)",
-            confidence: 0.92,
+            confidence: 0.8,
             validator: None,
         },
         CompiledRule {
@@ -2433,20 +2436,33 @@ jobs:
     #[test]
     fn detects_plaintext_restore_map_on_one_line() {
         let cfg = RuleEngineConfig::default();
-        let token = ["email_", "abcdefgh"].concat();
+        let token = ["email_", "abcdefghijklm"].concat();
         let addr = ["ada", "@", "example.com"].concat();
-        let leaked = format!("{token} {addr}");
-        let m = scan_content(&leaked, "map.json", &cfg);
-        assert!(
-            m.iter().any(|x| x.rule_id == "pii.shk_plaintext_map"),
-            "{m:?}"
-        );
-        let token_only = scan_content(&token, "tokens.txt", &cfg);
-        assert!(
-            !token_only
+        let hits = |text: &str| {
+            scan_content(text, "map.json", &cfg)
                 .iter()
-                .any(|x| x.rule_id == "pii.shk_plaintext_map"),
-            "{token_only:?}"
+                .filter(|x| x.rule_id == "pii.shk_plaintext_map")
+                .count()
+        };
+        assert_eq!(hits(&format!("{token} {addr}")), 1);
+        assert_eq!(hits(&format!("{addr}\t{token}")), 1);
+        assert_eq!(hits(&format!("{token}, 090-1234-5678")), 1);
+        // Tokens alone, identifiers that merely start with a prefix, and
+        // numbers that are not delimited phones must stay quiet.
+        assert_eq!(hits(&token), 0);
+        assert_eq!(hits("email_template_id = 12345678"), 0);
+        assert_eq!(hits("email_verified_at = 1694412345"), 0);
+        assert_eq!(
+            hits(&format!("let user_email_verified = true; // {addr}")),
+            0
+        );
+        assert_eq!(hits(&format!("email_provider = \"{addr}\"")), 0);
+        assert_eq!(hits("name_validator = \"2024-01-01 12:00:00\""), 0);
+        // 26 base32 characters is a 128-bit token; 27 is not a token at all.
+        assert_eq!(hits(&format!("email_abcdefghijklmnopqrstuvwxyz {addr}")), 1);
+        assert_eq!(
+            hits(&format!("email_abcdefghijklmnopqrstuvwxyz2 {addr}")),
+            0
         );
     }
 

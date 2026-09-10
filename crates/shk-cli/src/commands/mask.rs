@@ -49,9 +49,11 @@ pub fn run(inv: MaskInvocation) -> Result<()> {
         || inv.map.is_some()
         || inv.check_remaining
     {
-        bail!(
-            "`--yes`, `--dry-run`, `--columns`, `--no-header`, `--no-create-key`, `--mode`, `--format`, `--sheet`, `--map`, and `--check-remaining` require `--pseudonymize`"
-        );
+        return Err(CliExit::message(
+            2,
+            "`--yes`, `--dry-run`, `--columns`, `--no-header`, `--no-create-key`, `--mode`, `--format`, `--sheet`, `--map`, and `--check-remaining` require `--pseudonymize`",
+        )
+        .into());
     }
     if let Some(tool) = inv.hook_mode {
         if inv.file.is_some() || inv.output.is_some() || inv.json {

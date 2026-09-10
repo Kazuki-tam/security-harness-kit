@@ -14,15 +14,15 @@ pub use apply::{
     CellAction, MapCollector, RestoreMapDocument, apply_cell, replacement_text, resolve_rule_kind,
 };
 pub use columns::{
-    ColumnOverrides, ColumnPlan, ColumnSource, ResolvedColumn, infer_header, parse_columns_spec,
+    ColumnOverrides, ColumnSource, ResolvedColumn, infer_header, parse_columns_spec,
     resolve_columns,
 };
 pub use derive::{KeyMaterial, fingerprint, parse_stored_material, token};
 pub use kind::{Kind, ParseKindError};
-pub use map::{decrypt_map, encrypt_map, restore_text};
-pub use normalize::{NormalizeOutcome, NormalizeSettings, normalize_value};
+pub use map::{RestoreOutcome, TokenIndex, decrypt_map, encrypt_map, restore_table, restore_text};
+pub use normalize::{NormalizeOutcome, NormalizeSettings, is_missing_raw, normalize_value};
 pub use table::{
-    PseudonymizeJson, PseudonymizeMeta, TableOptions, TableResult, delimiter_for_path, run_table,
+    MetaColumn, PseudonymizeMeta, TableOptions, TableResult, delimiter_for_path, run_table,
 };
 pub use text::{TextOptions, TextResult, run_office_text, run_text};
 pub use xlsx::run_xlsx;
@@ -50,4 +50,19 @@ pub fn validate_norm(norm: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validators_reject_unknown_norm_and_bad_widths() {
+        assert!(validate_norm(NORM_V1).is_ok());
+        assert!(validate_norm("v2").unwrap_err().contains("v2"));
+        assert!(validate_token_bits(64).is_ok());
+        assert!(validate_token_bits(72).is_ok());
+        assert!(validate_token_bits(70).is_err());
+        assert!(validate_token_bits(136).is_err());
+    }
 }

@@ -9,6 +9,8 @@ pub enum ColumnSource {
     Config,
     Cli,
     Inferred,
+    /// Text mode: the kind came from a detection rule, not a column.
+    Rule,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -19,12 +21,6 @@ pub struct ResolvedColumn {
     pub source: ColumnSource,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub match_rate: Option<f64>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ColumnPlan {
-    pub has_header: bool,
-    pub columns: Vec<ResolvedColumn>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -96,9 +92,11 @@ pub fn resolve_columns(
     }
 
     let mut resolved = Vec::new();
+    let mut matched_explicit = std::collections::BTreeSet::new();
     for (index, header) in headers.iter().enumerate() {
         let key = normalize_header_key(header);
         if let Some((kind, source)) = explicit.get(&key) {
+            matched_explicit.insert(key);
             resolved.push(ResolvedColumn {
                 index,
                 name: header.clone(),
@@ -117,6 +115,23 @@ pub fn resolve_columns(
                 match_rate: Some(rate),
             });
         }
+    }
+    // Config columns are project-wide and may not apply to every file, but a
+    // CLI entry that matches nothing is almost certainly a typo.
+    let unmatched: Vec<&str> = cli
+        .map(|cli| {
+            cli.entries
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .filter(|name| !matched_explicit.contains(&normalize_header_key(name)))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !unmatched.is_empty() {
+        return Err(format!(
+            "--columns entries did not match any header: {}",
+            unmatched.join(", ")
+        ));
     }
     Ok(resolved)
 }
@@ -162,14 +177,7 @@ fn infer_column(header: &str, index: usize, sample_rows: &[Vec<String>]) -> Opti
 }
 
 fn cell_is_missing(cell: &str) -> bool {
-    matches!(
-        super::normalize_value(
-            &Kind::Custom("probe".into()),
-            cell,
-            super::NormalizeSettings::default()
-        ),
-        super::NormalizeOutcome::Missing
-    )
+    super::normalize::is_missing_raw(cell)
 }
 
 fn classify_cell(value: &str) -> Option<Kind> {
@@ -194,11 +202,9 @@ fn classify_cell(value: &str) -> Option<Kind> {
 fn pii_config() -> RuleEngineConfig {
     RuleEngineConfig {
         secrets: false,
-        pii: true,
-        pii_languages: vec!["en".into(), "ja".into()],
         env: false,
-        internal_terms: false,
         ai_context: false,
+        ..RuleEngineConfig::default()
     }
 }
 
@@ -259,6 +265,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_columns_reports_malformed_entries() {
+        assert!(parse_columns_spec("Email").is_err());
+        assert!(parse_columns_spec(":email").is_err());
+        assert!(parse_columns_spec("").is_err());
+        assert!(parse_columns_spec(" , ").is_err());
+        assert!(parse_columns_spec("Email:bogus").is_err());
+        assert_eq!(parse_columns_spec("Email:email,").unwrap().entries.len(), 1);
+        assert!(infer_header(&[], INFER_MATCH_THRESHOLD));
+        assert!(!infer_header(
+            &[["ada", "@", "example.com"].concat()],
+            INFER_MATCH_THRESHOLD
+        ));
+    }
+
+    #[test]
     fn explicit_columns_win_over_inference() {
         let headers = vec!["contact".into(), "phone".into()];
         let rows = vec![vec![
@@ -272,6 +293,20 @@ mod tests {
         assert_eq!(resolved[0].source, ColumnSource::Config);
         assert_eq!(resolved[1].kind, Kind::Phone);
         assert_eq!(resolved[1].source, ColumnSource::Inferred);
+    }
+
+    #[test]
+    fn unmatched_cli_columns_are_rejected_but_config_columns_are_not() {
+        let headers = vec!["Email".into()];
+        let rows: Vec<Vec<String>> = Vec::new();
+        let cli = parse_columns_spec("Emial:email").unwrap();
+        let err = resolve_columns(&headers, &rows, &BTreeMap::new(), Some(&cli)).unwrap_err();
+        assert!(err.contains("Emial"), "{err}");
+        let mut config = BTreeMap::new();
+        config.insert("Phone".into(), "phone".into());
+        let resolved = resolve_columns(&headers, &rows, &config, None).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].source, ColumnSource::Inferred);
     }
 
     #[test]

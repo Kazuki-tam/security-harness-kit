@@ -173,6 +173,14 @@ struct PathFilters {
     include: Option<GlobSet>,
 }
 
+/// Whether the policy's `[scan]` include / exclude patterns would skip `rel`,
+/// a policy-root-relative path using `/` separators. `scan_path` reports an
+/// excluded single-file target as scanned with no findings, so callers that
+/// need "was this file actually inspected" must ask first.
+pub fn path_is_excluded(policy: &Policy, rel: &str) -> Result<bool> {
+    Ok(!PathFilters::from_policy(policy)?.allows(rel))
+}
+
 impl PathFilters {
     fn from_policy(policy: &Policy) -> Result<Self> {
         Ok(Self {
