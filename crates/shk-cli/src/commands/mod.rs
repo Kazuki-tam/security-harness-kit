@@ -9,6 +9,7 @@ pub mod env;
 pub mod init;
 pub mod mask;
 pub mod mcp;
+pub mod pseudonymize;
 pub mod scan;
 pub mod secrets;
 pub mod skills;

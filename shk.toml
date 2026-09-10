@@ -167,6 +167,14 @@ path = "crates/shk-core/src/masker.rs"
 reason = "Example email in masker tests"
 
 [[allowlist]]
+path = "crates/shk-core/src/pseudonymize/**"
+reason = "Synthetic values in pseudonymize unit tests"
+
+[[allowlist]]
+path = "crates/shk-cli/src/commands/pseudonymize.rs"
+reason = "Synthetic values in pseudonymize command tests"
+
+[[allowlist]]
 rule_id = "pii.en.name"
 path = "crates/shk-cli/src/commands/ci.rs"
 reason = "Synthetic name-like labels in CI command tests"

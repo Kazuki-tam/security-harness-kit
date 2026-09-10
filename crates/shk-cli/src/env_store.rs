@@ -20,6 +20,7 @@ const DOTENVX_SERVICE: &str = "security-harness-kit/dotenvx";
 const DOTENVX_INDEX_KEY: &str = "__index";
 const KEYRING_TRANSACTION_KEY: &str = "__transaction_v1";
 const SHK_ENV_SERVICE: &str = "security-harness-kit/env";
+const SHK_PSEUDONYMIZE_SERVICE: &str = "security-harness-kit/pseudonymize";
 const SHK_OP_PATH_ENV: &str = "SHK_OP_PATH";
 const MIN_OP_VERSION: &str = "2.24.0";
 const OP_TAG: &str = "shk";
@@ -35,6 +36,7 @@ const SECRET_STORE_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 pub enum StoreKind {
     NativeEnv,
     Dotenvx,
+    Pseudonymize,
 }
 
 impl StoreKind {
@@ -42,6 +44,7 @@ impl StoreKind {
         match self {
             Self::NativeEnv => "env",
             Self::Dotenvx => "dotenvx",
+            Self::Pseudonymize => "pseudonymize",
         }
     }
 }
@@ -281,6 +284,42 @@ pub struct EnvStores {
     pub backend: SecretStoreBackend,
 }
 
+pub fn open_pseudonymize_store(
+    project: &ProjectIdentity,
+    policy: &Policy,
+) -> Result<(Box<dyn SecretStore>, SecretStoreBackend)> {
+    policy.validate_env_config(&project.root)?;
+    let backend = policy
+        .env
+        .secret_store
+        .parse()
+        .map_err(anyhow::Error::msg)?;
+    match backend {
+        SecretStoreBackend::Keyring => Ok((
+            Box::new(KeyringSecretStore::new(StoreKind::Pseudonymize)),
+            backend,
+        )),
+        SecretStoreBackend::OnePassword => {
+            let vault = policy
+                .env
+                .onepassword
+                .vault
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| anyhow!("env.onepassword.vault is required"))?;
+            let client = Arc::new(OnePasswordClient::new(resolve_op_path()?, vault)?);
+            Ok((
+                Box::new(OnePasswordSecretStore::new(
+                    StoreKind::Pseudonymize,
+                    client,
+                    project.root.clone(),
+                )),
+                backend,
+            ))
+        }
+    }
+}
+
 pub fn open_env_stores(project: &ProjectIdentity, policy: &Policy) -> Result<EnvStores> {
     policy.validate_env_config(&project.root)?;
     let backend = policy
@@ -375,6 +414,7 @@ impl KeyringSecretStore {
         let service = match kind {
             StoreKind::NativeEnv => SHK_ENV_SERVICE,
             StoreKind::Dotenvx => DOTENVX_SERVICE,
+            StoreKind::Pseudonymize => SHK_PSEUDONYMIZE_SERVICE,
         };
         Self { service }
     }

@@ -143,6 +143,32 @@ pub enum Commands {
         /// Post-tool hook inbound masking mode.
         #[arg(long)]
         post: bool,
+        /// Replace selected PII with deterministic tokens instead of [REDACTED].
+        #[arg(long)]
+        pseudonymize: bool,
+        /// Accept inferred columns / key creation without prompting.
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Show the column plan without writing files or creating a key.
+        #[arg(long)]
+        dry_run: bool,
+        /// Override [pseudonymize.columns], e.g. Email:email,Tel:phone.
+        #[arg(long, value_name = "SPEC")]
+        columns: Option<String>,
+        /// Treat the first row as data, not a header.
+        #[arg(long)]
+        no_header: bool,
+        /// Fail if this project has no pseudonymize key yet.
+        #[arg(long)]
+        no_create_key: bool,
+        /// Force table or text handling. text arrives in shk 0.8.0.
+        #[arg(long, value_enum)]
+        mode: Option<PseudonymizeModeArg>,
+    },
+    /// Manage deterministic pseudonymization keys and restore maps
+    Pseudonymize {
+        #[command(subcommand)]
+        cmd: PseudonymizeCmd,
     },
     /// Scan or mask the OS clipboard text
     Clipboard {
@@ -279,6 +305,48 @@ pub enum ClipboardCmd {
         /// Minimum finding severity to mask.
         #[arg(long, value_enum, value_name = "SEVERITY")]
         min_severity: Option<SeverityArg>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum PseudonymizeModeArg {
+    Table,
+    Text,
+}
+
+#[derive(Subcommand)]
+pub enum PseudonymizeCmd {
+    /// Show, rotate, delete, or hand off the project pseudonymize key
+    Key {
+        #[command(subcommand)]
+        cmd: PseudonymizeKeyCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PseudonymizeKeyCmd {
+    /// Show the key fingerprint and store backend (never the raw material)
+    Show,
+    /// Replace the project key. Existing tokens become unlinkable.
+    Rotate {
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    /// Delete the project key
+    Delete {
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    /// Print team handoff instructions without printing raw material
+    Export {
+        #[arg(long)]
+        instructions: bool,
+    },
+    /// Import material from stdin into the configured store
+    Import {
+        #[arg(long)]
+        stdin: bool,
     },
 }
 
@@ -1078,6 +1146,59 @@ mod tests {
         };
 
         assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn mask_pseudonymize_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "shk",
+            "mask",
+            "orders.csv",
+            "--pseudonymize",
+            "--yes",
+            "--dry-run",
+            "--columns",
+            "Email:email",
+            "--no-header",
+            "--no-create-key",
+            "--mode",
+            "table",
+        ])
+        .expect("pseudonymize flags should parse");
+        let Commands::Mask {
+            pseudonymize,
+            yes,
+            dry_run,
+            columns,
+            no_header,
+            no_create_key,
+            mode,
+            ..
+        } = cli.command
+        else {
+            panic!("expected mask command");
+        };
+        assert!(pseudonymize);
+        assert!(yes);
+        assert!(dry_run);
+        assert_eq!(columns.as_deref(), Some("Email:email"));
+        assert!(no_header);
+        assert!(no_create_key);
+        assert_eq!(mode, Some(PseudonymizeModeArg::Table));
+    }
+
+    #[test]
+    fn pseudonymize_key_show_parses() {
+        let cli = Cli::try_parse_from(["shk", "pseudonymize", "key", "show"])
+            .expect("key show should parse");
+        assert!(matches!(
+            cli.command,
+            Commands::Pseudonymize {
+                cmd: PseudonymizeCmd::Key {
+                    cmd: PseudonymizeKeyCmd::Show
+                }
+            }
+        ));
     }
 }
 

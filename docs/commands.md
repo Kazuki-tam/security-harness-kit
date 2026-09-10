@@ -300,6 +300,15 @@ Options:
 | `--min-severity <severity>` | Override `[mask].min_severity` for this run. Defaults to `medium`. |
 | `--hook-mode <tool>` | Read a hook payload from stdin and print tool-specific masked hook output. |
 | `--post` | Post-tool hook mode. Requires `--hook-mode <tool>`. |
+| `--pseudonymize` | Replace selected table columns with deterministic HMAC tokens instead of `[REDACTED]`. Requires `--output` unless `--dry-run`. CSV/TSV in this release. |
+| `--columns <SPEC>` | With `--pseudonymize`, set `Name:kind` pairs (example: `Email:email,Phone:phone`). |
+| `--yes` | With `--pseudonymize`, skip confirmation prompts (required in non-TTY environments when a key must be created or columns are inferred). |
+| `--dry-run` | With `--pseudonymize`, print the column plan and do not write files or create a key. |
+| `--no-header` | With `--pseudonymize`, treat the first row as data and address columns as `0`, `1`, … |
+| `--no-create-key` | With `--pseudonymize`, fail if this project has no key yet. |
+| `--mode table\|text` | Override input classification. `text` arrives in shk 0.8.0. |
+
+Cannot be combined with `--pseudonymize`: `--hook-mode`, `--min-severity`, `--redaction`.
 
 When no `FILE` is provided, `shk mask` reads stdin until EOF. In an interactive
 terminal, run it with input redirection (`shk mask < prompt.txt`) or provide a
@@ -310,6 +319,17 @@ file path (`shk mask prompt.txt`).
 Office document masking supports `.docx`, `.xlsx`, and `.pptx` files and always requires `--output` so the original document is left unchanged. JSON output reports `[DOCUMENT_WRITTEN]` as `masked_content` and includes findings from the rewritten document. PDF masking is not supported; use `shk scan` to detect text-layer PDF findings and convert or redact PDFs with a dedicated PDF tool.
 
 Office output is transactional: `shk` finalizes and syncs a sibling temporary archive before replacing `--output`. ZIP entry count and expanded sizes are bounded to prevent compressed documents from exhausting memory or disk.
+
+`--pseudonymize` writes `<output>.shk-meta.json` beside the output. The sidecar records norm version, token width, key fingerprint, column kinds, and counts. It never includes original values or tokens. Tokens are project-local: the same input yields the same token only when the same stored key and salt are used. Rotate or delete the key when a project ends (`shk pseudonymize key rotate` / `delete`).
+
+```bash
+shk mask orders.csv --pseudonymize --columns "Email:email,Phone:phone" --output orders.pseudo.csv
+shk mask orders.csv --pseudonymize --dry-run
+shk pseudonymize key show
+shk pseudonymize key export --instructions
+```
+
+UTF-8 is required. Non-UTF-8 input (including Shift_JIS) exits 2 with a conversion hint. Output is still personal data for anyone who holds the key; confirm the receiving AI service's retention and training terms before upload.
 
 ## `shk clipboard`
 

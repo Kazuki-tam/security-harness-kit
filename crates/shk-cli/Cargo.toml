@@ -39,6 +39,7 @@ toml_edit.workspace = true
 ureq.workspace = true
 zeroize.workspace = true
 sha2.workspace = true
+getrandom.workspace = true
 tempfile.workspace = true
 libc.workspace = true
 dotenvx.workspace = true

@@ -6038,3 +6038,164 @@ fn skills_install_windsurf_uses_windsurf_skills_dir() {
         "windsurf skill should be written to .windsurf/skills/shk/SKILL.md"
     );
 }
+
+#[test]
+fn mask_pseudonymize_requires_output() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::write(dir.path().join("orders.csv"), "Email\nada@example.com\n").unwrap();
+    let out = Command::new(shk_bin())
+        .args([
+            "mask",
+            "orders.csv",
+            "--pseudonymize",
+            "--columns",
+            "Email:email",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("mask pseudonymize");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mask_pseudonymize_rejects_hook_mode_and_severity() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::write(dir.path().join("orders.csv"), "Email\n").unwrap();
+    for extra in ["--hook-mode", "--min-severity", "--redaction"] {
+        let mut args = vec![
+            "mask",
+            "orders.csv",
+            "--pseudonymize",
+            "--output",
+            "out.csv",
+        ];
+        match extra {
+            "--hook-mode" => args.extend(["--hook-mode", "cursor"]),
+            "--min-severity" => args.extend(["--min-severity", "high"]),
+            "--redaction" => args.extend(["--redaction", "match"]),
+            _ => unreachable!(),
+        }
+        let out = Command::new(shk_bin())
+            .args(&args)
+            .current_dir(dir.path())
+            .output()
+            .expect("mask conflict");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{extra} stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn mask_pseudonymize_dry_run_lists_columns_without_output() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::write(
+        dir.path().join("orders.csv"),
+        "Email,Note\nada@example.com,keep\n",
+    )
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .args([
+            "mask",
+            "orders.csv",
+            "--pseudonymize",
+            "--dry-run",
+            "--columns",
+            "Email:email",
+            "--json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("dry-run");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"dry_run\": true"), "{stdout}");
+    assert!(stdout.contains("email"), "{stdout}");
+    assert!(!stdout.contains("masked_content"), "{stdout}");
+    assert!(!dir.path().join("orders.csv.shk-meta.json").exists());
+}
+
+#[test]
+fn mask_pseudonymize_rejects_non_utf8() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::write(dir.path().join("orders.csv"), [0x82, 0xa0, b'\n']).unwrap();
+    let out = Command::new(shk_bin())
+        .args([
+            "mask",
+            "orders.csv",
+            "--pseudonymize",
+            "--dry-run",
+            "--columns",
+            "0:email",
+            "--no-header",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("non-utf8");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("UTF-8"), "{stderr}");
+}
+
+#[test]
+fn mask_pseudonymize_rejects_xlsx_in_phase1a() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::write(dir.path().join("book.xlsx"), "not-a-real-xlsx").unwrap();
+    let out = Command::new(shk_bin())
+        .args([
+            "mask",
+            "book.xlsx",
+            "--pseudonymize",
+            "--output",
+            "out.xlsx",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("xlsx");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn existing_mask_without_pseudonymize_still_prints_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    std::fs::write(dir.path().join("prompt.txt"), "hello world\n").unwrap();
+    let out = Command::new(shk_bin())
+        .args(["mask", "prompt.txt"])
+        .current_dir(dir.path())
+        .output()
+        .expect("plain mask");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hello world\n");
+}

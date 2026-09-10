@@ -411,6 +411,8 @@ pub struct Policy {
     pub env: EnvSection,
     #[serde(default)]
     pub secrets: SecretsSection,
+    #[serde(default)]
+    pub pseudonymize: PseudonymizeSection,
     /// Path-based / hash-based suppression (also see inline `# shk-ignore` in scanner).
     #[serde(default)]
     pub allowlist: Vec<AllowlistEntry>,
@@ -502,6 +504,41 @@ impl Default for EnvSection {
 pub struct OnePasswordSection {
     #[serde(default)]
     pub vault: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PseudonymizeSection {
+    #[serde(default = "default_pseudonymize_norm")]
+    pub norm: String,
+    #[serde(default = "default_token_bits")]
+    pub token_bits: u16,
+    #[serde(default)]
+    pub email_strip_subaddress: bool,
+    #[serde(default)]
+    pub columns: BTreeMap<String, String>,
+    /// Reserved for text-mode rule overrides (Phase 1b). Ignored in 0.7.0.
+    #[serde(default)]
+    pub rules: BTreeMap<String, String>,
+}
+
+fn default_pseudonymize_norm() -> String {
+    "v1".into()
+}
+
+fn default_token_bits() -> u16 {
+    64
+}
+
+impl Default for PseudonymizeSection {
+    fn default() -> Self {
+        Self {
+            norm: default_pseudonymize_norm(),
+            token_bits: default_token_bits(),
+            email_strip_subaddress: false,
+            columns: BTreeMap::new(),
+            rules: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -1027,6 +1064,38 @@ pattern = "ProjectNebula"
                 .ignore
                 .effective_required_patterns()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn pseudonymize_defaults_and_overrides_parse() {
+        let defaulted: Policy = toml::from_str("").unwrap();
+        assert_eq!(defaulted.pseudonymize.norm, "v1");
+        assert_eq!(defaulted.pseudonymize.token_bits, 64);
+        assert!(!defaulted.pseudonymize.email_strip_subaddress);
+        assert!(defaulted.pseudonymize.columns.is_empty());
+
+        let overridden: Policy = toml::from_str(
+            r#"[pseudonymize]
+norm = "v1"
+token_bits = 80
+email_strip_subaddress = true
+
+[pseudonymize.columns]
+"Email" = "email"
+"Member ID" = "custom:member_id"
+"#,
+        )
+        .unwrap();
+        assert_eq!(overridden.pseudonymize.token_bits, 80);
+        assert!(overridden.pseudonymize.email_strip_subaddress);
+        assert_eq!(
+            overridden
+                .pseudonymize
+                .columns
+                .get("Email")
+                .map(String::as_str),
+            Some("email")
         );
     }
 
