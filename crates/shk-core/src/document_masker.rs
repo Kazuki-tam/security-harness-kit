@@ -736,65 +736,12 @@ fn split_masked_text(masked: &str, original_lengths: &[usize]) -> Vec<String> {
 /// Parse an Office document exactly as `rewrite_ooxml_text_groups` would,
 /// without writing anything, so a dry run reports structural problems early.
 pub fn validate_ooxml_text_document(input: &Path, max_file_size_bytes: u64) -> Result<()> {
-    let format = OoxmlFormat::from_path(&input.to_string_lossy()).ok_or_else(|| {
-        anyhow::anyhow!(
-            "unsupported Office document for text rewrite: {}",
-            input.display()
-        )
-    })?;
-    let input_file =
-        File::open(input).with_context(|| format!("open input document {}", input.display()))?;
-    let mut archive = ZipArchive::new(input_file)
-        .with_context(|| format!("read {} zip container", format.label))?;
-    if archive.by_name(format.required_entry).is_err() {
-        bail!(
-            "unsupported {}: missing {}",
-            format.label,
-            format.required_entry
-        );
-    }
-    ensure_archive_entry_limit(archive.len())?;
-    let limits = ooxml_read_limits(max_file_size_bytes);
-    let mut declared_total = 0u64;
-    let mut actual_total = 0u64;
-    for idx in 0..archive.len() {
-        let mut entry = archive
-            .by_index(idx)
-            .with_context(|| format!("read zip entry {idx}"))?;
-        let name = entry.name().to_string();
-        declared_total = declared_total
-            .checked_add(entry.size())
-            .context("Office document expanded size overflow")?;
-        if declared_total > limits.total_bytes {
-            bail!(
-                "Office document expanded size exceeds limit ({} bytes)",
-                limits.total_bytes
-            );
-        }
-        if entry.is_dir() {
-            continue;
-        }
-        if (format.should_mask_entry)(&name) {
-            let remaining = limits.total_bytes.saturating_sub(actual_total);
-            let mut bytes =
-                read_entry_bounded(&mut entry, limits.entry_bytes.min(remaining), &name)?;
-            actual_total = actual_total
-                .checked_add(bytes.len() as u64)
-                .context("Office document expanded size overflow")?;
-            rewrite_xml_text_groups(&bytes, format.text_group, &mut |text| Ok(text.to_string()))
-                .with_context(|| format!("validate XML entry {name}"))?;
-            bytes.zeroize();
-        } else {
-            copy_entry_bounded(
-                &mut entry,
-                &mut std::io::sink(),
-                &mut actual_total,
-                limits.total_bytes,
-                &name,
-            )?;
-        }
-    }
-    Ok(())
+    process_ooxml_text_groups(
+        input,
+        None,
+        max_file_size_bytes,
+        |text| Ok(text.to_string()),
+    )
 }
 
 /// Rewrite each OOXML text group (paragraph / shared string) by concatenating
@@ -804,6 +751,19 @@ pub fn rewrite_ooxml_text_groups(
     input: &Path,
     output: &Path,
     max_file_size_bytes: u64,
+    transform: impl FnMut(&str) -> Result<String>,
+) -> Result<()> {
+    process_ooxml_text_groups(input, Some(output), max_file_size_bytes, transform)
+}
+
+/// Shared walk for validating and rewriting: every entry is read under the
+/// same limits and every text part goes through `transform`; only when
+/// `output` is given are the results written to a sibling temp file that
+/// atomically replaces the destination.
+fn process_ooxml_text_groups(
+    input: &Path,
+    output: Option<&Path>,
+    max_file_size_bytes: u64,
     mut transform: impl FnMut(&str) -> Result<String>,
 ) -> Result<()> {
     let format = OoxmlFormat::from_path(&input.to_string_lossy()).ok_or_else(|| {
@@ -812,7 +772,9 @@ pub fn rewrite_ooxml_text_groups(
             input.display()
         )
     })?;
-    if paths_refer_to_same_target(input, output)? {
+    if let Some(output) = output
+        && paths_refer_to_same_target(input, output)?
+    {
         bail!("--output must not be the same as input for Office document rewriting");
     }
 
@@ -827,21 +789,10 @@ pub fn rewrite_ooxml_text_groups(
             format.required_entry
         );
     }
-
     ensure_archive_entry_limit(archive.len())?;
     let limits = ooxml_read_limits(max_file_size_bytes);
 
-    let output_parent = output
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let output_file = NamedTempFile::new_in(output_parent)
-        .with_context(|| format!("create temporary output in {}", output_parent.display()))?;
-    if let Ok(metadata) = std::fs::metadata(output) {
-        std::fs::set_permissions(output_file.path(), metadata.permissions())
-            .with_context(|| format!("preserve output permissions for {}", output.display()))?;
-    }
-    let mut writer = ZipWriter::new(output_file);
+    let mut writer = output.map(open_ooxml_output).transpose()?;
     let mut declared_total = 0u64;
     let mut actual_total = 0u64;
 
@@ -863,15 +814,18 @@ pub fn rewrite_ooxml_text_groups(
         }
 
         if entry.is_dir() {
-            writer
-                .add_directory(&name, options)
-                .with_context(|| format!("write directory entry {name}"))?;
+            if let Some(writer) = writer.as_mut() {
+                writer
+                    .add_directory(&name, options)
+                    .with_context(|| format!("write directory entry {name}"))?;
+            }
             continue;
         }
-
-        writer
-            .start_file(&name, options)
-            .with_context(|| format!("write zip entry {name}"))?;
+        if let Some(writer) = writer.as_mut() {
+            writer
+                .start_file(&name, options)
+                .with_context(|| format!("write zip entry {name}"))?;
+        }
 
         if (format.should_mask_entry)(&name) {
             let remaining = limits.total_bytes.saturating_sub(actual_total);
@@ -892,13 +846,23 @@ pub fn rewrite_ooxml_text_groups(
                     limits.total_bytes
                 );
             }
-            writer
-                .write_all(&rewritten)
-                .with_context(|| format!("write rewritten XML entry {name}"))?;
+            if let Some(writer) = writer.as_mut() {
+                writer
+                    .write_all(&rewritten)
+                    .with_context(|| format!("write rewritten XML entry {name}"))?;
+            }
+        } else if let Some(writer) = writer.as_mut() {
+            copy_entry_bounded(
+                &mut entry,
+                writer,
+                &mut actual_total,
+                limits.total_bytes,
+                &name,
+            )?;
         } else {
             copy_entry_bounded(
                 &mut entry,
-                &mut writer,
+                &mut std::io::sink(),
                 &mut actual_total,
                 limits.total_bytes,
                 &name,
@@ -906,15 +870,32 @@ pub fn rewrite_ooxml_text_groups(
         }
     }
 
-    let output_file = writer
-        .finish()
-        .with_context(|| format!("finish output {} zip container", format.label))?;
-    output_file
-        .as_file()
-        .sync_all()
-        .with_context(|| format!("sync output document {}", output.display()))?;
-    persist_named_temp_file(output_file, output)?;
+    if let (Some(writer), Some(output)) = (writer, output) {
+        let output_file = writer
+            .finish()
+            .with_context(|| format!("finish output {} zip container", format.label))?;
+        output_file
+            .as_file()
+            .sync_all()
+            .with_context(|| format!("sync output document {}", output.display()))?;
+        persist_named_temp_file(output_file, output)?;
+    }
     Ok(())
+}
+
+/// Sibling temp file for `output`, inheriting its permissions when it exists.
+fn open_ooxml_output(output: &Path) -> Result<ZipWriter<NamedTempFile>> {
+    let output_parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let output_file = NamedTempFile::new_in(output_parent)
+        .with_context(|| format!("create temporary output in {}", output_parent.display()))?;
+    if let Ok(metadata) = std::fs::metadata(output) {
+        std::fs::set_permissions(output_file.path(), metadata.permissions())
+            .with_context(|| format!("preserve output permissions for {}", output.display()))?;
+    }
+    Ok(ZipWriter::new(output_file))
 }
 
 fn rewrite_xml_text_groups(
