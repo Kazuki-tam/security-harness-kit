@@ -4,7 +4,7 @@ use super::columns::{
 };
 use super::derive::KeyMaterial;
 use super::normalize::NormalizeSettings;
-use super::{INFER_MATCH_THRESHOLD, INFER_SAMPLE_ROWS, validate_norm, validate_token_bits};
+use super::{INFER_SAMPLE_ROWS, validate_norm, validate_token_bits};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -99,7 +99,7 @@ pub fn run_table<R: Read, W: Write>(
     let has_header = if options.no_header {
         false
     } else {
-        infer_header(&first_row, INFER_MATCH_THRESHOLD)
+        infer_header(&first_row)
     };
 
     let (headers, mut pending_rows) = if has_header {
@@ -387,6 +387,28 @@ mod tests {
         assert_eq!(result.columns[0].kind, Kind::Email);
         assert_eq!(result.columns[0].name, "Email");
         assert_eq!(result.meta.rows_processed, (INFER_SAMPLE_ROWS + 5) as u64);
+    }
+
+    #[test]
+    fn sparse_pii_in_first_data_row_is_not_copied_as_a_header() {
+        let material = material();
+        let opts = options("1:email", false);
+        let email = ["ada", "@", "example.com"].concat();
+        let input = format!("row-1,{email},keep,ordinary\nrow-2,{email},keep,ordinary\n");
+        let mut out = Vec::new();
+        let result = run_table(
+            input.as_bytes(),
+            Some(&mut out),
+            &opts,
+            Some(&material),
+            None,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(!result.has_header);
+        assert_eq!(result.meta.rows_processed, 2);
+        assert!(!text.contains(&email), "{text}");
+        assert_eq!(text.matches("email_").count(), 2);
     }
 
     #[test]

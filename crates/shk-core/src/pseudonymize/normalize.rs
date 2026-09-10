@@ -63,7 +63,7 @@ fn normalize_email(value: &str, strip_subaddress: bool) -> NormalizeOutcome {
     let Some((local, domain)) = lowered.split_once('@') else {
         return NormalizeOutcome::Unparsed;
     };
-    if local.is_empty() || !valid_email_domain(domain) {
+    if !valid_email_local(local) || !valid_email_domain(domain) {
         return NormalizeOutcome::Unparsed;
     }
     let local = if strip_subaddress {
@@ -77,19 +77,66 @@ fn normalize_email(value: &str, strip_subaddress: bool) -> NormalizeOutcome {
     NormalizeOutcome::Value(format!("{local}@{domain}"))
 }
 
+fn valid_email_local(local: &str) -> bool {
+    !local.is_empty()
+        && local.len() <= 64
+        && !local.starts_with('.')
+        && !local.ends_with('.')
+        && !local.contains("..")
+        && local.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'.' | b'!'
+                        | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'/'
+                        | b'='
+                        | b'?'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'{'
+                        | b'|'
+                        | b'}'
+                        | b'~'
+                )
+        })
+}
+
 fn valid_email_domain(domain: &str) -> bool {
-    let Some((head, tld)) = domain.rsplit_once('.') else {
+    let Some((_, tld)) = domain.rsplit_once('.') else {
         return false;
     };
-    !head.is_empty()
+    domain.len() <= 253
         && tld.len() >= 2
         && tld.bytes().all(|byte| byte.is_ascii_alphabetic())
-        && domain
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
 }
 
 fn normalize_phone(value: &str) -> NormalizeOutcome {
+    if !value.chars().enumerate().all(|(index, ch)| {
+        ch.is_ascii_digit()
+            || ch.is_ascii_whitespace()
+            || matches!(ch, '-' | '(' | ')')
+            || (index == 0 && ch == '+')
+    }) {
+        return NormalizeOutcome::Unparsed;
+    }
     let has_plus = value.starts_with('+');
     let digits: String = value.chars().filter(|ch| ch.is_ascii_digit()).collect();
     if has_plus {
@@ -271,6 +318,12 @@ mod tests {
             "ada@localhost",
             "ada@example.c0m",
             "ada@.com",
+            "ada@example..com",
+            "ada@-example.com",
+            "ada@example-.com",
+            "Ada Smith@example.com",
+            ".ada@example.com",
+            "ada..lovelace@example.com",
             "ada@exa_mple.com",
         ] {
             assert_eq!(email(raw), NormalizeOutcome::Unparsed, "{raw}");
@@ -292,6 +345,8 @@ mod tests {
     fn phone_rejects_garbage() {
         assert_eq!(phone("12345"), NormalizeOutcome::Unparsed);
         assert_eq!(phone("abcd"), NormalizeOutcome::Unparsed);
+        assert_eq!(phone("090ABC1234XYZ5678"), NormalizeOutcome::Unparsed);
+        assert_eq!(phone("+1abc4155552671"), NormalizeOutcome::Unparsed);
     }
 
     #[test]

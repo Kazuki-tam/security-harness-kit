@@ -508,6 +508,7 @@ pub struct OnePasswordSection {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PseudonymizeSection {
     #[serde(default = "default_pseudonymize_norm")]
     pub norm: String,
@@ -1100,6 +1101,7 @@ email_strip_subaddress = true
                 .map(String::as_str),
             Some("email")
         );
+        assert!(toml::from_str::<Policy>("[pseudonymize]\ntoken_bit = 128\n").is_err());
     }
 
     #[test]

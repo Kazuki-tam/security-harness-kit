@@ -89,6 +89,7 @@ fn mask_inner(args: MaskPseudonymizeArgs, open_store: StoreOpener<'_>) -> Result
 
     let kind = classify_input(args.file.as_deref(), args.mode, args.format)?;
     validate_mode_flags(&args, &kind)?;
+    validate_restore_compatible_output(&args, &kind)?;
 
     if args.file.is_none() {
         if io::stdin().is_terminal() {
@@ -623,6 +624,58 @@ fn validate_mode_flags(args: &MaskPseudonymizeArgs, kind: &InputKind) -> Result<
     Ok(())
 }
 
+fn validate_restore_compatible_output(args: &MaskPseudonymizeArgs, kind: &InputKind) -> Result<()> {
+    let (Some(_map), Some(output)) = (args.map.as_ref(), args.output.as_ref()) else {
+        return Ok(());
+    };
+    let output_ext = output
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default();
+    match kind {
+        InputKind::TableCsv => {
+            let expected = if table_delimiter(args, args.file.as_deref()) == b'\t' {
+                "tsv"
+            } else {
+                "csv"
+            };
+            if !output_ext.eq_ignore_ascii_case(expected) {
+                return Err(fail(format!(
+                    "reversible {expected} output requires a .{expected} --output path"
+                )));
+            }
+        }
+        InputKind::TableXlsx => {
+            if !output_ext.eq_ignore_ascii_case("xlsx") {
+                return Err(fail(
+                    "reversible xlsx output requires a .xlsx --output path",
+                ));
+            }
+        }
+        InputKind::TextOffice => {
+            let input_ext = args
+                .file
+                .as_deref()
+                .and_then(Path::extension)
+                .and_then(|ext| ext.to_str())
+                .unwrap_or_default();
+            if input_ext.is_empty() || !output_ext.eq_ignore_ascii_case(input_ext) {
+                return Err(fail(format!(
+                    "reversible Office output must keep the .{input_ext} extension"
+                )));
+            }
+        }
+        InputKind::TextPlain => {
+            if is_table_path(output) || is_office_path(output) {
+                return Err(fail(
+                    "reversible text output must not use a CSV/TSV/Office extension",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn parse_cli_columns(spec: Option<&str>) -> Result<Option<ColumnOverrides>> {
     spec.map(|spec| parse_columns_spec(spec).map_err(|err| fail(err.0)))
         .transpose()
@@ -825,6 +878,7 @@ fn check_remaining(project_root: &Path, policy: &Policy, output: &Path) -> Resul
         output,
         ScanOptions {
             policy_root: Some(project_root.to_path_buf()),
+            sensitive_check: true,
             ..Default::default()
         },
     )?;
@@ -1568,6 +1622,11 @@ mod tests {
         let mut text_dry = args(root, "notes.md", None);
         text_dry.dry_run = true;
         mask_with(text_dry, &open).unwrap();
+
+        std::fs::write(root.join("broken.docx"), b"not an Office archive").unwrap();
+        let mut office_dry = args(root, "broken.docx", None);
+        office_dry.dry_run = true;
+        assert_eq!(exit_code(mask_with(office_dry, &open).unwrap_err()), 2);
     }
 
     #[test]
@@ -1612,6 +1671,53 @@ mod tests {
             assert_eq!(exit_code(err), 2, "{policy}");
             assert!(message.contains(needle), "{policy}: {message}");
         }
+    }
+
+    #[test]
+    fn check_remaining_ignores_rule_and_suppression_bypasses() {
+        let card = ["4111", "1111", "1111", "1111"].join(" ");
+        for (policy_text, body) in [
+            ("[rules]\npii = false\nsecrets = false\n", card.clone()),
+            (
+                "[[allowlist]]\nrule_id = \"pii.credit_card\"\npath = \"out.txt\"\nreason = \"test\"\n",
+                card.clone(),
+            ),
+            (
+                "",
+                format!("# shk-ignore-next-line pii.credit_card\n{card}\n"),
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            std::fs::write(root.join("shk.toml"), policy_text).unwrap();
+            let output = root.join("out.txt");
+            std::fs::write(&output, body).unwrap();
+            let (policy, _) = Policy::load_from_dir(root).unwrap();
+            let err = check_remaining(root, &policy, &output).unwrap_err();
+            assert_eq!(exit_code(err), 1, "{policy_text}");
+        }
+    }
+
+    #[test]
+    fn reversible_outputs_require_restore_compatible_extensions() {
+        let dir = project();
+        let root = dir.path();
+
+        let mut table = args(root, "rows.csv", Some("out.csv"));
+        table.map = Some(root.join("out.shk-map"));
+        table.format = Some(PseudonymizeFormatArg::Tsv);
+        assert!(validate_restore_compatible_output(&table, &InputKind::TableCsv).is_err());
+
+        let mut office = args(root, "report.docx", Some("out.bin"));
+        office.map = Some(root.join("out.shk-map"));
+        assert!(validate_restore_compatible_output(&office, &InputKind::TextOffice).is_err());
+
+        let mut text = args(root, "notes.md", Some("out.csv"));
+        text.map = Some(root.join("out.shk-map"));
+        assert!(validate_restore_compatible_output(&text, &InputKind::TextPlain).is_err());
+
+        table.output = Some(root.join("out.tsv"));
+        assert!(validate_restore_compatible_output(&table, &InputKind::TableCsv).is_ok());
     }
 
     #[test]

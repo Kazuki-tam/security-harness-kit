@@ -733,6 +733,70 @@ fn split_masked_text(masked: &str, original_lengths: &[usize]) -> Vec<String> {
     out
 }
 
+/// Parse an Office document exactly as `rewrite_ooxml_text_groups` would,
+/// without writing anything, so a dry run reports structural problems early.
+pub fn validate_ooxml_text_document(input: &Path, max_file_size_bytes: u64) -> Result<()> {
+    let format = OoxmlFormat::from_path(&input.to_string_lossy()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unsupported Office document for text rewrite: {}",
+            input.display()
+        )
+    })?;
+    let input_file =
+        File::open(input).with_context(|| format!("open input document {}", input.display()))?;
+    let mut archive = ZipArchive::new(input_file)
+        .with_context(|| format!("read {} zip container", format.label))?;
+    if archive.by_name(format.required_entry).is_err() {
+        bail!(
+            "unsupported {}: missing {}",
+            format.label,
+            format.required_entry
+        );
+    }
+    ensure_archive_entry_limit(archive.len())?;
+    let limits = ooxml_read_limits(max_file_size_bytes);
+    let mut declared_total = 0u64;
+    let mut actual_total = 0u64;
+    for idx in 0..archive.len() {
+        let mut entry = archive
+            .by_index(idx)
+            .with_context(|| format!("read zip entry {idx}"))?;
+        let name = entry.name().to_string();
+        declared_total = declared_total
+            .checked_add(entry.size())
+            .context("Office document expanded size overflow")?;
+        if declared_total > limits.total_bytes {
+            bail!(
+                "Office document expanded size exceeds limit ({} bytes)",
+                limits.total_bytes
+            );
+        }
+        if entry.is_dir() {
+            continue;
+        }
+        if (format.should_mask_entry)(&name) {
+            let remaining = limits.total_bytes.saturating_sub(actual_total);
+            let mut bytes =
+                read_entry_bounded(&mut entry, limits.entry_bytes.min(remaining), &name)?;
+            actual_total = actual_total
+                .checked_add(bytes.len() as u64)
+                .context("Office document expanded size overflow")?;
+            rewrite_xml_text_groups(&bytes, format.text_group, &mut |text| Ok(text.to_string()))
+                .with_context(|| format!("validate XML entry {name}"))?;
+            bytes.zeroize();
+        } else {
+            copy_entry_bounded(
+                &mut entry,
+                &mut std::io::sink(),
+                &mut actual_total,
+                limits.total_bytes,
+                &name,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Rewrite each OOXML text group (paragraph / shared string) by concatenating
 /// runs, applying `transform`, and distributing the result back over the
 /// original runs by character count so per-run formatting survives.
@@ -813,12 +877,21 @@ pub fn rewrite_ooxml_text_groups(
             let remaining = limits.total_bytes.saturating_sub(actual_total);
             let mut bytes =
                 read_entry_bounded(&mut entry, limits.entry_bytes.min(remaining), &name)?;
-            actual_total = actual_total
-                .checked_add(bytes.len() as u64)
-                .context("Office document expanded size overflow")?;
             let rewritten = rewrite_xml_text_groups(&bytes, format.text_group, &mut transform)
                 .with_context(|| format!("rewrite XML entry {name}"))?;
             bytes.zeroize();
+            if rewritten.len() as u64 > limits.entry_bytes {
+                bail!("rewritten Office XML entry exceeds limit: {name}");
+            }
+            actual_total = actual_total
+                .checked_add(rewritten.len() as u64)
+                .context("Office document expanded size overflow")?;
+            if actual_total > limits.total_bytes {
+                bail!(
+                    "rewritten Office document expanded size exceeds limit ({} bytes)",
+                    limits.total_bytes
+                );
+            }
             writer
                 .write_all(&rewritten)
                 .with_context(|| format!("write rewritten XML entry {name}"))?;

@@ -30,6 +30,7 @@ pub struct ColumnOverrides {
 
 pub fn parse_columns_spec(spec: &str) -> Result<ColumnOverrides, ParseKindError> {
     let mut entries = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
     for raw in spec.split(',') {
         let item = raw.trim();
         if item.is_empty() {
@@ -46,6 +47,12 @@ pub fn parse_columns_spec(spec: &str) -> Result<ColumnOverrides, ParseKindError>
                 "invalid --columns entry `{item}` (empty column name)"
             )));
         }
+        let key = normalize_header_key(name);
+        if !seen.insert(key) {
+            return Err(ParseKindError(format!(
+                "duplicate --columns entry after case folding: `{name}`"
+            )));
+        }
         entries.push((name.to_string(), Kind::parse(kind_raw.trim())?));
     }
     if entries.is_empty() {
@@ -56,10 +63,10 @@ pub fn parse_columns_spec(spec: &str) -> Result<ColumnOverrides, ParseKindError>
     Ok(ColumnOverrides { entries })
 }
 
-pub fn infer_header(first_row: &[String], treat_as_data_threshold: f64) -> bool {
-    if first_row.iter().any(|cell| header_kind(cell).is_some()) {
-        return true;
-    }
+/// A first row that holds any PII is data; anything else is the header.
+/// Misreading data as a header would print the raw value in the column plan
+/// and record it in the metadata sidecar.
+pub fn infer_header(first_row: &[String]) -> bool {
     if first_row.is_empty() {
         return true;
     }
@@ -67,8 +74,7 @@ pub fn infer_header(first_row: &[String], treat_as_data_threshold: f64) -> bool 
         .iter()
         .filter(|cell| classify_cell(cell).is_some())
         .count();
-    let rate = pii_hits as f64 / first_row.len() as f64;
-    rate < treat_as_data_threshold
+    pii_hits == 0
 }
 
 pub fn resolve_columns(
@@ -80,7 +86,12 @@ pub fn resolve_columns(
     let mut explicit: BTreeMap<String, (Kind, ColumnSource)> = BTreeMap::new();
     for (name, kind_raw) in config {
         let kind = Kind::parse(kind_raw).map_err(|err| err.0)?;
-        explicit.insert(normalize_header_key(name), (kind, ColumnSource::Config));
+        let key = normalize_header_key(name);
+        if explicit.insert(key, (kind, ColumnSource::Config)).is_some() {
+            return Err(format!(
+                "duplicate [pseudonymize.columns] entry after case folding: `{name}`"
+            ));
+        }
     }
     if let Some(cli) = cli {
         for (name, kind) in &cli.entries {
@@ -271,12 +282,20 @@ mod tests {
         assert!(parse_columns_spec("").is_err());
         assert!(parse_columns_spec(" , ").is_err());
         assert!(parse_columns_spec("Email:bogus").is_err());
+        assert!(parse_columns_spec("Email:email,email:phone").is_err());
         assert_eq!(parse_columns_spec("Email:email,").unwrap().entries.len(), 1);
-        assert!(infer_header(&[], INFER_MATCH_THRESHOLD));
-        assert!(!infer_header(
-            &[["ada", "@", "example.com"].concat()],
-            INFER_MATCH_THRESHOLD
-        ));
+        assert!(infer_header(&[]));
+        assert!(!infer_header(&[["ada", "@", "example.com"].concat()]));
+        assert!(!infer_header(&[
+            "row-1".into(),
+            ["ada", "@", "example.com"].concat(),
+            "ordinary".into(),
+            "values".into(),
+        ]));
+        assert!(!infer_header(&[
+            "Email".into(),
+            ["ada", "@", "example.com"].concat()
+        ]));
     }
 
     #[test]
@@ -307,6 +326,15 @@ mod tests {
         let resolved = resolve_columns(&headers, &rows, &config, None).unwrap();
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].source, ColumnSource::Inferred);
+
+        let mut duplicate_config = BTreeMap::new();
+        duplicate_config.insert("Email".into(), "email".into());
+        duplicate_config.insert("email".into(), "phone".into());
+        assert!(
+            resolve_columns(&headers, &rows, &duplicate_config, None)
+                .unwrap_err()
+                .contains("duplicate")
+        );
     }
 
     #[test]

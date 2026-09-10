@@ -5,6 +5,7 @@ use super::normalize::{NormalizeOutcome, NormalizeSettings, normalize_value};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use zeroize::Zeroize;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RestoreMapDocument {
@@ -52,9 +53,11 @@ impl MapCollector {
     }
 
     pub fn merge(&mut self, other: RestoreMapDocument) {
-        for entry in other.entries {
-            let dest = self.entry_for(entry.token, entry.kind);
-            for original in entry.originals {
+        for mut entry in other.entries {
+            let token = std::mem::take(&mut entry.token);
+            let kind = std::mem::take(&mut entry.kind);
+            let dest = self.entry_for(token, kind);
+            for original in entry.originals.drain(..) {
                 dest.push_original(original);
             }
         }
@@ -66,6 +69,14 @@ impl RestoreMapEntry {
         if !self.originals.contains(&original) {
             self.originals.push(original);
         }
+    }
+}
+
+impl Drop for RestoreMapEntry {
+    fn drop(&mut self) {
+        self.token.zeroize();
+        self.kind.zeroize();
+        self.originals.zeroize();
     }
 }
 

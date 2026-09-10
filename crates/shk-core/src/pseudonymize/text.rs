@@ -29,6 +29,7 @@ pub fn run_text(
     options: &TextOptions,
     mut map: Option<&mut MapCollector>,
 ) -> Result<TextResult> {
+    validate_options(options)?;
     if options.dry_run {
         return Ok(TextResult {
             output: String::new(),
@@ -139,7 +140,9 @@ pub fn run_office_text(
     mut map: Option<&mut MapCollector>,
     max_file_size_bytes: u64,
 ) -> Result<TextResult> {
+    validate_options(options)?;
     if options.dry_run {
+        crate::document_masker::validate_ooxml_text_document(input, max_file_size_bytes)?;
         return Ok(TextResult {
             output: String::new(),
             meta: text_meta(options, material, 0, BTreeMap::new(), BTreeMap::new(), true),
@@ -168,6 +171,16 @@ pub fn run_office_text(
         output: String::new(),
         meta: text_meta(options, Some(material), 1, replaced, unparsed, false),
     })
+}
+
+fn validate_options(options: &TextOptions) -> Result<()> {
+    super::validate_norm(&options.norm).map_err(anyhow::Error::msg)?;
+    super::validate_token_bits(options.token_bits).map_err(anyhow::Error::msg)?;
+    for (rule_id, kind) in &options.rule_overrides {
+        Kind::parse(kind)
+            .map_err(|err| anyhow::anyhow!("[pseudonymize.rules] `{rule_id}`: {err}"))?;
+    }
+    Ok(())
 }
 
 /// Split a name-rule match into its label prefix (`氏名: `, `Name: `, `by `)
@@ -304,6 +317,20 @@ mod tests {
         assert!(!result.output.contains(&email));
         assert_eq!(result.meta.replaced.get("email"), Some(&4));
         assert_eq!(result.output.lines().count(), 3);
+    }
+
+    #[test]
+    fn dry_run_rejects_invalid_contract_options() {
+        let mut invalid = options();
+        invalid.dry_run = true;
+        invalid.token_bits = 63;
+        assert!(run_text("plain", None, &invalid, None).is_err());
+
+        invalid.token_bits = 64;
+        invalid
+            .rule_overrides
+            .insert("pii.email".into(), "bogus".into());
+        assert!(run_text("plain", None, &invalid, None).is_err());
     }
 
     #[test]

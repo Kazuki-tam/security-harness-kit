@@ -1,8 +1,8 @@
+use super::INFER_SAMPLE_ROWS;
 use super::apply::{CellAction, MapCollector, apply_cell, replacement_text};
 use super::columns::{infer_header, resolve_columns};
 use super::derive::KeyMaterial;
 use super::table::{TableOptions, TableResult, meta_from_parts};
-use super::{INFER_MATCH_THRESHOLD, INFER_SAMPLE_ROWS};
 use crate::document_masker::{
     copy_entry_bounded, decode_general_ref, decode_xml_text as decode_text, local_name,
     read_entry_bounded,
@@ -99,7 +99,7 @@ pub fn run_xlsx(
     let has_header = if options.no_header {
         false
     } else {
-        infer_header(&grid[0], INFER_MATCH_THRESHOLD)
+        infer_header(&grid[0])
     };
     let headers = if has_header {
         grid.remove(0)
@@ -115,6 +115,22 @@ pub fn run_xlsx(
         options.cli_columns.as_ref(),
     )
     .map_err(|err| anyhow::anyhow!(err))?;
+    let data_offset = leading_blank + usize::from(has_header);
+    let selected_columns: BTreeSet<usize> = columns.iter().map(|column| column.index).collect();
+    if let Some((row, col)) = parse_formula_cells(&sheet_xml)?
+        .into_iter()
+        .find(|(row, col)| {
+            *row >= data_offset
+                && *row < data_offset + data_rows.len()
+                && selected_columns.contains(col)
+        })
+    {
+        bail!(
+            "refusing to pseudonymize formula cell at row {}, column {}; select a value-only column",
+            row + 1,
+            col + 1
+        );
+    }
 
     if options.dry_run {
         return Ok(TableResult {
@@ -138,7 +154,6 @@ pub fn run_xlsx(
     let mut replaced: BTreeMap<String, u64> = BTreeMap::new();
     let mut unparsed: BTreeMap<String, u64> = BTreeMap::new();
     let mut new_values: BTreeMap<(usize, usize), String> = BTreeMap::new();
-    let data_offset = leading_blank + usize::from(has_header);
     for (row_idx, row) in data_rows.iter().enumerate() {
         for column in &columns {
             let Some(raw) = row.get(column.index) else {
@@ -246,14 +261,13 @@ fn resolve_sheet_path(rels: &str, rel_id: &str) -> Option<String> {
                 if local_name(tag.name().as_ref()) == "Relationship" =>
             {
                 if attr(&tag, "Id").as_deref() == Some(rel_id) {
+                    if attr(&tag, "TargetMode")
+                        .is_some_and(|mode| mode.eq_ignore_ascii_case("external"))
+                    {
+                        return None;
+                    }
                     let target = attr(&tag, "Target")?;
-                    return Some(if target.starts_with("/xl/") {
-                        target.trim_start_matches('/').to_string()
-                    } else if target.starts_with("xl/") {
-                        target
-                    } else {
-                        format!("xl/{target}")
-                    });
+                    return normalize_sheet_target(&target);
                 }
             }
             Event::Eof => break,
@@ -262,6 +276,31 @@ fn resolve_sheet_path(rels: &str, rel_id: &str) -> Option<String> {
         buf.clear();
     }
     None
+}
+
+fn normalize_sheet_target(target: &str) -> Option<String> {
+    if target.contains("://") || target.starts_with("//") || target.contains('\\') {
+        return None;
+    }
+    let raw = if target.starts_with('/') {
+        target.trim_start_matches('/').to_string()
+    } else if target.starts_with("xl/") {
+        target.to_string()
+    } else {
+        format!("xl/{target}")
+    };
+    let mut parts = Vec::new();
+    for part in raw.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            value => parts.push(value),
+        }
+    }
+    let path = parts.join("/");
+    (!path.is_empty()).then_some(path)
 }
 
 fn parse_shared_strings(xml: &str) -> Result<Vec<String>> {
@@ -420,6 +459,38 @@ fn parse_sheet_cells(xml: &str, shared: &[String]) -> Result<Vec<((usize, usize)
         buf.clear();
     }
     Ok(cells)
+}
+
+fn parse_formula_cells(xml: &str) -> Result<BTreeSet<(usize, usize)>> {
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut cursor = CellCursor::default();
+    let mut current = None;
+    let mut formulas = BTreeSet::new();
+    loop {
+        match reader.read_event_into(&mut buf)? {
+            Event::Start(tag) | Event::Empty(tag) if local_name(tag.name().as_ref()) == "row" => {
+                cursor.enter_row(&tag)?;
+            }
+            Event::Start(tag) if local_name(tag.name().as_ref()) == "c" => {
+                current = Some(cursor.enter_cell(&tag)?);
+            }
+            Event::Empty(tag) if local_name(tag.name().as_ref()) == "c" => {
+                cursor.enter_cell(&tag)?;
+                current = None;
+            }
+            Event::Start(tag) | Event::Empty(tag) if local_name(tag.name().as_ref()) == "f" => {
+                if let Some(coord) = current {
+                    formulas.insert(coord);
+                }
+            }
+            Event::End(tag) if local_name(tag.name().as_ref()) == "c" => current = None,
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(formulas)
 }
 
 fn cells_to_grid(cells: &[((usize, usize), String)]) -> Result<Vec<Vec<String>>> {
@@ -585,6 +656,9 @@ fn write_xlsx_copy(
                 actual_total = actual_total
                     .checked_add(bytes.len() as u64)
                     .context("xlsx expanded size overflow")?;
+                if actual_total > MAX_ARCHIVE_EXPANDED_BYTES {
+                    bail!("xlsx expanded output exceeds 256 MiB limit");
+                }
             }
             None => copy_entry_bounded(
                 &mut entry,
@@ -909,6 +983,19 @@ mod tests {
         }
         assert!(parse_cell_ref("A-1").is_none());
         assert!(parse_cell_ref("A").is_none());
+        assert_eq!(
+            resolve_sheet_path(
+                r#"<Relationships><Relationship Id="rId1" Target="./worksheets/sheet1.xml"/></Relationships>"#,
+                "rId1"
+            )
+            .as_deref(),
+            Some("xl/worksheets/sheet1.xml")
+        );
+        assert!(resolve_sheet_path(
+            r#"<Relationships><Relationship Id="rId1" Target="https://example.com/sheet.xml" TargetMode="External"/></Relationships>"#,
+            "rId1"
+        )
+        .is_none());
         // Entity references are part of the cell text; malformed ones are errors.
         assert!(parse_shared_strings("<sst><si><t>bad &#xZZ; entity</t></si></sst>").is_err());
         assert_eq!(
@@ -925,6 +1012,31 @@ mod tests {
             parse_shared_strings("<sst><si><t><![CDATA[cd]]></t></si></sst>").unwrap(),
             vec!["cd"]
         );
+    }
+
+    #[test]
+    fn selected_formula_cells_are_rejected_without_rewriting_formulas() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("formula.xlsx");
+        build_xlsx(
+            &input,
+            &[
+                ("xl/workbook.xml", WORKBOOK.into()),
+                ("xl/_rels/workbook.xml.rels", RELS.into()),
+                (
+                    "xl/worksheets/sheet1.xml",
+                    format!(
+                        r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Email</t></is></c></row><row r="2"><c r="A2" t="str"><f>LOWER(B2)</f><v>{}</v></c></row></sheetData></worksheet>"#,
+                        ["ada", "@", "example.com"].concat()
+                    ),
+                ),
+            ],
+            &[],
+        );
+        let mut dry = options();
+        dry.dry_run = true;
+        let err = run_xlsx(&input, None, None, &dry, None, None).unwrap_err();
+        assert!(err.to_string().contains("formula cell"), "{err}");
     }
 
     #[test]

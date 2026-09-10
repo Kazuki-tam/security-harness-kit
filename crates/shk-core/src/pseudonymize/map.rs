@@ -135,8 +135,16 @@ impl<'a> TokenIndex<'a> {
                     let tail = &remaining[entry.token.len()..];
                     !tail.as_bytes().first().is_some_and(|byte| {
                         byte.is_ascii_lowercase() || matches!(byte, b'2'..=b'7')
-                    }) || self.by_token.keys().any(|token| tail.starts_with(token))
+                    }) || self.starts_with_known_token(tail)
                 })
+        })
+    }
+
+    fn starts_with_known_token(&self, input: &str) -> bool {
+        self.lengths.iter().any(|&len| {
+            input
+                .get(..len)
+                .is_some_and(|candidate| self.by_token.contains_key(candidate))
         })
     }
 }

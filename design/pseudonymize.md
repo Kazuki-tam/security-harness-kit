@@ -70,3 +70,12 @@ in text, libphonenumber, PDF rewrite.
 - Key import refuses to replace existing material.
 - Exit codes: `--check-remaining` leftovers exit 1; every other failure on
   the pseudonymize path exits 2 (`fail_run` preserves explicit `CliExit`s).
+- Restore replaces only complete tokens: a token directly followed by a
+  base32 character is left alone unless that tail is itself a known token.
+  A token glued to trailing digits (an email followed by a number with no
+  separator) is therefore not restored.
+- Header inference: a first row holding any PII is data, otherwise it is the
+  header; `--columns` / `[pseudonymize.columns]` names must be unique after
+  case folding.
+- `--check-remaining` scans with `ScanOptions::sensitive_check`: secret and
+  PII rules forced on, allowlist and inline suppressions bypassed.
