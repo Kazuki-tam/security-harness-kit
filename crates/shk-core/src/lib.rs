@@ -5,6 +5,7 @@ pub mod fs_atomic;
 pub mod git;
 pub mod masker;
 pub mod policy;
+pub mod pseudonymize;
 pub mod scanner;
 pub mod suppression;
 

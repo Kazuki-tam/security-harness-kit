@@ -1,4 +1,5 @@
-use crate::args::{AiTool, RedactionMode, SeverityArg};
+use crate::args::{AiTool, PseudonymizeFormatArg, PseudonymizeModeArg, RedactionMode, SeverityArg};
+use crate::exit::CliExit;
 use crate::hook_output;
 use crate::safety;
 use anyhow::{Context, Result, bail};
@@ -20,9 +21,40 @@ pub struct MaskInvocation {
     pub min_severity: Option<SeverityArg>,
     pub hook_mode: Option<AiTool>,
     pub post: bool,
+    pub pseudonymize: bool,
+    pub yes: bool,
+    pub dry_run: bool,
+    pub columns: Option<String>,
+    pub no_header: bool,
+    pub no_create_key: bool,
+    pub mode: Option<PseudonymizeModeArg>,
+    pub format: Option<PseudonymizeFormatArg>,
+    pub sheet: Option<String>,
+    pub map: Option<PathBuf>,
+    pub check_remaining: bool,
 }
 
 pub fn run(inv: MaskInvocation) -> Result<()> {
+    if inv.pseudonymize {
+        return run_pseudonymize(inv);
+    }
+    if inv.yes
+        || inv.dry_run
+        || inv.columns.is_some()
+        || inv.no_header
+        || inv.no_create_key
+        || inv.mode.is_some()
+        || inv.format.is_some()
+        || inv.sheet.is_some()
+        || inv.map.is_some()
+        || inv.check_remaining
+    {
+        return Err(CliExit::message(
+            2,
+            "`--yes`, `--dry-run`, `--columns`, `--no-header`, `--no-create-key`, `--mode`, `--format`, `--sheet`, `--map`, and `--check-remaining` require `--pseudonymize`",
+        )
+        .into());
+    }
     if let Some(tool) = inv.hook_mode {
         if inv.file.is_some() || inv.output.is_some() || inv.json {
             bail!("`mask --hook-mode` cannot be combined with FILE, `--output`, or `--json`");
@@ -155,6 +187,47 @@ pub(crate) fn apply_redaction_override(policy: &mut Policy, redaction: Option<Re
         }
         .into();
     }
+}
+
+fn run_pseudonymize(inv: MaskInvocation) -> Result<()> {
+    if inv.hook_mode.is_some() {
+        return Err(
+            CliExit::message(2, "`--pseudonymize` cannot be combined with `--hook-mode`").into(),
+        );
+    }
+    if inv.redaction.is_some() {
+        return Err(
+            CliExit::message(2, "`--pseudonymize` cannot be combined with `--redaction`").into(),
+        );
+    }
+    if inv.min_severity.is_some() {
+        return Err(CliExit::message(
+            2,
+            "`--pseudonymize` cannot be combined with `--min-severity`",
+        )
+        .into());
+    }
+    if inv.post {
+        return Err(
+            CliExit::message(2, "`--pseudonymize` cannot be combined with `--post`").into(),
+        );
+    }
+    super::pseudonymize::mask(super::pseudonymize::MaskPseudonymizeArgs {
+        project_root: inv.project_root,
+        file: inv.file,
+        json: inv.json,
+        output: inv.output,
+        yes: inv.yes,
+        dry_run: inv.dry_run,
+        columns: inv.columns,
+        no_header: inv.no_header,
+        no_create_key: inv.no_create_key,
+        mode: inv.mode,
+        format: inv.format,
+        sheet: inv.sheet,
+        map: inv.map,
+        check_remaining: inv.check_remaining,
+    })
 }
 
 pub(crate) fn apply_min_severity_override(policy: &mut Policy, min_severity: Option<SeverityArg>) {

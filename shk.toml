@@ -98,7 +98,8 @@ required_patterns = [
   "*.key",
   "*.p12",
   "*.mobileprovision",
-  "*.log"
+  "*.log",
+  "*.shk-map"
 ]
 
 # Allowlist / inline suppressions (spec §5.3). Prefer path-scoped rows; use value_hash only as an equality fingerprint.
@@ -165,6 +166,14 @@ reason = "Synthetic OpenAI key in masker tests"
 rule_id = "pii.email"
 path = "crates/shk-core/src/masker.rs"
 reason = "Example email in masker tests"
+
+[[allowlist]]
+path = "crates/shk-core/src/pseudonymize/**"
+reason = "Synthetic values in pseudonymize unit tests"
+
+[[allowlist]]
+path = "crates/shk-cli/src/commands/pseudonymize.rs"
+reason = "Synthetic values in pseudonymize command tests"
 
 [[allowlist]]
 rule_id = "pii.en.name"

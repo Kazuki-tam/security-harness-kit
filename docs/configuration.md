@@ -101,7 +101,8 @@ required_patterns = [
   "*.key",
   "*.p12",
   "*.mobileprovision",
-  "*.log"
+  "*.log",
+  "*.shk-map"
 ]
 
 # Optional profiles for `shk secrets push`.
@@ -378,7 +379,8 @@ The default required patterns are:
   "*.key",
   "*.p12",
   "*.mobileprovision",
-  "*.log"
+  "*.log",
+  "*.shk-map"
 ]
 ```
 

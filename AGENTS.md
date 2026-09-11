@@ -42,8 +42,8 @@ cargo build --release
 | Code | Meaning | Commands |
 |------|---------|----------|
 | `0` | No findings above threshold / success | `shk scan`, `shk scan --staged`, `shk mcp audit`, `shk mask`, `shk clipboard scan`, `shk clipboard mask`, `shk doctor`, `shk audit`, `shk scan --audit` |
-| `1` | Findings at or above the fail threshold / strict doctor warnings | `shk scan`, `shk scan --staged`, `shk mcp audit`, `shk clipboard scan`, `shk doctor --strict` |
-| `2` | Blocking AI pre-hook triggered / runtime or config error | `shk scan --hook-mode <tool>` (block), `shk scan --staged` outside a Git repo, invalid `shk mcp audit` arguments/path, invalid `shk doctor --strict` usage, `shk clipboard …` when the OS clipboard is unavailable |
+| `1` | Findings at or above the fail threshold / strict doctor warnings | `shk scan`, `shk scan --staged`, `shk mcp audit`, `shk clipboard scan`, `shk doctor --strict`, `shk mask --pseudonymize --check-remaining` |
+| `2` | Blocking AI pre-hook triggered / runtime or config error | `shk scan --hook-mode <tool>` (block), `shk scan --staged` outside a Git repo, invalid `shk mcp audit` arguments/path, invalid `shk doctor --strict` usage, `shk clipboard …` when the OS clipboard is unavailable, any usage / I/O / key-store / policy error in `shk mask --pseudonymize` and `shk pseudonymize …` (exit 1 there means leftovers only) |
 
 - `--audit` mode **always exits 0** (log-only; never blocks).
 - Plain `shk doctor` keeps advisory warnings non-blocking; `shk doctor --strict` exits 1 when one or more advisory warnings are reported.

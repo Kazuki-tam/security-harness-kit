@@ -30,6 +30,9 @@ pub struct ScanOptions {
     pub include_context: bool,
     pub include_binary: bool,
     pub follow_symlinks: bool,
+    /// Force secret/PII rules on and bypass allowlist/inline suppression.
+    /// Intended for post-transform leftover checks, not normal scans.
+    pub sensitive_check: bool,
     /// Explicit policy root for filesystem scans (where `shk.toml` lives).
     /// Git scan modes resolve policy from the repository root. When `None`,
     /// filesystem scans resolve policy relative to the process working
@@ -173,6 +176,14 @@ struct PathFilters {
     include: Option<GlobSet>,
 }
 
+/// Whether the policy's `[scan]` include / exclude patterns would skip `rel`,
+/// a policy-root-relative path using `/` separators. `scan_path` reports an
+/// excluded single-file target as scanned with no findings, so callers that
+/// need "was this file actually inspected" must ask first.
+pub fn path_is_excluded(policy: &Policy, rel: &str) -> Result<bool> {
+    Ok(!PathFilters::from_policy(policy)?.allows(rel))
+}
+
 impl PathFilters {
     fn from_policy(policy: &Policy) -> Result<Self> {
         Ok(Self {
@@ -262,10 +273,15 @@ struct PreparedScan<'a> {
     allowlist: Vec<suppression::CompiledAllowlist>,
     custom: Vec<custom_rules::CompiledCustomRule>,
     cfg: shk_rules::RuleEngineConfig,
+    apply_suppressions: bool,
 }
 
 impl<'a> PreparedScan<'a> {
     fn new(policy: &'a Policy) -> Result<Self> {
+        Self::with_suppressions(policy, true)
+    }
+
+    fn with_suppressions(policy: &'a Policy, apply_suppressions: bool) -> Result<Self> {
         let cfg = policy.rule_engine_config();
         let custom = custom_rules::compile_for_policy(&policy.custom_rules, cfg.internal_terms)?;
         Ok(Self {
@@ -273,6 +289,7 @@ impl<'a> PreparedScan<'a> {
             allowlist: suppression::compile_allowlist(&policy.allowlist)?,
             custom,
             cfg,
+            apply_suppressions,
         })
     }
 }
@@ -353,18 +370,20 @@ fn scan_text_prepared(
     let mut deduper = FindingDeduper::new();
 
     for mut m in shk_rules::scan_content(content, rel, &prepared.cfg) {
-        if inline.is_suppressed(m.line, m.rule_id) {
+        if prepared.apply_suppressions && inline.is_suppressed(m.line, m.rule_id) {
             m.matched_text.zeroize();
             suppressed += 1;
             continue;
         }
-        if suppression::suppressed_by_allowlist(
-            rel,
-            m.rule_id,
-            &m.matched_text,
-            &prepared.policy.allowlist,
-            &prepared.allowlist,
-        ) {
+        if prepared.apply_suppressions
+            && suppression::suppressed_by_allowlist(
+                rel,
+                m.rule_id,
+                &m.matched_text,
+                &prepared.policy.allowlist,
+                &prepared.allowlist,
+            )
+        {
             m.matched_text.zeroize();
             suppressed += 1;
             continue;
@@ -385,18 +404,20 @@ fn scan_text_prepared(
         m.matched_text.zeroize();
     }
     for mut m in custom_rules::scan_content(content, &prepared.custom) {
-        if inline.is_suppressed(m.line, &m.rule_id) {
+        if prepared.apply_suppressions && inline.is_suppressed(m.line, &m.rule_id) {
             m.matched_text.zeroize();
             suppressed += 1;
             continue;
         }
-        if suppression::suppressed_by_allowlist(
-            rel,
-            &m.rule_id,
-            &m.matched_text,
-            &prepared.policy.allowlist,
-            &prepared.allowlist,
-        ) {
+        if prepared.apply_suppressions
+            && suppression::suppressed_by_allowlist(
+                rel,
+                &m.rule_id,
+                &m.matched_text,
+                &prepared.policy.allowlist,
+                &prepared.allowlist,
+            )
+        {
             m.matched_text.zeroize();
             suppressed += 1;
             continue;
@@ -930,6 +951,12 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
     };
     let (mut policy, policy_path) = Policy::load_from_dir(&policy_root)?;
     apply_scan_flag_overrides(&mut policy, &opts);
+    if opts.sensitive_check {
+        policy.rules.secrets = true;
+        policy.rules.pii = true;
+        policy.rules.pii_languages = vec!["en".into(), "ja".into()];
+        policy.allowlist.clear();
+    }
     let filters = PathFilters::from_policy(&policy)?;
     let include_context = opts.include_context || opts.json;
     let exit_threshold = if opts.use_pre_commit_threshold {
@@ -943,7 +970,7 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
     let mut suppressed_total = 0u64;
     let mut deduplicated_total = 0u64;
     let expired = suppression::expired_allowlist_warnings(&policy.allowlist);
-    let prepared = PreparedScan::new(&policy)?;
+    let prepared = PreparedScan::with_suppressions(&policy, !opts.sensitive_check)?;
 
     if target.is_file() {
         let abs_target = fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());

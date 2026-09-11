@@ -4,7 +4,7 @@ use crate::masker;
 use crate::policy::Policy;
 use anyhow::{Context, Result, bail};
 use quick_xml::escape::unescape;
-use quick_xml::events::{BytesCData, BytesText, Event};
+use quick_xml::events::{BytesCData, BytesRef, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use std::fs::File;
 use std::io::{Cursor, Read, Write};
@@ -305,14 +305,18 @@ pub fn extract_document_text_entries(
     Ok(None)
 }
 
-fn ensure_archive_entry_limit(entries: usize) -> Result<()> {
+pub(crate) fn ensure_archive_entry_limit(entries: usize) -> Result<()> {
     if entries > MAX_OOXML_ENTRIES {
         bail!("Office document contains too many zip entries ({entries})");
     }
     Ok(())
 }
 
-fn read_entry_bounded(reader: &mut impl Read, limit: u64, name: &str) -> Result<Vec<u8>> {
+pub(crate) fn read_entry_bounded(
+    reader: &mut impl Read,
+    limit: u64,
+    name: &str,
+) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     reader
         .take(limit.saturating_add(1))
@@ -325,7 +329,7 @@ fn read_entry_bounded(reader: &mut impl Read, limit: u64, name: &str) -> Result<
     Ok(bytes)
 }
 
-fn copy_entry_bounded<W: Write>(
+pub(crate) fn copy_entry_bounded<W: Write>(
     reader: &mut impl Read,
     writer: &mut W,
     actual_total: &mut u64,
@@ -408,7 +412,9 @@ fn paths_refer_to_same_target(input: &Path, output: &Path) -> Result<bool> {
     Ok(input_abs == output_abs)
 }
 
-fn entry_options<R: Read>(entry: &zip::read::ZipFile<'_, R>) -> FileOptions<'static, ()> {
+pub(crate) fn entry_options<R: Read>(
+    entry: &zip::read::ZipFile<'_, R>,
+) -> FileOptions<'static, ()> {
     let mut options = FileOptions::default().compression_method(entry.compression());
     if let Some(mod_time) = entry.last_modified() {
         options = options.last_modified_time(mod_time);
@@ -434,7 +440,30 @@ struct XmlMaskContext<'a> {
     findings: &'a mut Vec<Finding>,
 }
 
-fn decode_xml_text(text: &BytesText<'_>) -> Result<String> {
+/// quick-xml emits entity references (`&amp;`, `&#x3C;`) as separate
+/// `GeneralRef` events instead of inline text. Resolve one back to the
+/// character it stands for so scanned / rewritten text is contiguous.
+/// Returns `None` for entities this code cannot resolve (`&nbsp;` from HTML
+/// converters); callers keep those as-is.
+pub(crate) fn decode_general_ref(reference: &BytesRef<'_>) -> Result<Option<String>> {
+    if let Some(ch) = reference
+        .resolve_char_ref()
+        .context("resolve XML character reference")?
+    {
+        return Ok(Some(ch.to_string()));
+    }
+    let name: &str = reference;
+    Ok(quick_xml::escape::resolve_predefined_entity(name).map(str::to_string))
+}
+
+/// Text that can be merged into the surrounding run: a resolvable reference
+/// to a printable character. Control characters (`&#xD;`) and unknown
+/// entities are left as the original reference so the bytes round-trip.
+fn mergeable_general_ref(reference: &BytesRef<'_>) -> Result<Option<String>> {
+    Ok(decode_general_ref(reference)?.filter(|text| !text.chars().any(char::is_control)))
+}
+
+pub(crate) fn decode_xml_text(text: &BytesText<'_>) -> Result<String> {
     Ok(unescape(text.as_ref())
         .context("unescape XML text")?
         .into_owned())
@@ -496,6 +525,17 @@ fn mask_xml_text(
                         &mut mask_context,
                     )?;
                 }
+                Event::GeneralRef(reference) => match mergeable_general_ref(&reference)? {
+                    Some(decoded) => push_text_item(
+                        &mut items,
+                        decoded,
+                        false,
+                        group_depth,
+                        &mut group_text_items,
+                        &mut mask_context,
+                    )?,
+                    None => items.push(XmlItem::Event(Event::GeneralRef(reference.into_owned()))),
+                },
                 Event::CData(cdata) => {
                     let decoded = cdata.as_ref().to_owned();
                     push_text_item(
@@ -583,6 +623,16 @@ fn extract_xml_text(xml: &[u8], text_group: TextGroupKind) -> Result<String> {
                     out.push('\n');
                 }
                 decoded.zeroize();
+            }
+            Event::GeneralRef(reference) => {
+                if let Some(mut decoded) = mergeable_general_ref(&reference)? {
+                    if group_depth.is_some() {
+                        group_text.push_str(&decoded);
+                    } else {
+                        out.push_str(&decoded);
+                    }
+                    decoded.zeroize();
+                }
             }
             Event::CData(cdata) => {
                 let mut decoded = cdata.as_ref().to_owned();
@@ -683,6 +733,353 @@ fn split_masked_text(masked: &str, original_lengths: &[usize]) -> Vec<String> {
     out
 }
 
+/// Parse an Office document exactly as `rewrite_ooxml_text_groups` would,
+/// without writing anything, so a dry run reports structural problems early.
+pub fn validate_ooxml_text_document(input: &Path, max_file_size_bytes: u64) -> Result<()> {
+    process_ooxml_text_groups(
+        input,
+        None,
+        max_file_size_bytes,
+        |text| Ok(text.to_string()),
+    )
+}
+
+/// Rewrite each OOXML text group (paragraph / shared string) by concatenating
+/// runs, applying `transform`, and distributing the result back over the
+/// original runs by character count so per-run formatting survives.
+pub fn rewrite_ooxml_text_groups(
+    input: &Path,
+    output: &Path,
+    max_file_size_bytes: u64,
+    transform: impl FnMut(&str) -> Result<String>,
+) -> Result<()> {
+    process_ooxml_text_groups(input, Some(output), max_file_size_bytes, transform)
+}
+
+/// Shared walk for validating and rewriting: every entry is read under the
+/// same limits and every text part goes through `transform`; only when
+/// `output` is given are the results written to a sibling temp file that
+/// atomically replaces the destination.
+fn process_ooxml_text_groups(
+    input: &Path,
+    output: Option<&Path>,
+    max_file_size_bytes: u64,
+    mut transform: impl FnMut(&str) -> Result<String>,
+) -> Result<()> {
+    let format = OoxmlFormat::from_path(&input.to_string_lossy()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unsupported Office document for text rewrite: {}",
+            input.display()
+        )
+    })?;
+    if let Some(output) = output
+        && paths_refer_to_same_target(input, output)?
+    {
+        bail!("--output must not be the same as input for Office document rewriting");
+    }
+
+    let input_file =
+        File::open(input).with_context(|| format!("open input document {}", input.display()))?;
+    let mut archive = ZipArchive::new(input_file)
+        .with_context(|| format!("read {} zip container", format.label))?;
+    if archive.by_name(format.required_entry).is_err() {
+        bail!(
+            "unsupported {}: missing {}",
+            format.label,
+            format.required_entry
+        );
+    }
+    ensure_archive_entry_limit(archive.len())?;
+    let limits = ooxml_read_limits(max_file_size_bytes);
+
+    let mut writer = output.map(open_ooxml_output).transpose()?;
+    let mut declared_total = 0u64;
+    let mut actual_total = 0u64;
+
+    for idx in 0..archive.len() {
+        let mut entry = archive
+            .by_index(idx)
+            .with_context(|| format!("read zip entry {idx}"))?;
+        let name = entry.name().to_string();
+        let options = entry_options(&entry);
+
+        declared_total = declared_total
+            .checked_add(entry.size())
+            .context("Office document expanded size overflow")?;
+        if declared_total > limits.total_bytes {
+            bail!(
+                "Office document expanded size exceeds limit ({} bytes)",
+                limits.total_bytes
+            );
+        }
+
+        if entry.is_dir() {
+            if let Some(writer) = writer.as_mut() {
+                writer
+                    .add_directory(&name, options)
+                    .with_context(|| format!("write directory entry {name}"))?;
+            }
+            continue;
+        }
+        if let Some(writer) = writer.as_mut() {
+            writer
+                .start_file(&name, options)
+                .with_context(|| format!("write zip entry {name}"))?;
+        }
+
+        if (format.should_mask_entry)(&name) {
+            let remaining = limits.total_bytes.saturating_sub(actual_total);
+            let mut bytes =
+                read_entry_bounded(&mut entry, limits.entry_bytes.min(remaining), &name)?;
+            let rewritten = rewrite_xml_text_groups(&bytes, format.text_group, &mut transform)
+                .with_context(|| format!("rewrite XML entry {name}"))?;
+            bytes.zeroize();
+            if rewritten.len() as u64 > limits.entry_bytes {
+                bail!("rewritten Office XML entry exceeds limit: {name}");
+            }
+            actual_total = actual_total
+                .checked_add(rewritten.len() as u64)
+                .context("Office document expanded size overflow")?;
+            if actual_total > limits.total_bytes {
+                bail!(
+                    "rewritten Office document expanded size exceeds limit ({} bytes)",
+                    limits.total_bytes
+                );
+            }
+            if let Some(writer) = writer.as_mut() {
+                writer
+                    .write_all(&rewritten)
+                    .with_context(|| format!("write rewritten XML entry {name}"))?;
+            }
+        } else if let Some(writer) = writer.as_mut() {
+            copy_entry_bounded(
+                &mut entry,
+                writer,
+                &mut actual_total,
+                limits.total_bytes,
+                &name,
+            )?;
+        } else {
+            copy_entry_bounded(
+                &mut entry,
+                &mut std::io::sink(),
+                &mut actual_total,
+                limits.total_bytes,
+                &name,
+            )?;
+        }
+    }
+
+    if let (Some(writer), Some(output)) = (writer, output) {
+        let output_file = writer
+            .finish()
+            .with_context(|| format!("finish output {} zip container", format.label))?;
+        output_file
+            .as_file()
+            .sync_all()
+            .with_context(|| format!("sync output document {}", output.display()))?;
+        persist_named_temp_file(output_file, output)?;
+    }
+    Ok(())
+}
+
+/// Sibling temp file for `output`, inheriting its permissions when it exists.
+fn open_ooxml_output(output: &Path) -> Result<ZipWriter<NamedTempFile>> {
+    let output_parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let output_file = NamedTempFile::new_in(output_parent)
+        .with_context(|| format!("create temporary output in {}", output_parent.display()))?;
+    if let Ok(metadata) = std::fs::metadata(output) {
+        std::fs::set_permissions(output_file.path(), metadata.permissions())
+            .with_context(|| format!("preserve output permissions for {}", output.display()))?;
+    }
+    Ok(ZipWriter::new(output_file))
+}
+
+fn rewrite_xml_text_groups(
+    xml: &[u8],
+    text_group: TextGroupKind,
+    transform: &mut impl FnMut(&str) -> Result<String>,
+) -> Result<Vec<u8>> {
+    let mut reader = Reader::from_reader(Cursor::new(xml));
+    reader.config_mut().trim_text(false);
+    let mut buf = Vec::new();
+    let mut items = Vec::new();
+    let mut group_depth: Option<usize> = None;
+    let mut group_text_items = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf).context("read XML event")? {
+            Event::Eof => break,
+            Event::Start(start) => {
+                if let Some(depth) = group_depth.as_mut() {
+                    *depth += 1;
+                } else if starts_text_group(start.name().as_ref(), text_group) {
+                    group_depth = Some(1);
+                    group_text_items.clear();
+                }
+                items.push(XmlItem::Event(Event::Start(start.into_owned())));
+            }
+            Event::End(end) => {
+                if let Some(depth) = group_depth {
+                    if depth == 1 {
+                        apply_group_transform(&mut items, &group_text_items, transform)?;
+                        group_depth = None;
+                        group_text_items.clear();
+                    } else {
+                        group_depth = Some(depth - 1);
+                    }
+                }
+                items.push(XmlItem::Event(Event::End(end.into_owned())));
+            }
+            Event::Text(text) => {
+                let decoded = decode_xml_text(&text)?;
+                push_rewrite_text_item(
+                    &mut items,
+                    decoded,
+                    false,
+                    group_depth,
+                    &mut group_text_items,
+                    transform,
+                    text_group,
+                )?;
+            }
+            Event::GeneralRef(reference) => match mergeable_general_ref(&reference)? {
+                Some(decoded) => push_rewrite_text_item(
+                    &mut items,
+                    decoded,
+                    false,
+                    group_depth,
+                    &mut group_text_items,
+                    transform,
+                    text_group,
+                )?,
+                None => items.push(XmlItem::Event(Event::GeneralRef(reference.into_owned()))),
+            },
+            Event::CData(cdata) => {
+                let decoded = cdata.as_ref().to_string();
+                push_rewrite_text_item(
+                    &mut items,
+                    decoded,
+                    true,
+                    group_depth,
+                    &mut group_text_items,
+                    transform,
+                    text_group,
+                )?;
+            }
+            event => items.push(XmlItem::Event(event.into_owned())),
+        }
+        buf.clear();
+    }
+
+    if !group_text_items.is_empty() {
+        apply_group_transform(&mut items, &group_text_items, transform)?;
+    }
+
+    let mut writer = Writer::new(Vec::with_capacity(xml.len()));
+    for item in items {
+        match item {
+            XmlItem::Event(event) => writer.write_event(event).context("write XML event")?,
+            XmlItem::Text {
+                is_cdata,
+                original,
+                replacement,
+            } => {
+                let text = replacement.as_deref().unwrap_or(&original);
+                if is_cdata {
+                    writer
+                        .write_event(Event::CData(BytesCData::new(text)))
+                        .context("write rewritten XML CDATA")?;
+                } else {
+                    writer
+                        .write_event(Event::Text(BytesText::new(text)))
+                        .context("write rewritten XML text")?;
+                }
+            }
+        }
+    }
+
+    Ok(writer.into_inner())
+}
+
+fn push_rewrite_text_item(
+    items: &mut Vec<XmlItem>,
+    original: String,
+    is_cdata: bool,
+    group_depth: Option<usize>,
+    group_text_items: &mut Vec<usize>,
+    transform: &mut impl FnMut(&str) -> Result<String>,
+    text_group: TextGroupKind,
+) -> Result<()> {
+    let idx = items.len();
+    items.push(XmlItem::Text {
+        is_cdata,
+        original,
+        replacement: None,
+    });
+    if group_depth.is_some() {
+        group_text_items.push(idx);
+    } else if let XmlItem::Text {
+        original,
+        replacement,
+        ..
+    } = &mut items[idx]
+        && !original.trim().is_empty()
+        // In a worksheet, text outside <si>/<is> is a numeric <v> or a formula;
+        // rewriting it would corrupt the cell, so only string groups are touched.
+        && !matches!(text_group, TextGroupKind::Xlsx)
+    {
+        // Whitespace between elements never carries PII; skip the scan.
+        let rewritten = transform(original)?;
+        original.zeroize();
+        *replacement = Some(rewritten);
+    }
+    Ok(())
+}
+
+fn apply_group_transform(
+    items: &mut [XmlItem],
+    text_item_indices: &[usize],
+    transform: &mut impl FnMut(&str) -> Result<String>,
+) -> Result<()> {
+    if text_item_indices.is_empty() {
+        return Ok(());
+    }
+    let mut combined = String::new();
+    let mut original_lengths = Vec::with_capacity(text_item_indices.len());
+    for idx in text_item_indices {
+        if let XmlItem::Text { original, .. } = &items[*idx] {
+            original_lengths.push(original.chars().count());
+            combined.push_str(original);
+        }
+    }
+    let mut rewritten = transform(&combined)?;
+    if rewritten == combined {
+        combined.zeroize();
+        rewritten.zeroize();
+        return Ok(());
+    }
+    combined.zeroize();
+    // Same run-preserving split the masker uses; the last run absorbs any growth.
+    let replacements = split_masked_text(&rewritten, &original_lengths);
+    rewritten.zeroize();
+    for (idx, text) in text_item_indices.iter().zip(replacements) {
+        if let XmlItem::Text {
+            original,
+            replacement,
+            ..
+        } = &mut items[*idx]
+        {
+            original.zeroize();
+            *replacement = Some(text);
+        }
+    }
+    Ok(())
+}
+
 fn starts_text_group(name: &str, kind: TextGroupKind) -> bool {
     let local = local_name(name);
     match kind {
@@ -692,7 +1089,7 @@ fn starts_text_group(name: &str, kind: TextGroupKind) -> bool {
     }
 }
 
-fn local_name(name: &str) -> &str {
+pub(crate) fn local_name(name: &str) -> &str {
     name.split_once(':').map(|(_, local)| local).unwrap_or(name)
 }
 
@@ -705,6 +1102,15 @@ mod tests {
 
     fn synthetic_openai_key(seed: char) -> String {
         format!("sk-proj-{seed}bcdefghijklmnopqrstuvwxyz0123456789")
+    }
+
+    #[test]
+    fn unchanged_rewrite_preserves_separate_formatted_runs() {
+        let xml = br#"<w:p><w:r><w:t>hello </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>world</w:t></w:r></w:p>"#;
+        let rewritten =
+            rewrite_xml_text_groups(xml, TextGroupKind::Docx, &mut |text| Ok(text.to_string()))
+                .unwrap();
+        assert_eq!(rewritten, xml);
     }
 
     #[test]
@@ -725,6 +1131,141 @@ mod tests {
 
         let original = read_docx_document_xml(&input).unwrap();
         assert!(original.contains(&secret), "{original}");
+    }
+
+    #[test]
+    fn entity_references_stay_part_of_the_group_text() {
+        // A `Name <addr>` paragraph stores the brackets as `&lt;` / `&gt;`.
+        let addr = ["ada", "@", "example.com"].concat();
+        let xml = format!(
+            r#"<w:p><w:r><w:t>R&amp;D &lt;</w:t></w:r><w:r><w:t>{addr}</w:t></w:r><w:r><w:t>&gt;</w:t></w:r></w:p>"#
+        );
+        let mut seen = Vec::new();
+        let rewritten = rewrite_xml_text_groups(xml.as_bytes(), TextGroupKind::Docx, &mut |text| {
+            seen.push(text.to_string());
+            Ok(text.replace(&addr, "TOKEN"))
+        })
+        .unwrap();
+        assert_eq!(seen, vec![format!("R&D <{addr}>")]);
+        let out = String::from_utf8(rewritten).unwrap();
+        // Runs keep their boundaries by original character count.
+        assert!(out.contains("<w:t>R&amp;D &lt;</w:t>"), "{out}");
+        assert!(out.contains("<w:t>TOKEN&gt;</w:t>"), "{out}");
+        assert!(!out.contains(&addr), "{out}");
+        let mut extracted = String::new();
+        let mut reader = Reader::from_str(&xml);
+        loop {
+            match reader.read_event().unwrap() {
+                Event::Eof => break,
+                Event::Text(text) => extracted.push_str(&decode_xml_text(&text).unwrap()),
+                Event::GeneralRef(reference) => {
+                    extracted.push_str(&decode_general_ref(&reference).unwrap().unwrap())
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(extracted, format!("R&D <{addr}>"));
+        assert_eq!(decode_general_ref(&BytesRef::new("bogus")).unwrap(), None);
+        assert!(decode_general_ref(&BytesRef::new("#xZZ")).is_err());
+        // Unknown entities and control-character references round-trip untouched.
+        let odd = br#"<w:p><w:r><w:t>a&nbsp;b&#xD;c</w:t></w:r></w:p>"#;
+        let rewritten =
+            rewrite_xml_text_groups(
+                odd,
+                TextGroupKind::Docx,
+                &mut |text| Ok(text.to_uppercase()),
+            )
+            .unwrap();
+        let out = String::from_utf8(rewritten).unwrap();
+        assert!(out.contains("A&nbsp;B&#xD;C"), "{out}");
+    }
+
+    #[test]
+    fn rewrite_handles_cdata_and_text_outside_groups() {
+        let xml = br#"<w:document><w:t>loose</w:t><w:p><w:r><w:t><![CDATA[a]]></w:t></w:r><w:r><w:t>b</w:t></w:r></w:p></w:document>"#;
+        let rewritten =
+            rewrite_xml_text_groups(
+                xml,
+                TextGroupKind::Docx,
+                &mut |text| Ok(text.to_uppercase()),
+            )
+            .unwrap();
+        let out = String::from_utf8(rewritten).unwrap();
+        assert!(out.contains("LOOSE"), "{out}");
+        assert!(
+            out.contains("<![CDATA[A]]>") && out.contains("<w:t>B</w:t>"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_leaves_worksheet_values_and_formulas_alone() {
+        let xml = br#"<worksheet><sheetData><row><c r="A1"><f>LEN(B1)</f><v>0901</v></c><c r="B1" t="inlineStr"><is><t>0901</t></is></c></row></sheetData></worksheet>"#;
+        let rewritten = rewrite_xml_text_groups(xml, TextGroupKind::Xlsx, &mut |text| {
+            Ok(text.replace("0901", "X"))
+        })
+        .unwrap();
+        let out = String::from_utf8(rewritten).unwrap();
+        assert!(out.contains("<f>LEN(B1)</f><v>0901</v>"), "{out}");
+        assert!(out.contains("<t>X</t>"), "{out}");
+    }
+
+    #[test]
+    fn rewrite_ooxml_rejects_unsupported_and_same_path_targets() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("note.docx");
+        create_minimal_docx(&input, "hello").unwrap();
+        let err =
+            rewrite_ooxml_text_groups(&input, &input, 1024, |t| Ok(t.to_string())).unwrap_err();
+        assert!(err.to_string().contains("same"), "{err}");
+        let txt = dir.path().join("note.txt");
+        std::fs::write(&txt, "x").unwrap();
+        assert!(
+            rewrite_ooxml_text_groups(&txt, &dir.path().join("o.txt"), 1024, |t| Ok(t.to_string()))
+                .is_err()
+        );
+        let missing_part = dir.path().join("empty.docx");
+        let mut zip = ZipWriter::new(File::create(&missing_part).unwrap());
+        zip.start_file("[Content_Types].xml", deflated_zip_options())
+            .unwrap();
+        zip.write_all(b"<Types/>").unwrap();
+        zip.finish().unwrap();
+        assert!(
+            rewrite_ooxml_text_groups(&missing_part, &dir.path().join("o.docx"), 1024, |t| Ok(
+                t.to_string()
+            ))
+            .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rewrite_ooxml_preserves_existing_output_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("note.docx");
+        let output = dir.path().join("out.docx");
+        create_minimal_docx(&input, "hello").unwrap();
+        std::fs::write(&output, "old").unwrap();
+        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o600)).unwrap();
+        rewrite_ooxml_text_groups(&input, &output, 1024 * 1024, |t| Ok(t.to_string())).unwrap();
+        let mode = std::fs::metadata(&output).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn rewrite_ooxml_writes_longer_text_to_first_run() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("note.docx");
+        let output = dir.path().join("note.out.docx");
+        create_minimal_docx(&input, "hello").unwrap();
+        rewrite_ooxml_text_groups(&input, &output, 1024 * 1024, |text| {
+            Ok(text.replace("hello", "hello-token-longer-than-source"))
+        })
+        .unwrap();
+        let body = read_docx_document_xml(&output).unwrap();
+        assert!(body.contains("hello-token-longer-than-source"), "{body}");
+        assert!(!body.contains(">hello<"), "{body}");
     }
 
     #[test]

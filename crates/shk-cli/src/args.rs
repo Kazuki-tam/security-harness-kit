@@ -143,6 +143,45 @@ pub enum Commands {
         /// Post-tool hook inbound masking mode.
         #[arg(long)]
         post: bool,
+        /// Replace selected PII with deterministic tokens instead of [REDACTED].
+        #[arg(long)]
+        pseudonymize: bool,
+        /// Accept inferred columns / key creation without prompting.
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Show the column plan without writing files or creating a key.
+        #[arg(long)]
+        dry_run: bool,
+        /// Override [pseudonymize.columns], e.g. Email:email,Tel:phone.
+        #[arg(long, value_name = "SPEC")]
+        columns: Option<String>,
+        /// Treat the first row as data, not a header.
+        #[arg(long)]
+        no_header: bool,
+        /// Fail if this project has no pseudonymize key yet.
+        #[arg(long)]
+        no_create_key: bool,
+        /// Force table or text handling.
+        #[arg(long, value_enum)]
+        mode: Option<PseudonymizeModeArg>,
+        /// Force CSV/TSV table parsing (useful for stdin).
+        #[arg(long, value_enum)]
+        format: Option<PseudonymizeFormatArg>,
+        /// Sheet name or 1-based index for xlsx table mode.
+        #[arg(long)]
+        sheet: Option<String>,
+        /// Encrypted restore map path. Must end with `.shk-map`.
+        #[arg(long, value_name = "PATH")]
+        map: Option<PathBuf>,
+        /// Scan the written output and exit 1 if PII or secrets remain.
+        /// This is a leftover check, not a sufficiency guarantee.
+        #[arg(long)]
+        check_remaining: bool,
+    },
+    /// Manage deterministic pseudonymization keys and restore maps
+    Pseudonymize {
+        #[command(subcommand)]
+        cmd: PseudonymizeCmd,
     },
     /// Scan or mask the OS clipboard text
     Clipboard {
@@ -279,6 +318,64 @@ pub enum ClipboardCmd {
         /// Minimum finding severity to mask.
         #[arg(long, value_enum, value_name = "SEVERITY")]
         min_severity: Option<SeverityArg>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum PseudonymizeModeArg {
+    Table,
+    Text,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum PseudonymizeFormatArg {
+    Csv,
+    Tsv,
+}
+
+#[derive(Subcommand)]
+pub enum PseudonymizeCmd {
+    /// Show, rotate, delete, or hand off the project pseudonymize key
+    Key {
+        #[command(subcommand)]
+        cmd: PseudonymizeKeyCmd,
+    },
+    /// Restore originals from an encrypted `.shk-map`
+    Restore {
+        #[arg(long, value_name = "PATH")]
+        file: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        map: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PseudonymizeKeyCmd {
+    /// Show the key fingerprint and store backend (never the raw material)
+    Show,
+    /// Replace the project key. Existing tokens become unlinkable.
+    Rotate {
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    /// Delete the project key
+    Delete {
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    /// Print team handoff instructions without printing raw material
+    Export {
+        #[arg(long)]
+        instructions: bool,
+    },
+    /// Import material from stdin into the configured store
+    Import {
+        #[arg(long)]
+        stdin: bool,
     },
 }
 
@@ -1078,6 +1175,96 @@ mod tests {
         };
 
         assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn mask_pseudonymize_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "shk",
+            "mask",
+            "orders.csv",
+            "--pseudonymize",
+            "--yes",
+            "--dry-run",
+            "--columns",
+            "Email:email",
+            "--no-header",
+            "--no-create-key",
+            "--mode",
+            "table",
+            "--sheet",
+            "1",
+            "--map",
+            "out.shk-map",
+            "--check-remaining",
+            "--format",
+            "csv",
+        ])
+        .expect("pseudonymize flags should parse");
+        let Commands::Mask {
+            pseudonymize,
+            yes,
+            dry_run,
+            columns,
+            no_header,
+            no_create_key,
+            mode,
+            format,
+            sheet,
+            map,
+            check_remaining,
+            ..
+        } = cli.command
+        else {
+            panic!("expected mask command");
+        };
+        assert!(pseudonymize);
+        assert!(yes);
+        assert!(dry_run);
+        assert_eq!(columns.as_deref(), Some("Email:email"));
+        assert!(no_header);
+        assert!(no_create_key);
+        assert_eq!(mode, Some(PseudonymizeModeArg::Table));
+        assert_eq!(format, Some(PseudonymizeFormatArg::Csv));
+        assert_eq!(sheet.as_deref(), Some("1"));
+        assert_eq!(map.as_deref(), Some(PathBuf::from("out.shk-map").as_path()));
+        assert!(check_remaining);
+    }
+
+    #[test]
+    fn pseudonymize_key_show_parses() {
+        let cli = Cli::try_parse_from(["shk", "pseudonymize", "key", "show"])
+            .expect("key show should parse");
+        assert!(matches!(
+            cli.command,
+            Commands::Pseudonymize {
+                cmd: PseudonymizeCmd::Key {
+                    cmd: PseudonymizeKeyCmd::Show
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn pseudonymize_restore_parses() {
+        let cli = Cli::try_parse_from([
+            "shk",
+            "pseudonymize",
+            "restore",
+            "--file",
+            "in.csv",
+            "--map",
+            "out.shk-map",
+            "--output",
+            "restored.csv",
+        ])
+        .expect("restore should parse");
+        assert!(matches!(
+            cli.command,
+            Commands::Pseudonymize {
+                cmd: PseudonymizeCmd::Restore { .. }
+            }
+        ));
     }
 }
 

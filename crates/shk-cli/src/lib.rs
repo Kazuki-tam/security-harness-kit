@@ -25,7 +25,8 @@ mod workflow_hardening;
 use anyhow::{Context, Result};
 use args::{
     AllowlistCmd, CiCmd, CiInitProvider, Cli, ClipboardCmd, Commands, DoctorCmd, DotenvxCmd,
-    EnvCmd, EnvKeyCmd, HooksCmd, McpCmd, PolicyCmd, SecretsCmd, SkillToolArg, SkillsCmd,
+    EnvCmd, EnvKeyCmd, HooksCmd, McpCmd, PolicyCmd, PseudonymizeCmd, PseudonymizeKeyCmd,
+    SecretsCmd, SkillToolArg, SkillsCmd,
 };
 use clap::Parser;
 use shk_core::policy::ColorMode;
@@ -144,6 +145,17 @@ pub fn run() -> Result<()> {
             min_severity,
             hook_mode,
             post,
+            pseudonymize,
+            yes,
+            dry_run,
+            columns,
+            no_header,
+            no_create_key,
+            mode,
+            format,
+            sheet,
+            map,
+            check_remaining,
         } => commands::mask::run(commands::mask::MaskInvocation {
             project_root: cwd,
             file,
@@ -153,6 +165,17 @@ pub fn run() -> Result<()> {
             min_severity,
             hook_mode,
             post,
+            pseudonymize,
+            yes,
+            dry_run,
+            columns,
+            no_header,
+            no_create_key,
+            mode,
+            format,
+            sheet,
+            map,
+            check_remaining,
         })?,
         Commands::Clipboard { cmd } => match cmd {
             ClipboardCmd::Scan {
@@ -338,6 +361,26 @@ pub fn run() -> Result<()> {
         },
         Commands::Secrets { cmd } => match cmd {
             SecretsCmd::Push(args) => commands::secrets::push(&cwd, args)?,
+        },
+        Commands::Pseudonymize { cmd } => match cmd {
+            PseudonymizeCmd::Key { cmd } => match cmd {
+                PseudonymizeKeyCmd::Show => commands::pseudonymize::key_show(&cwd)?,
+                PseudonymizeKeyCmd::Rotate { yes } => {
+                    commands::pseudonymize::key_rotate(&cwd, yes)?
+                }
+                PseudonymizeKeyCmd::Delete { yes } => {
+                    commands::pseudonymize::key_delete(&cwd, yes)?
+                }
+                PseudonymizeKeyCmd::Export { instructions } => {
+                    commands::pseudonymize::key_export(&cwd, instructions)?
+                }
+                PseudonymizeKeyCmd::Import { stdin } => {
+                    commands::pseudonymize::key_import(&cwd, stdin)?
+                }
+            },
+            PseudonymizeCmd::Restore { file, map, output } => {
+                commands::pseudonymize::restore(&cwd, file, map, output)?
+            }
         },
     }
     Ok(())

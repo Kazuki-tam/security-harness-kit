@@ -300,6 +300,19 @@ Options:
 | `--min-severity <severity>` | Override `[mask].min_severity` for this run. Defaults to `medium`. |
 | `--hook-mode <tool>` | Read a hook payload from stdin and print tool-specific masked hook output. |
 | `--post` | Post-tool hook mode. Requires `--hook-mode <tool>`. |
+| `--pseudonymize` | Replace selected PII with deterministic HMAC tokens instead of `[REDACTED]`. Requires `--output` unless `--dry-run`. Supports CSV/TSV, xlsx table mode, and text mode (stdin, `.txt`, `.md`, `.docx`, `.pptx`, or `--mode text`). |
+| `--columns <SPEC>` | Table mode: set `Name:kind` pairs (example: `Email:email,Phone:phone,Name:name`). Names are matched case-insensitively against the header; an entry that matches no header exits 2. `[pseudonymize.columns]` entries that do not apply to the file are ignored. |
+| `--yes` | With `--pseudonymize`, skip confirmation prompts (required in non-TTY environments when a key must be created or columns are inferred). |
+| `--dry-run` | With `--pseudonymize`, print the plan and do not write files or create a key. |
+| `--no-header` | Table mode: treat the first row as data and address columns as `0`, `1`, … |
+| `--no-create-key` | With `--pseudonymize`, fail if this project has no key yet. |
+| `--mode table\|text` | Override input classification. `.xlsx` defaults to table mode; `--mode text` scans string cells only; numeric values and formulas are left untouched. |
+| `--format csv\|tsv` | Force CSV/TSV table parsing (stdin, or files without a `.csv`/`.tsv` extension). Not valid for xlsx input or text mode. |
+| `--sheet <NAME\|N>` | xlsx table mode: sheet name or 1-based index. Defaults to the first sheet. |
+| `--map <PATH>` | Write or merge an encrypted restore map. Path must end with `.shk-map`. |
+| `--check-remaining` | After writing output, scan it and exit 1 if `pii.*` or `secret.*` detections remain. This is a leftover check, not a sufficiency guarantee. |
+
+Cannot be combined with `--pseudonymize`: `--hook-mode`, `--min-severity`, `--redaction`.
 
 When no `FILE` is provided, `shk mask` reads stdin until EOF. In an interactive
 terminal, run it with input redirection (`shk mask < prompt.txt`) or provide a
@@ -310,6 +323,28 @@ file path (`shk mask prompt.txt`).
 Office document masking supports `.docx`, `.xlsx`, and `.pptx` files and always requires `--output` so the original document is left unchanged. JSON output reports `[DOCUMENT_WRITTEN]` as `masked_content` and includes findings from the rewritten document. PDF masking is not supported; use `shk scan` to detect text-layer PDF findings and convert or redact PDFs with a dedicated PDF tool.
 
 Office output is transactional: `shk` finalizes and syncs a sibling temporary archive before replacing `--output`. ZIP entry count and expanded sizes are bounded to prevent compressed documents from exhausting memory or disk.
+
+`--pseudonymize` writes `<output>.shk-meta.json` beside the output. The sidecar records norm version, token width, key fingerprint, column kinds, and counts. It never includes original values or tokens. Tokens are project-local: the same input yields the same token only when the same stored key and salt are used. Rotate or delete the key when a project ends (`shk pseudonymize key rotate` / `delete`).
+
+`--json` with `--pseudonymize` prints that metadata only (`masked_content` and findings are omitted).
+
+Table mode replaces whole cells (`email`, `phone`, `name`, `custom:<label>`). A non-missing value that cannot be parsed as its declared email or phone kind becomes `[UNPARSED]`; it is counted in metadata and is not recoverable from a restore map. Text mode ignores severity and allowlists: `email` / `phone` / `name` matches become tokens, `secret.*` and unmapped detections become `[REDACTED]`. Name labels such as `氏名:` or `Name:` stay in place and only the name is tokenized, so the token matches the table-mode token for the same person. In xlsx table mode, blank rows above the table are skipped, phonetic (`rPh`) guides are ignored, and cells without an `r` attribute are positioned after their predecessor. Selected formula cells are rejected rather than converted to constants. xlsx table mode rewrites selected value cells on the selected sheet as inline strings and removes unreferenced shared-string contents. Values still referenced by other cells or sheets remain unchanged. Table mode is not a whole-workbook sanitization pass. XLSX processing rejects archives above 10,000 entries or 256 MiB expanded size, XML entries above 64 MiB, and grids above 1,000,000 cells. `--map` writes ciphertext only; there is no plaintext map export, and restore maps are limited to 64 MiB. Restore uses the first-seen original when one token maps to several inputs and only replaces complete known tokens. When `--map` is used, the output extension must preserve the restore format: `.csv`/`.tsv` must match the effective delimiter, xlsx must remain `.xlsx`, Office text output must keep its input extension, and plain-text output must not use a table or Office extension. CSV/TSV restore escapes each field so original delimiters, quotes, and newlines do not alter the table structure. Input, output, map, and metadata paths must be distinct; existing regular-file destinations are atomically replaced. Pseudonymize mutations are serialized per project; recovery material and metadata are committed before the output becomes visible. `key import` refuses to replace an existing key—delete or rotate the existing key explicitly first. `--check-remaining` forces secret/PII rules on and bypasses allowlist and inline suppression; it exits 2 instead of passing when the scanner would skip the output (a `[scan]` exclude / include pattern, or a file above `max_file_size_bytes`). With `--json`, metadata is printed before an exit 1 leftover result. Every other failure (usage, I/O, key store, invalid `[pseudonymize]` settings) exits 2, so exit 1 always means leftover detections. CSV/TSV files are streamed, so table mode does not load the whole file into memory; stdin input is buffered:
+
+```bash
+shk mask orders.csv --pseudonymize --columns "Email:email,Phone:phone" --output orders.pseudo.csv
+shk mask book.xlsx --pseudonymize --sheet 顧客 --columns "Email:email" --output book.pseudo.xlsx
+shk mask notes.md --pseudonymize --output notes.pseudo.md --map notes.shk-map
+shk mask --pseudonymize --format csv --columns "Email:email" --output stdin.pseudo.csv < rows.csv
+shk mask orders.csv --pseudonymize --dry-run
+shk mask out.pseudo.csv --pseudonymize --columns "Email:email" --output checked.csv --check-remaining
+shk pseudonymize restore --file notes.pseudo.md --map notes.shk-map --output notes.restored.md
+shk pseudonymize key show
+shk pseudonymize key export --instructions
+```
+
+UTF-8 is required for text and CSV/TSV. Non-UTF-8 input (including Shift_JIS) exits 2 with a conversion hint. Output is still personal data for anyone who holds the key; confirm the receiving AI service's retention and training terms before upload. Keep `.shk-map` files out of git (default `doctor.ignore` includes `*.shk-map`). Do not treat `--check-remaining` as legal or completeness proof.
+
+Office text mode processes the DOCX main document, XLSX worksheet/shared-string text, and PPTX slide, notes, and comment text. Other package parts such as DOCX headers/footers and PPTX charts or masters are outside the current scope and are also not covered by `--check-remaining`.
 
 ## `shk clipboard`
 
