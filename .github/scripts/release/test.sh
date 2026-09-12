@@ -334,6 +334,60 @@ jq -e \
   "$tmpdir/shk-desktop-latest.json" >/dev/null
 echo "ok: desktop release manifest generated"
 
+stable_src="$tmpdir/stable-src"
+stable_out="$tmpdir/stable-out"
+mkdir -p "$stable_src"
+for suffix in \
+  "aarch64-apple-darwin_${current_version}_aarch64.dmg" \
+  "aarch64-apple-darwin_shk.app.tar.gz" \
+  "aarch64-apple-darwin_shk.app.tar.gz.sig" \
+  "x86_64-apple-darwin_${current_version}_x64.dmg" \
+  "x86_64-unknown-linux-gnu_${current_version}_amd64.AppImage" \
+  "x86_64-unknown-linux-gnu_${current_version}_amd64.deb" \
+  "aarch64-unknown-linux-gnu_${current_version}_arm64.AppImage" \
+  "x86_64-pc-windows-msvc_${current_version}_x64-setup.exe" \
+  "x86_64-pc-windows-msvc_${current_version}_x64_en-US.msi"; do
+  printf '%s\n' "$suffix" > "$stable_src/shk-desktop_${current_version}_${suffix}"
+done
+cp "$tmpdir/shk-desktop-latest.json" "$stable_src/shk-desktop-latest.json"
+RELEASE_VERSION="$current_version" \
+  ./.github/scripts/release/generate-desktop-stable-assets.sh "$stable_src" "$stable_out" >/dev/null
+for stable in \
+  shk-desktop-aarch64-apple-darwin.dmg \
+  shk-desktop-x86_64-apple-darwin.dmg \
+  shk-desktop-x86_64-unknown-linux-gnu.AppImage \
+  shk-desktop-x86_64-unknown-linux-gnu.deb \
+  shk-desktop-aarch64-unknown-linux-gnu.AppImage \
+  shk-desktop-x86_64-pc-windows-msvc-setup.exe \
+  shk-desktop-x86_64-pc-windows-msvc.msi \
+  shk-desktop-latest.json \
+  shk-desktop.sha256sum; do
+  test -f "$stable_out/$stable"
+done
+# Stable copies must be byte-identical to the versioned installer.
+cmp -s "$stable_src/shk-desktop_${current_version}_aarch64-apple-darwin_${current_version}_aarch64.dmg" \
+  "$stable_out/shk-desktop-aarch64-apple-darwin.dmg"
+# Updater bundles and signatures stay out of the stable set.
+if ls "$stable_out"/*.tar.gz "$stable_out"/*.sig >/dev/null 2>&1; then
+  echo "FAIL: stable assets must only contain installers" >&2
+  exit 1
+fi
+(cd "$stable_out" && shk_verify_sha256_file shk-desktop.sha256sum)
+assert_output "stable checksum file lists every installer" "7" \
+  bash -c "wc -l < '$stable_out/shk-desktop.sha256sum' | tr -d ' '"
+echo "ok: desktop stable assets generated"
+
+printf 'second dmg\n' > "$stable_src/shk-desktop_${current_version}_aarch64-apple-darwin_other.dmg"
+if RELEASE_VERSION="$current_version" \
+  ./.github/scripts/release/generate-desktop-stable-assets.sh "$stable_src" "$tmpdir/stable-dup" >/dev/null 2>&1; then
+  echo "FAIL: stable asset generation must reject ambiguous installers" >&2
+  exit 1
+fi
+echo "ok: desktop stable assets reject ambiguous installers"
+
+assert_contains "release workflow uploads stable desktop assets to desktop-latest" \
+  "$release_workflow" "gh release upload desktop-latest release-assets-stable/* --clobber"
+
 printf 'windows exe\n' > "$tmpdir/shk.exe"
 (
   cd "$tmpdir"

@@ -179,7 +179,12 @@ releases need no mirror.
    `desktop-vX.Y.Z` for a signed desktop-only release, or `shk-vX.Y.Z` for a
    combined CLI and desktop release.
 5. After publishing, verify the GitHub release assets, `shk-desktop.sha256sum`,
-   `shk-desktop-latest.json`, and the `desktop-latest` updater metadata.
+   `shk-desktop-latest.json`, and the `desktop-latest` release: `latest.json`
+   must point at the new tag, and the version-free installers
+   (`shk-desktop-<target>.dmg` / `.AppImage` / `.deb` / `-setup.exe` / `.msi`)
+   plus their `shk-desktop.sha256sum` must match the new assets. These stable
+   names back the website's download links; unsigned releases do not update
+   them.
 6. For `shk-vX.Y.Z` (or `cli-vX.Y.Z`) releases, run the
    [CLI mirror](#combined-releases-and-the-cli-mirror) so the installers,
    Homebrew formula, and npm package resolve; the mirror command now verifies

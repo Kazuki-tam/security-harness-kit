@@ -183,18 +183,37 @@ See [`desktop-release.md`](desktop-release.md) for maintainer release steps.
 | macOS Apple Silicon | `shk-desktop_*_aarch64-apple-darwin_*.dmg` | Same as above |
 | Windows x86_64 | `shk-desktop_*_x86_64-pc-windows-msvc_*setup.exe` or `*.msi` | Currently unsigned |
 
-Download from the release page for your tag, for example:
+### Stable download links
 
-```text
-https://github.com/Kazuki-tam/security-harness-kit/releases/tag/desktop-v0.7.0
-```
+The `desktop-latest` release always carries the installers from the newest
+signed desktop release under version-free names, so these URLs never change:
 
-Verify checksums when available:
+| Platform | Stable URL |
+|----------|------------|
+| macOS Apple Silicon | <https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-latest/shk-desktop-aarch64-apple-darwin.dmg> |
+| macOS Intel | <https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-latest/shk-desktop-x86_64-apple-darwin.dmg> |
+| Windows x86_64 (NSIS) | <https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-latest/shk-desktop-x86_64-pc-windows-msvc-setup.exe> |
+| Windows x86_64 (MSI) | <https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-latest/shk-desktop-x86_64-pc-windows-msvc.msi> |
+| Linux x86_64 | `.../desktop-latest/shk-desktop-x86_64-unknown-linux-gnu.AppImage` or `.deb` |
+| Linux aarch64 | `.../desktop-latest/shk-desktop-aarch64-unknown-linux-gnu.AppImage` or `.deb` |
+
+`desktop-latest` also carries `shk-desktop.sha256sum` for the stable names and
+`shk-desktop-latest.json`, whose `release_tag` says which versioned release the
+stable files currently come from. The files are byte-identical to the
+`shk-desktop_*` assets of that release, so its provenance attestation verifies
+them too.
+
+Verify a stable download:
 
 ```bash
-curl -LO https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-v0.7.0/shk-desktop.sha256sum
-sha256sum -c shk-desktop.sha256sum
+curl -LO https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-latest/shk-desktop-aarch64-apple-darwin.dmg
+curl -LO https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-latest/shk-desktop.sha256sum
+sha256sum -c --ignore-missing shk-desktop.sha256sum
 ```
+
+To pin a specific version instead, download the versioned `shk-desktop_*`
+assets and `shk-desktop.sha256sum` from that tag's release page, for example
+[desktop-v0.6.4](https://github.com/Kazuki-tam/security-harness-kit/releases/tag/desktop-v0.6.4). <!-- shk-version-pin -->
 
 ### macOS
 

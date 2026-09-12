@@ -395,6 +395,16 @@ jobs:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: ./.github/scripts/release/generate-tauri-latest-json.sh release-assets
 
+      # Version-free copies of the installers for the mutable desktop-latest
+      # release, so the website can link to immutable download URLs. Kept out of
+      # release-assets/ so they are not attached to the versioned release.
+      - name: generate desktop stable assets
+        if: needs.prepare.outputs.build_desktop == 'true'
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: ./.github/scripts/release/generate-desktop-stable-assets.sh release-assets release-assets-stable
+
       - name: generate winget manifests
         if: needs.prepare.outputs.build_cli == 'true'
         shell: bash
@@ -443,7 +453,7 @@ jobs:
               -f sha="$RELEASE_SHA"
           fi
 
-      - name: publish desktop updater endpoint
+      - name: publish desktop updater endpoint and stable downloads
         if: needs.prepare.outputs.build_desktop == 'true'
         shell: bash
         env:
@@ -452,10 +462,11 @@ jobs:
           if ! gh release view desktop-latest >/dev/null 2>&1; then
             gh release create desktop-latest \
               --title "shk Desktop Latest" \
-              --notes "Mutable endpoint for Tauri desktop updater metadata." \
+              --notes "Mutable endpoint for Tauri desktop updater metadata and version-free installer downloads." \
               --latest=false
           fi
           gh release upload desktop-latest release-assets/latest.json --clobber
+          gh release upload desktop-latest release-assets-stable/* --clobber
 
   # Push the dist-generated Homebrew formula to the public tap so users can run
   # `brew install Kazuki-tam/homebrew-tap/shk`. Requires a PAT with
