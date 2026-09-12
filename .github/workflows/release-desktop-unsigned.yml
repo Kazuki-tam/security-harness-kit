@@ -163,6 +163,9 @@ jobs:
   publish:
     name: publish unsigned release
     runs-on: ubuntu-22.04
+    concurrency:
+      group: shk-desktop-latest-publish
+      cancel-in-progress: false
     permissions:
       contents: write
       id-token: write

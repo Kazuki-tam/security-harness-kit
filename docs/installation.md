@@ -194,8 +194,8 @@ signed desktop release under version-free names, so these URLs never change:
 | macOS Intel | <https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-latest/shk-desktop-x86_64-apple-darwin.dmg> |
 | Windows x86_64 (NSIS) | <https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-latest/shk-desktop-x86_64-pc-windows-msvc-setup.exe> |
 | Windows x86_64 (MSI) | <https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-latest/shk-desktop-x86_64-pc-windows-msvc.msi> |
-| Linux x86_64 | `.../desktop-latest/shk-desktop-x86_64-unknown-linux-gnu.AppImage` or `.deb` |
-| Linux aarch64 | `.../desktop-latest/shk-desktop-aarch64-unknown-linux-gnu.AppImage` or `.deb` |
+| Linux x86_64 | <https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-latest/shk-desktop-x86_64-unknown-linux-gnu.AppImage> or <https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-latest/shk-desktop-x86_64-unknown-linux-gnu.deb> |
+| Linux aarch64 | <https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-latest/shk-desktop-aarch64-unknown-linux-gnu.AppImage> or <https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-latest/shk-desktop-aarch64-unknown-linux-gnu.deb> |
 
 `desktop-latest` also carries `shk-desktop.sha256sum` for the stable names and
 `shk-desktop-latest.json`, whose `release_tag` says which versioned release the
@@ -208,7 +208,8 @@ Verify a stable download:
 ```bash
 curl -LO https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-latest/shk-desktop-aarch64-apple-darwin.dmg
 curl -LO https://github.com/Kazuki-tam/security-harness-kit/releases/download/desktop-latest/shk-desktop.sha256sum
-sha256sum -c --ignore-missing shk-desktop.sha256sum
+awk '$2 == "shk-desktop-aarch64-apple-darwin.dmg"' shk-desktop.sha256sum \
+  | shasum -a 256 -c -
 ```
 
 To pin a specific version instead, download the versioned `shk-desktop_*`

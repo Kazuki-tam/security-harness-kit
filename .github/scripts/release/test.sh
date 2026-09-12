@@ -8,6 +8,7 @@ source ./.github/scripts/release/common.sh
 current_version="$(shk_workspace_version)"
 
 release_workflow="$(<.github/workflows/release.yml)"
+unsigned_release_workflow="$(<.github/workflows/release-desktop-unsigned.yml)"
 
 assert_output() {
   local description="$1"
@@ -345,12 +346,13 @@ for suffix in \
   "x86_64-unknown-linux-gnu_${current_version}_amd64.AppImage" \
   "x86_64-unknown-linux-gnu_${current_version}_amd64.deb" \
   "aarch64-unknown-linux-gnu_${current_version}_arm64.AppImage" \
+  "aarch64-unknown-linux-gnu_${current_version}_arm64.deb" \
   "x86_64-pc-windows-msvc_${current_version}_x64-setup.exe" \
   "x86_64-pc-windows-msvc_${current_version}_x64_en-US.msi"; do
   printf '%s\n' "$suffix" > "$stable_src/shk-desktop_${current_version}_${suffix}"
 done
 cp "$tmpdir/shk-desktop-latest.json" "$stable_src/shk-desktop-latest.json"
-RELEASE_VERSION="$current_version" \
+RELEASE_TAG="desktop-v${current_version}" RELEASE_VERSION="$current_version" \
   ./.github/scripts/release/generate-desktop-stable-assets.sh "$stable_src" "$stable_out" >/dev/null
 for stable in \
   shk-desktop-aarch64-apple-darwin.dmg \
@@ -358,6 +360,7 @@ for stable in \
   shk-desktop-x86_64-unknown-linux-gnu.AppImage \
   shk-desktop-x86_64-unknown-linux-gnu.deb \
   shk-desktop-aarch64-unknown-linux-gnu.AppImage \
+  shk-desktop-aarch64-unknown-linux-gnu.deb \
   shk-desktop-x86_64-pc-windows-msvc-setup.exe \
   shk-desktop-x86_64-pc-windows-msvc.msi \
   shk-desktop-latest.json \
@@ -373,20 +376,180 @@ if ls "$stable_out"/*.tar.gz "$stable_out"/*.sig >/dev/null 2>&1; then
   exit 1
 fi
 (cd "$stable_out" && shk_verify_sha256_file shk-desktop.sha256sum)
-assert_output "stable checksum file lists every installer" "7" \
+assert_output "stable checksum file lists every installer" "8" \
   bash -c "wc -l < '$stable_out/shk-desktop.sha256sum' | tr -d ' '"
 echo "ok: desktop stable assets generated"
 
+printf 'preserve existing output\n' > "$stable_out/preserved.txt"
 printf 'second dmg\n' > "$stable_src/shk-desktop_${current_version}_aarch64-apple-darwin_other.dmg"
-if RELEASE_VERSION="$current_version" \
-  ./.github/scripts/release/generate-desktop-stable-assets.sh "$stable_src" "$tmpdir/stable-dup" >/dev/null 2>&1; then
+if RELEASE_TAG="desktop-v${current_version}" RELEASE_VERSION="$current_version" \
+  ./.github/scripts/release/generate-desktop-stable-assets.sh "$stable_src" "$stable_out" >/dev/null 2>&1; then
   echo "FAIL: stable asset generation must reject ambiguous installers" >&2
   exit 1
 fi
+test -f "$stable_out/preserved.txt"
+rm "$stable_out/preserved.txt"
 echo "ok: desktop stable assets reject ambiguous installers"
 
-assert_contains "release workflow uploads stable desktop assets to desktop-latest" \
-  "$release_workflow" "gh release upload desktop-latest release-assets-stable/* --clobber"
+rm "$stable_src/shk-desktop_${current_version}_aarch64-apple-darwin_other.dmg"
+rm "$stable_src/shk-desktop_${current_version}_x86_64-pc-windows-msvc_${current_version}_x64_en-US.msi"
+if RELEASE_TAG="desktop-v${current_version}" RELEASE_VERSION="$current_version" \
+  ./.github/scripts/release/generate-desktop-stable-assets.sh "$stable_src" "$tmpdir/stable-missing" >/dev/null 2>&1; then
+  echo "FAIL: stable asset generation must reject missing installers" >&2
+  exit 1
+fi
+echo "ok: desktop stable assets reject missing installers"
+
+printf 'restored msi\n' \
+  > "$stable_src/shk-desktop_${current_version}_x86_64-pc-windows-msvc_${current_version}_x64_en-US.msi"
+jq '.version = "9.9.9"' "$stable_src/shk-desktop-latest.json" \
+  > "$stable_src/shk-desktop-latest.invalid.json"
+mv "$stable_src/shk-desktop-latest.invalid.json" "$stable_src/shk-desktop-latest.json"
+if RELEASE_TAG="desktop-v${current_version}" RELEASE_VERSION="$current_version" \
+  ./.github/scripts/release/generate-desktop-stable-assets.sh "$stable_src" "$tmpdir/stable-invalid-manifest" >/dev/null 2>&1; then
+  echo "FAIL: stable asset generation must reject a mismatched manifest" >&2
+  exit 1
+fi
+echo "ok: desktop stable assets reject a mismatched manifest"
+
+cp "$tmpdir/shk-desktop-latest.json" "$stable_src/shk-desktop-latest.json"
+if RELEASE_TAG="desktop-v${current_version}" RELEASE_VERSION="$current_version" \
+  ./.github/scripts/release/generate-desktop-stable-assets.sh "$stable_src" "$stable_src" >/dev/null 2>&1; then
+  echo "FAIL: stable asset generation must reject an in-place output directory" >&2
+  exit 1
+fi
+echo "ok: desktop stable assets reject an in-place output directory"
+
+assert_contains "release workflow uses verified stable desktop publishing" \
+  "$release_workflow" "./.github/scripts/release/publish-desktop-stable-assets.sh"
+assert_contains "signed release serializes desktop-latest publishing" \
+  "$release_workflow" "group: shk-desktop-latest-publish"
+assert_contains "unsigned release shares desktop-latest publishing lock" \
+  "$unsigned_release_workflow" "group: shk-desktop-latest-publish"
+
+fake_gh_bin="$tmpdir/fake-gh-bin"
+fake_gh_remote="$tmpdir/fake-gh-remote"
+fake_gh_log="$tmpdir/fake-gh.log"
+fake_gh_state="$tmpdir/fake-gh-state"
+mkdir -p "$fake_gh_bin" "$fake_gh_remote" "$fake_gh_state"
+cat > "$fake_gh_bin/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+command="$1"
+subcommand="${2:-}"
+shift 2 || true
+
+case "${command}:${subcommand}" in
+  release:upload)
+    tag="$1"
+    path="$2"
+    name="$(basename "$path")"
+    if [[ "${SHK_FAKE_FAIL_ONCE:-}" == "$name" && ! -e "${SHK_FAKE_GH_STATE}/${name}" ]]; then
+      touch "${SHK_FAKE_GH_STATE}/${name}"
+      echo "fail:${name}" >> "$SHK_FAKE_GH_LOG"
+      exit 1
+    fi
+    cp "$path" "${SHK_FAKE_GH_REMOTE}/${name}"
+    echo "upload:${name}" >> "$SHK_FAKE_GH_LOG"
+    ;;
+  release:download)
+    pattern=""
+    destination=""
+    while (($# > 0)); do
+      case "$1" in
+        --pattern)
+          pattern="$2"
+          shift 2
+          ;;
+        --dir)
+          destination="$2"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    mkdir -p "$destination"
+    cp "${SHK_FAKE_GH_REMOTE}/${pattern}" "${destination}/${pattern}"
+    echo "download:${pattern}" >> "$SHK_FAKE_GH_LOG"
+    ;;
+  api:--method)
+    method="$1"
+    endpoint="$2"
+    if [[ "$method" != "DELETE" || "$endpoint" != */releases/assets/999 ]]; then
+      exit 1
+    fi
+    if [[ "${SHK_FAKE_KEEP_STALE:-}" != "true" ]]; then
+      rm -f "${SHK_FAKE_GH_REMOTE}/shk-desktop-obsolete.pkg"
+    fi
+    echo "delete:shk-desktop-obsolete.pkg" >> "$SHK_FAKE_GH_LOG"
+    ;;
+  api:*)
+    asset_id=1
+    for path in "${SHK_FAKE_GH_REMOTE}"/*; do
+      name="$(basename "$path")"
+      if [[ "$name" == "shk-desktop-obsolete.pkg" ]]; then
+        printf '999\t%s\n' "$name"
+      else
+        printf '%s\t%s\n' "$asset_id" "$name"
+        asset_id=$((asset_id + 1))
+      fi
+    done
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "$fake_gh_bin/gh"
+
+printf 'stale\n' > "$fake_gh_remote/shk-desktop-obsolete.pkg"
+printf 'updater metadata\n' > "$tmpdir/latest.json"
+PATH="$fake_gh_bin:$PATH" \
+  GITHUB_REPOSITORY=Kazuki-tam/security-harness-kit \
+  SHK_FAKE_GH_LOG="$fake_gh_log" \
+  SHK_FAKE_GH_REMOTE="$fake_gh_remote" \
+  SHK_FAKE_GH_STATE="$fake_gh_state" \
+  SHK_FAKE_FAIL_ONCE=shk-desktop-x86_64-apple-darwin.dmg \
+  ./.github/scripts/release/publish-desktop-stable-assets.sh \
+  "$stable_out" "$tmpdir/latest.json" >/dev/null
+
+test ! -e "$fake_gh_remote/shk-desktop-obsolete.pkg"
+cmp -s "$tmpdir/latest.json" "$fake_gh_remote/latest.json"
+assert_output "stable publisher retries a failed upload" "1" \
+  awk '$0 == "fail:shk-desktop-x86_64-apple-darwin.dmg" { count++ } END { print count + 0 }' "$fake_gh_log"
+assert_output "stable publisher uploads updater metadata last" "upload:latest.json" \
+  awk '/^upload:/ { last = $0 } END { print last }' "$fake_gh_log"
+if ! awk '
+  $0 == "delete:shk-desktop-obsolete.pkg" { deleted = NR }
+  $0 == "upload:latest.json" { latest = NR }
+  END { exit !(deleted > 0 && latest > deleted) }
+' "$fake_gh_log"; then
+  echo "FAIL: stale stable assets must be removed before updater metadata is published" >&2
+  exit 1
+fi
+echo "ok: desktop stable assets are retried, verified, pruned, and published metadata-last"
+
+printf 'stale again\n' > "$fake_gh_remote/shk-desktop-obsolete.pkg"
+: > "$fake_gh_log"
+if PATH="$fake_gh_bin:$PATH" \
+  GITHUB_REPOSITORY=Kazuki-tam/security-harness-kit \
+  SHK_FAKE_GH_LOG="$fake_gh_log" \
+  SHK_FAKE_GH_REMOTE="$fake_gh_remote" \
+  SHK_FAKE_GH_STATE="$fake_gh_state" \
+  SHK_FAKE_KEEP_STALE=true \
+  ./.github/scripts/release/publish-desktop-stable-assets.sh \
+  "$stable_out" "$tmpdir/latest.json" >/dev/null 2>&1; then
+  echo "FAIL: stable publisher must reject a stale asset that remains after deletion" >&2
+  exit 1
+fi
+if grep -q '^upload:latest.json$' "$fake_gh_log"; then
+  echo "FAIL: updater metadata must not publish before final asset-set validation" >&2
+  exit 1
+fi
+echo "ok: failed final asset validation does not publish updater metadata"
 
 printf 'windows exe\n' > "$tmpdir/shk.exe"
 (
