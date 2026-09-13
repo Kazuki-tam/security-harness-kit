@@ -14,8 +14,9 @@ Example output:
 3 findings
 
 HIGH  secret.openai_api_key  src/app.ts:12    Possible OpenAI API key detected
-MED   pii.ja.phone           config/dev.ts:5  Japanese phone number detected
-MED   pii.en.ssn             docs/test.md:8   US Social Security Number detected
+MED   pii.ja.phone  config/dev.ts:5    Japanese phone number pattern detected
+MED   pii.en.ssn  docs/test.md:8    US SSN pattern detected
+Failed: findings at or above high (max high).
 ```
 
 ## Why
@@ -26,7 +27,9 @@ With `shk`, you can:
 
 - Scan project paths and Git-staged files for common secrets and PII across source code, Markdown, plain text, Office documents (`.docx`, `.xlsx`, `.pptx`), and text-layer `.pdf` files.
 - Mask sensitive content from stdin, text files, and Office documents (`.docx`, `.xlsx`, `.pptx`).
+- Pseudonymize tables, text, and Office files with `shk mask --pseudonymize`: deterministic tokens that stay consistent across files, plus an encrypted restore map for `shk pseudonymize restore`.
 - Encrypt `.env` files, store private keys in the configured secret store, and run commands with decrypted values injected only at runtime.
+- Push dotenv values to AWS Secrets Manager or GCP Secret Manager with `shk secrets push`, as a single blob or one secret per key.
 - Install Git pre-commit hooks.
 - Install managed hooks for Claude Code, Cursor, Codex, GitHub Copilot, Antigravity, and Windsurf.
 - Preview metadata-only audit logs to understand blocked hook activity without storing detected values.
@@ -45,6 +48,9 @@ notarized as of `desktop-v0.6.0`. <!-- shk-version-pin -->
 
 While it is open it also raises an OS notification when a hook blocks AI
 activity in any of your projects.
+
+The hooks it installs run the `shk` command, so the CLI is required for
+real-time protection.
 
 - Download and install: [Installation → Desktop App](docs/installation.md#desktop-app)
 - Notification behaviour: [Blocked-activity notifications](docs/installation.md#blocked-activity-notifications)

@@ -9,10 +9,10 @@ Raw matched values are not emitted in JSON reports. `redacted_value` is `[REDACT
 | Level | Examples |
 |-------|----------|
 | `critical` | Private key PEM blocks. |
-| `high` | OpenAI-style keys, AWS access key IDs, Anthropic keys, Google API keys, GitHub tokens, Slack tokens, Stripe keys, database URLs. |
-| `medium` | JWTs, bearer tokens, generic API key assignments, email, credit card numbers, most English/Japanese PII rules. |
-| `low` | IP addresses and policy warnings such as expired allowlist entries. |
-| `info` | Skip notices and informational findings. |
+| `high` | OpenAI-style keys, AWS access key IDs, Anthropic keys, Google API keys, GitHub tokens, Slack tokens, Stripe keys, database URLs, dotenvx private keys, every `secret.gitleaks.*` rule, and pseudonymize tokens found next to plaintext PII. |
+| `medium` | JWTs, bearer tokens, generic API key assignments, email, credit card numbers, phone numbers, US SSNs, and most Japanese PII rules. |
+| `low` | IP addresses, lower-confidence PII patterns (English EINs, postal codes, and passport numbers; Japanese bank account, health insurance, and street address patterns), and policy warnings such as expired allowlist entries. |
+| `info` | Skip notices, label-anchored personal names and English street addresses, and other informational findings. |
 
 ## AI Context Safety Coverage
 
@@ -37,10 +37,11 @@ The rule engine supports these kinds:
 |------|-------|
 | `secret` | API keys, tokens, database URLs, private keys, and similar sensitive credentials. |
 | `pii` | Personal information patterns. |
-| `env` | Env-related rules and hints. The built-in `env.sensitive_assignment` rule flags dotenv-style assignments of sensitive variable names (`*PASSWORD*`, `*SECRET*`, `*TOKEN*`, `*API_KEY*`, `*PRIVATE_KEY*`, `*ACCESS_KEY*`, `*CREDENTIAL*`) with non-placeholder values. Env rules only apply to dotenv-style files (file name starting with `.env` or ending in `.env`), so source code reading the environment (e.g. `DB_PASSWORD = os.environ[...]`) is not flagged. `.env.example` and `.env.sample` files are skipped, and `[rules] env = false` disables the kind. Names that are public or non-secret by construction are excluded: browser build prefixes (`NEXT_PUBLIC_`, `VITE_`, `REACT_APP_`, `EXPO_PUBLIC_`, `GATSBY_`, `NUXT_PUBLIC_`, `VUE_APP_`, `PUBLIC_`) are inlined into client bundles — unless the name also contains `SECRET`/`PASSWORD`/`PRIVATE`, which is reported as a misconfiguration — and `*_PATH`/`*_FILE`/`*_DIR` names hold a location, not the secret itself. Pure-digit values are skipped. Vendor-format `secret.*` rules keep matching values independently of the name. |
+| `env` | Env-related rules and hints. The built-in `env.sensitive_assignment` rule flags dotenv-style assignments of sensitive variable names (`*PASSWORD*`, `*PASSWD*`, `*SECRET*`, `*TOKEN*`, `*API_KEY*`, `*APIKEY*`, `*PRIVATE_KEY*`, `*ACCESS_KEY*`, `*CREDENTIAL*`) with non-placeholder values. Env rules only apply to dotenv-style files (file name starting with `.env` or ending in `.env`), so source code reading the environment (e.g. `DB_PASSWORD = os.environ[...]`) is not flagged. `.env.example` and `.env.sample` files are skipped, and `[rules] env = false` disables the kind. Names that are public or non-secret by construction are excluded: browser build prefixes (`NEXT_PUBLIC_`, `VITE_`, `REACT_APP_`, `EXPO_PUBLIC_`, `GATSBY_`, `NUXT_PUBLIC_`, `VUE_APP_`, `PUBLIC_`) are inlined into client bundles — unless the name also contains `SECRET`/`PASSWORD`/`PASSWD`/`PRIVATE`, which is reported as a misconfiguration — and `*_PATH`/`*_FILE`/`*_DIR` names hold a location, not the secret itself. Vendor-format `secret.*` rules keep matching values independently of the name; the same public-name exclusions also apply to `secret.generic_api_key`, in any file type. |
 | `ai-context` | AI-context-oriented rules. |
 | `ignore` | Scanner skip notices and policy warnings. |
-| `git` | Git-related findings. |
+| `internal` | Default kind for `[[custom_rules]]` entries, gated by `[rules] internal_terms`. Custom rules may declare any other kind string. |
+| `git` | Reserved for Git-related findings. No built-in rule currently emits it. |
 | `mcp` | MCP server configuration findings produced by `shk mcp audit`. |
 
 Pure-digit values are ignored only for metadata names such as expiry, TTL, port, timeout,
@@ -68,7 +69,7 @@ The hand-tuned `shk` rules include patterns for:
 - Label-anchored Twilio auth tokens.
 - SendGrid API keys.
 - Shopify tokens.
-- Supabase service role keys.
+- Label-anchored Supabase service role keys.
 - Label-anchored Vercel tokens.
 - npm tokens.
 - GitLab personal access tokens.
@@ -81,10 +82,11 @@ The hand-tuned `shk` rules include patterns for:
 - Bearer tokens.
 - Generic API key or secret key assignments.
 - Private key PEM block headers.
+- dotenvx private keys (`DOTENV_PRIVATE_KEY*` assignments).
 
 The generated gitleaks-derived rules add broader service coverage for provider-specific API keys, access tokens, client secrets, webhook URLs, cloud credentials, package registry tokens, and related secret formats. They preserve key gitleaks rule semantics where practical, including keyword prefilters, path-limited rules, `secretGroup` extraction for the reported secret value, entropy thresholds, and rule-level allowlists.
 
-Generated gitleaks rule ids use the `secret.gitleaks.<upstream-id>` namespace so they do not collide with existing `shk` rule ids. A small number of upstream rules are intentionally skipped when they are path-only, overlap with existing tuned `shk` rules, or exceed Rust `regex` compiled-size limits. See `THIRD_PARTY_LICENSES.md` for the gitleaks license and source commit.
+Generated gitleaks rule ids use the `secret.gitleaks.<upstream-id>` namespace so they do not collide with existing `shk` rule ids. A small number of upstream rules are intentionally skipped: `generic-api-key` and `openai-api-key` overlap with tuned `shk` rules, and two others exceed Rust `regex` compiled-size limits. Other overlapping rules are kept, so one value can be reported by both a tuned rule and a `secret.gitleaks.*` rule (for example `secret.jwt` at `medium` and `secret.gitleaks.jwt` at `high`). See `THIRD_PARTY_LICENSES.md` for the gitleaks license and source commit.
 
 These are pattern-based detections. Review findings before treating them as confirmed credentials.
 
@@ -92,7 +94,7 @@ These are pattern-based detections. Review findings before treating them as conf
 
 In pre-hook mode, `shk scan --hook-mode <tool>` checks the AI tool payload for dangerous actions before scanning text content. This guard is separate from secret and PII detection: it looks at operation intent such as file paths and shell commands.
 
-The initial guard blocks sensitive file reads/writes, `.env` dump commands, environment dump commands such as `printenv`, `env`, `export -p`, `set | ...`, shell `-c` environment dumps, and common interpreter environment reads such as Python `os.environ`, Node `process.env`, Ruby `ENV`, and Perl `%ENV`, destructive recursive removal, direct database mutation commands, privilege or system changes, external transfer commands, and package manager operations. Projects can tune it with `[action_guard]` in `shk.toml`, including `profile`, `allow`, and `deny` patterns. In `strict` profile, opaque execution such as `bash -c`, `python -c`, and `node -e` is blocked rather than deeply interpreted. Audit mode still records findings without blocking.
+The initial guard blocks sensitive file reads/writes, `.env` dump commands, environment dump commands such as `printenv`, `env`, `export -p`, `set | ...`, shell `-c` environment dumps, and common interpreter environment reads such as Python `os.environ`, Node `process.env`, Ruby `ENV`, and Perl `%ENV`, destructive recursive removal, direct database mutation commands, privilege or system changes, external transfer commands, and package manager operations. Projects can tune it with `[action_guard]` in `shk.toml`, including `profile`, `allow`, and `deny` patterns. In `strict` profile, opaque execution forms such as `bash -c`, `python -c`, and `node -e` are blocked rather than deeply interpreted; see [Action Guard Settings](configuration.md#action-guard-settings) for the full list. Audit mode still records findings without blocking.
 
 Common zsh, bash, sh, fish, and PowerShell PSReadLine history files are treated as sensitive
 paths. Supported nested shell payloads are inspected recursively; the strict profile additionally
@@ -124,7 +126,7 @@ subject of the finding is the server entry rather than a text position.
 | `mcp.secret_in_url` | `high` | Sensitive query parameter names in a server URL. |
 | `mcp.unknown_transport` | `info` | Entries declaring neither a command nor a URL. |
 | `mcp.config_unreadable` | `low` | Files that cannot be read or parsed, including entries rejected by the read limits below. |
-| `mcp.env_file_unreadable` | `low` | An existing `--env-file` target that cannot be safely read (oversized or not a regular file). |
+| `mcp.env_file_unreadable` | `low` | An existing `--env-file` target that escapes the selected scope or cannot be safely read (a symlink, oversized, or not a regular file). |
 
 Configured argument, process-variable, header, and URL values additionally pass through the
 built-in secret rules, so a plaintext credential in a server definition is reported with its normal
@@ -157,14 +159,15 @@ Universal PII rules run when `pii = true`:
 - Luhn-validated credit card numbers.
 - IPv4 addresses.
 - IPv6 addresses.
+- Pseudonymize tokens (`email_…`, `phone_…`, `name_…`) on the same line as a plaintext email address or phone number (`pii.shk_plaintext_map`, `high`), which indicates a leaked mapping.
 
 English PII rules run when `pii = true` and `pii_languages` includes `en`:
 
 - Phone numbers.
 - Label-anchored US Social Security Numbers.
 - Label-anchored ZIP or postal codes.
-- EINs.
-- Passport numbers.
+- Label-anchored EINs.
+- Label-anchored passport numbers.
 - Label-anchored street addresses.
 - Label-anchored personal names.
 
@@ -174,13 +177,14 @@ Japanese PII rules run when `pii = true` and `pii_languages` includes `ja`:
 - Label-anchored or postal-mark-prefixed postal codes.
 - Label-anchored passport numbers.
 - Label-anchored My Number values.
-- Corporate numbers.
-- Driver license numbers.
-- Bank account patterns.
-- Health insurance card patterns.
+- Label-anchored corporate numbers.
+- Label-anchored driver license numbers.
+- Label-anchored bank account patterns.
+- Label-anchored health insurance card patterns.
 - Label-anchored personal names.
+- Street addresses (prefecture, municipality, and block number; reported at `low`).
 
-Personal names, English street addresses, English SSNs, and Japanese passport numbers are label-anchored to reduce false positives.
+Rules described above as label-anchored require a nearby field label, which keeps false positives low for formats that would otherwise match ordinary numbers.
 
 ## Binary And Large Files
 
@@ -195,7 +199,7 @@ Use `--include-binary` or `scan.include_binary = true` to opt into scanning bina
 Before binary skipping, `shk scan` attempts text extraction for supported document formats:
 
 - `.docx`: scans `word/document.xml`.
-- `.xlsx`: scans shared strings and worksheet inline strings.
+- `.xlsx`: scans shared strings and worksheet XML text (inline strings, cell values, and formulas).
 - `.pptx`: scans slide, notes slide, and comment text.
 - `.pdf`: scans the embedded text layer.
 
@@ -244,7 +248,7 @@ Example report:
 }
 ```
 
-JSON scans include redacted surrounding context when context lines are available. Empty context fields are omitted from the serialized report. Repeated findings with the same rule and value in a single scanned file are emitted once and counted in `deduplicated`.
+JSON scans include redacted surrounding context when context lines are available. Empty context fields are omitted from the serialized report, and a `policy_path` field is added when a `shk.toml` was resolved. Repeated findings with the same rule and value in a single scanned file are emitted once and counted in `deduplicated`.
 
 When `--with-value-hash` is passed, each content finding also includes `value_hash`, which is `HMAC-SHA256(raw_value, rule_id)` formatted as `sha256-hmac:<hex>`. It supports value-specific `[[allowlist]]` entries and `shk allowlist suggest --value-hash` without printing raw matched values.
 

@@ -32,6 +32,13 @@ With `--upload-sarif`, it instead runs `shk scan --sarif --fail-on high -- .`, g
 `security-events: write` and `actions: read`, uploads with
 `github/codeql-action/upload-sarif@v4`, and then restores the scan result.
 
+Preview without writing the file, or scan a subdirectory:
+
+```bash
+shk ci init github --dry-run
+shk ci init github --path packages/api
+```
+
 ## Composite Action
 
 This repository also provides a composite action for adding `shk` to an existing workflow.
@@ -68,12 +75,6 @@ permissions to its caller, so `security-events: write` must remain in the workfl
 is enabled. Pull requests from forks normally receive a read-only token. If SARIF upload is not
 available for fork-triggered runs, set `upload-sarif: false` for those runs; do not switch to
 `pull_request_target` merely to obtain a write token while scanning untrusted pull-request code.
-
-Preview without writing the file:
-
-```bash
-shk ci init github --dry-run
-```
 
 ## What The Generated Workflow Contains
 
@@ -113,7 +114,9 @@ jobs:
           case "$(uname -s)-$(uname -m)" in
             Linux-x86_64) TARGET=x86_64-unknown-linux-gnu ;;
             Linux-aarch64|Linux-arm64) TARGET=aarch64-unknown-linux-gnu ;;
-            *) echo "unsupported runner" >&2; exit 1 ;;
+            Darwin-x86_64) TARGET=x86_64-apple-darwin ;;
+            Darwin-arm64) TARGET=aarch64-apple-darwin ;;
+            *) echo "unsupported runner: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
           esac
           ASSET="shk-cli-${TARGET}.tar.xz"
           gh release download "$SHK_VERSION" -R "$REPO" -p "$ASSET" -p "${ASSET}.sha256"
@@ -205,19 +208,19 @@ The workflow runs `shk scan --json --audit -- .` and always exits `0`. Findings 
 shk ci init github --mode audit
 ```
 
-`--fail-on` is silently ignored under `--mode audit` and the CLI prints a warning if you supply both.
+`--fail-on` has no effect under `--mode audit`; the CLI prints a warning if you supply both.
 
 ## Pin A Release
 
 Generated workflows default to the `shk` version that produced them (`v` + crate version). Override when pointing CI at a different tag:
 
 ```bash
-shk ci init github --shk-version v0.3.3
+shk ci init github --shk-version v0.7.0
 ```
 
 Re-run `shk ci init github --shk-version <new tag> --force` after upgrading `shk` locally to refresh the pin.
 
-`--shk-version` accepts either `latest` or a SemVer-ish tag (`v?MAJOR.MINOR.PATCH[-pre]`). Other values are rejected at CLI parse time so they cannot reach the install script.
+`--shk-version` accepts either `latest` or a SemVer-ish tag (`v?MAJOR.MINOR.PATCH[-pre]`). Other values are rejected before anything is written, so they cannot reach the install script. A tag without the `v` prefix is normalised to `vMAJOR.MINOR.PATCH`.
 
 ## Use A Fork Or Mirror
 
@@ -269,7 +272,7 @@ The install step downloads a single release archive, so a cache is usually unnec
         id: shk-cache
         with:
           path: ~/.cargo/bin/shk
-          key: shk-${{ runner.os }}-v0.3.3
+          key: shk-${{ runner.os }}-v0.7.0
 
       - name: Install shk
         if: steps.shk-cache.outputs.cache-hit != 'true'
@@ -286,11 +289,11 @@ Cache only when you have pinned `--shk-version`; caching `latest` defeats the pu
 
 | Symptom | Likely cause / fix |
 |---------|--------------------|
-| `error: invalid value '<x>' for '--fail-on'` | clap rejected an unknown severity. Use one of `info`, `low`, `medium`, `high`, `critical`. |
-| `invalid --shk-version` | The version is neither `latest` nor `vMAJOR.MINOR.PATCH`. Pin to a published release tag. |
+| `error: invalid value '<x>' for '--fail-on <SEVERITY>'` | clap rejected an unknown severity. Use one of `info`, `low`, `medium`, `high`, `critical`. |
+| `invalid --shk-version` | The version is neither `latest` nor a `v?MAJOR.MINOR.PATCH[-pre]` tag. Pin to a published release tag. |
 | `<file> already exists (use --force to overwrite)` | The destination workflow exists. Re-run with `--force`, or use `--output` to write a new file. |
 | `shk scan` exits 1 in CI but not locally | Check `[thresholds]` in `shk.toml` (CI uses the same policy) and any `[[allowlist]]` entries. The CI command prints JSON; inspect the `findings` array in the run log. |
-| Job runs but never blocks | You generated `--mode audit`. Re-generate without `--audit` to enforce. |
+| Job runs but never blocks | You generated `--mode audit`. Re-generate with `--mode blocking --force` to enforce. |
 | Job fails but the scan SARIF is clean | With `mcp-audit: true`, the MCP audit can fail the job on its own. Check the **Run shk mcp audit** step output and the `<category>-mcp` code-scanning results. |
 
 ## Related

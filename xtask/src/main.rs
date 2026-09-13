@@ -51,6 +51,7 @@ const V_VERSION_FILES: &[&str] = &[
     "README.md",
     "docs/installation.md",
     "docs/ci.md",
+    "docs/commands.md",
     "crates/shk-cli/src/skills/shk.md",
     ".claude/skills/shk/SKILL.md",
     ".agents/skills/shk/SKILL.md",

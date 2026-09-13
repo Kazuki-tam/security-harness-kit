@@ -11,20 +11,40 @@ This page describes the implemented `shk` CLI commands and options.
 
 ## `shk init`
 
-Create a starter `shk.toml` policy file in the current directory.
+Interactive first-run setup: the starter `shk.toml` policy, package-manager hardening, the Git pre-commit hook, AI editor hooks, and bundled agent skills.
 
 ```bash
 shk init
 shk init --strict
 shk init --force
+shk init --yes
 shk init --yes --no-npm-hardening
+shk init --yes --tool claude-code,cursor --log-blocked
+shk init --yes --no-git-hook --no-ai-hooks --no-skills
 ```
 
-`--strict` writes medium fail thresholds. `--force` overwrites an existing policy file.
+In a terminal, `shk init` prompts for the policy profile and asks which steps to run. The policy file is written first because the hook steps require `shk.toml`. When stdin is not a terminal and no setup flags are passed, `shk init` falls back to writing only `shk.toml`.
+
+Options:
+
+| Option | Behavior |
+|--------|----------|
+| `--strict` | Use the strict starter policy profile (medium fail thresholds). |
+| `--force` | Overwrite existing managed files where supported, including an existing `shk.toml`. |
+| `-y, --yes` | Accept the recommended defaults without prompting. Without `--tool`, all supported AI tools are configured. |
+| `--audit` | Install AI hooks in audit-only mode. Mutually exclusive with `--log-blocked`. |
+| `--log-blocked` | Install blocking AI hooks that append metadata-only block entries to `.shk/audit.log`. |
+| `--tool <tool>` | AI tools to configure: `claude-code`, `codex`, `cursor`, `copilot`, `antigravity`, `windsurf`. Repeat the flag or separate values with commas. |
+| `--no-git-hook` | Skip Git pre-commit hook setup. |
+| `--no-ai-hooks` | Skip AI editor hook setup. |
+| `--no-skills` | Skip bundled agent skill setup. |
+| `--no-npm-hardening` | Skip package-manager supply-chain hardening, including in `--yes` mode. |
+| `--global` | Write AI hooks and skills to user-level config directories. |
+| `--apply-sandbox` | Apply supported AI-tool sandbox hardening while installing hooks. |
 
 When `package.json` is detected, `shk init` can apply package-manager supply-chain hardening. For npm projects it writes project `.npmrc` settings such as `ignore-scripts=true` and `min-release-age=7`. For pnpm, Yarn, or Bun projects it writes the corresponding age-gate setting to `pnpm-workspace.yaml`, `.yarnrc.yml`, or `bunfig.toml`. Pass `--no-npm-hardening` to skip this step, including in `--yes` mode.
 
-`shk policy init` is also available as a longer alias:
+`shk policy init` writes only the starter `shk.toml` and skips the other setup steps:
 
 ```bash
 shk policy init
@@ -122,8 +142,11 @@ Rules:
 | `mcp.secret_in_url` | high | Sensitive query parameter names in a URL |
 | `mcp.unknown_transport` | info | Entries with neither a command nor a URL |
 | `mcp.config_unreadable` | low | Files that cannot be read or parsed |
+| `mcp.env_file_unreadable` | low | An existing `--env-file` target that escapes the selected scope or cannot be safely read |
 
 Configured argument, process-variable, header, and URL values also pass through the existing secret rule engine. References such as `${VAR}`, `$VAR`, and `${input:token}` are not treated as plaintext values. Existing `[[allowlist]]` entries apply. Reports contain no process-variable values, header values, or raw matches.
+
+Files named by a server's `--env-file <path>`, `--env-file=<path>`, or `--envfile` argument are also read and scanned with the secret and dotenv rules. Those findings keep their normal `secret.*` / `env.*` rule ids, with the message rewritten to name the server and client. Relative paths resolve against the config file's directory, `~/` is expanded, `${VAR}`-style references are not followed, and a missing file is skipped. See [MCP Configuration Audit](detection-model.md#mcp-configuration-audit).
 
 `--json` returns `findings`, `summary.by_severity`, and a redacted `servers` inventory. `--sarif` emits SARIF 2.1.0 using the same rule metadata shape as `shk scan --sarif`. The two output flags are mutually exclusive. Human output hides informational findings unless `--verbose` is passed.
 
@@ -259,7 +282,7 @@ Supported hook mode tools are `claude-code`, `codex`, `cursor`, `copilot`, `anti
 
 Hook mode notes:
 
-- `--hook-mode` cannot be combined with `--staged`.
+- `--hook-mode` cannot be combined with `--staged`, `--changed-since`, or `--git-history`.
 - `--audit` appends metadata-only JSON lines to `.shk/audit.log`, always exits `0`, and requires a project `shk.toml`.
 - `--log-blocked` keeps pre-hook blocking behavior, appends metadata-only blocked entries to `.shk/audit.log`, and requires a project `shk.toml`. Combined with `--post`, it writes non-blocking post audit entries.
 - `--post` is non-blocking and always exits `0`. It reports findings in tool output for review.
@@ -309,7 +332,7 @@ Options:
 | `--mode table\|text` | Override input classification. `.xlsx` defaults to table mode; `--mode text` scans string cells only; numeric values and formulas are left untouched. |
 | `--format csv\|tsv` | Force CSV/TSV table parsing (stdin, or files without a `.csv`/`.tsv` extension). Not valid for xlsx input or text mode. |
 | `--sheet <NAME\|N>` | xlsx table mode: sheet name or 1-based index. Defaults to the first sheet. |
-| `--map <PATH>` | Write or merge an encrypted restore map. Path must end with `.shk-map`. |
+| `--map <PATH>` | Write or merge an encrypted restore map. Path must end with `.shk-map`. Requires `shk.toml`. |
 | `--check-remaining` | After writing output, scan it and exit 1 if `pii.*` or `secret.*` detections remain. This is a leftover check, not a sufficiency guarantee. |
 
 Cannot be combined with `--pseudonymize`: `--hook-mode`, `--min-severity`, `--redaction`.
@@ -324,11 +347,11 @@ Office document masking supports `.docx`, `.xlsx`, and `.pptx` files and always 
 
 Office output is transactional: `shk` finalizes and syncs a sibling temporary archive before replacing `--output`. ZIP entry count and expanded sizes are bounded to prevent compressed documents from exhausting memory or disk.
 
-`--pseudonymize` writes `<output>.shk-meta.json` beside the output. The sidecar records norm version, token width, key fingerprint, column kinds, and counts. It never includes original values or tokens. Tokens are project-local: the same input yields the same token only when the same stored key and salt are used. Rotate or delete the key when a project ends (`shk pseudonymize key rotate` / `delete`).
+`--pseudonymize` writes `<output>.shk-meta.json` beside the output. The sidecar records norm version, token width, key fingerprint, column kinds, and counts. It never includes original values or tokens. Tokens are project-local: the same input yields the same token only when the same stored key and salt are used. Rotate or delete the key when a project ends (see [`shk pseudonymize`](#shk-pseudonymize)).
 
 `--json` with `--pseudonymize` prints that metadata only (`masked_content` and findings are omitted).
 
-Table mode replaces whole cells (`email`, `phone`, `name`, `custom:<label>`). A non-missing value that cannot be parsed as its declared email or phone kind becomes `[UNPARSED]`; it is counted in metadata and is not recoverable from a restore map. Text mode ignores severity and allowlists: `email` / `phone` / `name` matches become tokens, `secret.*` and unmapped detections become `[REDACTED]`. Name labels such as `氏名:` or `Name:` stay in place and only the name is tokenized, so the token matches the table-mode token for the same person. In xlsx table mode, blank rows above the table are skipped, phonetic (`rPh`) guides are ignored, and cells without an `r` attribute are positioned after their predecessor. Selected formula cells are rejected rather than converted to constants. xlsx table mode rewrites selected value cells on the selected sheet as inline strings and removes unreferenced shared-string contents. Values still referenced by other cells or sheets remain unchanged. Table mode is not a whole-workbook sanitization pass. XLSX processing rejects archives above 10,000 entries or 256 MiB expanded size, XML entries above 64 MiB, and grids above 1,000,000 cells. `--map` writes ciphertext only; there is no plaintext map export, and restore maps are limited to 64 MiB. Restore uses the first-seen original when one token maps to several inputs and only replaces complete known tokens. When `--map` is used, the output extension must preserve the restore format: `.csv`/`.tsv` must match the effective delimiter, xlsx must remain `.xlsx`, Office text output must keep its input extension, and plain-text output must not use a table or Office extension. CSV/TSV restore escapes each field so original delimiters, quotes, and newlines do not alter the table structure. Input, output, map, and metadata paths must be distinct; existing regular-file destinations are atomically replaced. Pseudonymize mutations are serialized per project; recovery material and metadata are committed before the output becomes visible. `key import` refuses to replace an existing key—delete or rotate the existing key explicitly first. `--check-remaining` forces secret/PII rules on and bypasses allowlist and inline suppression; it exits 2 instead of passing when the scanner would skip the output (a `[scan]` exclude / include pattern, or a file above `max_file_size_bytes`). With `--json`, metadata is printed before an exit 1 leftover result. Every other failure (usage, I/O, key store, invalid `[pseudonymize]` settings) exits 2, so exit 1 always means leftover detections. CSV/TSV files are streamed, so table mode does not load the whole file into memory; stdin input is buffered:
+Table mode replaces whole cells (`email`, `phone`, `name`, `custom:<label>`). A non-missing value that cannot be parsed as its declared email or phone kind becomes `[UNPARSED]`; it is counted in metadata and is not recoverable from a restore map. Text mode ignores severity and allowlists: `email` / `phone` / `name` matches become tokens, `secret.*` and unmapped detections become `[REDACTED]`. Name labels such as `氏名:` or `Name:` stay in place and only the name is tokenized, so the token matches the table-mode token for the same person. In xlsx table mode, blank rows above the table are skipped, phonetic (`rPh`) guides are ignored, and cells without an `r` attribute are positioned after their predecessor. Selected formula cells are rejected rather than converted to constants. xlsx table mode rewrites selected value cells on the selected sheet as inline strings and removes unreferenced shared-string contents. Values still referenced by other cells or sheets remain unchanged. Table mode is not a whole-workbook sanitization pass. XLSX processing rejects archives above 10,000 entries or 256 MiB expanded size, XML entries above 64 MiB, and grids above 1,000,000 cells. `--map` writes ciphertext only; there is no plaintext map export, and restore maps are limited to 64 MiB. Restore uses the first-seen original when one token maps to several inputs and only replaces complete known tokens. When `--map` is used, the output extension must preserve the restore format: `.csv`/`.tsv` must match the effective delimiter, xlsx must remain `.xlsx`, Office text output must keep its input extension, and plain-text output must not use a table or Office extension. CSV/TSV restore escapes each field so original delimiters, quotes, and newlines do not alter the table structure. Input, output, map, and metadata paths must be distinct; existing regular-file destinations are atomically replaced. Pseudonymize mutations are serialized per project; recovery material and metadata are committed before the output becomes visible. `key import` refuses to replace an existing key; delete the existing key explicitly first. `--check-remaining` forces secret/PII rules on and bypasses allowlist and inline suppression; it exits 2 instead of passing when the scanner would skip the output (a `[scan]` exclude / include pattern, or a file above `max_file_size_bytes`). With `--json`, metadata is printed before an exit 1 leftover result. Every other failure (usage, I/O, key store, invalid `[pseudonymize]` settings) exits 2, so exit 1 always means leftover detections. CSV/TSV files are streamed, so table mode does not load the whole file into memory; stdin input is buffered:
 
 ```bash
 shk mask orders.csv --pseudonymize --columns "Email:email,Phone:phone" --output orders.pseudo.csv
@@ -345,6 +368,31 @@ shk pseudonymize key export --instructions
 UTF-8 is required for text and CSV/TSV. Non-UTF-8 input (including Shift_JIS) exits 2 with a conversion hint. Output is still personal data for anyone who holds the key; confirm the receiving AI service's retention and training terms before upload. Keep `.shk-map` files out of git (default `doctor.ignore` includes `*.shk-map`). Do not treat `--check-remaining` as legal or completeness proof.
 
 Office text mode processes the DOCX main document, XLSX worksheet/shared-string text, and PPTX slide, notes, and comment text. Other package parts such as DOCX headers/footers and PPTX charts or masters are outside the current scope and are also not covered by `--check-remaining`.
+
+## `shk pseudonymize`
+
+Manage the project pseudonymization key and restore originals from an encrypted `.shk-map`. Tokens are produced by [`shk mask --pseudonymize`](#shk-mask).
+
+```bash
+shk pseudonymize key show
+shk pseudonymize key rotate
+shk pseudonymize key rotate --yes
+shk pseudonymize key delete --yes
+shk pseudonymize key export --instructions
+shk pseudonymize key import --stdin
+shk pseudonymize restore --file notes.pseudo.md --map notes.shk-map --output notes.restored.md
+```
+
+| Subcommand | Behavior |
+|------------|----------|
+| `key show` | Print the key fingerprint and the store backend, never the raw key material. |
+| `key rotate` | Replace the project key. Existing tokens become unlinkable. `-y, --yes` skips the confirmation prompt. |
+| `key delete` | Delete the project key. `-y, --yes` skips the confirmation prompt. |
+| `key export --instructions` | Print team handoff instructions without printing raw material. |
+| `key import --stdin` | Import key material from stdin into the configured store. Refuses to replace an existing key; delete it first (`key rotate` leaves a key in place). |
+| `restore` | Rewrite tokens in `--file` back to their originals using `--map` and write the result to `--output`. All three options are required. Requires `shk.toml` and the project's pseudonymize key. |
+
+Keys are stored in the backend selected by `[env].secret_store`; see [Env Secret Store](configuration.md#env-secret-store). Restore-map semantics are described under [`shk mask`](#shk-mask).
 
 ## `shk clipboard`
 
@@ -397,7 +445,7 @@ shk doctor --strict
 
 When distinct `shk` executables are present on PATH (for example, separate installer, Homebrew, and npm installations), doctor reports the first executable PATH would select and the shadowed locations. Paths that resolve to the same binary through symlinks are deduplicated, and shadowed executables are never run.
 
-Advisory warnings remain non-blocking by default. `shk doctor --strict` exits `1` when any advisory warning is present, making the full suite suitable for CI; runtime or configuration errors retain their error exit behavior. JSON output includes `ok`, `strict`, `warningCount`, `shkExecutable`, and metadata-only `envSecretStore` fields. Configuration failures are also emitted as valid JSON and exit `2`. The full suite performs static 1Password configuration checks only; use `shk doctor env` when an explicit live `op --version` / `op whoami` check is wanted. `--strict` applies to the full suite, not doctor subcommands.
+Advisory warnings remain non-blocking by default. `shk doctor --strict` exits `1` when any advisory warning is present, making the full suite suitable for CI; runtime or configuration errors retain their error exit behavior. JSON output includes `ok`, `strict`, `warningCount`, `shkExecutable`, and metadata-only `envSecretStore` fields. Configuration failures are also emitted as valid JSON and exit `2`. The full suite performs static 1Password configuration checks only; use `shk doctor env` when an explicit live `op --version` / `op whoami` check is wanted. `--strict` is only accepted by the full suite; `shk doctor --strict <subcommand>` exits with an error.
 
 ### `shk doctor ignore`
 
@@ -411,7 +459,7 @@ shk doctor ignore ./path --fix
 
 The ignore diagnostic checks `.gitignore`, `.cursorignore`, `.cursorindexingignore`, `.codeiumignore`, `.clineignore`, `.aiderignore`, `.continueignore`, `.tabnineignore`, `.ignore`, and `.aiignore` when present.
 
-It also reports on Claude Code `.claude/settings.json` read deny entries and Codex `.codex/config.toml` hook/sandbox settings when those files exist.
+It also reports on Claude Code `.claude/settings.json` (whether `permissions.deny` contains the recommended action-guard deny entries and whether the recommended sandbox settings are present) and Codex `.codex/config.toml` hook/sandbox settings when those files exist.
 
 `--fix` requires `shk.toml` and appends missing required patterns to `.gitignore`.
 
@@ -425,7 +473,7 @@ shk doctor env --dotenvx
 shk doctor env ./path
 ```
 
-`.env.example`, dotenvx-encrypted env files, and `shk env encrypt` output files are excluded from the plaintext env file warning. If an encrypted env file contains newly added or edited plaintext values, `doctor env` reports the plaintext key names and recommends re-running `shk env encrypt <file> --in-place`. With `--dotenvx`, the diagnostic also reports known dotenvx artifact files such as `.env.keys` and `.env.vault`.
+`.env.example`, `.env.sample`, `.env.vault`, dotenvx-encrypted env files, and `shk env encrypt` output files are excluded from the plaintext env file warning; a plaintext `.env.keys` file is reported like any other env file. If an encrypted env file contains newly added or edited plaintext values, `doctor env` reports the plaintext key names and recommends re-running `shk env encrypt <file> --in-place`. With `--dotenvx`, the diagnostic also reports known dotenvx artifact files such as `.env.keys` and `.env.vault`.
 
 When `[env].secret_store = "1password"`, the diagnostic also checks `env.project_id`, `env.onepassword.vault`, `op` resolution (`SHK_OP_PATH`, known paths, or `PATH`), CLI version (minimum `2.24.0`), and sign-in state (`op whoami`). When `secret_store = "keyring"`, it reports that the OS keyring is the active backend.
 
@@ -441,7 +489,7 @@ shk doctor workflows --fix
 
 The diagnostic scans `.github/workflows/*.yml` and `*.yaml` and reports any `actions/checkout` step that does not set `persist-credentials: false`. Without it, `actions/checkout` leaves the workflow's GitHub token in a Git credential file that later steps can read, so a compromised or injected later step can exfiltrate the token.
 
-`--fix` requires `shk.toml` and adds `persist-credentials: false` to flagged checkout steps (creating a `with:` block when needed, or flipping an explicit `true`), preserving existing formatting, comments, and line endings. Other line endings are left untouched. It is a project-only hardening aid, not a full GitHub Actions linter.
+`--fix` requires `shk.toml` and adds `persist-credentials: false` to flagged checkout steps (creating a `with:` block when needed, or flipping an explicit `true`), preserving existing formatting and comments. Line endings are kept as CRLF when the file contains any CRLF and as LF otherwise. It is a project-only hardening aid, not a full GitHub Actions linter.
 
 ### `shk doctor version`
 
@@ -495,7 +543,7 @@ shk env run -f .env -- npm test
 
 | Option | Meaning |
 |--------|---------|
-| `--output <file>` | Destination file. Required unless `encrypt --in-place` is used. |
+| `-o, --output <file>` | Destination file. Required unless `encrypt --in-place` is used. |
 | `--in-place` | Encrypt only: replace the source file contents with encrypted data. |
 | `--env <name>` | Use `DOTENV_PRIVATE_KEY_<NAME>` and `DOTENV_PUBLIC_KEY_<NAME>`. Use `default` for `DOTENV_PRIVATE_KEY` / `DOTENV_PUBLIC_KEY`. Defaults to `default`. |
 | `--key <DOTENV_PRIVATE_KEY*>` | Use an exact private key variable name instead of deriving one from `--env`. |
@@ -520,7 +568,7 @@ shk env key migrate --to 1password
 shk env key migrate --to keyring
 ```
 
-`import` stores one `DOTENV_PRIVATE_KEY*` value in the native env secret store for the current project. Without `--stdin`, it prompts for the key without echoing input. With `--stdin`, it can read from a password manager CLI:
+`import` stores one `DOTENV_PRIVATE_KEY*` value in the native env secret store for the current project. It refuses to replace a key that is already stored unless `--force` is passed. Without `--stdin`, it prompts for the key without echoing input. With `--stdin`, it can read from a password manager CLI:
 
 ```bash
 op read "op://Project/prod/DOTENV_PRIVATE_KEY_PRODUCTION" \
@@ -529,7 +577,7 @@ op read "op://Project/prod/DOTENV_PRIVATE_KEY_PRODUCTION" \
 
 `list` prints only native key names indexed for the current project, never key material. `delete` removes stored native keys and requires an explicit target: `--all`, `--key <DOTENV_PRIVATE_KEY*>`, or `--env <name>`. Keys created by older versions that are not indexed can still be removed with an exact `--key` or `--env` target.
 
-`export --instructions` intentionally does not print raw key material. It prints the key name, whether a key is already present on this machine, and a recommended local handoff flow: store the key in a team password manager, share vault access with the teammate, and have the recipient run `shk env key import`.
+`export` requires `--instructions` and intentionally does not print raw key material. It prints the key name, whether a key is already present on this machine, and a recommended local handoff flow: store the key in a team password manager, share vault access with the teammate, and have the recipient run `shk env key import`.
 
 ### `shk env key migrate`
 
@@ -730,7 +778,7 @@ shk ci init github --dry-run
 shk ci init github --mode audit
 shk ci init github --fail-on critical
 shk ci init github --upload-sarif
-shk ci init github --shk-version v0.3.3
+shk ci init github --shk-version v0.7.0
 shk ci init github --output .github/workflows/security.yml --force
 ```
 

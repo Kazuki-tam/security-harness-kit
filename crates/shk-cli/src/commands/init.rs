@@ -216,6 +216,7 @@ fn should_run_legacy_policy_init(args: &InitArgs) -> bool {
         && !io::stdin().is_terminal()
         && args.tools.is_empty()
         && !args.audit
+        && !args.log_blocked
         && !args.no_git_hook
         && !args.no_ai_hooks
         && !args.no_skills
