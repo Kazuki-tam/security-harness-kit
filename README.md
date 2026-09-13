@@ -1,6 +1,6 @@
 # security-harness-kit (`shk`)
 
-![Overview illustration of shk scanning code, masking secrets, enforcing hooks, and producing safe reports](docs/assets/shk-overview.jpg)
+![shk — Security Harness Kit. Let AI build. Keep secrets yours. Detect secrets, mask sensitive data, block risky AI actions before they run.](docs/assets/shk-overview.jpg)
 
 `shk` is a local-first guardrail for AI-assisted development. It helps keep secrets, PII, and risky project surfaces out of AI tool context, Git commits, generated output, and everyday local workflows. It can also encrypt `.env` files and inject decrypted values only when running local commands.
 

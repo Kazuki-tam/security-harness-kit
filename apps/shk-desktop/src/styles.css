@@ -25,7 +25,7 @@
   --color-sky-900: #0d3d82;
   --color-sky-950: #023171;
 
-  /* Sampled from app-logo.png: left arm #0370f8, right arm #27c7fb. */
+  /* Tuned to app-logo.svg (shared with the website): blue arm ≈ #0370f8, cyan arm ≈ #27c7fb. */
   --color-accent: #27c7fb;
   --color-accent-strong: #0370f8;
   --color-accent-soft: rgba(39, 199, 251, 0.12);
