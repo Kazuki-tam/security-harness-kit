@@ -41,7 +41,7 @@ pub enum Commands {
         /// Install blocking AI hooks that append metadata-only block entries to `.shk/audit.log`.
         #[arg(long, conflicts_with = "audit")]
         log_blocked: bool,
-        /// AI tools to configure: claude-code, codex, cursor, copilot, antigravity, windsurf. Repeat or use commas.
+        /// AI tools to configure. Repeat the flag or separate values with commas.
         #[arg(long, value_enum, value_delimiter = ',')]
         tool: Vec<AiTool>,
         /// Skip Git pre-commit hook setup.
@@ -461,7 +461,7 @@ pub enum HooksCmd {
         #[arg(long, help = "Explicit alias for the default pre-commit hook.")]
         pre_commit: bool,
     },
-    /// Configure AI-editor hooks (Cursor / Claude Code / Codex / Antigravity / GitHub Copilot / Windsurf)
+    /// Configure hooks for supported AI editors
     InstallAi {
         #[arg(
             long,
@@ -647,12 +647,12 @@ pub enum SkillsCmd {
     List,
     /// Show installation status for all supported tools
     Status,
-    /// Install shk skill for Claude Code, Codex, Cursor, Copilot, Antigravity, and/or Windsurf
+    /// Install the shk skill for supported AI tools
     Install {
-        /// Target tool: claude-code, codex, cursor, copilot, antigravity, windsurf, or all (default: all)
+        /// Target tool (default: all)
         #[arg(long, value_enum)]
         tool: Option<SkillToolArg>,
-        /// Write to user-level directory (~/.claude/skills/, ~/.agents/skills/, ~/.copilot/skills/, ~/.gemini/config/skills/, or ~/.codeium/windsurf/skills/)
+        /// Write to the tool's user-level skills directory instead of the project (`--dry-run` shows the paths)
         #[arg(long)]
         global: bool,
         /// Print planned changes without writing

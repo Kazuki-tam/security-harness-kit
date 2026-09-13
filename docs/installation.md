@@ -167,24 +167,23 @@ brew install kazuki-tam/tap/shk
 
 The formula always tracks the latest release. To upgrade later, run `brew upgrade shk`.
 
-Alternatively, the formula (`shk.rb`) is attached to each release as an asset and can be installed without the tap. Current Homebrew refuses to install a formula from an `https://` URL, so download the file first and install it from the local path:
+To pin a specific release with Homebrew 6, tap the repository and extract that version from its history into a personal tap (pass the version without the `v` prefix):
 
 ```bash
-curl -fsSLO https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk.rb
-brew install --formula ./shk.rb
+brew tap kazuki-tam/tap
+brew version-install kazuki-tam/tap/shk <version>
 ```
 
-To install a pinned release this way, replace `latest/download` with `download/<tag>` (e.g. `download/v0.7.0`). To upgrade later, download the newer `shk.rb` and run `brew upgrade --formula ./shk.rb`; a formula installed from a file is not tracked by `brew upgrade shk`.
+The formula file (`shk.rb`) is also attached to each release as an asset. Current Homebrew only loads formulae from taps, so `brew install --formula` with a URL or a local path is rejected; to use the asset, create a tap with `brew tap-new <user>/<repository>`, copy `shk.rb` into its `Formula/` directory, and install `<user>/<repository>/shk`.
 
 Intel macOS, Apple Silicon macOS, Linux x86_64/aarch64, and Windows x86_64 are supported. Scoop manifests are not published by the current release pipeline.
 
 ## Desktop App
 
-The desktop app is distributed separately from the CLI, but the hooks that
-Quick Setup installs run the `shk` command, so the CLI must also be installed
-for real-time protection; scanning and masking inside the app work on their
-own. Releases are published
-from `desktop-vX.Y.Z` (or combined `shk-vX.Y.Z`) tags as `shk-desktop_*` assets
+The desktop app is distributed separately from the CLI. The hooks that Quick
+Setup installs run the `shk` command, so the CLI must also be installed for
+real-time protection; everything else in the app works on its own. Releases
+are published from `desktop-vX.Y.Z` (or combined `shk-vX.Y.Z`) tags as `shk-desktop_*` assets
 on GitHub Releases. Starting with `desktop-v0.6.0`, macOS builds are <!-- shk-version-pin -->
 Developer ID signed, notarized, and stapled. Windows installers are currently
 **not** Authenticode-signed (see

@@ -37,9 +37,11 @@ The command updates all of the following files.
 - `apps/shk-desktop/src-tauri/Cargo.toml` — internal crate dependencies
 
 **v-prefixed version (`v0.3.8` format)**
+- `action.yml`
 - `README.md`
 - `docs/installation.md`
 - `docs/ci.md`
+- `docs/commands.md`
 - `crates/shk-cli/src/skills/shk.md`
 - `.claude/skills/shk/SKILL.md`
 - `.agents/skills/shk/SKILL.md`

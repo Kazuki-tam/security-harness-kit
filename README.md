@@ -50,7 +50,7 @@ While it is open it also raises an OS notification when a hook blocks AI
 activity in any of your projects.
 
 The hooks it installs run the `shk` command, so the CLI is required for
-real-time protection; only scanning and masking work with the app alone.
+real-time protection.
 
 - Download and install: [Installation → Desktop App](docs/installation.md#desktop-app)
 - Notification behaviour: [Blocked-activity notifications](docs/installation.md#blocked-activity-notifications)

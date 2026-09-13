@@ -28,6 +28,9 @@ shk allowlist suggest --from report.json # generate safe [[allowlist]] TOML snip
 shk mask < file.txt                  # mask PII/secrets from stdin
 shk mask file.txt --json             # JSON output with findings + masked content
 shk mask report.docx --output report.redacted.docx
+shk mask data.csv --pseudonymize --output data.pseudo.csv --map data.shk-map  # deterministic tokens + encrypted restore map
+shk pseudonymize restore --file data.pseudo.csv --map data.shk-map --output data.csv
+shk pseudonymize key show            # key fingerprint and store backend, never the key
 shk clipboard scan                   # scan OS clipboard text
 shk clipboard mask                   # print masked clipboard text
 shk clipboard mask --write           # replace clipboard with masked text
@@ -132,6 +135,15 @@ shk mask report.docx --output report.redacted.docx
 ```
 
 Office document masking supports `.docx`, `.xlsx`, and `.pptx` and requires `--output`. PDF masking is not supported.
+
+Pseudonymization:
+```bash
+shk mask customers.csv --pseudonymize --output customers.pseudo.csv --map customers.shk-map
+shk mask notes.md --pseudonymize --output notes.pseudo.md
+shk pseudonymize restore --file customers.pseudo.csv --map customers.shk-map --output customers.csv
+```
+
+`--pseudonymize` replaces emails, phone numbers, and names with deterministic tokens instead of `[REDACTED]`, so the same person gets the same token across files. It requires `shk.toml` and a project key in the configured secret store (created on first use; inspect it with `shk pseudonymize key show`). `--map` writes an encrypted restore map (`.shk-map`) that `shk pseudonymize restore` reverses; never commit `.shk-map` files. Rotate or delete the key with `shk pseudonymize key rotate` / `key delete` when a project ends. Table mode (`.csv`, `.tsv`, `.xlsx`) tokenizes whole cells by column; text mode tokenizes matches in place. Configure defaults under `[pseudonymize]` in `shk.toml`.
 
 Hook-mode masking:
 ```bash

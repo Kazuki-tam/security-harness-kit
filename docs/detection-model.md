@@ -11,7 +11,7 @@ Raw matched values are not emitted in JSON reports. `redacted_value` is `[REDACT
 | `critical` | Private key PEM blocks. |
 | `high` | OpenAI-style keys, AWS access key IDs, Anthropic keys, Google API keys, GitHub tokens, Slack tokens, Stripe keys, database URLs, dotenvx private keys, every `secret.gitleaks.*` rule, and pseudonymize tokens found next to plaintext PII. |
 | `medium` | JWTs, bearer tokens, generic API key assignments, email, credit card numbers, phone numbers, US SSNs, and most Japanese PII rules. |
-| `low` | IP addresses, lower-confidence PII patterns (EINs, postal codes, passport numbers, Japanese bank account, health insurance, and street address patterns), and policy warnings such as expired allowlist entries. |
+| `low` | IP addresses, lower-confidence PII patterns (English EINs, postal codes, and passport numbers; Japanese bank account, health insurance, and street address patterns), and policy warnings such as expired allowlist entries. |
 | `info` | Skip notices, label-anchored personal names and English street addresses, and other informational findings. |
 
 ## AI Context Safety Coverage
@@ -86,7 +86,7 @@ The hand-tuned `shk` rules include patterns for:
 
 The generated gitleaks-derived rules add broader service coverage for provider-specific API keys, access tokens, client secrets, webhook URLs, cloud credentials, package registry tokens, and related secret formats. They preserve key gitleaks rule semantics where practical, including keyword prefilters, path-limited rules, `secretGroup` extraction for the reported secret value, entropy thresholds, and rule-level allowlists.
 
-Generated gitleaks rule ids use the `secret.gitleaks.<upstream-id>` namespace so they do not collide with existing `shk` rule ids. A small number of upstream rules are intentionally skipped: `generic-api-key` and `openai-api-key` overlap with tuned `shk` rules, and a few others exceed Rust `regex` compiled-size limits or have no content regex. Other overlapping rules are kept, so one value can be reported by both a tuned rule and a `secret.gitleaks.*` rule (for example `secret.jwt` at `medium` and `secret.gitleaks.jwt` at `high`). See `THIRD_PARTY_LICENSES.md` for the gitleaks license and source commit.
+Generated gitleaks rule ids use the `secret.gitleaks.<upstream-id>` namespace so they do not collide with existing `shk` rule ids. A small number of upstream rules are intentionally skipped: `generic-api-key` and `openai-api-key` overlap with tuned `shk` rules, and two others exceed Rust `regex` compiled-size limits. Other overlapping rules are kept, so one value can be reported by both a tuned rule and a `secret.gitleaks.*` rule (for example `secret.jwt` at `medium` and `secret.gitleaks.jwt` at `high`). See `THIRD_PARTY_LICENSES.md` for the gitleaks license and source commit.
 
 These are pattern-based detections. Review findings before treating them as confirmed credentials.
 
@@ -94,7 +94,7 @@ These are pattern-based detections. Review findings before treating them as conf
 
 In pre-hook mode, `shk scan --hook-mode <tool>` checks the AI tool payload for dangerous actions before scanning text content. This guard is separate from secret and PII detection: it looks at operation intent such as file paths and shell commands.
 
-The initial guard blocks sensitive file reads/writes, `.env` dump commands, environment dump commands such as `printenv`, `env`, `export -p`, `set | ...`, shell `-c` environment dumps, and common interpreter environment reads such as Python `os.environ`, Node `process.env`, Ruby `ENV`, and Perl `%ENV`, destructive recursive removal, direct database mutation commands, privilege or system changes, external transfer commands, and package manager operations. Projects can tune it with `[action_guard]` in `shk.toml`, including `profile`, `allow`, and `deny` patterns. In `strict` profile, opaque execution such as `bash -c`, `python -c`, and `node -e` is blocked rather than deeply interpreted. Audit mode still records findings without blocking.
+The initial guard blocks sensitive file reads/writes, `.env` dump commands, environment dump commands such as `printenv`, `env`, `export -p`, `set | ...`, shell `-c` environment dumps, and common interpreter environment reads such as Python `os.environ`, Node `process.env`, Ruby `ENV`, and Perl `%ENV`, destructive recursive removal, direct database mutation commands, privilege or system changes, external transfer commands, and package manager operations. Projects can tune it with `[action_guard]` in `shk.toml`, including `profile`, `allow`, and `deny` patterns. In `strict` profile, opaque execution forms such as `bash -c`, `python -c`, and `node -e` are blocked rather than deeply interpreted; see [Action Guard Settings](configuration.md#action-guard-settings) for the full list. Audit mode still records findings without blocking.
 
 Common zsh, bash, sh, fish, and PowerShell PSReadLine history files are treated as sensitive
 paths. Supported nested shell payloads are inspected recursively; the strict profile additionally
@@ -126,7 +126,7 @@ subject of the finding is the server entry rather than a text position.
 | `mcp.secret_in_url` | `high` | Sensitive query parameter names in a server URL. |
 | `mcp.unknown_transport` | `info` | Entries declaring neither a command nor a URL. |
 | `mcp.config_unreadable` | `low` | Files that cannot be read or parsed, including entries rejected by the read limits below. |
-| `mcp.env_file_unreadable` | `low` | An existing `--env-file` target that cannot be safely read (oversized or not a regular file). |
+| `mcp.env_file_unreadable` | `low` | An existing `--env-file` target that escapes the selected scope or cannot be safely read (a symlink, oversized, or not a regular file). |
 
 Configured argument, process-variable, header, and URL values additionally pass through the
 built-in secret rules, so a plaintext credential in a server definition is reported with its normal
@@ -184,7 +184,7 @@ Japanese PII rules run when `pii = true` and `pii_languages` includes `ja`:
 - Label-anchored personal names.
 - Street addresses (prefecture, municipality, and block number; reported at `low`).
 
-Apart from phone numbers, email addresses, credit card numbers, IP addresses, and Japanese street addresses, the PII rules are label-anchored to reduce false positives.
+Rules described above as label-anchored require a nearby field label, which keeps false positives low for formats that would otherwise match ordinary numbers.
 
 ## Binary And Large Files
 
