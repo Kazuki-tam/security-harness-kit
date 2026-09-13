@@ -167,13 +167,14 @@ brew install kazuki-tam/tap/shk
 
 The formula always tracks the latest release. To upgrade later, run `brew upgrade shk`.
 
-Alternatively, the formula (`shk.rb`) is attached to each release as an asset and can be installed directly without the tap:
+Alternatively, the formula (`shk.rb`) is attached to each release as an asset and can be installed without the tap. Current Homebrew refuses to install a formula from an `https://` URL, so download the file first and install it from the local path:
 
 ```bash
-brew install --formula https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk.rb
+curl -fsSLO https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk.rb
+brew install --formula ./shk.rb
 ```
 
-To install a pinned release this way, replace `latest/download` with `download/<tag>` (e.g. `download/v0.7.0`).
+To install a pinned release this way, replace `latest/download` with `download/<tag>` (e.g. `download/v0.7.0`). To upgrade later, download the newer `shk.rb` and run `brew upgrade --formula ./shk.rb`; a formula installed from a file is not tracked by `brew upgrade shk`.
 
 Intel macOS, Apple Silicon macOS, Linux x86_64/aarch64, and Windows x86_64 are supported. Scoop manifests are not published by the current release pipeline.
 
