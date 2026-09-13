@@ -2,16 +2,18 @@
 
 `shk` reads project policy from `shk.toml` in the current working directory. If the file is absent, read-only commands use built-in defaults. Commands that write project or tool configuration require `shk.toml`. Pass the global `--project-root <DIR>` flag to resolve the policy from another directory.
 
-Create a starter policy:
+Create a starter policy as part of the interactive first-run setup, or write only the policy file:
 
 ```bash
 shk init
+shk policy init
 ```
 
-Create a stricter starter policy:
+Create a stricter starter policy that fails on medium-severity findings:
 
 ```bash
 shk init --strict
+shk policy init --strict
 ```
 
 ## Policy Reference
@@ -135,6 +137,8 @@ confirm = true
 | `follow_symlinks` | `false` | Whether scanner traversal follows symlinks. |
 | `include_binary` | `false` | Whether binary-looking files are scanned instead of skipped. |
 
+Only an absent key falls back to the default. `include = []` scans nothing and `exclude = []` disables the built-in exclusions.
+
 Supported document formats (`.docx`, `.xlsx`, `.pptx`, and text-layer `.pdf`) are text-extracted before binary skipping. Office findings are labelled with internal entry paths such as `report.docx:word/document.xml`; PDF findings use the PDF path itself. Image-only PDFs are not OCRed and produce `scan.document_text_empty` when no text can be extracted.
 
 ## Rule Settings
@@ -172,12 +176,12 @@ The `--fail-on` CLI option overrides the configured threshold for that command i
 
 ## Action Guard Settings
 
-`action_guard` applies only to pre-hook scans such as `shk scan --hook-mode claude-code`. It checks operation intent before content scanning.
+`action_guard` applies only to blocking pre-hook scans such as `shk scan --hook-mode claude-code`. It checks operation intent before content scanning, and it is skipped in `--audit` mode and in `--post` hooks.
 
 | Key | Default | Behavior |
 |-----|---------|----------|
 | `enabled` | `true` | Enables action guard blocking in pre-hook mode. |
-| `profile` | `recommended` | Built-in coverage level: `minimal`, `recommended`, or `strict`. |
+| `profile` | `recommended` | Built-in coverage level: `minimal`, `recommended`, or `strict`. Any other value falls back to `recommended`. |
 | `allow` | `[]` | Action patterns that bypass action guard, for project-approved operations. |
 | `deny` | `[]` | Extra project-specific action patterns to block. |
 
@@ -185,7 +189,32 @@ Action patterns use tool-like strings with `*` wildcards, such as `Bash(psql:*)`
 
 Shell commands are evaluated segment by segment. A single-command allow such as `Bash(echo:*)` does not allow a later segment in `echo ok && curl ...`; allow the complete compound command explicitly only when every segment is trusted. This prevents a broadly allowed first command from hiding a dangerous later command.
 
-The `strict` profile also blocks opaque execution forms such as `bash -c`, `sh -c`, `python -c`, `node -e`, `ruby -e`, and `perl -e` instead of trying to fully interpret embedded scripts.
+The `strict` profile also blocks opaque execution forms such as `bash -c`, `sh -c`, `zsh -c`, `python -c`, `python3 -c`, `node -e`, `node --eval`, `ruby -e`, and `perl -e` instead of trying to fully interpret embedded scripts.
+
+## Pseudonymize Settings
+
+`[pseudonymize]` configures [`shk mask --pseudonymize`](commands.md#shk-mask). Unknown keys are rejected, and invalid settings exit `2` before any file is written.
+
+| Key | Default | Behavior |
+|-----|---------|----------|
+| `norm` | `"v1"` | Normalization version applied before hashing. Only `v1` is accepted. |
+| `token_bits` | `64` | Token width in bits. Must be a multiple of 8 between `64` and `128`. |
+| `email_strip_subaddress` | `false` | Drop `+tag` sub-addresses before tokenizing email addresses, so `user+news` and `user` at the same domain share a token. |
+| `columns` | `{}` | Table-mode defaults mapping a header name to a kind (`email`, `phone`, `name`, or `custom:<label>`). Entries that match no header are ignored, and `--columns` overrides them. |
+| `rules` | `{}` | Text-mode overrides mapping a rule id to a kind, for detections that should become tokens instead of `[REDACTED]`. |
+
+```toml
+[pseudonymize]
+token_bits = 64
+email_strip_subaddress = false
+
+[pseudonymize.columns]
+Email = "email"
+Phone = "phone"
+Name = "name"
+```
+
+The project key lives in the same backend as env keys (`[env].secret_store`); see [`shk pseudonymize`](commands.md#shk-pseudonymize).
 
 ## Env Secret Store
 
@@ -220,20 +249,21 @@ vault = "shk-project-keys"        # required before using or migrating to 1Passw
 
 | Key | Default | Behavior |
 |-----|---------|----------|
-| `env.secret_store` | `"keyring"` | Backend for native and dotenvx env key storage. Supported values: `keyring`, `1password`. |
-| `env.project_id` | unset | Required when `secret_store = "1password"`. Stable, machine-independent project label used in 1Password item titles. `shk doctor env` can suggest a value from `git remote get-url origin` or the repository directory name. |
+| `env.secret_store` | `"keyring"` | Backend for native env keys, imported dotenvx keys, and pseudonymize keys. Supported values: `keyring`, `1password`. |
+| `env.project_id` | unset | Required when `secret_store = "1password"`. Stable, machine-independent project label used in 1Password item titles. Must not contain `:` or leading/trailing whitespace. `shk doctor env` can suggest a value from `git remote get-url origin` or the repository directory name. |
 | `env.onepassword.vault` | unset | Required when `secret_store = "1password"`. Vault name passed to the 1Password CLI (`op`). |
 
-1Password item titles follow `shk:{project_id}:{segment}:{key}` where `{segment}` is `env` for native keys (`shk env encrypt`, `shk env key import`) or `dotenvx` for imported dotenvx keys. Items are tagged `shk`. Raw key values never appear in `shk.toml`, JSON reports, or `.shk/audit.log`.
+1Password item titles follow `shk:{project_id}:{segment}:{key}` where `{segment}` is `env` for native keys (`shk env encrypt`, `shk env key import`), `dotenvx` for imported dotenvx keys, or `pseudonymize` for `shk mask --pseudonymize` keys. Items are tagged `shk`. Raw key values never appear in `shk.toml`, JSON reports, or `.shk/audit.log`.
 
 Set `SHK_OP_PATH` to an absolute path when the `op` binary is not on `PATH`. Resolution order is `SHK_OP_PATH`, known install paths, then `PATH` (the last option is flagged in `shk doctor env` because it is susceptible to hijacking). The 1Password CLI must be signed in (`op whoami`) and at least version `2.24.0`.
 
-Keyring storage uses two service names in the OS credential store:
+Keyring storage uses three service names in the OS credential store:
 
 | Service | Used by |
 |---------|---------|
 | `security-harness-kit/env` | Native keys from `shk env encrypt`, `shk env key import`, and adopted dotenvx keys |
 | `security-harness-kit/dotenvx` | Keys imported with `shk env dotenvx import-keys` |
+| `security-harness-kit/pseudonymize` | Project keys for `shk mask --pseudonymize` and `shk pseudonymize` |
 
 Run `shk doctor env` to check plaintext env files and, when 1Password is configured, `op` resolution, version, and sign-in state.
 
@@ -274,15 +304,15 @@ Supported profile keys:
 | Key | Behavior |
 |-----|----------|
 | `provider` | `aws` or `gcp`. |
-| `mode` | `blob` or `per-key`. Defaults to `blob` when omitted. |
+| `mode` | `blob` or `per-key` (`per_key` is accepted as an alias). Defaults to `blob` when omitted. |
 | `target` | Blob mode target secret name. |
 | `target_prefix` | Per-key mode target prefix. |
-| `source` | Source dotenv file, resolved relative to the project root when relative. |
+| `source` | Source dotenv file, resolved relative to the Git repository root (or the current directory outside a repository) when relative. |
 | `region` | AWS region. Otherwise AWS CLI environment/config is used. |
 | `project` | GCP project. Otherwise gcloud environment/config is used. |
 | `location` | GCP location. Defaults to `global`. |
 | `audit` | Append metadata-only `.shk/audit.log` entries when `true`. |
-| `confirm` | Prompt before writing when `true`. |
+| `confirm` | Prompt before writing when `true`. The prompt needs a terminal; non-interactive runs exit `2` unless `--yes` or `--dry-run` is passed. |
 | `create_if_missing` | Create provider secrets when missing. |
 | `expected_env` | Lint hint used for environment-like values such as `NODE_ENV`. |
 
@@ -311,7 +341,7 @@ Fields:
 | `pattern` | Required | Rust regex pattern. |
 | `severity` | `medium` | Finding severity. |
 | `kind` | `internal` | Finding kind. |
-| `message` | Generated from `id` | Finding message. |
+| `message` | `Custom sensitive term detected` | Finding message. |
 | `confidence` | `1.0` | Finding confidence. |
 | `case_insensitive` | `false` | Wraps the pattern in case-insensitive matching. |
 | `enabled` | `true` | Enables or disables the rule. |
@@ -330,6 +360,8 @@ SECRET=synthetic-example-value
 SECRET=synthetic-example-value
 ```
 
+A marker without a rule id (`# shk-ignore`, `# shk-ignore-next-line`) suppresses every rule on that line, and `//` comments work the same way as `#`.
+
 Policy allowlists can suppress by path and rule:
 
 ```toml
@@ -339,6 +371,8 @@ path = "fixtures/**"
 reason = "Intentional test fixture"
 expires = "2026-12-31"
 ```
+
+`path` is optional and defaults to `**/*`. `expires` must be `YYYY-MM-DD`; an entry whose date cannot be parsed never expires.
 
 For Office document findings, match the internal entry label shown in reports:
 

@@ -19,6 +19,21 @@ For one-off runs without a global install:
 npx security-harness-kit scan
 ```
 
+## bun
+
+The same npm package works with bun. Its `postinstall` script fetches the platform binary at install time; if bun skips lifecycle scripts, the binary is fetched on the first run instead.
+
+```bash
+bun add -g security-harness-kit
+shk --version
+```
+
+For one-off runs without a global install:
+
+```bash
+bunx security-harness-kit scan
+```
+
 ## Install With Script
 
 macOS and Linux releases can be installed with the bundled installer:
@@ -158,13 +173,16 @@ Alternatively, the formula (`shk.rb`) is attached to each release as an asset an
 brew install --formula https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk.rb
 ```
 
-To install a pinned release this way, replace `latest/download` with `download/<tag>` (e.g. `download/v0.3.3`).
+To install a pinned release this way, replace `latest/download` with `download/<tag>` (e.g. `download/v0.7.0`).
 
 Intel macOS, Apple Silicon macOS, Linux x86_64/aarch64, and Windows x86_64 are supported. Scoop manifests are not published by the current release pipeline.
 
 ## Desktop App
 
-The desktop app is distributed separately from the CLI. Releases are published
+The desktop app is distributed separately from the CLI, but the hooks that
+Quick Setup installs run the `shk` command, so the CLI must also be installed
+for real-time protection; scanning and masking inside the app work on their
+own. Releases are published
 from `desktop-vX.Y.Z` (or combined `shk-vX.Y.Z`) tags as `shk-desktop_*` assets
 on GitHub Releases. Starting with `desktop-v0.6.0`, macOS builds are <!-- shk-version-pin -->
 Developer ID signed, notarized, and stapled. Windows installers are currently
@@ -323,6 +341,12 @@ npm uninstall -g security-harness-kit
 ```
 
 Release archive: remove `shk` from the directory where you unpacked or copied it.
+
+bun:
+
+```bash
+bun remove -g security-harness-kit
+```
 
 Source build: run `cargo clean` in the cloned repository to remove build output, or remove `target/release/shk` directly. If you copied that binary into a directory on `PATH`, remove the copied binary there as well.
 
