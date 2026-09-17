@@ -17,7 +17,7 @@ pub fn encrypt_map(material: &KeyMaterial, document: &RestoreMapDocument) -> Res
         .map_err(|_| anyhow::anyhow!("invalid map cipher key"))?;
     key_bytes.zeroize();
     let mut nonce_bytes = [0u8; 12];
-    getrandom::getrandom(&mut nonce_bytes)
+    getrandom::fill(&mut nonce_bytes)
         .map_err(|err| anyhow::anyhow!("generate map nonce: {err}"))?;
     let nonce = Nonce::from(nonce_bytes);
     let ciphertext = cipher
