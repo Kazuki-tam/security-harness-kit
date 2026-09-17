@@ -57,8 +57,8 @@ impl KeyMaterial {
     pub fn generate() -> Result<Self> {
         let mut master = [0u8; 32];
         let mut salt = [0u8; 32];
-        getrandom::getrandom(&mut master).map_err(|err| anyhow!("CSPRNG failed: {err}"))?;
-        getrandom::getrandom(&mut salt).map_err(|err| anyhow!("CSPRNG failed: {err}"))?;
+        getrandom::fill(&mut master).map_err(|err| anyhow!("CSPRNG failed: {err}"))?;
+        getrandom::fill(&mut salt).map_err(|err| anyhow!("CSPRNG failed: {err}"))?;
         Ok(Self::from_parts(master, salt))
     }
 

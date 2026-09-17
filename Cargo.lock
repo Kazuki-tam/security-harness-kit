@@ -4501,7 +4501,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "csv",
- "getrandom 0.2.17",
+ "getrandom 0.4.2",
  "globset",
  "hkdf 0.13.0",
  "hmac 0.13.0",
