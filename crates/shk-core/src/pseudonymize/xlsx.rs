@@ -102,20 +102,23 @@ pub fn run_xlsx(
     .map_err(|err| anyhow::anyhow!(err))?;
     let data_offset = leading_blank + usize::from(has_header);
     let selected_columns: BTreeSet<usize> = columns.iter().map(|column| column.index).collect();
-    // The first formula cell per selected column, in column order. A dry run
-    // reports them so a planner can steer the user away; a real run refuses.
+    // The first formula cell per selected column, plus every column that has
+    // one. A dry run reports them so a planner can steer the user away; a
+    // real run refuses the first such cell in row order, as it always has.
     let mut formula_cells: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
+    let mut formula_columns = BTreeSet::new();
     for (row, col) in parse_formula_cells(&sheet_xml)? {
-        if row >= data_offset
-            && row < data_offset + data_rows.len()
-            && selected_columns.contains(&col)
-        {
-            formula_cells.entry(col).or_insert((row, col));
+        if row >= data_offset && row < data_offset + data_rows.len() {
+            formula_columns.insert(col);
+            if selected_columns.contains(&col) {
+                formula_cells.entry(col).or_insert((row, col));
+            }
         }
     }
     let formula_cells: Vec<(usize, usize)> = formula_cells.into_values().collect();
+    let formula_columns: Vec<usize> = formula_columns.into_iter().collect();
     if !options.dry_run
-        && let Some(&(row, col)) = formula_cells.first()
+        && let Some(&(row, col)) = formula_cells.iter().min()
     {
         return Err(formula_cell_error(row, col));
     }
@@ -137,6 +140,7 @@ pub fn run_xlsx(
             headers,
             sample_rows: data_rows[..sample_len].to_vec(),
             formula_cells,
+            formula_columns,
         });
     }
     let material = material.expect("checked above");
@@ -199,6 +203,7 @@ pub fn run_xlsx(
         headers,
         sample_rows: Vec::new(),
         formula_cells: Vec::new(),
+        formula_columns: Vec::new(),
     })
 }
 
@@ -835,6 +840,7 @@ fn empty_xlsx_result(options: &TableOptions, material: Option<&KeyMaterial>) -> 
         headers: Vec::new(),
         sample_rows: Vec::new(),
         formula_cells: Vec::new(),
+        formula_columns: Vec::new(),
     }
 }
 
@@ -1089,6 +1095,7 @@ mod tests {
         // A dry run reports the cell so a planner can show it; a run refuses.
         let preview = run_xlsx(&input, None, None, &dry, None, None).unwrap();
         assert_eq!(preview.formula_cells, vec![(1, 0)]);
+        assert_eq!(preview.formula_columns, vec![0]);
         let err = run_xlsx(
             &input,
             Some(&dir.path().join("out.xlsx")),

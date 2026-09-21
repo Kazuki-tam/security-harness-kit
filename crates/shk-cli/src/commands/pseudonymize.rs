@@ -744,9 +744,10 @@ fn run_table_xlsx(
     interaction: &dyn Interaction,
 ) -> Result<PseudonymizeOutcome> {
     let plan = plan_table_xlsx(req, policy, !req.dry_run)?;
-    // The planning pass only reports formula cells; the CLI refuses them up
-    // front (as it always has), while a GUI preview shows them instead.
-    if let Some(&(row, col)) = plan.preview.formula_cells.first() {
+    // The planning pass only reports formula cells; the CLI refuses the first
+    // one in row order up front (as it always has), while a GUI preview shows
+    // them instead.
+    if let Some(&(row, col)) = plan.preview.formula_cells.iter().min() {
         return Err(formula_cell_error(row, col));
     }
     confirm_table_plan(interaction, &plan.preview)?;

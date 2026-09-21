@@ -30,9 +30,10 @@ pub struct ColumnOverrides {
     /// inference would select them. Lets a caller that already reviewed the
     /// plan (the desktop app) send an exact column set.
     pub skip: Vec<String>,
-    /// Choices by column position (`None` leaves the column alone). They win
-    /// over names, so blank or repeated headers can still be addressed one by
-    /// one. A position past the header row is an error.
+    /// Choices by column position (`None` leaves the column alone). When any
+    /// are given they are the whole selection: columns without a position are
+    /// left alone too, and names, config, and inference do not apply. A
+    /// position past the header row is an error.
     pub positions: Vec<(usize, Option<Kind>)>,
 }
 
@@ -127,11 +128,12 @@ pub fn resolve_columns(
         }
     }
 
+    let exact = !positions.is_empty();
     let mut resolved = Vec::new();
     let mut matched_explicit = std::collections::BTreeSet::new();
     for (index, header) in headers.iter().enumerate() {
-        if let Some(choice) = positions.get(&index) {
-            if let Some(kind) = choice {
+        if exact {
+            if let Some(Some(kind)) = positions.get(&index) {
                 resolved.push(ResolvedColumn {
                     index,
                     name: header.clone(),
@@ -169,6 +171,9 @@ pub fn resolve_columns(
                 match_rate: Some(rate),
             });
         }
+    }
+    if exact {
+        return Ok(resolved);
     }
     // Config columns are project-wide and may not apply to every file, but a
     // CLI entry that matches nothing is almost certainly a typo.
@@ -441,23 +446,21 @@ mod tests {
                 .all(|column| column.source == ColumnSource::Cli)
         );
 
-        // Positions beat names and config for the same column.
+        // Positions are the whole selection: names, config, and inference
+        // do not add anything, so a reviewed plan is applied exactly.
         let mut config = BTreeMap::new();
         config.insert("Email".into(), "email".into());
         let both = ColumnOverrides {
             entries: vec![("Email".into(), Kind::Name)],
             skip: Vec::new(),
-            positions: vec![(0, None)],
+            positions: vec![(2, Some(Kind::Email))],
         };
         let resolved = resolve_columns(&headers, &rows, &config, Some(&both)).unwrap();
-        // Column 0 is skipped by position; the blank column is still inferred
-        // (a phone-like sample) and the last one takes the name entry.
         assert_eq!(
             resolved.iter().map(|c| c.index).collect::<Vec<_>>(),
-            vec![1, 2]
+            vec![2]
         );
-        assert_eq!(resolved[0].source, ColumnSource::Inferred);
-        assert_eq!(resolved[1].kind, Kind::Name);
+        assert_eq!(resolved[0].kind, Kind::Email);
 
         let beyond = ColumnOverrides {
             entries: Vec::new(),

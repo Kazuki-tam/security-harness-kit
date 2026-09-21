@@ -67,6 +67,9 @@ pub struct TableResult {
     /// in each selected column. A real run refuses such columns; a planner
     /// can show them instead so the user deselects them.
     pub formula_cells: Vec<(usize, usize)>,
+    /// xlsx dry runs only: every column with a formula in the data rows,
+    /// selected or not, so a planner can warn before a column is picked.
+    pub formula_columns: Vec<usize>,
 }
 
 pub fn delimiter_for_path(path: Option<&std::path::Path>) -> u8 {
@@ -157,6 +160,7 @@ pub fn run_table<R: Read, W: Write>(
             headers,
             sample_rows: pending_rows,
             formula_cells: Vec::new(),
+            formula_columns: Vec::new(),
         });
     }
 
@@ -220,6 +224,7 @@ pub fn run_table<R: Read, W: Write>(
         headers,
         sample_rows: Vec::new(),
         formula_cells: Vec::new(),
+        formula_columns: Vec::new(),
     })
 }
 
@@ -322,6 +327,7 @@ fn empty_result(
         headers: Vec::new(),
         sample_rows: Vec::new(),
         formula_cells: Vec::new(),
+        formula_columns: Vec::new(),
     }
 }
 

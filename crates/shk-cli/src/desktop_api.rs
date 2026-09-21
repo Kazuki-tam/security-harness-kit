@@ -810,8 +810,8 @@ fn pseudonymize_run_inner(
 ) -> Result<PseudonymizeRunResult> {
     let root = require_pseudonymize_project(project_root)?;
     let parsed = parse_pseudonymize_input(options.input)?;
-    // The app is expected to send a choice for every header. Should a caller
-    // send fewer, inference must not quietly add columns: fail closed.
+    // Positional choices are applied exactly; name-based ones leave the rest
+    // to config and inference, and inference then fails closed.
     let decisions = Decisions {
         accept_inferred: false,
         create_key: options.create_key,
@@ -1127,7 +1127,7 @@ fn table_preview(
             .map(|row| row.iter().map(|cell| truncate_cell(cell)).collect())
             .collect(),
         row_count: result.meta.rows_processed,
-        columns: column_plans(&result.headers, &result.columns, &result.formula_cells),
+        columns: column_plans(&result.headers, &result.columns, &result.formula_columns),
         sheets,
         selected_sheet,
     }
@@ -1137,7 +1137,7 @@ fn table_preview(
 fn column_plans(
     headers: &[String],
     resolved: &[ResolvedColumn],
-    formula_cells: &[(usize, usize)],
+    formula_columns: &[usize],
 ) -> Vec<PseudonymizeColumnPlan> {
     headers
         .iter()
@@ -1156,7 +1156,7 @@ fn column_plans(
                     match_rate: None,
                     formula: false,
                 });
-            plan.formula = formula_cells.iter().any(|(_, col)| *col == index);
+            plan.formula = formula_columns.contains(&index);
             plan
         })
         .collect()
@@ -4558,6 +4558,23 @@ mod tests {
             let pseudo = fs::read_to_string(root.join("export.pseudo.csv")).unwrap();
             assert!(pseudo.contains(&email()), "second column stays");
             assert!(pseudo.contains("name_"), "{pseudo}");
+
+            // Positions are exact: config and inference never add a column.
+            fs::write(
+                root.join("shk.toml"),
+                "[pseudonymize.columns]\nEmail = \"email\"\n",
+            )
+            .unwrap();
+            let mut only_last = run_options(
+                file_options(&root.join("export.csv")),
+                Some(&root.join("last.csv")),
+            );
+            only_last.input.columns = vec![at(2, "name")];
+            let result = pseudonymize_run_with(root, only_last, &open).unwrap();
+            assert_eq!(result.columns.len(), 1);
+            assert_eq!(result.columns[0].index, 2);
+            assert!(!result.replaced.contains_key("email"));
+            fs::write(root.join("shk.toml"), "").unwrap();
 
             let mut twice = run_options(
                 file_options(&root.join("export.csv")),
