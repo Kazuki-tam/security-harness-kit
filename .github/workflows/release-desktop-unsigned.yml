@@ -38,6 +38,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: verify reviewed dependency backports
+        run: python3 .github/scripts/ci/verify-glib-patch.py
+
       - id: source
         shell: bash
         run: echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -152,6 +155,11 @@ jobs:
             "${{ needs.prepare.outputs.version }}" \
             "$OUT" \
             updater
+
+      - name: verify updater signatures with the release public key
+        shell: bash
+        working-directory: .
+        run: cargo run -p xtask --locked -- verify-updater-artifacts "target/distrib/desktop/${{ matrix.target }}"
 
       - name: upload desktop artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

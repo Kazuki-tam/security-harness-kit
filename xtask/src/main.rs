@@ -8,6 +8,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod updater_artifacts;
+
 const DEFAULT_SOURCE_REF: &str = "8863af47d64c3681422523e36837957c74d4af4b";
 const DEFAULT_SOURCE: &str = concat!(
     "https://raw.githubusercontent.com/gitleaks/gitleaks/",
@@ -110,7 +112,7 @@ fn main() -> Result<()> {
     let command = match raw.next() {
         Some(c) => c,
         None => bail!(
-            "usage: cargo xtask <command> [args...]\ncommands: import-gitleaks-rules, bump-version"
+            "usage: cargo xtask <command> [args...]\ncommands: import-gitleaks-rules, bump-version, verify-updater-artifacts"
         ),
     };
     match command.as_str() {
@@ -122,9 +124,20 @@ fn main() -> Result<()> {
             let version = parse_bump_version_args(raw)?;
             bump_version(&version)
         }
+        "verify-updater-artifacts" => {
+            let directory = raw.next().context("an artifact directory is required")?;
+            if raw.next().is_some() {
+                bail!("verify-updater-artifacts accepts only one directory");
+            }
+            let public_key =
+                env::var("TAURI_UPDATER_PUBKEY").context("TAURI_UPDATER_PUBKEY is required")?;
+            let count = updater_artifacts::verify(Path::new(&directory), &public_key)?;
+            println!("verified {count} updater artifact signatures with the release public key");
+            Ok(())
+        }
         "--help" | "-h" => {
             println!(
-                "usage: cargo xtask <command> [args...]\ncommands: import-gitleaks-rules, bump-version"
+                "usage: cargo xtask <command> [args...]\ncommands: import-gitleaks-rules, bump-version, verify-updater-artifacts"
             );
             Ok(())
         }

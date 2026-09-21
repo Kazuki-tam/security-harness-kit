@@ -258,6 +258,11 @@ jobs:
             "${{ needs.prepare.outputs.version }}" \
             "$OUT"
 
+      - name: verify updater signatures with the release public key
+        shell: bash
+        working-directory: .
+        run: cargo run -p xtask --locked -- verify-updater-artifacts "target/distrib/desktop/${{ matrix.target }}"
+
       - name: verify macOS desktop signatures and notarization
         if: runner.os == 'macOS'
         shell: bash

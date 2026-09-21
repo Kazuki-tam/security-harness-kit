@@ -307,6 +307,9 @@ printf 'linux-signature\n' > "$tmpdir/shk-desktop_${current_version}_x86_64-unkn
 if [[ -n "$fake_package_target" ]]; then
   for dir in "${fake_bundle_dirs[@]}"; do
     mkdir -p "target/${fake_package_target}/release/bundle/${dir}"
+    printf 'helper\n' > "target/${fake_package_target}/release/bundle/${dir}/bundle_dmg.sh"
+    printf 'icon\n' > "target/${fake_package_target}/release/bundle/${dir}/icon.icns"
+    printf 'log\n' > "target/${fake_package_target}/release/bundle/${dir}/debug.log"
   done
   for file in "${fake_bundle_files[@]}"; do
     printf 'artifact\n' > "target/${fake_package_target}/release/bundle/${file}"
@@ -315,7 +318,15 @@ if [[ -n "$fake_package_target" ]]; then
   for file in "${fake_packaged_files[@]}"; do
     test -f "$tmpdir/packaged/shk-desktop_${current_version}_${fake_package_target}_${file}"
   done
+  packaged_files=( "$tmpdir/packaged"/* )
+  test "${#packaged_files[@]}" -eq "${#fake_packaged_files[@]}"
   echo "ok: desktop package artifacts are selected by target"
+  ln -s debug.log "target/${fake_package_target}/release/bundle/${fake_bundle_dirs[0]}/linked.${fake_bundle_files[0]##*.}"
+  if ./.github/scripts/release/package-desktop-artifacts.sh "$fake_package_target" "$current_version" "$tmpdir/rejected-package" >/dev/null 2>&1; then
+    echo "FAIL: symlinked distribution artifact must be rejected" >&2
+    exit 1
+  fi
+  echo "ok: desktop packaging excludes helpers and rejects symlinks"
 fi
 
 ./.github/scripts/release/generate-desktop-checksums.sh "$tmpdir" >/dev/null

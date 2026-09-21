@@ -40,9 +40,20 @@ copy_glob() {
   fi
   local copied=0
   for file in "${files[@]}"; do
-    [[ -f "$file" ]] || continue
     local base
     base="$(basename "$file")"
+    # Tauri also leaves build helpers and icons in these directories. Publish
+    # only distribution payloads and their detached updater signatures.
+    case "$subdir:$base" in
+      dmg:*.dmg | macos:*.app.tar.gz | macos:*.app.tar.gz.sig | \
+      appimage:*.AppImage | appimage:*.AppImage.sig | deb:*.deb | \
+      msi:*.msi | msi:*.msi.sig | nsis:*.exe | nsis:*.exe.sig) ;;
+      *) continue ;;
+    esac
+    if [[ -L "$file" || ! -f "$file" ]]; then
+      echo "distribution artifact must be a regular file: $base" >&2
+      return 1
+    fi
     cp "$file" "$out/shk-desktop_${version}_${target}_${base#shk_}"
     copied=$((copied + 1))
   done
