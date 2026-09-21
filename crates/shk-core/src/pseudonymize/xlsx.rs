@@ -34,23 +34,8 @@ pub fn run_xlsx(
     if !options.dry_run && material.is_none() {
         bail!("xlsx table mode requires key material unless --dry-run");
     }
-    let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
-    let mut archive = ZipArchive::new(file).context("read xlsx zip container")?;
-    crate::document_masker::ensure_archive_entry_limit(archive.len())?;
-    let mut expanded_bytes = 0u64;
-    for index in 0..archive.len() {
-        expanded_bytes = expanded_bytes
-            .checked_add(archive.by_index(index)?.size())
-            .context("xlsx expanded size overflow")?;
-        if expanded_bytes > MAX_ARCHIVE_EXPANDED_BYTES {
-            bail!("xlsx expanded size exceeds 256 MiB limit");
-        }
-    }
-    let workbook = read_zip_string(&mut archive, "xl/workbook.xml")?;
-    let sheets = parse_workbook_sheets(&workbook)?;
-    if sheets.is_empty() {
-        bail!("xlsx workbook has no sheets");
-    }
+    let mut archive = open_workbook_archive(input)?;
+    let sheets = read_workbook_sheets(&mut archive)?;
     let selected = select_sheet(&sheets, sheet)?;
     let rels = read_zip_string(&mut archive, "xl/_rels/workbook.xml.rels")?;
     let sheet_path = resolve_sheet_path(&rels, &selected.rel_id)
@@ -146,6 +131,8 @@ pub fn run_xlsx(
             ),
             columns,
             has_header,
+            headers,
+            sample_rows: data_rows[..sample_len].to_vec(),
         });
     }
     let material = material.expect("checked above");
@@ -205,7 +192,42 @@ pub fn run_xlsx(
         ),
         columns,
         has_header,
+        headers,
+        sample_rows: Vec::new(),
     })
+}
+
+/// Sheet names in workbook order. The position (1-based) is the number that
+/// `run_xlsx` accepts as a sheet selector.
+pub fn list_sheets(input: &Path) -> Result<Vec<String>> {
+    let mut archive = open_workbook_archive(input)?;
+    let sheets = read_workbook_sheets(&mut archive)?;
+    Ok(sheets.into_iter().map(|sheet| sheet.name).collect())
+}
+
+fn open_workbook_archive(input: &Path) -> Result<ZipArchive<File>> {
+    let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
+    let mut archive = ZipArchive::new(file).context("read xlsx zip container")?;
+    crate::document_masker::ensure_archive_entry_limit(archive.len())?;
+    let mut expanded_bytes = 0u64;
+    for index in 0..archive.len() {
+        expanded_bytes = expanded_bytes
+            .checked_add(archive.by_index(index)?.size())
+            .context("xlsx expanded size overflow")?;
+        if expanded_bytes > MAX_ARCHIVE_EXPANDED_BYTES {
+            bail!("xlsx expanded size exceeds 256 MiB limit");
+        }
+    }
+    Ok(archive)
+}
+
+fn read_workbook_sheets(archive: &mut ZipArchive<File>) -> Result<Vec<SheetInfo>> {
+    let workbook = read_zip_string(archive, "xl/workbook.xml")?;
+    let sheets = parse_workbook_sheets(&workbook)?;
+    if sheets.is_empty() {
+        bail!("xlsx workbook has no sheets");
+    }
+    Ok(sheets)
 }
 
 struct SheetInfo {
@@ -796,6 +818,8 @@ fn empty_xlsx_result(options: &TableOptions, material: Option<&KeyMaterial>) -> 
         ),
         columns: Vec::new(),
         has_header: !options.no_header,
+        headers: Vec::new(),
+        sample_rows: Vec::new(),
     }
 }
 
@@ -961,6 +985,10 @@ mod tests {
             &[],
         );
         assert!(run_xlsx(&no_sheets, None, None, &options(), None, None).is_err());
+        assert!(list_sheets(&no_sheets).is_err());
+        let not_zip = dir.path().join("plain.xlsx");
+        std::fs::write(&not_zip, b"not a workbook").unwrap();
+        assert!(list_sheets(&not_zip).is_err());
 
         let bad_rel = dir.path().join("rel.xlsx");
         build_xlsx(
@@ -975,6 +1003,14 @@ mod tests {
 
         let ok = dir.path().join("ok.xlsx");
         create_xlsx(&ok, "Email", "x");
+        assert_eq!(list_sheets(&ok).unwrap(), vec!["Customers".to_string()]);
+        let dry = TableOptions {
+            dry_run: true,
+            ..options()
+        };
+        let preview = run_xlsx(&ok, None, None, &dry, None, None).unwrap();
+        assert_eq!(preview.headers, vec!["Email".to_string()]);
+        assert_eq!(preview.sample_rows, vec![vec!["x".to_string()]]);
         for sheet in ["0", "2", "Missing"] {
             assert!(
                 run_xlsx(&ok, None, Some(sheet), &options(), None, None).is_err(),
