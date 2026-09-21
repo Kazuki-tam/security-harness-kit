@@ -2,7 +2,8 @@ use shk_cli::desktop_api::{
     self, ActionResult, ApplyAiHookSettingsOptions, ApplyNpmHardeningOptions,
     ApplyRecommendedFixesOptions, AuditReportOptions, CloneRepositoryResult, DesktopMaskFileResult,
     FixDoctorIgnoreOptions, InitPolicyOptions, InstallAiHooksOptions, InstallSkillsOptions,
-    ProjectStatus,
+    ProjectStatus, PseudonymizeInspectOptions, PseudonymizeInspectResult, PseudonymizeKeyStatus,
+    PseudonymizeRestoreResult, PseudonymizeRunOptions, PseudonymizeRunResult,
 };
 use shk_core::ScanJsonReport;
 use shk_core::masker::MaskJsonOutput;
@@ -226,6 +227,55 @@ async fn mask_file(
             .filter(|path| !path.as_os_str().is_empty());
         desktop_api::mask_file_for_desktop(project_root.as_deref(), &input, output.as_deref())
             .map_err(map_err)
+    })
+    .await
+}
+
+fn require_path(value: &str, label: &str) -> Result<PathBuf, AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::Message(format!("{label} is empty")));
+    }
+    Ok(PathBuf::from(trimmed))
+}
+
+#[tauri::command]
+async fn pseudonymize_inspect(
+    project_path: String,
+    options: PseudonymizeInspectOptions,
+) -> Result<PseudonymizeInspectResult, AppError> {
+    let root = require_path(&project_path, "project path")?;
+    run_blocking(move || desktop_api::pseudonymize_inspect(&root, options).map_err(map_err)).await
+}
+
+#[tauri::command]
+async fn pseudonymize_key_status(project_path: String) -> Result<PseudonymizeKeyStatus, AppError> {
+    let root = require_path(&project_path, "project path")?;
+    run_blocking(move || desktop_api::pseudonymize_key_status(&root).map_err(map_err)).await
+}
+
+#[tauri::command]
+async fn pseudonymize_run(
+    project_path: String,
+    options: PseudonymizeRunOptions,
+) -> Result<PseudonymizeRunResult, AppError> {
+    let root = require_path(&project_path, "project path")?;
+    run_blocking(move || desktop_api::pseudonymize_run(&root, options).map_err(map_err)).await
+}
+
+#[tauri::command]
+async fn pseudonymize_restore(
+    project_path: String,
+    input_path: String,
+    map_path: String,
+    output_path: String,
+) -> Result<PseudonymizeRestoreResult, AppError> {
+    let root = require_path(&project_path, "project path")?;
+    let input = require_path(&input_path, "input path")?;
+    let map = require_path(&map_path, "restore map path")?;
+    let output = require_path(&output_path, "output path")?;
+    run_blocking(move || {
+        desktop_api::pseudonymize_restore(&root, &input, &map, &output).map_err(map_err)
     })
     .await
 }
@@ -512,6 +562,10 @@ pub fn run() {
             mask_policy_status,
             mask_content,
             mask_file,
+            pseudonymize_inspect,
+            pseudonymize_key_status,
+            pseudonymize_run,
+            pseudonymize_restore,
             open_ai_tool,
         ])
         .build(tauri::generate_context!())
@@ -541,6 +595,15 @@ mod tests {
         assert_eq!(AiToolKind::parse("cursor").unwrap(), AiToolKind::Cursor);
         assert!(AiToolKind::parse("codex").is_err());
         assert_eq!(AiToolKind::ClaudeDesktop.display_name(), "Claude Desktop");
+    }
+
+    #[test]
+    fn require_path_rejects_blank_values() {
+        assert!(require_path("  ", "project path").is_err());
+        assert_eq!(
+            require_path(" /tmp/x ", "project path").unwrap(),
+            PathBuf::from("/tmp/x")
+        );
     }
 
     #[test]

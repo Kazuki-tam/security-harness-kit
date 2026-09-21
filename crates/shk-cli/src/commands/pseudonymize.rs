@@ -61,7 +61,7 @@ pub(crate) enum PseudonymizeSource {
 }
 
 impl PseudonymizeSource {
-    fn path(&self) -> Option<&Path> {
+    pub(crate) fn path(&self) -> Option<&Path> {
         match self {
             Self::File(path) => Some(path),
             Self::Stdin | Self::Buffer(_) => None,
@@ -175,7 +175,7 @@ pub(crate) struct PseudonymizeOutcome {
 
 /// Opens the project's pseudonymize key store. Injected so the complete
 /// write / restore path can run against an in-memory store in unit tests.
-type StoreOpener<'a> =
+pub(crate) type StoreOpener<'a> =
     &'a dyn Fn(&ProjectIdentity, &Policy) -> Result<(Box<dyn SecretStore>, SecretStoreBackend)>;
 
 /// Every failure on the pseudonymize path exits 2 (usage / runtime error) so
@@ -298,8 +298,8 @@ pub(crate) fn preflight(req: &PseudonymizeRequest) -> Result<(InputKind, Policy)
 
 #[derive(Debug)]
 pub(crate) enum Preview {
-    Table(TableResult),
-    Text { office: bool },
+    Table(Box<TableResult>),
+    Text,
 }
 
 /// The dry-run planning pass on its own: never prompts, never opens the key
@@ -311,12 +311,12 @@ pub(crate) fn preview(req: &PseudonymizeRequest) -> Result<Preview> {
     }
     let (kind, policy) = preflight(req)?;
     Ok(match kind {
-        InputKind::TableCsv => Preview::Table(plan_table_csv(req, &policy)?.preview),
-        InputKind::TableXlsx => Preview::Table(plan_table_xlsx(req, &policy)?.preview),
+        InputKind::TableCsv => Preview::Table(Box::new(plan_table_csv(req, &policy)?.preview)),
+        InputKind::TableXlsx => Preview::Table(Box::new(plan_table_xlsx(req, &policy)?.preview)),
         InputKind::TextPlain => {
             let input = read_text_source(req)?;
             run_text(&input, None, &text_options(req, &policy, true), None)?;
-            Preview::Text { office: false }
+            Preview::Text
         }
         InputKind::TextOffice => {
             let input = office_input(req)?;
@@ -328,7 +328,7 @@ pub(crate) fn preview(req: &PseudonymizeRequest) -> Result<Preview> {
                 None,
                 policy.scan.max_file_size_bytes,
             )?;
-            Preview::Text { office: true }
+            Preview::Text
         }
     })
 }
@@ -2023,16 +2023,10 @@ mod tests {
 
         let mut text = request(root, buffer("hello\n"));
         text.mode = Some(PseudonymizeModeArg::Text);
-        assert!(matches!(
-            preview(&text).unwrap(),
-            Preview::Text { office: false }
-        ));
+        assert!(matches!(preview(&text).unwrap(), Preview::Text));
         create_docx(&root.join("memo.docx"), "hello");
         let office = request(root, PseudonymizeSource::File(root.join("memo.docx")));
-        assert!(matches!(
-            preview(&office).unwrap(),
-            Preview::Text { office: true }
-        ));
+        assert!(matches!(preview(&office).unwrap(), Preview::Text));
         create_xlsx(&root.join("book.xlsx"), "Email", &email());
         let mut sheet = request(root, PseudonymizeSource::File(root.join("book.xlsx")));
         sheet.sheet = Some("Customers".into());
