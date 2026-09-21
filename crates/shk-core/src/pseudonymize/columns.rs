@@ -129,6 +129,9 @@ pub fn resolve_columns(
     }
 
     let exact = !positions.is_empty();
+    if exact && cli.is_some_and(|cli| !cli.entries.is_empty() || !cli.skip.is_empty()) {
+        return Err("positional and named column choices cannot be mixed".to_string());
+    }
     let mut resolved = Vec::new();
     let mut matched_explicit = std::collections::BTreeSet::new();
     for (index, header) in headers.iter().enumerate() {
@@ -450,17 +453,24 @@ mod tests {
         // do not add anything, so a reviewed plan is applied exactly.
         let mut config = BTreeMap::new();
         config.insert("Email".into(), "email".into());
-        let both = ColumnOverrides {
-            entries: vec![("Email".into(), Kind::Name)],
+        let exact = ColumnOverrides {
+            entries: Vec::new(),
             skip: Vec::new(),
             positions: vec![(2, Some(Kind::Email))],
         };
-        let resolved = resolve_columns(&headers, &rows, &config, Some(&both)).unwrap();
+        let resolved = resolve_columns(&headers, &rows, &config, Some(&exact)).unwrap();
         assert_eq!(
             resolved.iter().map(|c| c.index).collect::<Vec<_>>(),
             vec![2]
         );
         assert_eq!(resolved[0].kind, Kind::Email);
+        let mixed = ColumnOverrides {
+            entries: vec![("Email".into(), Kind::Name)],
+            skip: Vec::new(),
+            positions: vec![(2, Some(Kind::Email))],
+        };
+        let err = resolve_columns(&headers, &rows, &config, Some(&mixed)).unwrap_err();
+        assert!(err.contains("mixed"), "{err}");
 
         let beyond = ColumnOverrides {
             entries: Vec::new(),

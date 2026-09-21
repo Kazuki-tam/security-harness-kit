@@ -70,13 +70,13 @@ export function PseudonymizeSection({
   } = workspace;
   const confirmKey = useCallback(() => resolveKeyDialog(true), [resolveKeyDialog]);
   const cancelKey = useCallback(() => resolveKeyDialog(false), [resolveKeyDialog]);
-  // Changing a choice after a run makes the old summary stale.
+  // Changing a choice after a run makes the old summary or failure stale.
   const dispatchChoice = useCallback(
     (action: Parameters<typeof dispatchColumns>[0]) => {
-      if (phase.status === "done") resetResult();
+      if (phase.status === "done" || (phase.status === "error" && inspect?.table)) resetResult();
       dispatchColumns(action);
     },
-    [dispatchColumns, phase.status, resetResult],
+    [dispatchColumns, inspect?.table, phase.status, resetResult],
   );
 
   const busy = isRunning || isInspecting || preparing;

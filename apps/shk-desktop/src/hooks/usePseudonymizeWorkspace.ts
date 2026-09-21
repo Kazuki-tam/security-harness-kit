@@ -252,7 +252,7 @@ export function usePseudonymizeWorkspace({
   useEffect(() => {
     if (isFileInput || isPastedInput) return;
     tracker.begin(INSPECT_KEY);
-    setPhase({ status: "idle" });
+    setPhase((current) => (current.status === "idle" ? current : { status: "idle" }));
   }, [isFileInput, isPastedInput, tracker]);
 
   const retryInspect = useCallback(() => {
