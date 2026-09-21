@@ -2,7 +2,7 @@
 
 ## Decision
 
-The fixes below pass the local automated gates, including 91.64% Rust line coverage.
+The fixes below pass the local automated gates, including 91.68% Rust line coverage.
 Native macOS acceptance was expanded in the second review pass. This is not a certification that
 all repository code is vulnerability-free or that release acceptance is complete.
 The review concentrated on desktop masking/pseudonymization, external app launch,
@@ -64,18 +64,36 @@ covered by the existing test suite, not an exhaustive manual source audit.
    in the project list. Confirmation now persists while the menu remains open,
    and resets when reopened. The label explicitly says files are retained. A
    regression test waits a simulated minute and checks cancellation/reconfirmation.
-9. **Re-review:** Inspected the final diff for stale success/error handling,
+9. **Artifact verification and packaging:** Added
+   `cargo run -p xtask -- verify-updater-artifacts <directory>` to both desktop
+   release workflows. It verifies every detached signature against the exact
+   release public key and payload, rejects missing signatures/orphan signatures,
+   malformed encodings, mismatched keys, tampered payloads and symlinks. Five
+   tests use only public Minisign example material; this module has 100% line
+   coverage locally. Packaging now allows only expected payload/signature types,
+   excluding Tauri helper scripts, icons and logs. A packaging regression also
+   rejects symlinks. The unsigned-OS-signature workflow still requires valid
+   updater signatures and verifies the glib backport too.
+10. **Clipboard lifecycle re-review:** Late clipboard success/failure after a
+    workspace reset could restore stale feedback or launch an AI app. Clipboard
+    operations now retain a request generation, suppress stale notices and return
+    false to callers after invalidation. Feedback timers cannot erase a newer
+    copy's feedback. Seven regression cases cover current/stale success/failure,
+    launch suppression, path copying and timer ordering. In-flight OS clipboard
+    writes themselves cannot be cancelled; no raw original is sent by these
+    copy actions.
+11. **Re-review:** Inspected the final diff for stale success/error handling,
    abandoned confirmations, duplicate operations, unmount cleanup and query-value
    preservation. Re-ran the relevant gates after the changes.
 
 ## Validation
 
-- `cargo test --all`: **1,049 passed; 3 ignored** (real 1Password integration tests).
+- `cargo test --all`: **1,054 passed; 3 ignored** (real 1Password integration tests).
 - `cargo fmt --all -- --check`: passed.
-- `bash ./.github/scripts/ci/rust-coverage.sh`: passed, **91.64% lines**.
+- `bash ./.github/scripts/ci/rust-coverage.sh`: passed, **91.68% lines**.
 - Release-script regression suite and six dependency-backport verifier tests: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
-- `pnpm -C apps/shk-desktop test:run`: **168 passed**, including 10 new tests.
+- `pnpm -C apps/shk-desktop test:run`: **175 passed**, including 17 new tests.
 - Frontend `fmt:check`, `lint`, and `build` (TypeScript + Vite): passed.
 - `pnpm -C apps/shk-desktop audit --prod`: no known vulnerabilities reported.
 - `cargo-audit` 0.22.2 against the freshly fetched RustSec DB: **0 vulnerability
@@ -104,20 +122,60 @@ Built the actual debug `.app` with Tauri and exercised native IPC using a dedica
   redaction and no original demo email.
 - Removed only the test project's list registration and cleared test input.
 
-These checks cover the debug app on macOS, not signed distribution artifacts.
+OS Keychain acceptance additionally passed in an isolated temporary project:
+key creation, deterministic repeat masking, encrypted restore-map round trip,
+rejection of a modified map with no output written, and deletion of only the
+key created for that test. No existing key material was read or printed.
 
-## Release acceptance still required
+The signed ARM macOS artifact from the branch build was also downloaded into
+`/tmp` and verified with `codesign --verify --deep --strict` and Gatekeeper
+(`source=Notarized Developer ID`). Launched that signed app and verified real
+text masking plus the production updater check returning "up to date". No
+application update was installed and no release was published. This updater
+check does not exercise installing a newer version. The copy-and-open ChatGPT
+action also completed successfully, with the masked result copied and the
+installed ChatGPT application observed running; no message was submitted.
 
-- Linux/Windows CI for this exact revision, especially the optimized glib test.
-- Signed packaged application and updater acceptance with the release public key.
-  Read-only GitHub metadata confirms Apple signing/notarization and updater secret
-  names exist in the `release` Environment. Values were not read. Windows signing
-  secret names were absent; `SHK_ALLOW_UNSIGNED_WINDOWS` exists as an environment
-  variable, but its value was not read. Configuration presence is not acceptance.
-- Actual OS key store / 1Password integration (three tests intentionally ignored).
-  A dedicated test Vault name was requested; no private vault was accessed.
-- Native drag/drop, external app launch, Windows/Linux interactive acceptance and
-  assistive technology acceptance beyond accessibility-tree inspection.
+## Remote validation and remaining acceptance
+
+- [CI for c32a5b8](https://github.com/Kazuki-tam/security-harness-kit/actions/runs/35613435018):
+  all jobs passed on Linux, macOS and Windows, including the optimized glib
+  regression and the 90% first-party line-coverage gate. Vendored upstream code
+  remains outside the first-party metric, as registry dependency code was before
+  vendoring; the reviewed backport has separate provenance and regression gates.
+- [Five-platform branch distribution build](https://github.com/Kazuki-tam/security-harness-kit/actions/runs/35612287987):
+  all builds passed, including macOS ARM/Intel signature and notarization checks.
+  Windows Authenticode is absent under the existing explicit
+  `SHK_ALLOW_UNSIGNED_WINDOWS=true` release Environment policy; updater signing
+  remains required. No Environment setting or credential was changed.
+- [CI for 988c012](https://github.com/Kazuki-tam/security-harness-kit/actions/runs/35614270074):
+  all jobs passed. The
+  [artifact verification build](https://github.com/Kazuki-tam/security-harness-kit/actions/runs/35614381735)
+  adds verification that updater signatures match the configured public key on
+  all five targets. Its first attempt failed on Windows (the WiX toolset
+  download returned HTTP 504) and Linux x86_64 (linuxdeploy could not fetch its
+  helpers); both are external download outages during bundling, before any
+  project code ran. Re-running exactly those jobs on the same commit passed, so
+  all five targets have now passed the signature verification.
+- [CI for b1d6364](https://github.com/Kazuki-tam/security-harness-kit/actions/runs/35616562942)
+  (clipboard lifecycle fix): the `coverage` job's first attempt failed while
+  `apt-get update` fetched the Microsoft package index (HTTP 403), before the
+  repository was built; it was re-run on the same commit. See the pull request
+  checks for the final state.
+- Real 1Password tests were attempted against the pre-existing dedicated
+  `shk-integration-test` Vault after a successful metadata-only availability
+  check. **All three failed because item operations timed out waiting for
+  authorization**, including the `op` error `authorization timeout`. This is
+  not a passing integration result. The user was asked to authorize the CLI and
+  request a retry; no account settings or access controls were changed.
+- Native drag/drop and project-directory deep links still need interactive
+  acceptance beyond the focused code/regression checks. AI application launch
+  was exercised on macOS as described above. Windows/Linux native
+  interactive flows and assistive-technology behavior were not exercised;
+  automated builds/tests cover those platforms, while native interaction was
+  tested on macOS.
+- PR #301 had no review comments at the time of this review; GitHub reported
+  `REVIEW_REQUIRED`. No release was published.
 
 Seven maintenance warnings remain for transitive `proc-macro-error` (GTK macros),
 `ttf-parser` (PDF extraction), and five `unic-*` crates (Tauri URL patterns).
@@ -130,3 +188,25 @@ GTK/Tauri accepts an unaffected published version.
 The pre-existing untracked `docs/assets/shk-overview.png` was left untouched.
 No application release or production installation was performed. The audit tool
 was installed only under `/tmp/shk-review-tools` for this review.
+
+## Final validation update — 2026-09-22 JST
+
+- Application commit `b1d6364` passed [all CI jobs](https://github.com/Kazuki-tam/security-harness-kit/actions/runs/35616562942)
+  and [all five distribution builds](https://github.com/Kazuki-tam/security-harness-kit/actions/runs/35616752191).
+  Real updater signatures match the release public key on every target; macOS
+  ARM/Intel signing and notarization passed. Publish jobs were skipped.
+- Local gates: 1,054 Rust tests, 175 frontend tests, formatting, lint/clippy,
+  frontend build, and 91.68% Rust line coverage passed. The three optional real
+  1Password tests are separately recorded as authorization failures above.
+- Commit `a240d45` changes only the two Python backport verification/test files.
+  Application source is identical to `b1d6364`. All eight verifier tests pass
+  locally, including rejection of a redirected/removed Cargo patch with an
+  unchanged lockfile. Its [CI run](https://github.com/Kazuki-tam/security-harness-kit/actions/runs/35618116070)
+  is still running at this update.
+- An automatic approval review initially rejected this last push because its
+  destination was unverified. Read-only checks confirmed the origin matches
+  the existing public repository and PR; re-review approved the same operation.
+  The two-file change was pushed successfully. No approval bypass was used.
+- Unconditional production sign-off remains **on hold**: real 1Password item
+  operations need user authorization and a successful retry. The native
+  platform/assistive-technology acceptance limits above remain explicit.
