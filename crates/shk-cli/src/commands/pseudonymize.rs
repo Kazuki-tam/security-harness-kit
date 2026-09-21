@@ -53,7 +53,10 @@ pub(crate) enum InputKind {
 }
 
 /// Where the input bytes come from. `Stdin` is CLI-only; `Buffer` holds
-/// content a GUI caller pasted and never touches disk.
+/// content a GUI caller pasted and never touches disk. The wrapper wipes the
+/// buffer on drop, but copies made while planning (sample rows, writer
+/// buffers, the returned text) are ordinary allocations: treat zeroization
+/// as best effort, not a guarantee.
 pub(crate) enum PseudonymizeSource {
     File(PathBuf),
     Stdin,
@@ -191,7 +194,7 @@ fn mask_with(args: MaskPseudonymizeArgs, open_store: StoreOpener<'_>) -> Result<
         no_create_key: args.no_create_key,
     };
     let outcome = mask_core(request_from_cli(args), open_store, &interaction).map_err(fail_run)?;
-    print_outcome(json, &outcome)?;
+    print_outcome(json, &outcome).map_err(fail_run)?;
     match outcome.remaining {
         Some(Err(err)) => Err(fail_run(err)),
         Some(Ok(leftover)) if !leftover.is_empty() => Err(leftover_error(&leftover)),
@@ -312,7 +315,9 @@ pub(crate) fn preview(req: &PseudonymizeRequest) -> Result<Preview> {
     let (kind, policy) = preflight(req)?;
     Ok(match kind {
         InputKind::TableCsv => Preview::Table(Box::new(plan_table_csv(req, &policy)?.preview)),
-        InputKind::TableXlsx => Preview::Table(Box::new(plan_table_xlsx(req, &policy)?.preview)),
+        InputKind::TableXlsx => {
+            Preview::Table(Box::new(plan_table_xlsx(req, &policy, false)?.preview))
+        }
         InputKind::TextPlain => {
             let input = read_text_source(req)?;
             run_text(&input, None, &text_options(req, &policy, true), None)?;
@@ -374,8 +379,9 @@ pub(crate) fn pseudonymize_inline(
     let outcome = with_secret_store_lock(&project, OPERATION_LOCK, || match kind {
         InputKind::TableCsv => inline_table(&req, &policy, &project, open_store, interaction),
         InputKind::TextPlain => inline_text(&req, &policy, &project, open_store, interaction),
+        // A buffer has no path, so `classify_input` never yields these.
         InputKind::TableXlsx | InputKind::TextOffice => {
-            Err(fail("inline input must be CSV/TSV or plain text"))
+            unreachable!("buffers classify as csv or text")
         }
     })?;
     let _ = crate::audit_log::append_line(
@@ -636,17 +642,27 @@ fn plan_table_csv<'a>(req: &'a PseudonymizeRequest, policy: &Policy) -> Result<C
 
 struct XlsxPlan<'a> {
     input: &'a Path,
-    digest: [u8; 32],
+    /// Taken before the planning read so a run can prove the file did not
+    /// change in between; a preview on its own does not need it.
+    digest: Option<[u8; 32]>,
     options: TableOptions,
     preview: TableResult,
 }
 
-fn plan_table_xlsx<'a>(req: &'a PseudonymizeRequest, policy: &Policy) -> Result<XlsxPlan<'a>> {
+fn plan_table_xlsx<'a>(
+    req: &'a PseudonymizeRequest,
+    policy: &Policy,
+    with_digest: bool,
+) -> Result<XlsxPlan<'a>> {
     let input = req
         .source
         .path()
         .ok_or_else(|| fail("xlsx table mode requires a file path"))?;
-    let digest = file_digest(input)?;
+    let digest = if with_digest {
+        Some(file_digest(input)?)
+    } else {
+        None
+    };
     let cli_columns = resolve_column_selection(req)?;
     let options = table_options(req, policy, b',', false, cli_columns, true);
     let preview = run_xlsx(input, None, req.sheet.as_deref(), &options, None, None)?;
@@ -727,7 +743,7 @@ fn run_table_xlsx(
     open_store: StoreOpener<'_>,
     interaction: &dyn Interaction,
 ) -> Result<PseudonymizeOutcome> {
-    let plan = plan_table_xlsx(req, policy)?;
+    let plan = plan_table_xlsx(req, policy, !req.dry_run)?;
     confirm_table_plan(interaction, &plan.preview)?;
     if req.dry_run {
         return Ok(dry_run_outcome(
@@ -735,12 +751,13 @@ fn run_table_xlsx(
             Some(plan.preview.columns),
         ));
     }
+    let digest = plan.digest.expect("digest is taken for a real run");
 
     let output = req.output.as_ref().expect("checked above");
     let project = ProjectIdentity::from_root_and_policy(req.project_root.clone(), policy);
     let material = load_or_create_material(&project, policy, open_store, interaction)?;
     let mut collector = prepare_map(req.map.as_deref(), &material)?;
-    ensure_digest_unchanged(plan.input, plan.digest)?;
+    ensure_digest_unchanged(plan.input, digest)?;
     let mut run_options = plan.options;
     run_options.dry_run = false;
     let staged_output = new_output_temp(output)?.into_temp_path();
@@ -752,7 +769,7 @@ fn run_table_xlsx(
         Some(&material),
         collector.as_mut(),
     )?;
-    ensure_digest_unchanged(plan.input, plan.digest)?;
+    ensure_digest_unchanged(plan.input, digest)?;
     finish_run(
         req,
         policy,
@@ -1212,16 +1229,16 @@ fn ensure_digest_unchanged(path: &Path, expected: [u8; 32]) -> Result<()> {
 }
 
 fn read_text_source(req: &PseudonymizeRequest) -> Result<String> {
-    let bytes: Cow<'_, [u8]> = match &req.source {
+    let bytes = match &req.source {
         PseudonymizeSource::File(path) => {
-            Cow::Owned(std::fs::read(path).with_context(|| format!("read {}", path.display()))?)
+            std::fs::read(path).with_context(|| format!("read {}", path.display()))?
         }
-        PseudonymizeSource::Stdin => Cow::Owned(read_stdin_bytes()?),
-        PseudonymizeSource::Buffer(bytes) => Cow::Borrowed(bytes.as_slice()),
+        PseudonymizeSource::Stdin => read_stdin_bytes()?,
+        // Pasted content is borrowed by the table path; text mode needs an
+        // owned String either way.
+        PseudonymizeSource::Buffer(bytes) => bytes.to_vec(),
     };
-    std::str::from_utf8(&bytes)
-        .map(str::to_owned)
-        .map_err(|_| encoding_error())
+    String::from_utf8(bytes).map_err(|_| encoding_error())
 }
 
 fn read_stdin_bytes() -> Result<Vec<u8>> {

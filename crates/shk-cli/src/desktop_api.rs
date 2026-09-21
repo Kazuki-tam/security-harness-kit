@@ -658,7 +658,10 @@ pub struct PseudonymizeRestoreResult {
 
 enum PseudonymizeInput {
     File(PathBuf),
-    Inline(Zeroizing<String>),
+    Inline {
+        text: Zeroizing<String>,
+        mode: PseudonymizeModeArg,
+    },
 }
 
 struct ParsedPseudonymizeInput {
@@ -681,8 +684,8 @@ pub fn pseudonymize_inspect(
             let label = source_label_for(&path);
             (PseudonymizeSource::File(path), label)
         }
-        PseudonymizeInput::Inline(text) => (
-            inline_source(&root, text)?,
+        PseudonymizeInput::Inline { text, .. } => (
+            PseudonymizeSource::Buffer(inline_bytes(&root, text)?),
             PSEUDONYMIZE_INLINE_LABEL.to_string(),
         ),
     };
@@ -700,7 +703,7 @@ pub fn pseudonymize_inspect(
         map: None,
         check_remaining: false,
     };
-    let table = match pseudonymize::preview(&request)? {
+    let table = match pseudonymize::preview(&request).map_err(flatten_error)? {
         Preview::Table(table) => {
             let (sheets, selected_sheet) = if kind == InputKind::TableXlsx {
                 let sheets = list_sheets(request.source.path().expect("xlsx input is a file"))?;
@@ -780,10 +783,23 @@ pub(crate) fn pseudonymize_run_with(
 ) -> Result<PseudonymizeRunResult> {
     let root = require_pseudonymize_project(project_root)?;
     let parsed = parse_pseudonymize_input(options.input)?;
+    // The app is expected to send a choice for every header. Should a caller
+    // send fewer, inference must not quietly add columns: fail closed.
     let decisions = Decisions {
-        accept_inferred: true,
+        accept_inferred: false,
         create_key: options.create_key,
     };
+    let kind = pseudonymize::classify_input(
+        match &parsed.input {
+            PseudonymizeInput::File(path) => Some(path.as_path()),
+            PseudonymizeInput::Inline { .. } => None,
+        },
+        parsed.mode,
+        parsed.format,
+    )?;
+    if matches!(kind, InputKind::TableCsv | InputKind::TableXlsx) && parsed.columns.is_none() {
+        anyhow::bail!("choose what each column holds before pseudonymizing a table");
+    }
     let output = non_blank(options.output_path.as_deref()).map(PathBuf::from);
     let map = non_blank(options.map_path.as_deref()).map(PathBuf::from);
     match parsed.input {
@@ -808,7 +824,8 @@ pub(crate) fn pseudonymize_run_with(
                 map,
                 check_remaining: options.check_remaining,
             };
-            let outcome = pseudonymize::mask_core(request, open_store, &decisions)?;
+            let outcome =
+                pseudonymize::mask_core(request, open_store, &decisions).map_err(flatten_error)?;
             let written = outcome
                 .written
                 .ok_or_else(|| anyhow::anyhow!("pseudonymize run finished without writing"))?;
@@ -835,18 +852,13 @@ pub(crate) fn pseudonymize_run_with(
                 remaining_check_error,
             })
         }
-        PseudonymizeInput::Inline(text) => {
+        PseudonymizeInput::Inline { text, mode } => {
             if output.is_some() || map.is_some() || options.check_remaining {
                 anyhow::bail!(
                     "pasted content is returned in place; output, restore map, and leftover checks apply to files only"
                 );
             }
-            let mode = parsed
-                .mode
-                .ok_or_else(|| anyhow::anyhow!("pasted content needs a mode (table or text)"))?;
-            let PseudonymizeSource::Buffer(bytes) = inline_source(&root, text)? else {
-                unreachable!("inline_source always buffers");
-            };
+            let bytes = inline_bytes(&root, text)?;
             let outcome = pseudonymize::pseudonymize_inline(
                 InlineRequest {
                     project_root: root,
@@ -858,7 +870,8 @@ pub(crate) fn pseudonymize_run_with(
                 },
                 open_store,
                 &decisions,
-            )?;
+            )
+            .map_err(flatten_error)?;
             Ok(PseudonymizeRunResult {
                 mode: outcome.meta.mode.to_string(),
                 rows_processed: outcome.meta.rows_processed,
@@ -928,23 +941,6 @@ fn require_pseudonymize_project(project_root: &Path) -> Result<PathBuf> {
 fn parse_pseudonymize_input(
     options: PseudonymizeInspectOptions,
 ) -> Result<ParsedPseudonymizeInput> {
-    let input = match (
-        non_blank(options.input_path.as_deref()),
-        options.inline_text,
-    ) {
-        (Some(path), None) => PseudonymizeInput::File(PathBuf::from(path)),
-        (None, Some(text)) => {
-            let text = Zeroizing::new(text);
-            if text.trim().is_empty() {
-                anyhow::bail!("pasted content is empty");
-            }
-            PseudonymizeInput::Inline(text)
-        }
-        (Some(_), Some(_)) => {
-            anyhow::bail!("pass either a file path or pasted content, not both")
-        }
-        (None, None) => anyhow::bail!("pass a file path or pasted content"),
-    };
     let mode = options
         .mode
         .as_deref()
@@ -955,9 +951,25 @@ fn parse_pseudonymize_input(
         .as_deref()
         .map(parse_pseudonymize_format)
         .transpose()?;
-    if matches!(input, PseudonymizeInput::Inline(_)) && mode.is_none() {
-        anyhow::bail!("pasted content needs a mode (table or text)");
-    }
+    let input = match (
+        non_blank(options.input_path.as_deref()),
+        options.inline_text,
+    ) {
+        (Some(path), None) => PseudonymizeInput::File(PathBuf::from(path)),
+        (None, Some(text)) => {
+            let text = Zeroizing::new(text);
+            if text.trim().is_empty() {
+                anyhow::bail!("pasted content is empty");
+            }
+            let mode =
+                mode.ok_or_else(|| anyhow::anyhow!("pasted content needs a mode (table or text)"))?;
+            PseudonymizeInput::Inline { text, mode }
+        }
+        (Some(_), Some(_)) => {
+            anyhow::bail!("pass either a file path or pasted content, not both")
+        }
+        (None, None) => anyhow::bail!("pass a file path or pasted content"),
+    };
     Ok(ParsedPseudonymizeInput {
         input,
         mode,
@@ -968,12 +980,16 @@ fn parse_pseudonymize_input(
     })
 }
 
-fn inline_source(root: &Path, mut text: Zeroizing<String>) -> Result<PseudonymizeSource> {
+fn inline_bytes(root: &Path, mut text: Zeroizing<String>) -> Result<Zeroizing<Vec<u8>>> {
     let (policy, _) = Policy::load_from_dir(root)?;
     ensure_mask_content_size_allowed(&text, policy.scan.max_file_size_bytes)?;
     // Move the buffer rather than copy it; the emptied String zeroizes nothing.
-    let bytes = std::mem::take(&mut *text).into_bytes();
-    Ok(PseudonymizeSource::Buffer(Zeroizing::new(bytes)))
+    Ok(Zeroizing::new(std::mem::take(&mut *text).into_bytes()))
+}
+
+/// Engine errors carry their cause in the chain; the app shows one string.
+fn flatten_error(err: anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!("{err:#}")
 }
 
 fn parse_pseudonymize_mode(raw: &str) -> Result<PseudonymizeModeArg> {
@@ -1000,10 +1016,16 @@ fn column_overrides(choices: &[PseudonymizeColumnChoice]) -> Result<Option<Colum
         return Ok(None);
     }
     let mut overrides = ColumnOverrides::default();
+    let mut seen = std::collections::BTreeSet::new();
     for choice in choices {
         let name = choice.name.trim();
         if name.is_empty() {
             anyhow::bail!("column choice has an empty name");
+        }
+        // Headers match case-insensitively, so two choices that fold to the
+        // same name would silently override each other.
+        if !seen.insert(name.to_ascii_lowercase()) {
+            anyhow::bail!("column `{name}` was chosen twice");
         }
         let kind = match choice.kind.trim() {
             "none" => {
@@ -1123,12 +1145,13 @@ fn resolve_sheet_name(sheets: &[String], spec: Option<&str>) -> Option<String> {
     let Some(spec) = spec else {
         return sheets.first().cloned();
     };
-    spec.parse::<usize>()
-        .ok()
-        .and_then(|number| number.checked_sub(1))
-        .and_then(|index| sheets.get(index))
-        .or_else(|| sheets.iter().find(|sheet| sheet.as_str() == spec))
-        .cloned()
+    match spec.parse::<usize>() {
+        Ok(number) => number
+            .checked_sub(1)
+            .and_then(|index| sheets.get(index))
+            .cloned(),
+        Err(_) => sheets.iter().find(|sheet| sheet.as_str() == spec).cloned(),
+    }
 }
 
 fn source_label_for(path: &Path) -> String {
@@ -4598,6 +4621,23 @@ mod tests {
                 Err(anyhow::anyhow!("store exploded"))
             };
             assert!(pseudonymize_key_status_with(root, &failing).is_err());
+
+            let unavailable = |_: &crate::env_store::ProjectIdentity, _: &Policy| {
+                Err(anyhow::Error::new(keyring::Error::NoStorageAccess(
+                    Box::new(std::io::Error::other("locked")),
+                )))
+            };
+            let status = pseudonymize_key_status_with(root, &unavailable).unwrap();
+            assert!(!status.exists);
+            assert_eq!(status.backend, "OS credential store");
+            assert!(
+                status
+                    .unavailable_reason
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("locked"),
+                "{status:?}"
+            );
             let no_policy = tempfile::tempdir().unwrap();
             assert!(pseudonymize_key_status_with(no_policy.path(), &open).is_err());
         }
@@ -4742,13 +4782,33 @@ mod tests {
             .unwrap();
             let csv = root.join("orders.csv");
 
-            let err = pseudonymize_run_with(root, run_options(file_options(&csv), None), &open)
-                .unwrap_err();
+            let mut no_output = run_options(file_options(&csv), None);
+            no_output.input.columns = vec![choice("Email", "email"), choice("Note", "none")];
+            let err = pseudonymize_run_with(root, no_output, &open).unwrap_err();
             assert!(err.to_string().contains("choose where"), "{err}");
 
+            // A table run without any choices must not fall back to inference.
+            let no_choices = run_options(file_options(&csv), Some(&root.join("z.csv")));
+            let err = pseudonymize_run_with(root, no_choices, &open).unwrap_err();
+            assert!(err.to_string().contains("choose what each column"), "{err}");
+            assert!(!root.join("z.csv").exists());
+            // Partial choices leave a header to inference, which fails closed.
+            let mut partial = run_options(file_options(&csv), Some(&root.join("y.csv")));
+            partial.input.columns = vec![choice("Note", "none")];
+            let err = pseudonymize_run_with(root, partial, &open).unwrap_err();
+            assert!(err.to_string().contains("confirmation"), "{err}");
+            assert!(!root.join("y.csv").exists());
+            let mut duplicate = run_options(file_options(&csv), Some(&root.join("y.csv")));
+            duplicate.input.columns = vec![choice("Email", "email"), choice("email", "none")];
+            let err = pseudonymize_run_with(root, duplicate, &open).unwrap_err();
+            assert!(err.to_string().contains("twice"), "{err}");
+
             let mut bad_map = run_options(file_options(&csv), Some(&root.join("a.csv")));
+            bad_map.input.columns = vec![choice("Email", "email"), choice("Note", "none")];
             bad_map.map_path = Some(root.join("a.map").display().to_string());
-            assert!(pseudonymize_run_with(root, bad_map, &open).is_err());
+            let err = pseudonymize_run_with(root, bad_map, &open).unwrap_err();
+            assert!(err.to_string().contains(".shk-map"), "{err}");
+            assert!(!root.join("a.csv").exists());
 
             let mut all_none = run_options(file_options(&csv), Some(&root.join("b.csv")));
             all_none.input.columns = vec![choice("Email", "none"), choice("Note", "none")];
@@ -4773,6 +4833,7 @@ mod tests {
             assert!(pseudonymize_run_with(root, blank_name, &open).is_err());
 
             let mut no_key = run_options(file_options(&csv), Some(&root.join("d.csv")));
+            no_key.input.columns = vec![choice("Email", "email"), choice("Note", "none")];
             no_key.create_key = false;
             let err = pseudonymize_run_with(root, no_key, &open).unwrap_err();
             assert_eq!(err.to_string(), NO_KEY_MESSAGE);
@@ -4790,6 +4851,8 @@ mod tests {
             assert_eq!(resolve_sheet_name(&sheets, Some("2")).as_deref(), Some("2"));
             assert_eq!(resolve_sheet_name(&sheets, Some("A")).as_deref(), Some("A"));
             assert_eq!(resolve_sheet_name(&sheets, Some("9")), None);
+            assert_eq!(resolve_sheet_name(&sheets, Some("0")), None);
+            assert_eq!(resolve_sheet_name(&sheets, Some("Zed")), None);
             assert_eq!(resolve_sheet_name(&[], None), None);
             assert!(column_overrides(&[]).unwrap().is_none());
             let overrides = column_overrides(&[choice("A", "phone"), choice("B", "none")])
