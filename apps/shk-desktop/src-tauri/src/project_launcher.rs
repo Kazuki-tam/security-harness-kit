@@ -1,22 +1,16 @@
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::AppError;
 
-const QUERY_VALUE_ENCODE_SET: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'#')
-    .add(b'<')
-    .add(b'>')
-    .add(b'?')
-    .add(b'`')
-    .add(b'{')
-    .add(b'}')
-    .add(b'/')
-    .add(b'\\')
-    .add(b':');
+// Only URI unreserved characters may appear literally in a query value.
+// In particular &, =, + and % must not alter parameters or path decoding.
+const QUERY_VALUE_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IdeKind {
@@ -416,6 +410,23 @@ mod tests {
             "%2FUsers%2Fme%2FMy%20Project%2Frepo"
         );
         assert_eq!(encode_query_value("日本語"), "%E6%97%A5%E6%9C%AC%E8%AA%9E");
+    }
+
+    #[test]
+    fn deep_links_preserve_paths_with_query_delimiters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("repo&path=other+%26_日本語");
+        std::fs::create_dir(&path).unwrap();
+        let expected = path.canonicalize().unwrap().to_string_lossy().into_owned();
+        for (app, key) in [
+            (ProjectAppKind::ClaudeDesktop, "folder"),
+            (ProjectAppKind::ChatGptDesktop, "path"),
+        ] {
+            let link = app.build_deep_link(&path).unwrap();
+            let parsed = tauri::Url::parse(&link).unwrap();
+            let pairs: Vec<_> = parsed.query_pairs().into_owned().collect();
+            assert_eq!(pairs, vec![(key.to_string(), expected.clone())]);
+        }
     }
 
     #[test]

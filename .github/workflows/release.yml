@@ -55,6 +55,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: verify reviewed dependency backports
+        run: python3 .github/scripts/ci/verify-glib-patch.py
+
       - id: resolve
         shell: bash
         env:
@@ -254,6 +257,11 @@ jobs:
             "${{ matrix.target }}" \
             "${{ needs.prepare.outputs.version }}" \
             "$OUT"
+
+      - name: verify updater signatures with the release public key
+        shell: bash
+        working-directory: .
+        run: cargo run -p xtask --locked -- verify-updater-artifacts "target/distrib/desktop/${{ matrix.target }}"
 
       - name: verify macOS desktop signatures and notarization
         if: runner.os == 'macOS'

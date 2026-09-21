@@ -26,6 +26,15 @@ pub struct ResolvedColumn {
 #[derive(Debug, Clone, Default)]
 pub struct ColumnOverrides {
     pub entries: Vec<(String, Kind)>,
+    /// Headers to leave untouched even when `[pseudonymize.columns]` or
+    /// inference would select them. Lets a caller that already reviewed the
+    /// plan (the desktop app) send an exact column set.
+    pub skip: Vec<String>,
+    /// Choices by column position (`None` leaves the column alone). When any
+    /// are given they are the whole selection: columns without a position are
+    /// left alone too, and names, config, and inference do not apply. A
+    /// position past the header row is an error.
+    pub positions: Vec<(usize, Option<Kind>)>,
 }
 
 pub fn parse_columns_spec(spec: &str) -> Result<ColumnOverrides, ParseKindError> {
@@ -60,7 +69,11 @@ pub fn parse_columns_spec(spec: &str) -> Result<ColumnOverrides, ParseKindError>
             "--columns did not contain any Name:kind entries".into(),
         ));
     }
-    Ok(ColumnOverrides { entries })
+    Ok(ColumnOverrides {
+        entries,
+        skip: Vec::new(),
+        positions: Vec::new(),
+    })
 }
 
 /// A first row that holds any PII is data; anything else is the header.
@@ -93,6 +106,8 @@ pub fn resolve_columns(
             ));
         }
     }
+    let mut skip: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut positions: BTreeMap<usize, Option<Kind>> = BTreeMap::new();
     if let Some(cli) = cli {
         for (name, kind) in &cli.entries {
             explicit.insert(
@@ -100,12 +115,45 @@ pub fn resolve_columns(
                 (kind.clone(), ColumnSource::Cli),
             );
         }
+        skip.extend(cli.skip.iter().map(|name| normalize_header_key(name)));
+        for (index, kind) in &cli.positions {
+            if *index >= headers.len() {
+                return Err(format!(
+                    "column position {} does not exist (the table has {} columns)",
+                    index + 1,
+                    headers.len()
+                ));
+            }
+            positions.insert(*index, kind.clone());
+        }
     }
 
+    let exact = !positions.is_empty();
+    if exact && cli.is_some_and(|cli| !cli.entries.is_empty() || !cli.skip.is_empty()) {
+        return Err("positional and named column choices cannot be mixed".to_string());
+    }
     let mut resolved = Vec::new();
     let mut matched_explicit = std::collections::BTreeSet::new();
     for (index, header) in headers.iter().enumerate() {
+        if exact {
+            if let Some(Some(kind)) = positions.get(&index) {
+                resolved.push(ResolvedColumn {
+                    index,
+                    name: header.clone(),
+                    kind: kind.clone(),
+                    source: ColumnSource::Cli,
+                    match_rate: None,
+                });
+            }
+            continue;
+        }
         let key = normalize_header_key(header);
+        // An explicit skip wins over config and inference: the caller has
+        // already decided this column stays as it is.
+        if skip.contains(&key) {
+            matched_explicit.insert(key);
+            continue;
+        }
         if let Some((kind, source)) = explicit.get(&key) {
             matched_explicit.insert(key);
             resolved.push(ResolvedColumn {
@@ -127,6 +175,9 @@ pub fn resolve_columns(
             });
         }
     }
+    if exact {
+        return Ok(resolved);
+    }
     // Config columns are project-wide and may not apply to every file, but a
     // CLI entry that matches nothing is almost certainly a typo.
     let unmatched: Vec<&str> = cli
@@ -134,6 +185,7 @@ pub fn resolve_columns(
             cli.entries
                 .iter()
                 .map(|(name, _)| name.as_str())
+                .chain(cli.skip.iter().map(String::as_str))
                 .filter(|name| !matched_explicit.contains(&normalize_header_key(name)))
                 .collect()
         })
@@ -335,6 +387,98 @@ mod tests {
                 .unwrap_err()
                 .contains("duplicate")
         );
+    }
+
+    #[test]
+    fn skipped_columns_override_config_and_inference() {
+        let headers = vec!["Email".into(), "phone".into(), "Note".into()];
+        let rows = vec![vec![
+            ["ada", "@", "example.com"].concat(),
+            ["090", "-", "1234", "-", "5678"].concat(),
+            "plain".into(),
+        ]];
+        let mut config = BTreeMap::new();
+        config.insert("Email".into(), "email".into());
+        let overrides = ColumnOverrides {
+            entries: vec![("Note".into(), Kind::Custom("note".into()))],
+            skip: vec!["email".into(), "PHONE".into()],
+            positions: Vec::new(),
+        };
+        let resolved = resolve_columns(&headers, &rows, &config, Some(&overrides)).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "Note");
+        assert_eq!(resolved[0].source, ColumnSource::Cli);
+
+        let unmatched = ColumnOverrides {
+            entries: Vec::new(),
+            skip: vec!["Missing".into()],
+            positions: Vec::new(),
+        };
+        let err = resolve_columns(&headers, &rows, &config, Some(&unmatched)).unwrap_err();
+        assert!(err.contains("Missing"), "{err}");
+        assert!(parse_columns_spec("Email:email").unwrap().skip.is_empty());
+    }
+
+    #[test]
+    fn positions_address_blank_and_repeated_headers() {
+        let headers = vec!["Email".into(), "".into(), "Email".into()];
+        let rows = vec![vec![
+            ["ada", "@", "example.com"].concat(),
+            ["090", "-", "1234", "-", "5678"].concat(),
+            ["bob", "@", "example.com"].concat(),
+        ]];
+        let overrides = ColumnOverrides {
+            entries: Vec::new(),
+            skip: Vec::new(),
+            positions: vec![(0, None), (1, Some(Kind::Phone)), (2, Some(Kind::Email))],
+        };
+        let resolved =
+            resolve_columns(&headers, &rows, &BTreeMap::new(), Some(&overrides)).unwrap();
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(
+            (resolved[0].index, resolved[0].kind.clone()),
+            (1, Kind::Phone)
+        );
+        assert_eq!(
+            (resolved[1].index, resolved[1].kind.clone()),
+            (2, Kind::Email)
+        );
+        assert!(
+            resolved
+                .iter()
+                .all(|column| column.source == ColumnSource::Cli)
+        );
+
+        // Positions are the whole selection: names, config, and inference
+        // do not add anything, so a reviewed plan is applied exactly.
+        let mut config = BTreeMap::new();
+        config.insert("Email".into(), "email".into());
+        let exact = ColumnOverrides {
+            entries: Vec::new(),
+            skip: Vec::new(),
+            positions: vec![(2, Some(Kind::Email))],
+        };
+        let resolved = resolve_columns(&headers, &rows, &config, Some(&exact)).unwrap();
+        assert_eq!(
+            resolved.iter().map(|c| c.index).collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert_eq!(resolved[0].kind, Kind::Email);
+        let mixed = ColumnOverrides {
+            entries: vec![("Email".into(), Kind::Name)],
+            skip: Vec::new(),
+            positions: vec![(2, Some(Kind::Email))],
+        };
+        let err = resolve_columns(&headers, &rows, &config, Some(&mixed)).unwrap_err();
+        assert!(err.contains("mixed"), "{err}");
+
+        let beyond = ColumnOverrides {
+            entries: Vec::new(),
+            skip: Vec::new(),
+            positions: vec![(5, None)],
+        };
+        let err = resolve_columns(&headers, &rows, &BTreeMap::new(), Some(&beyond)).unwrap_err();
+        assert!(err.contains("position 6"), "{err}");
     }
 
     #[test]

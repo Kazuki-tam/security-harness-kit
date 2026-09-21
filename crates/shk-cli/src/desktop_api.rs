@@ -1,14 +1,21 @@
 //! Structured APIs for the desktop app (no stdout parsing).
 
-use crate::args::{AiTool, AuditReasonArg, EnvEncryptArgs};
+use crate::args::{
+    AiTool, AuditReasonArg, EnvEncryptArgs, PseudonymizeFormatArg, PseudonymizeModeArg,
+};
 pub use crate::commands::audit::AuditReport;
 use crate::commands::audit::{self, AuditInvocation};
+use crate::commands::pseudonymize::{
+    self, ColumnSelection, Decisions, InlineRequest, InputKind, Preview, PseudonymizeRequest,
+    PseudonymizeSource, StoreOpener,
+};
 use crate::commands::skills::{SkillTool, SkillsInstallArgs};
 use crate::doctor::{
     ClaudePermissionsStatus, CodexConfigStatus, EnvFileState, EnvFileStatus, IgnoreStatus,
     collect_claude_permissions_status, collect_codex_config_status, collect_env_file_statuses,
     collect_ignore_status, fix_ignore_patterns, has_shk_pre_commit, ignore_fix_target_statuses,
 };
+use crate::env_store::{is_secret_store_unavailable, open_pseudonymize_store};
 use crate::hooks::{
     ConfigureAiOptions, InstallAiOptions, configure_ai_with_summaries, install_ai_with_summaries,
     install_pre_commit,
@@ -23,14 +30,18 @@ use serde::{Deserialize, Serialize};
 use shk_core::finding::Finding;
 use shk_core::git;
 use shk_core::masker::MaskJsonOutput;
-use shk_core::policy::Policy;
+use shk_core::policy::{Policy, SecretStoreBackend};
+use shk_core::pseudonymize::{
+    ColumnOverrides, ColumnSource, Kind, ResolvedColumn, TableResult, delimiter_for_path,
+    list_sheets,
+};
 use shk_integrations::{MANAGED_MARKER_JSON, MANAGED_MARKER_SH};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Desktop setup installs blocking scan hooks that append metadata-only block entries.
 const DESKTOP_AI_HOOK_LOG_BLOCKED: bool = true;
@@ -514,6 +525,710 @@ fn mask_office_file_for_desktop(
         source_label: source_label.into(),
         output_path: written_output,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Pseudonymize
+// ---------------------------------------------------------------------------
+
+/// Sample rows shown next to each column so a person can tell what it holds.
+const PSEUDONYMIZE_PREVIEW_ROWS: usize = 3;
+/// Cells are cut for display; the engine never sees the truncated copy.
+const PSEUDONYMIZE_PREVIEW_CELL_CHARS: usize = 40;
+const PSEUDONYMIZE_INLINE_LABEL: &str = "<pasted>";
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PseudonymizeColumnChoice {
+    /// Column position from the plan. When every choice carries one, columns
+    /// are addressed by position, so blank or repeated headers work too.
+    #[serde(default)]
+    pub index: Option<usize>,
+    pub name: String,
+    /// `email`, `phone`, `name`, `custom`, or `none` (leave the column as it is).
+    pub kind: String,
+    #[serde(default)]
+    pub custom_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PseudonymizeInspectOptions {
+    #[serde(default)]
+    pub input_path: Option<String>,
+    #[serde(default)]
+    pub inline_text: Option<String>,
+    /// `table` or `text`. Required for pasted content; files classify by extension.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// `csv` or `tsv` for pasted tables or files without a table extension.
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub sheet: Option<String>,
+    #[serde(default)]
+    pub no_header: bool,
+    /// The user's column choices, one per header. Empty means "suggest".
+    #[serde(default)]
+    pub columns: Vec<PseudonymizeColumnChoice>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PseudonymizeColumnPlan {
+    pub index: usize,
+    pub name: String,
+    /// `email`, `phone`, `name`, `custom`, or `none`.
+    pub kind: String,
+    pub custom_label: Option<String>,
+    /// `config`, `cli`, `inferred`, `rule`, or `none`.
+    pub source: String,
+    pub match_rate: Option<f64>,
+    /// xlsx only: the column holds a formula cell, which a run would refuse.
+    pub formula: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PseudonymizeTablePreview {
+    pub has_header: bool,
+    pub delimiter: String,
+    pub headers: Vec<String>,
+    pub sample_rows: Vec<Vec<String>>,
+    pub row_count: u64,
+    pub columns: Vec<PseudonymizeColumnPlan>,
+    pub sheets: Vec<String>,
+    pub selected_sheet: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PseudonymizeInspectResult {
+    /// `table-csv`, `table-xlsx`, `text`, or `text-office`.
+    pub input_kind: String,
+    pub source_label: String,
+    pub table: Option<PseudonymizeTablePreview>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PseudonymizeKeyStatus {
+    pub exists: bool,
+    pub backend: String,
+    pub fingerprint: Option<String>,
+    /// Set when the configured store cannot be reached on this machine.
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PseudonymizeRunOptions {
+    #[serde(flatten)]
+    pub input: PseudonymizeInspectOptions,
+    #[serde(default)]
+    pub output_path: Option<String>,
+    #[serde(default)]
+    pub map_path: Option<String>,
+    /// The user agreed to create the project key if none exists yet.
+    #[serde(default)]
+    pub create_key: bool,
+    #[serde(default)]
+    pub check_remaining: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PseudonymizeRunResult {
+    pub mode: String,
+    pub rows_processed: u64,
+    pub replaced: BTreeMap<String, u64>,
+    pub unparsed: BTreeMap<String, u64>,
+    pub columns: Vec<PseudonymizeColumnPlan>,
+    pub key_fingerprint: Option<String>,
+    pub output_path: Option<String>,
+    pub meta_path: Option<String>,
+    pub map_path: Option<String>,
+    /// The pseudonymized text for pasted content; files are written instead.
+    pub inline_output: Option<String>,
+    pub remaining_rule_ids: Vec<String>,
+    pub remaining_check_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PseudonymizeRestoreResult {
+    pub output_path: String,
+    pub replacements: usize,
+    pub ambiguous_tokens: usize,
+}
+
+enum PseudonymizeInput {
+    File(PathBuf),
+    Inline {
+        text: Zeroizing<String>,
+        mode: PseudonymizeModeArg,
+    },
+}
+
+struct ParsedPseudonymizeInput {
+    input: PseudonymizeInput,
+    mode: Option<PseudonymizeModeArg>,
+    format: Option<PseudonymizeFormatArg>,
+    sheet: Option<String>,
+    no_header: bool,
+    columns: Option<ColumnOverrides>,
+}
+
+pub fn pseudonymize_inspect(
+    project_root: &Path,
+    options: PseudonymizeInspectOptions,
+) -> Result<PseudonymizeInspectResult> {
+    pseudonymize_inspect_inner(project_root, options).map_err(flatten_error)
+}
+
+fn pseudonymize_inspect_inner(
+    project_root: &Path,
+    options: PseudonymizeInspectOptions,
+) -> Result<PseudonymizeInspectResult> {
+    let root = require_pseudonymize_project(project_root)?;
+    let parsed = parse_pseudonymize_input(options)?;
+    let (source, source_label) = match parsed.input {
+        PseudonymizeInput::File(path) => {
+            let label = source_label_for(&path);
+            (PseudonymizeSource::File(path), label)
+        }
+        PseudonymizeInput::Inline { text, .. } => (
+            PseudonymizeSource::Buffer(inline_bytes(&root, text)?),
+            PSEUDONYMIZE_INLINE_LABEL.to_string(),
+        ),
+    };
+    let kind = pseudonymize::classify_input(source.path(), parsed.mode, parsed.format)?;
+    let (sheets, sheet, selected_sheet) = if kind == InputKind::TableXlsx {
+        let path = source.path().expect("xlsx input is a file");
+        sheet_selection(path, parsed.sheet.as_deref())?
+    } else {
+        (Vec::new(), parsed.sheet.clone(), None)
+    };
+    let request = PseudonymizeRequest {
+        project_root: root,
+        source,
+        output: None,
+        dry_run: true,
+        columns: parsed.columns.map(ColumnSelection::Resolved),
+        no_header: parsed.no_header,
+        mode: parsed.mode,
+        format: parsed.format,
+        sheet,
+        map: None,
+        check_remaining: false,
+    };
+    let table = match pseudonymize::preview(&request)? {
+        Preview::Table(table) => {
+            let delimiter = match (kind, parsed.format) {
+                (InputKind::TableXlsx, _) | (_, Some(PseudonymizeFormatArg::Csv)) => ",",
+                (_, Some(PseudonymizeFormatArg::Tsv)) => "\t",
+                (_, None) if delimiter_for_path(request.source.path()) == b'\t' => "\t",
+                (_, None) => ",",
+            };
+            Some(table_preview(&table, delimiter, sheets, selected_sheet))
+        }
+        Preview::Text => None,
+    };
+    Ok(PseudonymizeInspectResult {
+        input_kind: input_kind_label(kind).to_string(),
+        source_label,
+        table,
+    })
+}
+
+pub fn pseudonymize_key_status(project_root: &Path) -> Result<PseudonymizeKeyStatus> {
+    pseudonymize_key_status_with(project_root, &open_pseudonymize_store)
+}
+
+pub(crate) fn pseudonymize_key_status_with(
+    project_root: &Path,
+    open_store: StoreOpener<'_>,
+) -> Result<PseudonymizeKeyStatus> {
+    pseudonymize_key_status_inner(project_root, open_store).map_err(flatten_error)
+}
+
+fn pseudonymize_key_status_inner(
+    project_root: &Path,
+    open_store: StoreOpener<'_>,
+) -> Result<PseudonymizeKeyStatus> {
+    let root = require_pseudonymize_project(project_root)?;
+    let lookup = (|| {
+        let (_policy, project, store, backend) = pseudonymize::open_context(&root, open_store)?;
+        let material = pseudonymize::load_material(store.as_ref(), &project)?;
+        Ok::<_, anyhow::Error>(PseudonymizeKeyStatus {
+            exists: material.is_some(),
+            backend: pseudonymize::backend_label(backend).to_string(),
+            fingerprint: material.map(|material| material.fingerprint()),
+            unavailable_reason: None,
+        })
+    })();
+    match lookup {
+        Ok(status) => Ok(status),
+        Err(err) if is_secret_store_unavailable(&err) => {
+            let (policy, _) = Policy::load_from_dir(&root)?;
+            let backend = policy
+                .env
+                .secret_store
+                .parse::<SecretStoreBackend>()
+                .map(pseudonymize::backend_label)
+                .unwrap_or("unknown");
+            Ok(PseudonymizeKeyStatus {
+                exists: false,
+                backend: backend.to_string(),
+                fingerprint: None,
+                unavailable_reason: Some(format!("{err:#}")),
+            })
+        }
+        Err(err) => Err(err),
+    }
+}
+
+pub fn pseudonymize_run(
+    project_root: &Path,
+    options: PseudonymizeRunOptions,
+) -> Result<PseudonymizeRunResult> {
+    pseudonymize_run_with(project_root, options, &open_pseudonymize_store)
+}
+
+pub(crate) fn pseudonymize_run_with(
+    project_root: &Path,
+    options: PseudonymizeRunOptions,
+    open_store: StoreOpener<'_>,
+) -> Result<PseudonymizeRunResult> {
+    pseudonymize_run_inner(project_root, options, open_store).map_err(flatten_error)
+}
+
+fn pseudonymize_run_inner(
+    project_root: &Path,
+    options: PseudonymizeRunOptions,
+    open_store: StoreOpener<'_>,
+) -> Result<PseudonymizeRunResult> {
+    let root = require_pseudonymize_project(project_root)?;
+    let parsed = parse_pseudonymize_input(options.input)?;
+    // Positional choices are applied exactly; name-based ones leave the rest
+    // to config and inference, and inference then fails closed.
+    let decisions = Decisions {
+        accept_inferred: false,
+        create_key: options.create_key,
+    };
+    let kind = pseudonymize::classify_input(
+        match &parsed.input {
+            PseudonymizeInput::File(path) => Some(path.as_path()),
+            PseudonymizeInput::Inline { .. } => None,
+        },
+        parsed.mode,
+        parsed.format,
+    )?;
+    if matches!(kind, InputKind::TableCsv | InputKind::TableXlsx) && parsed.columns.is_none() {
+        anyhow::bail!("choose what each column holds before pseudonymizing a table");
+    }
+    let output = non_blank(options.output_path.as_deref()).map(PathBuf::from);
+    let map = non_blank(options.map_path.as_deref()).map(PathBuf::from);
+    match parsed.input {
+        PseudonymizeInput::File(path) => {
+            let output = output
+                .ok_or_else(|| anyhow::anyhow!("choose where to save the pseudonymized file"))?;
+            // The engine applies the CLI's own guards: protected home paths,
+            // regular-file and distinct-path checks, and the `.shk-map` suffix.
+            // Unlike redaction, outputs are not confined to the project tree:
+            // business exports usually live outside the repository and the
+            // location came from a save dialog the user drove.
+            let sheet = if kind == InputKind::TableXlsx {
+                sheet_selection(&path, parsed.sheet.as_deref())?.1
+            } else {
+                parsed.sheet
+            };
+            let request = PseudonymizeRequest {
+                project_root: root,
+                source: PseudonymizeSource::File(path),
+                output: Some(output),
+                dry_run: false,
+                columns: parsed.columns.map(ColumnSelection::Resolved),
+                no_header: parsed.no_header,
+                mode: parsed.mode,
+                format: parsed.format,
+                sheet,
+                map,
+                check_remaining: options.check_remaining,
+            };
+            let outcome = pseudonymize::mask_core(request, open_store, &decisions)?;
+            let written = outcome
+                .written
+                .ok_or_else(|| anyhow::anyhow!("pseudonymize run finished without writing"))?;
+            let (remaining_rule_ids, remaining_check_error) = match outcome.remaining {
+                None => (Vec::new(), None),
+                Some(Ok(ids)) => (ids, None),
+                Some(Err(err)) => (Vec::new(), Some(format!("{err:#}"))),
+            };
+            Ok(PseudonymizeRunResult {
+                mode: outcome.meta.mode.to_string(),
+                rows_processed: outcome.meta.rows_processed,
+                replaced: outcome.meta.replaced,
+                unparsed: outcome.meta.unparsed,
+                columns: outcome
+                    .columns
+                    .map(|columns| columns.iter().map(column_plan).collect())
+                    .unwrap_or_default(),
+                key_fingerprint: outcome.meta.key_fingerprint,
+                output_path: Some(written.output.display().to_string()),
+                meta_path: Some(written.meta.display().to_string()),
+                map_path: written.map.map(|map| map.display().to_string()),
+                inline_output: None,
+                remaining_rule_ids,
+                remaining_check_error,
+            })
+        }
+        PseudonymizeInput::Inline { text, mode } => {
+            if output.is_some() || map.is_some() || options.check_remaining {
+                anyhow::bail!(
+                    "pasted content is returned in place; output, restore map, and leftover checks apply to files only"
+                );
+            }
+            let bytes = inline_bytes(&root, text)?;
+            let outcome = pseudonymize::pseudonymize_inline(
+                InlineRequest {
+                    project_root: root,
+                    bytes,
+                    mode,
+                    format: parsed.format,
+                    columns: parsed.columns,
+                    no_header: parsed.no_header,
+                },
+                open_store,
+                &decisions,
+            )?;
+            Ok(PseudonymizeRunResult {
+                mode: outcome.meta.mode.to_string(),
+                rows_processed: outcome.meta.rows_processed,
+                replaced: outcome.meta.replaced,
+                unparsed: outcome.meta.unparsed,
+                columns: outcome
+                    .columns
+                    .map(|columns| columns.iter().map(column_plan).collect())
+                    .unwrap_or_default(),
+                key_fingerprint: outcome.meta.key_fingerprint,
+                output_path: None,
+                meta_path: None,
+                map_path: None,
+                inline_output: Some(outcome.output.to_string()),
+                remaining_rule_ids: Vec::new(),
+                remaining_check_error: None,
+            })
+        }
+    }
+}
+
+pub fn pseudonymize_restore(
+    project_root: &Path,
+    input_path: &Path,
+    map_path: &Path,
+    output_path: &Path,
+) -> Result<PseudonymizeRestoreResult> {
+    pseudonymize_restore_with(
+        project_root,
+        input_path,
+        map_path,
+        output_path,
+        &open_pseudonymize_store,
+    )
+}
+
+pub(crate) fn pseudonymize_restore_with(
+    project_root: &Path,
+    input_path: &Path,
+    map_path: &Path,
+    output_path: &Path,
+    open_store: StoreOpener<'_>,
+) -> Result<PseudonymizeRestoreResult> {
+    let root = require_pseudonymize_project(project_root).map_err(flatten_error)?;
+    let summary = pseudonymize::restore_with(
+        &root,
+        input_path.to_path_buf(),
+        map_path.to_path_buf(),
+        output_path.to_path_buf(),
+        open_store,
+    )?;
+    Ok(PseudonymizeRestoreResult {
+        output_path: summary.output.display().to_string(),
+        replacements: summary.replacements,
+        ambiguous_tokens: summary.ambiguous,
+    })
+}
+
+/// Keys are per project, so every pseudonymize call needs a real project
+/// with a policy file, unlike redaction which falls back to defaults.
+fn require_pseudonymize_project(project_root: &Path) -> Result<PathBuf> {
+    let root = resolve_project_root(&project_root.display().to_string())?;
+    safety::require_project_policy(&root, "pseudonymize")?;
+    Ok(root)
+}
+
+fn parse_pseudonymize_input(
+    options: PseudonymizeInspectOptions,
+) -> Result<ParsedPseudonymizeInput> {
+    let mode = options
+        .mode
+        .as_deref()
+        .map(parse_pseudonymize_mode)
+        .transpose()?;
+    let format = options
+        .format
+        .as_deref()
+        .map(parse_pseudonymize_format)
+        .transpose()?;
+    let input = match (
+        non_blank(options.input_path.as_deref()),
+        options.inline_text,
+    ) {
+        (Some(path), None) => PseudonymizeInput::File(PathBuf::from(path)),
+        (None, Some(text)) => {
+            let text = Zeroizing::new(text);
+            if text.trim().is_empty() {
+                anyhow::bail!("pasted content is empty");
+            }
+            let mode =
+                mode.ok_or_else(|| anyhow::anyhow!("pasted content needs a mode (table or text)"))?;
+            PseudonymizeInput::Inline { text, mode }
+        }
+        (Some(_), Some(_)) => {
+            anyhow::bail!("pass either a file path or pasted content, not both")
+        }
+        (None, None) => anyhow::bail!("pass a file path or pasted content"),
+    };
+    Ok(ParsedPseudonymizeInput {
+        input,
+        mode,
+        format,
+        sheet: non_blank(options.sheet.as_deref()).map(str::to_string),
+        no_header: options.no_header,
+        columns: column_overrides(&options.columns)?,
+    })
+}
+
+fn inline_bytes(root: &Path, mut text: Zeroizing<String>) -> Result<Zeroizing<Vec<u8>>> {
+    let (policy, _) = Policy::load_from_dir(root)?;
+    ensure_mask_content_size_allowed(&text, policy.scan.max_file_size_bytes)?;
+    // Move the buffer rather than copy it; the emptied String zeroizes nothing.
+    Ok(Zeroizing::new(std::mem::take(&mut *text).into_bytes()))
+}
+
+/// Engine errors carry their cause in the chain; the app shows one string.
+fn flatten_error(err: anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!("{err:#}")
+}
+
+fn parse_pseudonymize_mode(raw: &str) -> Result<PseudonymizeModeArg> {
+    match raw.trim() {
+        "table" => Ok(PseudonymizeModeArg::Table),
+        "text" => Ok(PseudonymizeModeArg::Text),
+        other => anyhow::bail!("unknown pseudonymize mode `{other}` (expected table or text)"),
+    }
+}
+
+fn parse_pseudonymize_format(raw: &str) -> Result<PseudonymizeFormatArg> {
+    match raw.trim() {
+        "csv" => Ok(PseudonymizeFormatArg::Csv),
+        "tsv" => Ok(PseudonymizeFormatArg::Tsv),
+        other => anyhow::bail!("unknown table format `{other}` (expected csv or tsv)"),
+    }
+}
+
+/// Turn the user's per-column choices into an exact selection: named kinds
+/// become entries and `none` becomes a skip, so neither `[pseudonymize.columns]`
+/// nor inference can add a column the user did not pick.
+fn column_overrides(choices: &[PseudonymizeColumnChoice]) -> Result<Option<ColumnOverrides>> {
+    if choices.is_empty() {
+        return Ok(None);
+    }
+    let by_position = choices.iter().all(|choice| choice.index.is_some());
+    if !by_position && choices.iter().any(|choice| choice.index.is_some()) {
+        anyhow::bail!("column choices must all carry a position, or none of them");
+    }
+    let mut overrides = ColumnOverrides::default();
+    let mut seen = std::collections::BTreeSet::new();
+    for choice in choices {
+        let name = choice.name.trim();
+        let label = if by_position {
+            format!("column {}", choice.index.unwrap_or_default() + 1)
+        } else {
+            format!("column `{name}`")
+        };
+        let key = match choice.index {
+            Some(index) => index.to_string(),
+            // Headers match case-insensitively, so two names that fold to the
+            // same key would silently override each other.
+            None if name.is_empty() => anyhow::bail!("column choice has an empty name"),
+            None => name.to_ascii_lowercase(),
+        };
+        if !seen.insert(key) {
+            anyhow::bail!("{label} was chosen twice");
+        }
+        let kind = match choice.kind.trim() {
+            "none" => None,
+            "custom" => {
+                let custom = choice
+                    .custom_label
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default();
+                if custom.is_empty() {
+                    anyhow::bail!("{label} needs a label for the custom kind");
+                }
+                Some(Kind::parse(&format!("custom:{custom}")))
+            }
+            other => Some(Kind::parse(other)),
+        }
+        .transpose()
+        .map_err(|err| anyhow::anyhow!("{label}: {}", err.0))?;
+        match (choice.index, kind) {
+            (Some(index), kind) => overrides.positions.push((index, kind)),
+            (None, Some(kind)) => overrides.entries.push((name.to_string(), kind)),
+            (None, None) => overrides.skip.push(name.to_string()),
+        }
+    }
+    Ok(Some(overrides))
+}
+
+/// Sheets for the picker, the selector to hand to the engine, and the name
+/// that selector resolves to. The engine reads a numeric selector as a
+/// position, so a sheet whose *name* looks like a number is sent by position.
+fn sheet_selection(
+    path: &Path,
+    spec: Option<&str>,
+) -> Result<(Vec<String>, Option<String>, Option<String>)> {
+    let sheets = list_sheets(path)?;
+    let selector = spec.map(|spec| match sheets.iter().position(|name| name == spec) {
+        Some(index) => (index + 1).to_string(),
+        None => spec.to_string(),
+    });
+    let selected = resolve_sheet_name(&sheets, selector.as_deref());
+    Ok((sheets, selector, selected))
+}
+
+fn table_preview(
+    result: &TableResult,
+    delimiter: &str,
+    sheets: Vec<String>,
+    selected_sheet: Option<String>,
+) -> PseudonymizeTablePreview {
+    PseudonymizeTablePreview {
+        has_header: result.has_header,
+        delimiter: delimiter.to_string(),
+        headers: result.headers.clone(),
+        sample_rows: result
+            .sample_rows
+            .iter()
+            .take(PSEUDONYMIZE_PREVIEW_ROWS)
+            .map(|row| row.iter().map(|cell| truncate_cell(cell)).collect())
+            .collect(),
+        row_count: result.meta.rows_processed,
+        columns: column_plans(&result.headers, &result.columns, &result.formula_columns),
+        sheets,
+        selected_sheet,
+    }
+}
+
+/// One plan entry per header, so the UI can render unselected columns too.
+fn column_plans(
+    headers: &[String],
+    resolved: &[ResolvedColumn],
+    formula_columns: &[usize],
+) -> Vec<PseudonymizeColumnPlan> {
+    headers
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let mut plan = resolved
+                .iter()
+                .find(|column| column.index == index)
+                .map(column_plan)
+                .unwrap_or_else(|| PseudonymizeColumnPlan {
+                    index,
+                    name: name.clone(),
+                    kind: "none".to_string(),
+                    custom_label: None,
+                    source: "none".to_string(),
+                    match_rate: None,
+                    formula: false,
+                });
+            plan.formula = formula_columns.contains(&index);
+            plan
+        })
+        .collect()
+}
+
+fn column_plan(column: &ResolvedColumn) -> PseudonymizeColumnPlan {
+    let (kind, custom_label) = match &column.kind {
+        Kind::Custom(label) => ("custom".to_string(), Some(label.clone())),
+        other => (other.as_config_value(), None),
+    };
+    PseudonymizeColumnPlan {
+        index: column.index,
+        name: column.name.clone(),
+        kind,
+        custom_label,
+        source: match column.source {
+            ColumnSource::Config => "config",
+            ColumnSource::Cli => "cli",
+            ColumnSource::Inferred => "inferred",
+            ColumnSource::Rule => "rule",
+        }
+        .to_string(),
+        match_rate: column.match_rate,
+        formula: false,
+    }
+}
+
+fn input_kind_label(kind: InputKind) -> &'static str {
+    match kind {
+        InputKind::TableCsv => "table-csv",
+        InputKind::TableXlsx => "table-xlsx",
+        InputKind::TextPlain => "text",
+        InputKind::TextOffice => "text-office",
+    }
+}
+
+fn truncate_cell(cell: &str) -> String {
+    let mut chars = cell.chars();
+    let shown: String = chars
+        .by_ref()
+        .take(PSEUDONYMIZE_PREVIEW_CELL_CHARS)
+        .collect();
+    if chars.next().is_some() {
+        format!("{shown}…")
+    } else {
+        shown
+    }
+}
+
+/// Mirror `run_xlsx`'s selector: a number is a 1-based position, otherwise
+/// an exact name; `None` means the first sheet.
+fn resolve_sheet_name(sheets: &[String], spec: Option<&str>) -> Option<String> {
+    let Some(spec) = spec else {
+        return sheets.first().cloned();
+    };
+    match spec.parse::<usize>() {
+        Ok(number) => number
+            .checked_sub(1)
+            .and_then(|index| sheets.get(index))
+            .cloned(),
+        Err(_) => sheets.iter().find(|sheet| sheet.as_str() == spec).cloned(),
+    }
+}
+
+fn source_label_for(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn non_blank(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 pub fn clone_repository(
@@ -3756,5 +4471,600 @@ mod tests {
         .unwrap();
         assert!(!report.log_exists);
         assert_eq!(report.summary.blocked_events, 0);
+    }
+
+    mod pseudonymize_api {
+        use super::*;
+        use crate::commands::pseudonymize::NO_KEY_MESSAGE;
+        use crate::commands::pseudonymize::test_support::{
+            MemoryStore, create_docx, create_xlsx, opener,
+        };
+        use std::sync::Arc;
+
+        fn email() -> String {
+            ["ada", "@", "example.com"].concat()
+        }
+
+        fn project() -> tempfile::TempDir {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(dir.path().join("shk.toml"), "").unwrap();
+            dir
+        }
+
+        fn file_options(path: &Path) -> PseudonymizeInspectOptions {
+            PseudonymizeInspectOptions {
+                input_path: Some(path.display().to_string()),
+                ..PseudonymizeInspectOptions::default()
+            }
+        }
+
+        fn inline_options(text: &str, mode: &str) -> PseudonymizeInspectOptions {
+            PseudonymizeInspectOptions {
+                inline_text: Some(text.to_string()),
+                mode: Some(mode.to_string()),
+                ..PseudonymizeInspectOptions::default()
+            }
+        }
+
+        fn choice(name: &str, kind: &str) -> PseudonymizeColumnChoice {
+            PseudonymizeColumnChoice {
+                index: None,
+                name: name.to_string(),
+                kind: kind.to_string(),
+                custom_label: None,
+            }
+        }
+
+        fn at(index: usize, kind: &str) -> PseudonymizeColumnChoice {
+            PseudonymizeColumnChoice {
+                index: Some(index),
+                name: String::new(),
+                kind: kind.to_string(),
+                custom_label: None,
+            }
+        }
+
+        #[test]
+        fn positional_choices_handle_blank_and_repeated_headers() {
+            let dir = project();
+            let root = dir.path();
+            let store = Arc::new(MemoryStore::default());
+            let open = opener(Arc::clone(&store));
+            // A trailing comma and a repeated header, as exports often have.
+            fs::write(
+                root.join("export.csv"),
+                format!("Email,Email,\n{},{},note\n", email(), email()),
+            )
+            .unwrap();
+            let table = pseudonymize_inspect(root, file_options(&root.join("export.csv")))
+                .unwrap()
+                .table
+                .unwrap();
+            assert_eq!(
+                table.headers,
+                vec!["Email".to_string(), "Email".to_string(), "".to_string()]
+            );
+            assert_eq!(table.columns.len(), 3);
+            assert!(table.columns.iter().all(|column| !column.formula));
+
+            let mut run = run_options(
+                file_options(&root.join("export.csv")),
+                Some(&root.join("export.pseudo.csv")),
+            );
+            run.input.columns = vec![at(0, "email"), at(1, "none"), at(2, "name")];
+            let result = pseudonymize_run_with(root, run, &open).unwrap();
+            assert_eq!(result.columns.len(), 2);
+            assert_eq!(result.replaced.get("email"), Some(&1));
+            let pseudo = fs::read_to_string(root.join("export.pseudo.csv")).unwrap();
+            assert!(pseudo.contains(&email()), "second column stays");
+            assert!(pseudo.contains("name_"), "{pseudo}");
+
+            // Positions are exact: config and inference never add a column.
+            fs::write(
+                root.join("shk.toml"),
+                "[pseudonymize.columns]\nEmail = \"email\"\n",
+            )
+            .unwrap();
+            let mut only_last = run_options(
+                file_options(&root.join("export.csv")),
+                Some(&root.join("last.csv")),
+            );
+            only_last.input.columns = vec![at(2, "name")];
+            let result = pseudonymize_run_with(root, only_last, &open).unwrap();
+            assert_eq!(result.columns.len(), 1);
+            assert_eq!(result.columns[0].index, 2);
+            assert!(!result.replaced.contains_key("email"));
+            fs::write(root.join("shk.toml"), "").unwrap();
+
+            let mut twice = run_options(
+                file_options(&root.join("export.csv")),
+                Some(&root.join("t.csv")),
+            );
+            twice.input.columns = vec![at(0, "email"), at(0, "none"), at(1, "none"), at(2, "none")];
+            let err = pseudonymize_run_with(root, twice, &open).unwrap_err();
+            assert!(
+                err.to_string().contains("column 1 was chosen twice"),
+                "{err}"
+            );
+            let mut mixed = run_options(
+                file_options(&root.join("export.csv")),
+                Some(&root.join("t.csv")),
+            );
+            mixed.input.columns = vec![at(0, "email"), choice("Email", "none")];
+            assert!(pseudonymize_run_with(root, mixed, &open).is_err());
+            let mut beyond = run_options(
+                file_options(&root.join("export.csv")),
+                Some(&root.join("t.csv")),
+            );
+            beyond.input.columns =
+                vec![at(0, "none"), at(1, "none"), at(2, "none"), at(7, "email")];
+            let err = pseudonymize_run_with(root, beyond, &open).unwrap_err();
+            assert!(err.to_string().contains("position 8"), "{err}");
+            assert!(!root.join("t.csv").exists());
+        }
+
+        #[test]
+        fn numeric_sheet_names_are_sent_by_position() {
+            let dir = project();
+            let root = dir.path();
+            let workbook = r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Summary" sheetId="1" r:id="rId1"/><sheet name="2024" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
+            let rels = r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#;
+            let sheet = |header: &str| {
+                format!(
+                    r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{header}</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>{}</t></is></c></row></sheetData></worksheet>"#,
+                    email()
+                )
+            };
+            crate::commands::pseudonymize::test_support::build_xlsx(
+                &root.join("book.xlsx"),
+                &[
+                    ("[Content_Types].xml", "<Types/>".into()),
+                    ("xl/workbook.xml", workbook.into()),
+                    ("xl/_rels/workbook.xml.rels", rels.into()),
+                    ("xl/worksheets/sheet1.xml", sheet("Contact")),
+                    ("xl/worksheets/sheet2.xml", sheet("Mail")),
+                ],
+            );
+            let mut by_name = file_options(&root.join("book.xlsx"));
+            by_name.sheet = Some("2024".into());
+            let table = pseudonymize_inspect(root, by_name).unwrap().table.unwrap();
+            assert_eq!(
+                table.sheets,
+                vec!["Summary".to_string(), "2024".to_string()]
+            );
+            assert_eq!(table.selected_sheet.as_deref(), Some("2024"));
+            assert_eq!(table.headers, vec!["Mail".to_string()]);
+
+            let (sheets, selector, selected) =
+                sheet_selection(&root.join("book.xlsx"), Some("2024")).unwrap();
+            assert_eq!(sheets.len(), 2);
+            assert_eq!(selector.as_deref(), Some("2"));
+            assert_eq!(selected.as_deref(), Some("2024"));
+            let (_, selector, selected) =
+                sheet_selection(&root.join("book.xlsx"), Some("Nope")).unwrap();
+            assert_eq!(selector.as_deref(), Some("Nope"));
+            assert!(selected.is_none());
+        }
+
+        fn run_options(
+            input: PseudonymizeInspectOptions,
+            output: Option<&Path>,
+        ) -> PseudonymizeRunOptions {
+            PseudonymizeRunOptions {
+                input,
+                output_path: output.map(|path| path.display().to_string()),
+                map_path: None,
+                create_key: true,
+                check_remaining: false,
+            }
+        }
+
+        #[test]
+        fn inspect_describes_csv_columns_with_bounded_samples() {
+            let dir = project();
+            let root = dir.path();
+            let long = "x".repeat(PSEUDONYMIZE_PREVIEW_CELL_CHARS + 5);
+            let mut body = format!("Email,Note\n{},{long}\n", email());
+            for _ in 0..5 {
+                body.push_str(&format!("{},short\n", email()));
+            }
+            fs::write(root.join("orders.csv"), &body).unwrap();
+
+            let result =
+                pseudonymize_inspect(root, file_options(&root.join("orders.csv"))).unwrap();
+            assert_eq!(result.input_kind, "table-csv");
+            assert_eq!(result.source_label, "orders.csv");
+            let table = result.table.unwrap();
+            assert!(table.has_header);
+            assert_eq!(table.delimiter, ",");
+            assert_eq!(table.headers, vec!["Email".to_string(), "Note".to_string()]);
+            assert_eq!(table.row_count, 6);
+            assert_eq!(table.sample_rows.len(), PSEUDONYMIZE_PREVIEW_ROWS);
+            assert!(table.sample_rows[0][1].ends_with('…'));
+            assert_eq!(
+                table.sample_rows[0][1].chars().count(),
+                PSEUDONYMIZE_PREVIEW_CELL_CHARS + 1
+            );
+            assert_eq!(table.columns.len(), 2);
+            assert_eq!(table.columns[0].kind, "email");
+            assert_eq!(table.columns[0].source, "inferred");
+            assert!(table.columns[0].match_rate.is_some());
+            assert_eq!(table.columns[1].kind, "none");
+            assert_eq!(table.columns[1].source, "none");
+            assert!(table.sheets.is_empty());
+            assert!(!root.join(".shk").exists(), "inspect writes nothing");
+
+            // A re-plan with the user's choices applies exactly those.
+            let mut options = file_options(&root.join("orders.csv"));
+            options.columns = vec![
+                choice("Email", "none"),
+                PseudonymizeColumnChoice {
+                    index: None,
+                    name: "Note".into(),
+                    kind: "custom".into(),
+                    custom_label: Some("note".into()),
+                },
+            ];
+            let table = pseudonymize_inspect(root, options).unwrap().table.unwrap();
+            assert_eq!(table.columns[0].kind, "none");
+            assert_eq!(table.columns[1].kind, "custom");
+            assert_eq!(table.columns[1].custom_label.as_deref(), Some("note"));
+            assert_eq!(table.columns[1].source, "cli");
+
+            fs::write(
+                root.join("rows.tsv"),
+                format!("Email\tNote\n{}\tkeep\n", email()),
+            )
+            .unwrap();
+            let table = pseudonymize_inspect(root, file_options(&root.join("rows.tsv")))
+                .unwrap()
+                .table
+                .unwrap();
+            assert_eq!(table.delimiter, "\t");
+        }
+
+        #[test]
+        fn inspect_lists_xlsx_sheets_and_classifies_text_inputs() {
+            let dir = project();
+            let root = dir.path();
+            create_xlsx(&root.join("book.xlsx"), "Email", &email());
+            let result = pseudonymize_inspect(root, file_options(&root.join("book.xlsx"))).unwrap();
+            assert_eq!(result.input_kind, "table-xlsx");
+            let table = result.table.unwrap();
+            assert_eq!(table.sheets, vec!["Customers".to_string()]);
+            assert_eq!(table.selected_sheet.as_deref(), Some("Customers"));
+            assert_eq!(table.headers, vec!["Email".to_string()]);
+            assert_eq!(table.sample_rows, vec![vec![email()]]);
+
+            let mut by_index = file_options(&root.join("book.xlsx"));
+            by_index.sheet = Some("1".into());
+            let table = pseudonymize_inspect(root, by_index).unwrap().table.unwrap();
+            assert_eq!(table.selected_sheet.as_deref(), Some("Customers"));
+
+            fs::write(root.join("notes.md"), format!("contact {}\n", email())).unwrap();
+            let result = pseudonymize_inspect(root, file_options(&root.join("notes.md"))).unwrap();
+            assert_eq!(result.input_kind, "text");
+            assert!(result.table.is_none());
+
+            create_docx(&root.join("memo.docx"), &email());
+            let result = pseudonymize_inspect(root, file_options(&root.join("memo.docx"))).unwrap();
+            assert_eq!(result.input_kind, "text-office");
+            assert!(result.table.is_none());
+
+            let mut text = file_options(&root.join("orders.csv"));
+            fs::write(root.join("orders.csv"), "Email\n").unwrap();
+            text.mode = Some("text".into());
+            assert_eq!(pseudonymize_inspect(root, text).unwrap().input_kind, "text");
+        }
+
+        #[test]
+        fn inspect_handles_pasted_content_and_rejects_bad_input() {
+            let dir = project();
+            let root = dir.path();
+            let pasted = format!("Email\tMember\n{}\tm-1\n", email());
+            let mut options = inline_options(&pasted, "table");
+            options.format = Some("tsv".into());
+            let result = pseudonymize_inspect(root, options).unwrap();
+            assert_eq!(result.source_label, PSEUDONYMIZE_INLINE_LABEL);
+            let table = result.table.unwrap();
+            assert_eq!(table.delimiter, "\t");
+            assert_eq!(
+                table.headers,
+                vec!["Email".to_string(), "Member".to_string()]
+            );
+
+            let text = pseudonymize_inspect(root, inline_options("hello", "text")).unwrap();
+            assert!(text.table.is_none());
+
+            let mut no_mode = inline_options("hello", "text");
+            no_mode.mode = None;
+            assert!(pseudonymize_inspect(root, no_mode).is_err());
+            let mut both = inline_options("hello", "text");
+            both.input_path = Some(root.join("x.csv").display().to_string());
+            assert!(pseudonymize_inspect(root, both).is_err());
+            assert!(pseudonymize_inspect(root, PseudonymizeInspectOptions::default()).is_err());
+            assert!(pseudonymize_inspect(root, inline_options("   ", "text")).is_err());
+            assert!(pseudonymize_inspect(root, inline_options("x", "tabular")).is_err());
+            let mut bad_format = inline_options("x", "table");
+            bad_format.format = Some("psv".into());
+            assert!(pseudonymize_inspect(root, bad_format).is_err());
+
+            let no_policy = tempfile::tempdir().unwrap();
+            let err =
+                pseudonymize_inspect(no_policy.path(), inline_options("x", "text")).unwrap_err();
+            assert!(err.to_string().contains("shk.toml"), "{err}");
+            assert!(
+                pseudonymize_inspect(&root.join("missing"), inline_options("x", "text")).is_err()
+            );
+
+            let mut typo = file_options(&root.join("orders.csv"));
+            fs::write(root.join("orders.csv"), format!("Email\n{}\n", email())).unwrap();
+            typo.columns = vec![choice("Emial", "email")];
+            let err = pseudonymize_inspect(root, typo).unwrap_err();
+            assert!(err.to_string().contains("Emial"), "{err}");
+        }
+
+        #[test]
+        fn key_status_reports_the_store_without_creating_a_key() {
+            let dir = project();
+            let root = dir.path();
+            let store = Arc::new(MemoryStore::default());
+            let open = opener(Arc::clone(&store));
+            let status = pseudonymize_key_status_with(root, &open).unwrap();
+            assert!(!status.exists);
+            assert!(status.fingerprint.is_none());
+            assert!(status.unavailable_reason.is_none());
+            assert_eq!(status.backend, "OS credential store");
+            assert!(store.entries.lock().unwrap().is_empty());
+
+            let failing = |_: &crate::env_store::ProjectIdentity, _: &Policy| {
+                Err(anyhow::anyhow!("store exploded"))
+            };
+            assert!(pseudonymize_key_status_with(root, &failing).is_err());
+
+            let unavailable = |_: &crate::env_store::ProjectIdentity, _: &Policy| {
+                Err(anyhow::Error::new(keyring::Error::NoStorageAccess(
+                    Box::new(std::io::Error::other("locked")),
+                )))
+            };
+            let status = pseudonymize_key_status_with(root, &unavailable).unwrap();
+            assert!(!status.exists);
+            assert_eq!(status.backend, "OS credential store");
+            assert!(
+                status
+                    .unavailable_reason
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("locked"),
+                "{status:?}"
+            );
+            let no_policy = tempfile::tempdir().unwrap();
+            assert!(pseudonymize_key_status_with(no_policy.path(), &open).is_err());
+        }
+
+        #[test]
+        fn run_writes_files_and_restores_through_the_map() {
+            let dir = project();
+            let root = dir.path();
+            let store = Arc::new(MemoryStore::default());
+            let open = opener(Arc::clone(&store));
+            let card = ["4111", "1111", "1111", "1111"].join(" ");
+            let input = format!("Email,Card,Note\n{},{card},keep\n", email());
+            fs::write(root.join("orders.csv"), &input).unwrap();
+
+            let mut options = run_options(
+                file_options(&root.join("orders.csv")),
+                Some(&root.join("orders.pseudo.csv")),
+            );
+            options.map_path = Some(root.join("orders.shk-map").display().to_string());
+            options.check_remaining = true;
+            options.input.columns = vec![
+                choice("Email", "email"),
+                choice("Card", "none"),
+                choice("Note", "none"),
+            ];
+            let result = pseudonymize_run_with(root, options, &open).unwrap();
+            assert_eq!(result.mode, "table");
+            assert_eq!(result.rows_processed, 1);
+            assert_eq!(result.replaced.get("email"), Some(&1));
+            assert_eq!(result.columns.len(), 1);
+            assert_eq!(result.columns[0].name, "Email");
+            assert!(result.key_fingerprint.is_some());
+            assert!(result.inline_output.is_none());
+            assert_eq!(
+                result.remaining_rule_ids,
+                vec!["pii.credit_card".to_string()]
+            );
+            assert!(result.remaining_check_error.is_none());
+            let output = PathBuf::from(result.output_path.clone().unwrap());
+            let pseudo = fs::read_to_string(&output).unwrap();
+            assert!(
+                pseudo.contains("email_") && !pseudo.contains(&email()),
+                "{pseudo}"
+            );
+            assert!(pseudo.contains(&card), "skipped column stays");
+            let sidecar = fs::read_to_string(result.meta_path.unwrap()).unwrap();
+            assert!(sidecar.contains("\"map_created\": true"), "{sidecar}");
+            let map = PathBuf::from(result.map_path.unwrap());
+            assert!(fs::read(&map).unwrap().starts_with(b"SHKMAP"));
+            assert_eq!(store.entries.lock().unwrap().len(), 1);
+
+            let status = pseudonymize_key_status_with(root, &open).unwrap();
+            assert!(status.exists);
+            assert_eq!(status.fingerprint, result.key_fingerprint);
+
+            let restored = pseudonymize_restore_with(
+                root,
+                &output,
+                &map,
+                &root.join("orders.restored.csv"),
+                &open,
+            )
+            .unwrap();
+            assert_eq!(restored.replacements, 1);
+            assert_eq!(restored.ambiguous_tokens, 0);
+            assert_eq!(fs::read_to_string(restored.output_path).unwrap(), input);
+            assert!(
+                pseudonymize_restore_with(
+                    root,
+                    &output,
+                    &root.join("nope.shk-map"),
+                    &root.join("x.csv"),
+                    &open
+                )
+                .is_err()
+            );
+        }
+
+        #[test]
+        fn run_returns_pasted_content_in_place() {
+            let dir = project();
+            let root = dir.path();
+            let store = Arc::new(MemoryStore::default());
+            let open = opener(Arc::clone(&store));
+            let text = format!("contact {}\n", email());
+            let result = pseudonymize_run_with(
+                root,
+                run_options(inline_options(&text, "text"), None),
+                &open,
+            )
+            .unwrap();
+            let output = result.inline_output.unwrap();
+            assert!(
+                output.contains("email_") && !output.contains(&email()),
+                "{output}"
+            );
+            assert!(result.output_path.is_none() && result.map_path.is_none());
+            assert_eq!(result.mode, "text");
+
+            let mut table = run_options(
+                inline_options(&format!("Email,Member\n{},m-1\n", email()), "table"),
+                None,
+            );
+            table.input.columns = vec![
+                choice("Email", "email"),
+                PseudonymizeColumnChoice {
+                    index: None,
+                    name: "Member".into(),
+                    kind: "custom".into(),
+                    custom_label: Some("member".into()),
+                },
+            ];
+            let result = pseudonymize_run_with(root, table, &open).unwrap();
+            let output = result.inline_output.unwrap();
+            assert!(
+                output.contains("member_") && output.contains("email_"),
+                "{output}"
+            );
+            assert_eq!(result.columns.len(), 2);
+            assert_eq!(result.columns[1].kind, "custom");
+
+            let leftovers: Vec<String> = fs::read_dir(root)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .filter(|name| name != "shk.toml" && name != ".shk")
+                .collect();
+            assert!(leftovers.is_empty(), "{leftovers:?}");
+
+            let with_output = run_options(inline_options("x", "text"), Some(&root.join("out.txt")));
+            assert!(pseudonymize_run_with(root, with_output, &open).is_err());
+        }
+
+        #[test]
+        fn run_rejects_bad_requests_before_touching_the_key() {
+            let dir = project();
+            let root = dir.path();
+            let store = Arc::new(MemoryStore::default());
+            let open = opener(Arc::clone(&store));
+            fs::write(
+                root.join("orders.csv"),
+                format!("Email,Note\n{},keep\n", email()),
+            )
+            .unwrap();
+            let csv = root.join("orders.csv");
+
+            let mut no_output = run_options(file_options(&csv), None);
+            no_output.input.columns = vec![choice("Email", "email"), choice("Note", "none")];
+            let err = pseudonymize_run_with(root, no_output, &open).unwrap_err();
+            assert!(err.to_string().contains("choose where"), "{err}");
+
+            // A table run without any choices must not fall back to inference.
+            let no_choices = run_options(file_options(&csv), Some(&root.join("z.csv")));
+            let err = pseudonymize_run_with(root, no_choices, &open).unwrap_err();
+            assert!(err.to_string().contains("choose what each column"), "{err}");
+            assert!(!root.join("z.csv").exists());
+            // Partial choices leave a header to inference, which fails closed.
+            let mut partial = run_options(file_options(&csv), Some(&root.join("y.csv")));
+            partial.input.columns = vec![choice("Note", "none")];
+            let err = pseudonymize_run_with(root, partial, &open).unwrap_err();
+            assert!(err.to_string().contains("confirmation"), "{err}");
+            assert!(!root.join("y.csv").exists());
+            let mut duplicate = run_options(file_options(&csv), Some(&root.join("y.csv")));
+            duplicate.input.columns = vec![choice("Email", "email"), choice("email", "none")];
+            let err = pseudonymize_run_with(root, duplicate, &open).unwrap_err();
+            assert!(err.to_string().contains("twice"), "{err}");
+
+            let mut bad_map = run_options(file_options(&csv), Some(&root.join("a.csv")));
+            bad_map.input.columns = vec![choice("Email", "email"), choice("Note", "none")];
+            bad_map.map_path = Some(root.join("a.map").display().to_string());
+            let err = pseudonymize_run_with(root, bad_map, &open).unwrap_err();
+            assert!(err.to_string().contains(".shk-map"), "{err}");
+            assert!(!root.join("a.csv").exists());
+
+            let mut all_none = run_options(file_options(&csv), Some(&root.join("b.csv")));
+            all_none.input.columns = vec![choice("Email", "none"), choice("Note", "none")];
+            let err = pseudonymize_run_with(root, all_none, &open).unwrap_err();
+            assert!(err.to_string().contains("no columns"), "{err}");
+
+            let mut bad_label = run_options(file_options(&csv), Some(&root.join("c.csv")));
+            bad_label.input.columns = vec![PseudonymizeColumnChoice {
+                index: None,
+                name: "Note".into(),
+                kind: "custom".into(),
+                custom_label: Some("Bad Label".into()),
+            }];
+            assert!(pseudonymize_run_with(root, bad_label, &open).is_err());
+            let mut empty_label = run_options(file_options(&csv), Some(&root.join("c.csv")));
+            empty_label.input.columns = vec![choice("Note", "custom")];
+            assert!(pseudonymize_run_with(root, empty_label, &open).is_err());
+            let mut bad_kind = run_options(file_options(&csv), Some(&root.join("c.csv")));
+            bad_kind.input.columns = vec![choice("Note", "bogus")];
+            assert!(pseudonymize_run_with(root, bad_kind, &open).is_err());
+            let mut blank_name = run_options(file_options(&csv), Some(&root.join("c.csv")));
+            blank_name.input.columns = vec![choice(" ", "email")];
+            assert!(pseudonymize_run_with(root, blank_name, &open).is_err());
+
+            let mut no_key = run_options(file_options(&csv), Some(&root.join("d.csv")));
+            no_key.input.columns = vec![choice("Email", "email"), choice("Note", "none")];
+            no_key.create_key = false;
+            let err = pseudonymize_run_with(root, no_key, &open).unwrap_err();
+            assert_eq!(err.to_string(), NO_KEY_MESSAGE);
+            assert!(store.entries.lock().unwrap().is_empty());
+            assert!(!root.join("d.csv").exists());
+        }
+
+        #[test]
+        fn preview_helpers_cover_edge_cases() {
+            assert_eq!(truncate_cell("abc"), "abc");
+            let exact = "y".repeat(PSEUDONYMIZE_PREVIEW_CELL_CHARS);
+            assert_eq!(truncate_cell(&exact), exact);
+            let sheets = vec!["A".to_string(), "2".to_string()];
+            assert_eq!(resolve_sheet_name(&sheets, None).as_deref(), Some("A"));
+            assert_eq!(resolve_sheet_name(&sheets, Some("2")).as_deref(), Some("2"));
+            assert_eq!(resolve_sheet_name(&sheets, Some("A")).as_deref(), Some("A"));
+            assert_eq!(resolve_sheet_name(&sheets, Some("9")), None);
+            assert_eq!(resolve_sheet_name(&sheets, Some("0")), None);
+            assert_eq!(resolve_sheet_name(&sheets, Some("Zed")), None);
+            assert_eq!(resolve_sheet_name(&[], None), None);
+            assert!(column_overrides(&[]).unwrap().is_none());
+            let overrides = column_overrides(&[choice("A", "phone"), choice("B", "none")])
+                .unwrap()
+                .unwrap();
+            assert_eq!(overrides.entries.len(), 1);
+            assert_eq!(overrides.skip, vec!["B".to_string()]);
+            assert_eq!(non_blank(Some("  ")), None);
+            assert_eq!(non_blank(Some(" x ")), Some("x"));
+            assert_eq!(source_label_for(Path::new("dir/file.csv")), "file.csv");
+        }
     }
 }

@@ -1,5 +1,5 @@
-import { open, save } from "@tauri-apps/plugin-dialog";
-import { useCallback, useMemo, useState } from "react";
+import { save } from "@tauri-apps/plugin-dialog";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { openAiTool, type PreferredAiTool } from "../aiTool";
 import { useI18n } from "../i18n";
 import { operationErrorMessage } from "../i18n/interpolate";
@@ -12,16 +12,18 @@ import {
   type MaskState,
 } from "../mask";
 import { actionableCount } from "../scan";
+import type { MaskInputApi } from "./useMaskInput";
 
-export type MaskInputMode = "text" | "file";
+export type { MaskInputMode } from "./useMaskInput";
 
-const MASK_FILE_EXTENSIONS = [
+export const MASK_FILE_EXTENSIONS = [
   "txt",
   "md",
   "json",
   "yaml",
   "yml",
   "csv",
+  "tsv",
   "log",
   "docx",
   "xlsx",
@@ -31,28 +33,34 @@ const MASK_FILE_EXTENSIONS = [
 
 type UseMaskWorkspaceOptions = {
   projectPath: string | null;
+  input: MaskInputApi;
   preferredAiTool: PreferredAiTool;
   onPreferredAiToolChange: (tool: PreferredAiTool) => void;
   onNotice?: (message: string) => void;
 };
 
+/** The redaction path: `[REDACTED]` replacement with findings to review. */
 export function useMaskWorkspace({
   projectPath,
+  input,
   preferredAiTool,
   onPreferredAiToolChange,
   onNotice,
 }: UseMaskWorkspaceOptions) {
   const { messages, t } = useI18n();
   const m = messages.mask;
+  const { inputMode, inputText, selectedFilePath, hasInput } = input;
 
-  const [inputMode, setInputMode] = useState<MaskInputMode>("text");
-  const [inputText, setInputText] = useState("");
-  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
+  // Invalidate work before accepting new input; backend operations cannot be
+  // cancelled, but their results must never replace a newer workspace.
+  const generation = useRef(0);
+  const copySequence = useRef(0);
+  const running = useRef(false);
+  const savingRef = useRef(false);
   const [maskState, setMaskState] = useState<MaskState>({ status: "idle" });
   const [copied, setCopied] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
-  const [dragActive, setDragActive] = useState(false);
 
   const maskedOutput = maskState.status === "done" ? maskState.result.masked_content : "";
   const findings = maskState.status === "done" ? maskState.result.findings : [];
@@ -61,61 +69,29 @@ export function useMaskWorkspace({
   const actionableFindings = actionableCount(severityCounts);
   const isLoading = maskState.status === "loading";
   const canCopy = maskedOutput.length > 0 && maskState.status === "done";
-  const hasInput = inputMode === "text" ? inputText.trim().length > 0 : Boolean(selectedFilePath);
   const currentStep: 1 | 2 | 3 = maskState.status === "done" ? 3 : hasInput ? 2 : 1;
 
   const resetResult = useCallback(() => {
+    generation.current += 1;
+    running.current = false;
+    savingRef.current = false;
+    setSaving(false);
     setMaskState({ status: "idle" });
     setCopied(false);
     setSaveMessage(null);
   }, []);
 
-  const clearInput = useCallback(() => {
-    setInputText("");
-    setSelectedFilePath(null);
+  useLayoutEffect(() => {
     resetResult();
-  }, [resetResult]);
-
-  const switchInputMode = useCallback(
-    (mode: MaskInputMode) => {
-      setInputMode(mode);
-      resetResult();
-      if (mode === "text") {
-        setSelectedFilePath(null);
-      } else {
-        setInputText("");
-      }
-    },
-    [resetResult],
-  );
-
-  const applySelectedFile = useCallback(
-    (path: string) => {
-      setSelectedFilePath(path);
-      setInputMode("file");
-      setInputText("");
-      resetResult();
-    },
-    [resetResult],
-  );
-
-  const chooseFile = useCallback(async () => {
-    try {
-      const path = await open({
-        directory: false,
-        multiple: false,
-        title: m.selectFile,
-        filters: [{ name: "Supported", extensions: [...MASK_FILE_EXTENSIONS] }],
-      });
-      if (typeof path === "string" && path) {
-        applySelectedFile(path);
-      }
-    } catch (error) {
-      onNotice?.(operationErrorMessage(messages.app.operationFailed, error));
-    }
-  }, [applySelectedFile, messages.app.operationFailed, m.selectFile, onNotice]);
+    return () => {
+      generation.current += 1;
+      running.current = false;
+      savingRef.current = false;
+    };
+  }, [projectPath, resetResult]);
 
   const runMask = useCallback(async () => {
+    if (running.current || savingRef.current) return;
     if (inputMode === "text" && !inputText.trim()) {
       setMaskState({ status: "error", message: m.emptyInput });
       return;
@@ -125,6 +101,9 @@ export function useMaskWorkspace({
       return;
     }
 
+    const requestId = ++generation.current;
+    const isCurrent = () => generation.current === requestId;
+    running.current = true;
     setMaskState({ status: "loading" });
     setCopied(false);
     setSaveMessage(null);
@@ -132,6 +111,7 @@ export function useMaskWorkspace({
     try {
       if (inputMode === "file" && selectedFilePath) {
         const result = await maskFile(projectPath, selectedFilePath);
+        if (!isCurrent()) return;
         const nextFileMeta: MaskFileMeta = {
           inputPath: selectedFilePath,
           fileKind: result.fileKind,
@@ -151,23 +131,35 @@ export function useMaskWorkspace({
       }
 
       const result = await maskContent(projectPath, inputText);
+      if (!isCurrent()) return;
       setMaskState({ status: "done", source: "text", result });
     } catch (error) {
+      if (!isCurrent()) return;
       setMaskState({
         status: "error",
         message: error instanceof Error ? error.message : String(error),
       });
+    } finally {
+      if (isCurrent()) running.current = false;
     }
   }, [inputMode, inputText, m.emptyInput, projectPath, selectedFilePath]);
 
   const copyMasked = useCallback(async () => {
     if (!maskedOutput) return false;
+    const requestId = generation.current;
+    const copyId = ++copySequence.current;
+    const isCurrent = () => generation.current === requestId && copySequence.current === copyId;
+    setCopied(false);
     try {
       await navigator.clipboard.writeText(maskedOutput);
+      if (!isCurrent()) return false;
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 1800);
+      window.setTimeout(() => {
+        if (isCurrent()) setCopied(false);
+      }, 1800);
       return true;
     } catch (error) {
+      if (!isCurrent()) return false;
       onNotice?.(operationErrorMessage(messages.app.clipboardFailed, error));
       return false;
     }
@@ -175,11 +167,13 @@ export function useMaskWorkspace({
 
   const copyAndOpenTool = useCallback(async () => {
     if (!maskedOutput) return;
-    if (!(await copyMasked())) return;
+    const requestId = generation.current;
+    if (!(await copyMasked()) || generation.current !== requestId) return;
     onPreferredAiToolChange(preferredAiTool);
     try {
       await openAiTool(preferredAiTool);
     } catch (error) {
+      if (generation.current !== requestId) return;
       onNotice?.(operationErrorMessage(messages.app.operationFailed, error));
     }
   }, [
@@ -192,7 +186,10 @@ export function useMaskWorkspace({
   ]);
 
   const saveMaskedFile = useCallback(async () => {
-    if (!fileMeta || fileMeta.fileKind !== "office") return;
+    if (!fileMeta || fileMeta.fileKind !== "office" || savingRef.current || running.current) return;
+    const requestId = generation.current;
+    const isCurrent = () => generation.current === requestId;
+    savingRef.current = true;
     setSaving(true);
     setSaveMessage(null);
     try {
@@ -201,9 +198,10 @@ export function useMaskWorkspace({
         defaultPath: maskOfficeSuggestedName(fileMeta.sourceLabel),
         filters: [{ name: "Office", extensions: ["docx", "xlsx", "pptx"] }],
       });
-      if (typeof outputPath !== "string" || !outputPath) return;
+      if (!isCurrent() || typeof outputPath !== "string" || !outputPath) return;
 
       const result = await maskFile(projectPath, fileMeta.inputPath, outputPath);
+      if (!isCurrent()) return;
       setMaskState((prev) =>
         prev.status === "done"
           ? {
@@ -223,33 +221,26 @@ export function useMaskWorkspace({
         setSaveMessage(t(m.savedTo, { path: result.outputPath }));
       }
     } catch (error) {
+      if (!isCurrent()) return;
       setMaskState({
         status: "error",
         message: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      setSaving(false);
+      if (isCurrent()) {
+        savingRef.current = false;
+        setSaving(false);
+      }
     }
   }, [fileMeta, m.saveMaskedFile, m.savedTo, projectPath, t]);
-
-  const removeSelectedFile = useCallback(() => {
-    setSelectedFilePath(null);
-    resetResult();
-  }, [resetResult]);
 
   return {
     messages: m,
     t,
-    inputMode,
-    inputText,
-    setInputText,
-    selectedFilePath,
     maskState,
     copied,
     saving,
     saveMessage,
-    dragActive,
-    setDragActive,
     maskedOutput,
     findings,
     severityCounts,
@@ -257,19 +248,13 @@ export function useMaskWorkspace({
     actionableFindings,
     isLoading,
     canCopy,
-    hasInput,
     currentStep,
     preferredAiTool,
     onPreferredAiToolChange,
     resetResult,
-    clearInput,
-    switchInputMode,
-    applySelectedFile,
-    chooseFile,
     runMask,
     copyMasked,
     copyAndOpenTool,
     saveMaskedFile,
-    removeSelectedFile,
   };
 }

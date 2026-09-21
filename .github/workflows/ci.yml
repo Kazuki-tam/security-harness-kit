@@ -82,6 +82,12 @@ jobs:
           # pubkey assertion only applies to real release workflows.
           SHK_ALLOW_MISSING_UPDATER_PUBKEY: "1"
 
+      - name: optimized GTK string iterator regression
+        if: runner.os == 'Linux'
+        run: cargo test -p shk-desktop --release --test glib_regression --locked
+        env:
+          SHK_ALLOW_MISSING_UPDATER_PUBKEY: "1"
+
       - name: version (Unix)
         if: runner.os != 'Windows'
         run: ./target/release/shk --version
@@ -168,8 +174,18 @@ jobs:
         with:
           tool: cargo-deny@0.19.7
 
+      - name: verify reviewed dependency backports
+        run: |
+          python3 .github/scripts/ci/test-verify-glib-patch.py
+          python3 .github/scripts/ci/verify-glib-patch.py
+
       - name: cargo audit
-        run: cargo audit
+        # cargo-audit 0.22.1 matches path dependencies by name/version. This
+        # exception is valid only after verifying the exact upstream backport.
+        # Keep that verification adjacent to the exception, not in global config.
+        run: |
+          python3 .github/scripts/ci/verify-glib-patch.py
+          cargo audit --deny unsound --ignore RUSTSEC-2024-0429
 
       - name: cargo deny
         run: cargo deny check

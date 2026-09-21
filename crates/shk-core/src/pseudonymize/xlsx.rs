@@ -34,23 +34,8 @@ pub fn run_xlsx(
     if !options.dry_run && material.is_none() {
         bail!("xlsx table mode requires key material unless --dry-run");
     }
-    let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
-    let mut archive = ZipArchive::new(file).context("read xlsx zip container")?;
-    crate::document_masker::ensure_archive_entry_limit(archive.len())?;
-    let mut expanded_bytes = 0u64;
-    for index in 0..archive.len() {
-        expanded_bytes = expanded_bytes
-            .checked_add(archive.by_index(index)?.size())
-            .context("xlsx expanded size overflow")?;
-        if expanded_bytes > MAX_ARCHIVE_EXPANDED_BYTES {
-            bail!("xlsx expanded size exceeds 256 MiB limit");
-        }
-    }
-    let workbook = read_zip_string(&mut archive, "xl/workbook.xml")?;
-    let sheets = parse_workbook_sheets(&workbook)?;
-    if sheets.is_empty() {
-        bail!("xlsx workbook has no sheets");
-    }
+    let mut archive = open_workbook_archive(input)?;
+    let sheets = read_workbook_sheets(&mut archive)?;
     let selected = select_sheet(&sheets, sheet)?;
     let rels = read_zip_string(&mut archive, "xl/_rels/workbook.xml.rels")?;
     let sheet_path = resolve_sheet_path(&rels, &selected.rel_id)
@@ -117,19 +102,25 @@ pub fn run_xlsx(
     .map_err(|err| anyhow::anyhow!(err))?;
     let data_offset = leading_blank + usize::from(has_header);
     let selected_columns: BTreeSet<usize> = columns.iter().map(|column| column.index).collect();
-    if let Some((row, col)) = parse_formula_cells(&sheet_xml)?
-        .into_iter()
-        .find(|(row, col)| {
-            *row >= data_offset
-                && *row < data_offset + data_rows.len()
-                && selected_columns.contains(col)
-        })
+    // The first formula cell per selected column, plus every column that has
+    // one. A dry run reports them so a planner can steer the user away; a
+    // real run refuses the first such cell in row order, as it always has.
+    let mut formula_cells: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
+    let mut formula_columns = BTreeSet::new();
+    for (row, col) in parse_formula_cells(&sheet_xml)? {
+        if row >= data_offset && row < data_offset + data_rows.len() {
+            formula_columns.insert(col);
+            if selected_columns.contains(&col) {
+                formula_cells.entry(col).or_insert((row, col));
+            }
+        }
+    }
+    let formula_cells: Vec<(usize, usize)> = formula_cells.into_values().collect();
+    let formula_columns: Vec<usize> = formula_columns.into_iter().collect();
+    if !options.dry_run
+        && let Some(&(row, col)) = formula_cells.iter().min()
     {
-        bail!(
-            "refusing to pseudonymize formula cell at row {}, column {}; select a value-only column",
-            row + 1,
-            col + 1
-        );
+        return Err(formula_cell_error(row, col));
     }
 
     if options.dry_run {
@@ -146,6 +137,10 @@ pub fn run_xlsx(
             ),
             columns,
             has_header,
+            headers,
+            sample_rows: data_rows[..sample_len].to_vec(),
+            formula_cells,
+            formula_columns,
         });
     }
     let material = material.expect("checked above");
@@ -205,7 +200,53 @@ pub fn run_xlsx(
         ),
         columns,
         has_header,
+        headers,
+        sample_rows: Vec::new(),
+        formula_cells: Vec::new(),
+        formula_columns: Vec::new(),
     })
+}
+
+/// The refusal a run raises for a formula cell (0-based row and column).
+pub fn formula_cell_error(row: usize, col: usize) -> anyhow::Error {
+    anyhow::anyhow!(
+        "refusing to pseudonymize formula cell at row {}, column {}; select a value-only column",
+        row + 1,
+        col + 1
+    )
+}
+
+/// Sheet names in workbook order. The position (1-based) is the number that
+/// `run_xlsx` accepts as a sheet selector.
+pub fn list_sheets(input: &Path) -> Result<Vec<String>> {
+    let mut archive = open_workbook_archive(input)?;
+    let sheets = read_workbook_sheets(&mut archive)?;
+    Ok(sheets.into_iter().map(|sheet| sheet.name).collect())
+}
+
+fn open_workbook_archive(input: &Path) -> Result<ZipArchive<File>> {
+    let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
+    let mut archive = ZipArchive::new(file).context("read xlsx zip container")?;
+    crate::document_masker::ensure_archive_entry_limit(archive.len())?;
+    let mut expanded_bytes = 0u64;
+    for index in 0..archive.len() {
+        expanded_bytes = expanded_bytes
+            .checked_add(archive.by_index(index)?.size())
+            .context("xlsx expanded size overflow")?;
+        if expanded_bytes > MAX_ARCHIVE_EXPANDED_BYTES {
+            bail!("xlsx expanded size exceeds 256 MiB limit");
+        }
+    }
+    Ok(archive)
+}
+
+fn read_workbook_sheets(archive: &mut ZipArchive<File>) -> Result<Vec<SheetInfo>> {
+    let workbook = read_zip_string(archive, "xl/workbook.xml")?;
+    let sheets = parse_workbook_sheets(&workbook)?;
+    if sheets.is_empty() {
+        bail!("xlsx workbook has no sheets");
+    }
+    Ok(sheets)
 }
 
 struct SheetInfo {
@@ -796,6 +837,10 @@ fn empty_xlsx_result(options: &TableOptions, material: Option<&KeyMaterial>) -> 
         ),
         columns: Vec::new(),
         has_header: !options.no_header,
+        headers: Vec::new(),
+        sample_rows: Vec::new(),
+        formula_cells: Vec::new(),
+        formula_columns: Vec::new(),
     }
 }
 
@@ -961,6 +1006,10 @@ mod tests {
             &[],
         );
         assert!(run_xlsx(&no_sheets, None, None, &options(), None, None).is_err());
+        assert!(list_sheets(&no_sheets).is_err());
+        let not_zip = dir.path().join("plain.xlsx");
+        std::fs::write(&not_zip, b"not a workbook").unwrap();
+        assert!(list_sheets(&not_zip).is_err());
 
         let bad_rel = dir.path().join("rel.xlsx");
         build_xlsx(
@@ -975,6 +1024,14 @@ mod tests {
 
         let ok = dir.path().join("ok.xlsx");
         create_xlsx(&ok, "Email", "x");
+        assert_eq!(list_sheets(&ok).unwrap(), vec!["Customers".to_string()]);
+        let dry = TableOptions {
+            dry_run: true,
+            ..options()
+        };
+        let preview = run_xlsx(&ok, None, None, &dry, None, None).unwrap();
+        assert_eq!(preview.headers, vec!["Email".to_string()]);
+        assert_eq!(preview.sample_rows, vec![vec!["x".to_string()]]);
         for sheet in ["0", "2", "Missing"] {
             assert!(
                 run_xlsx(&ok, None, Some(sheet), &options(), None, None).is_err(),
@@ -1035,8 +1092,25 @@ mod tests {
         );
         let mut dry = options();
         dry.dry_run = true;
-        let err = run_xlsx(&input, None, None, &dry, None, None).unwrap_err();
+        // A dry run reports the cell so a planner can show it; a run refuses.
+        let preview = run_xlsx(&input, None, None, &dry, None, None).unwrap();
+        assert_eq!(preview.formula_cells, vec![(1, 0)]);
+        assert_eq!(preview.formula_columns, vec![0]);
+        let err = run_xlsx(
+            &input,
+            Some(&dir.path().join("out.xlsx")),
+            None,
+            &options(),
+            Some(&material()),
+            None,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("formula cell"), "{err}");
+        assert_eq!(
+            formula_cell_error(1, 0).to_string(),
+            "refusing to pseudonymize formula cell at row 2, column 1; select a value-only column"
+        );
+        assert!(!dir.path().join("out.xlsx").exists());
     }
 
     #[test]

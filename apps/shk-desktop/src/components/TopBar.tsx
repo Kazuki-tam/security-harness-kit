@@ -1,4 +1,4 @@
-import { CircleHelp } from "lucide-react";
+import { ArrowLeft, CircleHelp } from "lucide-react";
 import { useI18n } from "../i18n";
 import type { NotificationControls } from "../notifications";
 import type { ProjectApp } from "../projectApp";
@@ -16,6 +16,7 @@ type Props = {
   notifications: NotificationControls;
   onOpenInApp: (app: ProjectApp) => void;
   onShowHelp: () => void;
+  onShowWelcome?: () => void;
 };
 
 export function TopBar({
@@ -26,6 +27,7 @@ export function TopBar({
   notifications,
   onOpenInApp,
   onShowHelp,
+  onShowWelcome,
 }: Props) {
   const { messages } = useI18n();
   const m = messages.topBar;
@@ -40,6 +42,17 @@ export function TopBar({
           reserveWindowControls ? "pl-16" : ""
         }`}
       >
+        {view === "mask" && onShowWelcome && (
+          <button
+            type="button"
+            onClick={onShowWelcome}
+            aria-label={m.backToWelcome}
+            title={m.backToWelcome}
+            className="shk-no-drag pointer-events-auto grid h-7 w-7 place-items-center rounded-md text-muted transition hover:bg-surface-2 hover:text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70"
+          >
+            <ArrowLeft size={15} aria-hidden="true" />
+          </button>
+        )}
         {view === "mask" ? (
           <span className="font-medium text-text">{m.maskWorkspace}</span>
         ) : project ? (

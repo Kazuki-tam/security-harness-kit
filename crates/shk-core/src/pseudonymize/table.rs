@@ -57,6 +57,19 @@ pub struct TableResult {
     pub meta: PseudonymizeMeta,
     pub columns: Vec<ResolvedColumn>,
     pub has_header: bool,
+    /// Header names, or the synthetic `0`, `1`, … names when `has_header` is false.
+    pub headers: Vec<String>,
+    /// The rows buffered for column inference (at most `INFER_SAMPLE_ROWS`).
+    /// Populated on dry-run planning passes only; a real run leaves it empty
+    /// so raw values are never carried past the write.
+    pub sample_rows: Vec<Vec<String>>,
+    /// xlsx dry runs only: the first formula cell (0-based row, column) found
+    /// in each selected column. A real run refuses such columns; a planner
+    /// can show them instead so the user deselects them.
+    pub formula_cells: Vec<(usize, usize)>,
+    /// xlsx dry runs only: every column with a formula in the data rows,
+    /// selected or not, so a planner can warn before a column is picked.
+    pub formula_columns: Vec<usize>,
 }
 
 pub fn delimiter_for_path(path: Option<&std::path::Path>) -> u8 {
@@ -144,6 +157,10 @@ pub fn run_table<R: Read, W: Write>(
             ),
             columns,
             has_header,
+            headers,
+            sample_rows: pending_rows,
+            formula_cells: Vec::new(),
+            formula_columns: Vec::new(),
         });
     }
 
@@ -204,6 +221,10 @@ pub fn run_table<R: Read, W: Write>(
         ),
         columns,
         has_header,
+        headers,
+        sample_rows: Vec::new(),
+        formula_cells: Vec::new(),
+        formula_columns: Vec::new(),
     })
 }
 
@@ -303,6 +324,10 @@ fn empty_result(
         ),
         columns,
         has_header,
+        headers: Vec::new(),
+        sample_rows: Vec::new(),
+        formula_cells: Vec::new(),
+        formula_columns: Vec::new(),
     }
 }
 
@@ -387,6 +412,27 @@ mod tests {
         assert_eq!(result.columns[0].kind, Kind::Email);
         assert_eq!(result.columns[0].name, "Email");
         assert_eq!(result.meta.rows_processed, (INFER_SAMPLE_ROWS + 5) as u64);
+        assert_eq!(result.headers, vec!["Email".to_string()]);
+        assert_eq!(result.sample_rows.len(), INFER_SAMPLE_ROWS);
+        assert_eq!(result.sample_rows[0], vec![email.clone()]);
+
+        let mut out = Vec::new();
+        let written = run_table(
+            body.as_bytes(),
+            Some(&mut out),
+            &options("Email:email", false),
+            Some(&material()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(written.headers, vec!["Email".to_string()]);
+        assert!(written.sample_rows.is_empty());
+        assert!(
+            run_table(b"".as_slice(), None::<&mut Vec<u8>>, &opts, None, None)
+                .unwrap()
+                .headers
+                .is_empty()
+        );
     }
 
     #[test]

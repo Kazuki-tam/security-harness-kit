@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor/glib"]
 members = [
     "apps/shk-desktop/src-tauri",
     "crates/shk-core",
@@ -76,3 +77,7 @@ opt-level = 2
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# GTK3 needs glib 0.18; backport the upstream VariantStrIter safety fix.
+[patch.crates-io]
+glib = { path = "vendor/glib" }
