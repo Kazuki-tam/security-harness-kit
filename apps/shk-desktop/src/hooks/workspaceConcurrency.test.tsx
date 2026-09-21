@@ -2,6 +2,7 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { save } from "@tauri-apps/plugin-dialog";
+import { openAiTool } from "../aiTool";
 import { I18nProvider } from "../i18n";
 import { maskContent, maskFile } from "../mask";
 import { pseudonymizeKeyStatus, pseudonymizeRun } from "../pseudonymize";
@@ -10,6 +11,9 @@ import { useMaskWorkspace } from "./useMaskWorkspace";
 import { usePseudonymizeWorkspace } from "./usePseudonymizeWorkspace";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn(), open: vi.fn() }));
+vi.mock("../aiTool", () => ({ openAiTool: vi.fn() }));
+const noticeMock = vi.fn();
+const clipboardMock = vi.fn();
 vi.mock("../mask", async (original) => ({
   ...(await original<typeof import("../mask")>()),
   maskContent: vi.fn(),
@@ -40,14 +44,78 @@ function useRedact(projectPath: string | null = null) {
       input,
       preferredAiTool: "cursor",
       onPreferredAiToolChange: vi.fn(),
+      onNotice: noticeMock,
     }),
   };
 }
 
-beforeEach(() => vi.resetAllMocks());
-afterEach(cleanup);
+beforeEach(() => {
+  vi.resetAllMocks();
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: clipboardMock },
+  });
+});
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 describe("redaction request lifecycle", () => {
+  it.each(["resolve", "reject"] as const)("handles a current clipboard %s", async (outcome) => {
+    vi.mocked(maskContent).mockResolvedValue({ masked_content: "masked", findings: [] });
+    if (outcome === "resolve") clipboardMock.mockResolvedValue(undefined);
+    else clipboardMock.mockRejectedValue(new Error("clipboard unavailable"));
+    const { result } = renderHook(() => useRedact(), { wrapper: I18nProvider });
+    act(() => result.current.input.setInputText("text"));
+    await act(() => result.current.workspace.runMask());
+    await act(() => result.current.workspace.copyAndOpenTool());
+    expect(clipboardMock).toHaveBeenCalledWith("masked");
+    expect(openAiTool).toHaveBeenCalledTimes(outcome === "resolve" ? 1 : 0);
+    expect(noticeMock).toHaveBeenCalledTimes(outcome === "reject" ? 1 : 0);
+    expect(result.current.workspace.copied).toBe(outcome === "resolve");
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "does not reopen an app or restore feedback after a stale clipboard %s",
+    async (outcome) => {
+      vi.mocked(maskContent).mockResolvedValue({ masked_content: "masked", findings: [] });
+      const pending = deferred<void>();
+      clipboardMock.mockReturnValue(pending.promise);
+      const { result } = renderHook(() => useRedact(), { wrapper: I18nProvider });
+      act(() => result.current.input.setInputText("text"));
+      await act(() => result.current.workspace.runMask());
+      let copying!: Promise<void>;
+      act(() => {
+        copying = result.current.workspace.copyAndOpenTool();
+      });
+      act(() => result.current.workspace.resetResult());
+      await act(async () => {
+        if (outcome === "resolve") pending.resolve();
+        else pending.reject(new Error("old clipboard failure"));
+        await copying;
+      });
+      expect(result.current.workspace.copied).toBe(false);
+      expect(openAiTool).not.toHaveBeenCalled();
+      expect(noticeMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps the latest copy feedback for its full duration", async () => {
+    vi.useFakeTimers();
+    vi.mocked(maskContent).mockResolvedValue({ masked_content: "masked", findings: [] });
+    clipboardMock.mockResolvedValue(undefined);
+    const { result } = renderHook(() => useRedact(), { wrapper: I18nProvider });
+    act(() => result.current.input.setInputText("text"));
+    await act(() => result.current.workspace.runMask());
+    await act(() => result.current.workspace.copyMasked());
+    act(() => vi.advanceTimersByTime(1000));
+    await act(() => result.current.workspace.copyMasked());
+    act(() => vi.advanceTimersByTime(800));
+    expect(result.current.workspace.copied).toBe(true);
+    act(() => vi.advanceTimersByTime(1000));
+    expect(result.current.workspace.copied).toBe(false);
+  });
   it.each(["resolve", "reject"] as const)(
     "ignores a late %s after clearing input",
     async (outcome) => {
@@ -157,11 +225,36 @@ function usePseudo() {
   const input = useMaskInput({ extensions: ["txt"] });
   return {
     input,
-    workspace: usePseudonymizeWorkspace({ projectPath: "/project", active: true, input }),
+    workspace: usePseudonymizeWorkspace({
+      projectPath: "/project",
+      active: true,
+      input,
+      onNotice: noticeMock,
+    }),
   };
 }
 
 describe("pseudonymization confirmation lifecycle", () => {
+  it.each(["resolve", "reject"] as const)(
+    "ignores stale path-copy %s after resetting the workspace",
+    async (outcome) => {
+      const pending = deferred<void>();
+      clipboardMock.mockReturnValue(pending.promise);
+      const { result } = renderHook(usePseudo, { wrapper: I18nProvider });
+      let copying!: Promise<void>;
+      act(() => {
+        copying = result.current.workspace.copyPath("/old/output.csv");
+      });
+      act(() => result.current.workspace.reset());
+      await act(async () => {
+        if (outcome === "resolve") pending.resolve();
+        else pending.reject(new Error("old clipboard failure"));
+        await copying;
+      });
+      expect(result.current.workspace.copiedPath).toBeNull();
+      expect(noticeMock).not.toHaveBeenCalled();
+    },
+  );
   it("discards a key status response after reset without opening a stale confirmation", async () => {
     const key = deferred<Awaited<ReturnType<typeof pseudonymizeKeyStatus>>>();
     vi.mocked(pseudonymizeKeyStatus).mockReturnValue(key.promise);

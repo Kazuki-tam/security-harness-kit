@@ -54,6 +54,7 @@ export function useMaskWorkspace({
   // Invalidate work before accepting new input; backend operations cannot be
   // cancelled, but their results must never replace a newer workspace.
   const generation = useRef(0);
+  const copySequence = useRef(0);
   const running = useRef(false);
   const savingRef = useRef(false);
   const [maskState, setMaskState] = useState<MaskState>({ status: "idle" });
@@ -145,12 +146,20 @@ export function useMaskWorkspace({
 
   const copyMasked = useCallback(async () => {
     if (!maskedOutput) return false;
+    const requestId = generation.current;
+    const copyId = ++copySequence.current;
+    const isCurrent = () => generation.current === requestId && copySequence.current === copyId;
+    setCopied(false);
     try {
       await navigator.clipboard.writeText(maskedOutput);
+      if (!isCurrent()) return false;
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 1800);
+      window.setTimeout(() => {
+        if (isCurrent()) setCopied(false);
+      }, 1800);
       return true;
     } catch (error) {
+      if (!isCurrent()) return false;
       onNotice?.(operationErrorMessage(messages.app.clipboardFailed, error));
       return false;
     }
@@ -158,11 +167,13 @@ export function useMaskWorkspace({
 
   const copyAndOpenTool = useCallback(async () => {
     if (!maskedOutput) return;
-    if (!(await copyMasked())) return;
+    const requestId = generation.current;
+    if (!(await copyMasked()) || generation.current !== requestId) return;
     onPreferredAiToolChange(preferredAiTool);
     try {
       await openAiTool(preferredAiTool);
     } catch (error) {
+      if (generation.current !== requestId) return;
       onNotice?.(operationErrorMessage(messages.app.operationFailed, error));
     }
   }, [

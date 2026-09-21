@@ -56,6 +56,7 @@ type UsePseudonymizeWorkspaceOptions = {
 
 const INSPECT_KEY = "inspect";
 const RUN_KEY = "run";
+const COPY_KEY = "copy";
 const PASTED_INSPECT_DELAY_MS = 400;
 
 const EMPTY_TABLE: PseudonymizeTablePreview = {
@@ -134,6 +135,7 @@ export function usePseudonymizeWorkspace({
   /** Drop results only; the plan, column choices, and options survive edits. */
   const resetResult = useCallback(() => {
     tracker.begin(RUN_KEY);
+    tracker.begin(COPY_KEY);
     runPending.current = false;
     setPreparing(false);
     keyResolver.current?.(false);
@@ -155,6 +157,7 @@ export function usePseudonymizeWorkspace({
   const reset = useCallback(() => {
     tracker.begin(INSPECT_KEY);
     tracker.begin(RUN_KEY);
+    tracker.begin(COPY_KEY);
     runPending.current = false;
     setPreparing(false);
     keyResolver.current?.(false);
@@ -173,6 +176,7 @@ export function usePseudonymizeWorkspace({
     return () => {
       tracker.begin(INSPECT_KEY);
       tracker.begin(RUN_KEY);
+      tracker.begin(COPY_KEY);
       runPending.current = false;
       keyResolver.current?.(false);
       keyResolver.current = null;
@@ -327,6 +331,7 @@ export function usePseudonymizeWorkspace({
     // An input change during the run invalidates this generation, so a late
     // result never overwrites what the user now sees.
     const runId = tracker.begin(RUN_KEY);
+    tracker.begin(COPY_KEY);
     const stillCurrent = () => tracker.isLatest(RUN_KEY, runId);
 
     runPending.current = true;
@@ -402,35 +407,42 @@ export function usePseudonymizeWorkspace({
 
   const copyText = useCallback(
     async (text: string) => {
+      const copyId = tracker.begin(COPY_KEY);
+      setCopied(false);
+      setCopiedPath(null);
       try {
         await navigator.clipboard.writeText(text);
-        return true;
+        return tracker.isLatest(COPY_KEY, copyId) ? copyId : null;
       } catch (error) {
+        if (!tracker.isLatest(COPY_KEY, copyId)) return null;
         onNotice?.(operationErrorMessage(messages.app.clipboardFailed, error));
-        return false;
+        return null;
       }
     },
-    [messages.app.clipboardFailed, onNotice],
+    [messages.app.clipboardFailed, onNotice, tracker],
   );
 
   const copyInlineOutput = useCallback(async () => {
     if (!inlineOutput) return false;
-    const ok = await copyText(inlineOutput);
-    if (ok) {
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1800);
-    }
-    return ok;
-  }, [copyText, inlineOutput]);
+    const copyId = await copyText(inlineOutput);
+    if (copyId === null || !tracker.isLatest(COPY_KEY, copyId)) return false;
+    setCopied(true);
+    window.setTimeout(() => {
+      if (tracker.isLatest(COPY_KEY, copyId)) setCopied(false);
+    }, 1800);
+    return true;
+  }, [copyText, inlineOutput, tracker]);
 
   const copyPath = useCallback(
     async (path: string) => {
-      if (await copyText(path)) {
-        setCopiedPath(path);
-        window.setTimeout(() => setCopiedPath(null), 1800);
-      }
+      const copyId = await copyText(path);
+      if (copyId === null || !tracker.isLatest(COPY_KEY, copyId)) return;
+      setCopiedPath(path);
+      window.setTimeout(() => {
+        if (tracker.isLatest(COPY_KEY, copyId)) setCopiedPath(null);
+      }, 1800);
     },
-    [copyText],
+    [copyText, tracker],
   );
 
   return {
