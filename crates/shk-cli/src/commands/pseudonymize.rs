@@ -15,6 +15,7 @@ use shk_core::pseudonymize::{
     restore_table, run_office_text, run_table, run_text, run_xlsx,
 };
 use shk_core::scanner::{ScanOptions, scan_path};
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::{self, BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -43,11 +44,133 @@ pub struct MaskPseudonymizeArgs {
     pub check_remaining: bool,
 }
 
-enum InputKind {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InputKind {
     TableCsv,
     TableXlsx,
     TextPlain,
     TextOffice,
+}
+
+/// Where the input bytes come from. `Stdin` is CLI-only; `Buffer` holds
+/// content a GUI caller pasted and never touches disk.
+pub(crate) enum PseudonymizeSource {
+    File(PathBuf),
+    Stdin,
+    Buffer(Zeroizing<Vec<u8>>),
+}
+
+impl PseudonymizeSource {
+    fn path(&self) -> Option<&Path> {
+        match self {
+            Self::File(path) => Some(path),
+            Self::Stdin | Self::Buffer(_) => None,
+        }
+    }
+}
+
+/// Column choices. The CLI keeps its `Name:kind` spec so parse errors surface
+/// at the same point as before; a GUI caller passes an already resolved list,
+/// which may also `skip` columns the plan would otherwise select.
+pub(crate) enum ColumnSelection {
+    Spec(String),
+    Resolved(ColumnOverrides),
+}
+
+/// One pseudonymize run, independent of how the caller talks to the user.
+pub(crate) struct PseudonymizeRequest {
+    pub project_root: PathBuf,
+    pub source: PseudonymizeSource,
+    pub output: Option<PathBuf>,
+    pub dry_run: bool,
+    pub columns: Option<ColumnSelection>,
+    pub no_header: bool,
+    pub mode: Option<PseudonymizeModeArg>,
+    pub format: Option<PseudonymizeFormatArg>,
+    pub sheet: Option<String>,
+    pub map: Option<PathBuf>,
+    pub check_remaining: bool,
+}
+
+/// The two points where the engine needs a human decision. The CLI prompts;
+/// a GUI collects the answers up front so the engine never blocks.
+pub(crate) trait Interaction {
+    /// Called only when at least one column was inferred rather than named.
+    fn confirm_inferred_columns(&self, columns: &[ResolvedColumn]) -> Result<()>;
+    /// Called only when the project has no pseudonymize key yet.
+    fn confirm_create_key(&self) -> Result<()>;
+}
+
+struct CliInteraction {
+    yes: bool,
+    no_create_key: bool,
+}
+
+impl Interaction for CliInteraction {
+    fn confirm_inferred_columns(&self, columns: &[ResolvedColumn]) -> Result<()> {
+        print_column_plan(columns);
+        confirm(self.yes, "Pseudonymize the inferred columns listed above?")
+    }
+
+    fn confirm_create_key(&self) -> Result<()> {
+        if self.no_create_key {
+            return Err(fail(
+                "no pseudonymize key for this project; omit --no-create-key to create one",
+            ));
+        }
+        confirm(
+            self.yes,
+            "No pseudonymize key found. Create a new project key in the configured secret store?",
+        )
+    }
+}
+
+pub(crate) const NO_KEY_MESSAGE: &str =
+    "no pseudonymize key for this project; confirm key creation to continue";
+
+/// Decisions a GUI caller already collected from the user.
+#[derive(Debug)]
+pub(crate) struct Decisions {
+    pub accept_inferred: bool,
+    pub create_key: bool,
+}
+
+impl Interaction for Decisions {
+    fn confirm_inferred_columns(&self, _columns: &[ResolvedColumn]) -> Result<()> {
+        if self.accept_inferred {
+            Ok(())
+        } else {
+            Err(fail("inferred columns require confirmation"))
+        }
+    }
+
+    fn confirm_create_key(&self) -> Result<()> {
+        if self.create_key {
+            Ok(())
+        } else {
+            Err(fail(NO_KEY_MESSAGE))
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct WrittenPaths {
+    pub output: PathBuf,
+    pub meta: PathBuf,
+    pub map: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PseudonymizeOutcome {
+    pub meta: PseudonymizeMeta,
+    /// Resolved columns for table modes; `None` in text modes.
+    pub columns: Option<Vec<ResolvedColumn>>,
+    /// `None` on a dry run.
+    pub written: Option<WrittenPaths>,
+    /// `--check-remaining` result: leftover rule ids, or the reason the output
+    /// could not be verified. Carried instead of raised so the CLI can print
+    /// its summary first, exactly as it always has.
+    pub remaining: Option<Result<Vec<String>>>,
 }
 
 /// Opens the project's pseudonymize key store. Injected so the complete
@@ -62,76 +185,273 @@ pub fn mask(args: MaskPseudonymizeArgs) -> Result<()> {
 }
 
 fn mask_with(args: MaskPseudonymizeArgs, open_store: StoreOpener<'_>) -> Result<()> {
-    mask_inner(args, open_store).map_err(fail_run)
+    let json = args.json;
+    let interaction = CliInteraction {
+        yes: args.yes,
+        no_create_key: args.no_create_key,
+    };
+    let outcome = mask_core(request_from_cli(args), open_store, &interaction).map_err(fail_run)?;
+    print_outcome(json, &outcome)?;
+    match outcome.remaining {
+        Some(Err(err)) => Err(fail_run(err)),
+        Some(Ok(leftover)) if !leftover.is_empty() => Err(leftover_error(&leftover)),
+        _ => Ok(()),
+    }
 }
 
-fn mask_inner(args: MaskPseudonymizeArgs, open_store: StoreOpener<'_>) -> Result<()> {
-    if !args.dry_run && args.output.is_none() {
-        return Err(fail(
-            "`mask --pseudonymize` requires --output so tokens are not written to stdout",
-        ));
+fn request_from_cli(args: MaskPseudonymizeArgs) -> PseudonymizeRequest {
+    PseudonymizeRequest {
+        project_root: args.project_root,
+        source: args
+            .file
+            .map_or(PseudonymizeSource::Stdin, PseudonymizeSource::File),
+        output: args.output,
+        dry_run: args.dry_run,
+        columns: args.columns.map(ColumnSelection::Spec),
+        no_header: args.no_header,
+        mode: args.mode,
+        format: args.format,
+        sheet: args.sheet,
+        map: args.map,
+        check_remaining: args.check_remaining,
     }
-    if args.check_remaining && args.dry_run {
-        return Err(fail(
-            "`--check-remaining` cannot be combined with `--dry-run`",
-        ));
-    }
-    validate_output_paths(&args)?;
-    if let Some(output) = args.output.as_ref() {
-        safety::require_project_policy(&args.project_root, "mask --output")?;
-        safety::ensure_writable_path_allowed(output)?;
-    }
-    if let Some(map) = args.map.as_ref() {
-        require_map_path(map)?;
-        safety::require_project_policy(&args.project_root, "mask --map")?;
-        safety::ensure_writable_path_allowed(map)?;
-    }
+}
 
-    let kind = classify_input(args.file.as_deref(), args.mode, args.format)?;
-    validate_mode_flags(&args, &kind)?;
-    validate_restore_compatible_output(&args, &kind)?;
-
-    if args.file.is_none() {
-        if io::stdin().is_terminal() {
-            return Err(fail(
-                "pass a file or redirect stdin; `mask --pseudonymize` does not prompt for input",
-            ));
-        }
-    } else {
-        let input = args.file.as_ref().expect("file present");
-        // The input is opened several times (UTF-8 check, digest, plan, run),
-        // so streams cannot be consumed correctly; ask for stdin instead.
-        if !input.is_file() {
-            return Err(fail(format!(
-                "{} is not a regular file; pipe streams on stdin instead",
-                input.display()
-            )));
-        }
-        if !matches!(kind, InputKind::TableXlsx | InputKind::TextOffice) {
-            ensure_utf8_file(input)?;
-        }
-    }
-
-    let (policy, _) = Policy::load_from_dir(&args.project_root)?;
-    validate_policy_section(&policy)?;
-
+/// The engine behind `shk mask --pseudonymize`: no printing, no prompting.
+/// Errors are plain runtime errors; callers map them to exit codes.
+pub(crate) fn mask_core(
+    req: PseudonymizeRequest,
+    open_store: StoreOpener<'_>,
+    interaction: &dyn Interaction,
+) -> Result<PseudonymizeOutcome> {
+    let (kind, policy) = preflight(&req)?;
     let run = || match kind {
-        InputKind::TableCsv => run_table_csv(&args, &policy, open_store),
-        InputKind::TableXlsx => run_table_xlsx(&args, &policy, open_store),
-        InputKind::TextPlain => run_text_plain(&args, &policy, open_store),
-        InputKind::TextOffice => run_text_office(&args, &policy, open_store),
+        InputKind::TableCsv => run_table_csv(&req, &policy, open_store, interaction),
+        InputKind::TableXlsx => run_table_xlsx(&req, &policy, open_store, interaction),
+        InputKind::TextPlain => run_text_plain(&req, &policy, open_store, interaction),
+        InputKind::TextOffice => run_text_office(&req, &policy, open_store, interaction),
     };
-    if args.dry_run {
+    if req.dry_run {
         run()
     } else {
-        let project = ProjectIdentity::from_root_and_policy(args.project_root.clone(), &policy);
+        let project = ProjectIdentity::from_root_and_policy(req.project_root.clone(), &policy);
         with_secret_store_lock(&project, OPERATION_LOCK, run)
     }
 }
 
+/// Everything that must hold before any input is read or any key is touched.
+pub(crate) fn preflight(req: &PseudonymizeRequest) -> Result<(InputKind, Policy)> {
+    if !req.dry_run && req.output.is_none() {
+        return Err(fail(
+            "`mask --pseudonymize` requires --output so tokens are not written to stdout",
+        ));
+    }
+    if req.check_remaining && req.dry_run {
+        return Err(fail(
+            "`--check-remaining` cannot be combined with `--dry-run`",
+        ));
+    }
+    validate_output_paths(req)?;
+    if let Some(output) = req.output.as_ref() {
+        safety::require_project_policy(&req.project_root, "mask --output")?;
+        safety::ensure_writable_path_allowed(output)?;
+    }
+    if let Some(map) = req.map.as_ref() {
+        require_map_path(map)?;
+        safety::require_project_policy(&req.project_root, "mask --map")?;
+        safety::ensure_writable_path_allowed(map)?;
+    }
+
+    let kind = classify_input(req.source.path(), req.mode, req.format)?;
+    validate_mode_flags(req, &kind)?;
+    validate_restore_compatible_output(req, &kind)?;
+
+    match &req.source {
+        PseudonymizeSource::Stdin => {
+            if io::stdin().is_terminal() {
+                return Err(fail(
+                    "pass a file or redirect stdin; `mask --pseudonymize` does not prompt for input",
+                ));
+            }
+        }
+        PseudonymizeSource::File(input) => {
+            // The input is opened several times (UTF-8 check, digest, plan, run),
+            // so streams cannot be consumed correctly; ask for stdin instead.
+            if !input.is_file() {
+                return Err(fail(format!(
+                    "{} is not a regular file; pipe streams on stdin instead",
+                    input.display()
+                )));
+            }
+            if !matches!(kind, InputKind::TableXlsx | InputKind::TextOffice) {
+                ensure_utf8_file(input)?;
+            }
+        }
+        // Buffers are UTF-8 checked when they are read, like stdin.
+        PseudonymizeSource::Buffer(_) => {}
+    }
+
+    let (policy, _) = Policy::load_from_dir(&req.project_root)?;
+    validate_policy_section(&policy)?;
+    Ok((kind, policy))
+}
+
+#[derive(Debug)]
+pub(crate) enum Preview {
+    Table(TableResult),
+    Text { office: bool },
+}
+
+/// The dry-run planning pass on its own: never prompts, never opens the key
+/// store, never takes the operation lock. A table preview may resolve zero
+/// columns; that is for the caller to decide about.
+pub(crate) fn preview(req: &PseudonymizeRequest) -> Result<Preview> {
+    if !req.dry_run {
+        return Err(fail("preview requires a dry-run request"));
+    }
+    let (kind, policy) = preflight(req)?;
+    Ok(match kind {
+        InputKind::TableCsv => Preview::Table(plan_table_csv(req, &policy)?.preview),
+        InputKind::TableXlsx => Preview::Table(plan_table_xlsx(req, &policy)?.preview),
+        InputKind::TextPlain => {
+            let input = read_text_source(req)?;
+            run_text(&input, None, &text_options(req, &policy, true), None)?;
+            Preview::Text { office: false }
+        }
+        InputKind::TextOffice => {
+            let input = office_input(req)?;
+            run_office_text(
+                input,
+                None,
+                None,
+                &text_options(req, &policy, true),
+                None,
+                policy.scan.max_file_size_bytes,
+            )?;
+            Preview::Text { office: true }
+        }
+    })
+}
+
+/// Pasted content for a GUI caller: the result stays in memory and no
+/// output, metadata sidecar, or restore map is written.
+pub(crate) struct InlineRequest {
+    pub project_root: PathBuf,
+    pub bytes: Zeroizing<Vec<u8>>,
+    pub mode: PseudonymizeModeArg,
+    pub format: Option<PseudonymizeFormatArg>,
+    pub columns: Option<ColumnOverrides>,
+    pub no_header: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct InlineOutcome {
+    pub output: Zeroizing<String>,
+    pub meta: PseudonymizeMeta,
+    pub columns: Option<Vec<ResolvedColumn>>,
+}
+
+pub(crate) fn pseudonymize_inline(
+    inline: InlineRequest,
+    open_store: StoreOpener<'_>,
+    interaction: &dyn Interaction,
+) -> Result<InlineOutcome> {
+    let req = PseudonymizeRequest {
+        project_root: inline.project_root,
+        source: PseudonymizeSource::Buffer(inline.bytes),
+        output: None,
+        dry_run: true,
+        columns: inline.columns.map(ColumnSelection::Resolved),
+        no_header: inline.no_header,
+        mode: Some(inline.mode),
+        format: inline.format,
+        sheet: None,
+        map: None,
+        check_remaining: false,
+    };
+    let (kind, policy) = preflight(&req)?;
+    let project = ProjectIdentity::from_root_and_policy(req.project_root.clone(), &policy);
+    let outcome = with_secret_store_lock(&project, OPERATION_LOCK, || match kind {
+        InputKind::TableCsv => inline_table(&req, &policy, &project, open_store, interaction),
+        InputKind::TextPlain => inline_text(&req, &policy, &project, open_store, interaction),
+        InputKind::TableXlsx | InputKind::TextOffice => {
+            Err(fail("inline input must be CSV/TSV or plain text"))
+        }
+    })?;
+    let _ = crate::audit_log::append_line(
+        &req.project_root,
+        serde_json::json!({
+            "event": "pseudonymize",
+            "mode": outcome.meta.mode,
+            "inline": true,
+            "rows": outcome.meta.rows_processed,
+            "columns": outcome.columns.as_ref().map(Vec::len).unwrap_or(0),
+            "kinds": outcome
+                .meta
+                .columns
+                .iter()
+                .map(|column| column.kind.as_str())
+                .collect::<Vec<_>>(),
+            "map": false,
+        }),
+    );
+    Ok(outcome)
+}
+
+fn inline_table(
+    req: &PseudonymizeRequest,
+    policy: &Policy,
+    project: &ProjectIdentity,
+    open_store: StoreOpener<'_>,
+    interaction: &dyn Interaction,
+) -> Result<InlineOutcome> {
+    let plan = plan_table_csv(req, policy)?;
+    confirm_table_plan(interaction, &plan.preview)?;
+    let material = load_or_create_material(project, policy, open_store, interaction)?;
+    let mut run_options = plan.options;
+    run_options.dry_run = false;
+    let mut out = Zeroizing::new(Vec::new());
+    let result = run_table(
+        plan.source.open()?,
+        Some(&mut *out),
+        &run_options,
+        Some(&material),
+        None,
+    )?;
+    let output =
+        Zeroizing::new(String::from_utf8(std::mem::take(&mut *out)).map_err(|_| encoding_error())?);
+    Ok(InlineOutcome {
+        output,
+        meta: result.meta,
+        columns: Some(result.columns),
+    })
+}
+
+fn inline_text(
+    req: &PseudonymizeRequest,
+    policy: &Policy,
+    project: &ProjectIdentity,
+    open_store: StoreOpener<'_>,
+    interaction: &dyn Interaction,
+) -> Result<InlineOutcome> {
+    let input = Zeroizing::new(read_text_source(req)?);
+    let material = load_or_create_material(project, policy, open_store, interaction)?;
+    let result = run_text(
+        &input,
+        Some(&material),
+        &text_options(req, policy, false),
+        None,
+    )?;
+    Ok(InlineOutcome {
+        output: Zeroizing::new(result.output),
+        meta: result.meta,
+        columns: None,
+    })
+}
+
 /// Reject broken `[pseudonymize]` settings before any prompt or key creation,
 /// including `rules` entries that would otherwise only fail once a rule matches.
-fn validate_policy_section(policy: &Policy) -> Result<()> {
+pub(crate) fn validate_policy_section(policy: &Policy) -> Result<()> {
     let section = &policy.pseudonymize;
     shk_core::pseudonymize::validate_norm(&section.norm).map_err(fail)?;
     shk_core::pseudonymize::validate_token_bits(section.token_bits).map_err(fail)?;
@@ -144,12 +464,12 @@ fn validate_policy_section(policy: &Policy) -> Result<()> {
     Ok(())
 }
 
-fn validate_output_paths(args: &MaskPseudonymizeArgs) -> Result<()> {
+fn validate_output_paths(req: &PseudonymizeRequest) -> Result<()> {
     let mut paths: Vec<(&str, PathBuf)> = Vec::new();
-    if let Some(input) = &args.file {
-        paths.push(("input", input.clone()));
+    if let Some(input) = req.source.path() {
+        paths.push(("input", input.to_path_buf()));
     }
-    if let Some(output) = &args.output {
+    if let Some(output) = &req.output {
         ensure_regular_destination(output, "output")?;
         paths.push(("output", output.clone()));
         let meta = meta_sidecar(output);
@@ -157,7 +477,7 @@ fn validate_output_paths(args: &MaskPseudonymizeArgs) -> Result<()> {
         safety::ensure_writable_path_allowed(&meta)?;
         paths.push(("metadata", meta));
     }
-    if let Some(map) = &args.map {
+    if let Some(map) = &req.map {
         ensure_regular_destination(map, "map")?;
         paths.push(("map", map.clone()));
     }
@@ -185,17 +505,37 @@ fn ensure_regular_destination(path: &Path, label: &str) -> Result<()> {
     }
 }
 
-pub fn restore(cwd: &Path, file: PathBuf, map: PathBuf, output: PathBuf) -> Result<()> {
-    restore_with(cwd, file, map, output, &open_pseudonymize_store)
+#[derive(Debug)]
+pub(crate) struct RestoreSummary {
+    pub output: PathBuf,
+    pub replacements: usize,
+    /// Tokens that had several originals; the first-seen value was used.
+    pub ambiguous: usize,
 }
 
-fn restore_with(
+pub fn restore(cwd: &Path, file: PathBuf, map: PathBuf, output: PathBuf) -> Result<()> {
+    let summary = restore_with(cwd, file, map, output, &open_pseudonymize_store)?;
+    println!(
+        "Restored {} token(s) to {}",
+        summary.replacements,
+        summary.output.display()
+    );
+    if summary.ambiguous > 0 {
+        eprintln!(
+            "warning: {} token(s) had multiple originals; first-seen value was used",
+            summary.ambiguous
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn restore_with(
     cwd: &Path,
     file: PathBuf,
     map: PathBuf,
     output: PathBuf,
     open_store: StoreOpener<'_>,
-) -> Result<()> {
+) -> Result<RestoreSummary> {
     let result = (|| {
         let (policy, _) = Policy::load_from_dir(cwd)?;
         let project = ProjectIdentity::from_root_and_policy(cwd.to_path_buf(), &policy);
@@ -212,7 +552,7 @@ fn restore_inner(
     map: PathBuf,
     output: PathBuf,
     open_store: StoreOpener<'_>,
-) -> Result<()> {
+) -> Result<RestoreSummary> {
     require_map_path(&map)?;
     ensure_regular_destination(&output, "output")?;
     ensure_regular_destination(&map, "map")?;
@@ -241,7 +581,7 @@ fn restore_inner(
     }
     let index = TokenIndex::new(&document);
 
-    let (replacements, multi) = if is_office_path(&file) {
+    let (replacements, ambiguous) = if is_office_path(&file) {
         let mut replacements = 0usize;
         let mut multi = 0usize;
         shk_core::document_masker::rewrite_ooxml_text_groups(
@@ -268,52 +608,113 @@ fn restore_inner(
         crate::fs_atomic::write_atomic(&output, restored.as_bytes())?;
         (replacements, multi)
     };
-    println!("Restored {replacements} token(s) to {}", output.display());
-    if multi > 0 {
-        eprintln!("warning: {multi} token(s) had multiple originals; first-seen value was used");
+    Ok(RestoreSummary {
+        output,
+        replacements,
+        ambiguous,
+    })
+}
+
+/// A CSV plan: the re-openable source plus the dry-run result it produced.
+struct CsvPlan<'a> {
+    source: TableSource<'a>,
+    options: TableOptions,
+    preview: TableResult,
+}
+
+fn plan_table_csv<'a>(req: &'a PseudonymizeRequest, policy: &Policy) -> Result<CsvPlan<'a>> {
+    let cli_columns = resolve_column_selection(req)?;
+    let (source, crlf, delimiter) = read_table_source(req)?;
+    let options = table_options(req, policy, delimiter, crlf, cli_columns, true);
+    let preview = run_table(source.open()?, None::<&mut Vec<u8>>, &options, None, None)?;
+    Ok(CsvPlan {
+        source,
+        options,
+        preview,
+    })
+}
+
+struct XlsxPlan<'a> {
+    input: &'a Path,
+    digest: [u8; 32],
+    options: TableOptions,
+    preview: TableResult,
+}
+
+fn plan_table_xlsx<'a>(req: &'a PseudonymizeRequest, policy: &Policy) -> Result<XlsxPlan<'a>> {
+    let input = req
+        .source
+        .path()
+        .ok_or_else(|| fail("xlsx table mode requires a file path"))?;
+    let digest = file_digest(input)?;
+    let cli_columns = resolve_column_selection(req)?;
+    let options = table_options(req, policy, b',', false, cli_columns, true);
+    let preview = run_xlsx(input, None, req.sheet.as_deref(), &options, None, None)?;
+    Ok(XlsxPlan {
+        input,
+        digest,
+        options,
+        preview,
+    })
+}
+
+fn office_input(req: &PseudonymizeRequest) -> Result<&Path> {
+    req.source
+        .path()
+        .ok_or_else(|| fail("Office text mode requires a file path"))
+}
+
+fn dry_run_outcome(
+    meta: PseudonymizeMeta,
+    columns: Option<Vec<ResolvedColumn>>,
+) -> PseudonymizeOutcome {
+    PseudonymizeOutcome {
+        meta,
+        columns,
+        written: None,
+        remaining: None,
     }
-    Ok(())
 }
 
 fn run_table_csv(
-    args: &MaskPseudonymizeArgs,
+    req: &PseudonymizeRequest,
     policy: &Policy,
     open_store: StoreOpener<'_>,
-) -> Result<()> {
-    let cli_columns = parse_cli_columns(args.columns.as_deref())?;
-    let (source, crlf, delimiter) = read_table_source(args)?;
-    let options = table_options(args, policy, delimiter, crlf, cli_columns, true);
-    let preview = run_table(source.open()?, None::<&mut Vec<u8>>, &options, None, None)?;
-    confirm_table_plan(args, &preview)?;
-    if args.dry_run {
-        return emit_dry_run(args, &preview.meta, Some(&preview.columns));
+    interaction: &dyn Interaction,
+) -> Result<PseudonymizeOutcome> {
+    let plan = plan_table_csv(req, policy)?;
+    confirm_table_plan(interaction, &plan.preview)?;
+    if req.dry_run {
+        return Ok(dry_run_outcome(
+            plan.preview.meta,
+            Some(plan.preview.columns),
+        ));
     }
 
-    let output = args.output.as_ref().expect("checked above");
-    let project = ProjectIdentity::from_root_and_policy(args.project_root.clone(), policy);
-    let material =
-        load_or_create_material(&project, policy, open_store, args.yes, args.no_create_key)?;
-    let mut collector = prepare_map(args.map.as_deref(), &material)?;
-    source.ensure_unchanged()?;
-    let mut run_options = options;
+    let output = req.output.as_ref().expect("checked above");
+    let project = ProjectIdentity::from_root_and_policy(req.project_root.clone(), policy);
+    let material = load_or_create_material(&project, policy, open_store, interaction)?;
+    let mut collector = prepare_map(req.map.as_deref(), &material)?;
+    plan.source.ensure_unchanged()?;
+    let mut run_options = plan.options;
     run_options.dry_run = false;
     let mut tmp = new_output_temp(output)?;
     let result = run_table(
-        source.open()?,
+        plan.source.open()?,
         Some(tmp.as_file_mut()),
         &run_options,
         Some(&material),
         collector.as_mut(),
     )?;
-    source.ensure_unchanged()?;
+    plan.source.ensure_unchanged()?;
     tmp.flush()?;
     tmp.as_file().sync_all()?;
     finish_run(
-        args,
+        req,
         policy,
         &material,
         result.meta,
-        Some(&result.columns),
+        Some(result.columns),
         collector,
         "table",
         tmp.into_temp_path(),
@@ -321,47 +722,43 @@ fn run_table_csv(
 }
 
 fn run_table_xlsx(
-    args: &MaskPseudonymizeArgs,
+    req: &PseudonymizeRequest,
     policy: &Policy,
     open_store: StoreOpener<'_>,
-) -> Result<()> {
-    let input = args
-        .file
-        .as_ref()
-        .ok_or_else(|| fail("xlsx table mode requires a file path"))?;
-    let input_digest = file_digest(input)?;
-    let cli_columns = parse_cli_columns(args.columns.as_deref())?;
-    let options = table_options(args, policy, b',', false, cli_columns, true);
-    let preview = run_xlsx(input, None, args.sheet.as_deref(), &options, None, None)?;
-    confirm_table_plan(args, &preview)?;
-    if args.dry_run {
-        return emit_dry_run(args, &preview.meta, Some(&preview.columns));
+    interaction: &dyn Interaction,
+) -> Result<PseudonymizeOutcome> {
+    let plan = plan_table_xlsx(req, policy)?;
+    confirm_table_plan(interaction, &plan.preview)?;
+    if req.dry_run {
+        return Ok(dry_run_outcome(
+            plan.preview.meta,
+            Some(plan.preview.columns),
+        ));
     }
 
-    let output = args.output.as_ref().expect("checked above");
-    let project = ProjectIdentity::from_root_and_policy(args.project_root.clone(), policy);
-    let material =
-        load_or_create_material(&project, policy, open_store, args.yes, args.no_create_key)?;
-    let mut collector = prepare_map(args.map.as_deref(), &material)?;
-    ensure_digest_unchanged(input, input_digest)?;
-    let mut run_options = options;
+    let output = req.output.as_ref().expect("checked above");
+    let project = ProjectIdentity::from_root_and_policy(req.project_root.clone(), policy);
+    let material = load_or_create_material(&project, policy, open_store, interaction)?;
+    let mut collector = prepare_map(req.map.as_deref(), &material)?;
+    ensure_digest_unchanged(plan.input, plan.digest)?;
+    let mut run_options = plan.options;
     run_options.dry_run = false;
     let staged_output = new_output_temp(output)?.into_temp_path();
     let result = run_xlsx(
-        input,
+        plan.input,
         Some(staged_output.as_ref()),
-        args.sheet.as_deref(),
+        req.sheet.as_deref(),
         &run_options,
         Some(&material),
         collector.as_mut(),
     )?;
-    ensure_digest_unchanged(input, input_digest)?;
+    ensure_digest_unchanged(plan.input, plan.digest)?;
     finish_run(
-        args,
+        req,
         policy,
         &material,
         result.meta,
-        Some(&result.columns),
+        Some(result.columns),
         collector,
         "table",
         staged_output,
@@ -369,27 +766,27 @@ fn run_table_xlsx(
 }
 
 fn run_text_plain(
-    args: &MaskPseudonymizeArgs,
+    req: &PseudonymizeRequest,
     policy: &Policy,
     open_store: StoreOpener<'_>,
-) -> Result<()> {
-    let input = read_text_source(args)?;
-    let options = text_options(args, policy, true);
-    if args.dry_run {
+    interaction: &dyn Interaction,
+) -> Result<PseudonymizeOutcome> {
+    let input = read_text_source(req)?;
+    let options = text_options(req, policy, true);
+    if req.dry_run {
         let result = run_text(&input, None, &options, None)?;
-        return emit_dry_run(args, &result.meta, None);
+        return Ok(dry_run_outcome(result.meta, None));
     }
-    let output = args.output.as_ref().expect("checked above");
-    let project = ProjectIdentity::from_root_and_policy(args.project_root.clone(), policy);
-    let material =
-        load_or_create_material(&project, policy, open_store, args.yes, args.no_create_key)?;
-    let mut collector = prepare_map(args.map.as_deref(), &material)?;
+    let output = req.output.as_ref().expect("checked above");
+    let project = ProjectIdentity::from_root_and_policy(req.project_root.clone(), policy);
+    let material = load_or_create_material(&project, policy, open_store, interaction)?;
+    let mut collector = prepare_map(req.map.as_deref(), &material)?;
     let mut run_options = options;
     run_options.dry_run = false;
     let result = run_text(&input, Some(&material), &run_options, collector.as_mut())?;
     let staged_output = stage_bytes(output, result.output.as_bytes())?;
     finish_run(
-        args,
+        req,
         policy,
         &material,
         result.meta,
@@ -401,16 +798,14 @@ fn run_text_plain(
 }
 
 fn run_text_office(
-    args: &MaskPseudonymizeArgs,
+    req: &PseudonymizeRequest,
     policy: &Policy,
     open_store: StoreOpener<'_>,
-) -> Result<()> {
-    let input = args
-        .file
-        .as_ref()
-        .ok_or_else(|| fail("Office text mode requires a file path"))?;
-    let options = text_options(args, policy, true);
-    if args.dry_run {
+    interaction: &dyn Interaction,
+) -> Result<PseudonymizeOutcome> {
+    let input = office_input(req)?;
+    let options = text_options(req, policy, true);
+    if req.dry_run {
         let result = run_office_text(
             input,
             None,
@@ -419,13 +814,12 @@ fn run_text_office(
             None,
             policy.scan.max_file_size_bytes,
         )?;
-        return emit_dry_run(args, &result.meta, None);
+        return Ok(dry_run_outcome(result.meta, None));
     }
-    let output = args.output.as_ref().expect("checked above");
-    let project = ProjectIdentity::from_root_and_policy(args.project_root.clone(), policy);
-    let material =
-        load_or_create_material(&project, policy, open_store, args.yes, args.no_create_key)?;
-    let mut collector = prepare_map(args.map.as_deref(), &material)?;
+    let output = req.output.as_ref().expect("checked above");
+    let project = ProjectIdentity::from_root_and_policy(req.project_root.clone(), policy);
+    let material = load_or_create_material(&project, policy, open_store, interaction)?;
+    let mut collector = prepare_map(req.map.as_deref(), &material)?;
     let mut run_options = options;
     run_options.dry_run = false;
     let staged_output = new_output_temp(output)?.into_temp_path();
@@ -438,7 +832,7 @@ fn run_text_office(
         policy.scan.max_file_size_bytes,
     )?;
     finish_run(
-        args,
+        req,
         policy,
         &material,
         result.meta,
@@ -451,17 +845,17 @@ fn run_text_office(
 
 #[allow(clippy::too_many_arguments)]
 fn finish_run(
-    args: &MaskPseudonymizeArgs,
+    req: &PseudonymizeRequest,
     policy: &Policy,
     material: &KeyMaterial,
     mut meta: PseudonymizeMeta,
-    columns: Option<&[ResolvedColumn]>,
+    columns: Option<Vec<ResolvedColumn>>,
     collector: Option<MapCollector>,
     mode: &str,
     staged_output: TempPath,
-) -> Result<()> {
-    let output = args.output.as_ref().expect("checked above");
-    let staged_map = if let (Some(map_path), Some(collector)) = (args.map.as_ref(), collector) {
+) -> Result<PseudonymizeOutcome> {
+    let output = req.output.as_ref().expect("checked above");
+    let staged_map = if let (Some(map_path), Some(collector)) = (req.map.as_ref(), collector) {
         let document =
             collector.into_document(policy.pseudonymize.norm.clone(), material.fingerprint());
         let bytes = encrypt_map(material, &document)?;
@@ -492,38 +886,54 @@ fn finish_run(
     persist_temp_path(staged_output, output)?;
 
     let _ = crate::audit_log::append_line(
-        &args.project_root,
+        &req.project_root,
         serde_json::json!({
             "event": "pseudonymize",
             "mode": mode,
             "rows": meta.rows_processed,
-            "columns": columns.map(|cols| cols.len()).unwrap_or(0),
+            "columns": columns.as_ref().map(Vec::len).unwrap_or(0),
             "kinds": meta
                 .columns
                 .iter()
                 .map(|column| column.kind.as_str())
                 .collect::<Vec<_>>(),
-            "map": args.map.is_some(),
+            "map": req.map.is_some(),
         }),
     );
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&meta)?);
+    let remaining = req
+        .check_remaining
+        .then(|| check_remaining(&req.project_root, policy, output));
+    Ok(PseudonymizeOutcome {
+        meta,
+        columns,
+        written: Some(WrittenPaths {
+            output: output.clone(),
+            meta: meta_path,
+            map: req.map.clone(),
+        }),
+        remaining,
+    })
+}
+
+fn print_outcome(json: bool, outcome: &PseudonymizeOutcome) -> Result<()> {
+    let Some(written) = outcome.written.as_ref() else {
+        return emit_dry_run(json, &outcome.meta, outcome.columns.as_deref());
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&outcome.meta)?);
     } else {
-        print_meta_summary(&meta, columns);
-        println!("Wrote {}", output.display());
-        println!("Wrote {}", meta_path.display());
-        if let Some(map) = args.map.as_ref() {
+        print_meta_summary(&outcome.meta, outcome.columns.as_deref());
+        println!("Wrote {}", written.output.display());
+        println!("Wrote {}", written.meta.display());
+        if let Some(map) = written.map.as_ref() {
             println!("Wrote {}", map.display());
         }
-    }
-    if args.check_remaining {
-        check_remaining(&args.project_root, policy, output)?;
     }
     Ok(())
 }
 
-fn confirm_table_plan(args: &MaskPseudonymizeArgs, preview: &TableResult) -> Result<()> {
+fn confirm_table_plan(interaction: &dyn Interaction, preview: &TableResult) -> Result<()> {
     if preview.columns.is_empty() {
         return Err(fail(
             "no columns to pseudonymize; pass --columns or add [pseudonymize.columns]",
@@ -534,18 +944,17 @@ fn confirm_table_plan(args: &MaskPseudonymizeArgs, preview: &TableResult) -> Res
         .iter()
         .any(|column| column.source == ColumnSource::Inferred);
     if inferred {
-        print_column_plan(&preview.columns);
-        confirm(args.yes, "Pseudonymize the inferred columns listed above?")?;
+        interaction.confirm_inferred_columns(&preview.columns)?;
     }
     Ok(())
 }
 
 fn emit_dry_run(
-    args: &MaskPseudonymizeArgs,
+    json: bool,
     meta: &PseudonymizeMeta,
     columns: Option<&[ResolvedColumn]>,
 ) -> Result<()> {
-    if args.json {
+    if json {
         println!("{}", serde_json::to_string_pretty(meta)?);
     } else if let Some(columns) = columns {
         print_column_plan(columns);
@@ -557,7 +966,7 @@ fn emit_dry_run(
     Ok(())
 }
 
-fn classify_input(
+pub(crate) fn classify_input(
     path: Option<&Path>,
     mode: Option<PseudonymizeModeArg>,
     format: Option<PseudonymizeFormatArg>,
@@ -598,24 +1007,24 @@ fn classify_input(
     }
 }
 
-fn validate_mode_flags(args: &MaskPseudonymizeArgs, kind: &InputKind) -> Result<()> {
+fn validate_mode_flags(req: &PseudonymizeRequest, kind: &InputKind) -> Result<()> {
     match kind {
         InputKind::TextPlain | InputKind::TextOffice => {
-            if args.columns.is_some() {
+            if req.columns.is_some() {
                 return Err(fail("`--columns` is only valid in table mode"));
             }
-            if args.format.is_some() {
+            if req.format.is_some() {
                 return Err(fail("`--format` is only valid in table mode"));
             }
-            if args.no_header {
+            if req.no_header {
                 return Err(fail("`--no-header` is only valid in table mode"));
             }
-            if args.sheet.is_some() {
+            if req.sheet.is_some() {
                 return Err(fail("`--sheet` is only valid for xlsx table mode"));
             }
         }
         InputKind::TableCsv => {
-            if args.sheet.is_some() {
+            if req.sheet.is_some() {
                 return Err(fail("`--sheet` is only valid for xlsx table mode"));
             }
         }
@@ -624,8 +1033,8 @@ fn validate_mode_flags(args: &MaskPseudonymizeArgs, kind: &InputKind) -> Result<
     Ok(())
 }
 
-fn validate_restore_compatible_output(args: &MaskPseudonymizeArgs, kind: &InputKind) -> Result<()> {
-    let (Some(_map), Some(output)) = (args.map.as_ref(), args.output.as_ref()) else {
+fn validate_restore_compatible_output(req: &PseudonymizeRequest, kind: &InputKind) -> Result<()> {
+    let (Some(_map), Some(output)) = (req.map.as_ref(), req.output.as_ref()) else {
         return Ok(());
     };
     let output_ext = output
@@ -634,7 +1043,7 @@ fn validate_restore_compatible_output(args: &MaskPseudonymizeArgs, kind: &InputK
         .unwrap_or_default();
     match kind {
         InputKind::TableCsv => {
-            let expected = if table_delimiter(args, args.file.as_deref()) == b'\t' {
+            let expected = if table_delimiter(req, req.source.path()) == b'\t' {
                 "tsv"
             } else {
                 "csv"
@@ -653,9 +1062,9 @@ fn validate_restore_compatible_output(args: &MaskPseudonymizeArgs, kind: &InputK
             }
         }
         InputKind::TextOffice => {
-            let input_ext = args
-                .file
-                .as_deref()
+            let input_ext = req
+                .source
+                .path()
                 .and_then(Path::extension)
                 .and_then(|ext| ext.to_str())
                 .unwrap_or_default();
@@ -676,13 +1085,18 @@ fn validate_restore_compatible_output(args: &MaskPseudonymizeArgs, kind: &InputK
     Ok(())
 }
 
-fn parse_cli_columns(spec: Option<&str>) -> Result<Option<ColumnOverrides>> {
-    spec.map(|spec| parse_columns_spec(spec).map_err(|err| fail(err.0)))
-        .transpose()
+fn resolve_column_selection(req: &PseudonymizeRequest) -> Result<Option<ColumnOverrides>> {
+    match req.columns.as_ref() {
+        None => Ok(None),
+        Some(ColumnSelection::Spec(spec)) => parse_columns_spec(spec)
+            .map(Some)
+            .map_err(|err| fail(err.0)),
+        Some(ColumnSelection::Resolved(overrides)) => Ok(Some(overrides.clone())),
+    }
 }
 
 fn table_options(
-    args: &MaskPseudonymizeArgs,
+    req: &PseudonymizeRequest,
     policy: &Policy,
     delimiter: u8,
     crlf: bool,
@@ -691,7 +1105,7 @@ fn table_options(
 ) -> TableOptions {
     TableOptions {
         delimiter,
-        no_header: args.no_header,
+        no_header: req.no_header,
         token_bits: policy.pseudonymize.token_bits,
         norm: policy.pseudonymize.norm.clone(),
         settings: NormalizeSettings {
@@ -702,11 +1116,11 @@ fn table_options(
         dry_run,
         crlf,
         shk_version: env!("CARGO_PKG_VERSION").into(),
-        key_namespace: key_namespace(&args.project_root, policy.env.project_id.as_deref()),
+        key_namespace: key_namespace(&req.project_root, policy.env.project_id.as_deref()),
     }
 }
 
-fn text_options(args: &MaskPseudonymizeArgs, policy: &Policy, dry_run: bool) -> TextOptions {
+fn text_options(req: &PseudonymizeRequest, policy: &Policy, dry_run: bool) -> TextOptions {
     TextOptions {
         token_bits: policy.pseudonymize.token_bits,
         norm: policy.pseudonymize.norm.clone(),
@@ -715,26 +1129,26 @@ fn text_options(args: &MaskPseudonymizeArgs, policy: &Policy, dry_run: bool) -> 
         },
         rule_overrides: policy.pseudonymize.rules.clone(),
         shk_version: env!("CARGO_PKG_VERSION").into(),
-        key_namespace: key_namespace(&args.project_root, policy.env.project_id.as_deref()),
+        key_namespace: key_namespace(&req.project_root, policy.env.project_id.as_deref()),
         dry_run,
     }
 }
 
 /// Table input is read twice (plan, then rewrite). Files are streamed so
-/// memory stays flat for large exports; stdin has to be buffered.
-enum TableSource {
+/// memory stays flat for large exports; stdin and pasted content are buffered.
+enum TableSource<'a> {
     File { path: PathBuf, digest: [u8; 32] },
-    Stdin(Vec<u8>),
+    Buffer(Cow<'a, [u8]>),
 }
 
-impl TableSource {
+impl TableSource<'_> {
     fn open(&self) -> Result<Box<dyn Read + '_>> {
         match self {
             Self::File { path, .. } => {
                 let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
                 Ok(Box::new(BufReader::new(file)))
             }
-            Self::Stdin(bytes) => Ok(Box::new(bytes.as_slice())),
+            Self::Buffer(bytes) => Ok(Box::new(bytes.as_ref())),
         }
     }
 
@@ -746,22 +1160,29 @@ impl TableSource {
     }
 }
 
-fn read_table_source(args: &MaskPseudonymizeArgs) -> Result<(TableSource, bool, u8)> {
-    if let Some(path) = args.file.as_ref() {
-        // UTF-8 validity was checked in `mask_inner` before the policy loaded.
-        return Ok((
-            TableSource::File {
-                path: path.clone(),
-                digest: file_digest(path)?,
-            },
-            file_uses_crlf(path)?,
-            table_delimiter(args, Some(path)),
-        ));
-    }
-    let bytes = read_stdin_bytes()?;
-    ensure_utf8_bytes(&bytes)?;
-    let crlf = bytes.windows(2).any(|pair| pair == b"\r\n");
-    Ok((TableSource::Stdin(bytes), crlf, table_delimiter(args, None)))
+fn read_table_source(req: &PseudonymizeRequest) -> Result<(TableSource<'_>, bool, u8)> {
+    let buffered: Cow<'_, [u8]> = match &req.source {
+        PseudonymizeSource::File(path) => {
+            // UTF-8 validity was checked in `preflight` before the policy loaded.
+            return Ok((
+                TableSource::File {
+                    path: path.clone(),
+                    digest: file_digest(path)?,
+                },
+                file_uses_crlf(path)?,
+                table_delimiter(req, Some(path)),
+            ));
+        }
+        PseudonymizeSource::Stdin => Cow::Owned(read_stdin_bytes()?),
+        PseudonymizeSource::Buffer(bytes) => Cow::Borrowed(bytes.as_slice()),
+    };
+    ensure_utf8_bytes(&buffered)?;
+    let crlf = buffered.windows(2).any(|pair| pair == b"\r\n");
+    Ok((
+        TableSource::Buffer(buffered),
+        crlf,
+        table_delimiter(req, None),
+    ))
 }
 
 fn file_digest(path: &Path) -> Result<[u8; 32]> {
@@ -790,12 +1211,17 @@ fn ensure_digest_unchanged(path: &Path, expected: [u8; 32]) -> Result<()> {
     Ok(())
 }
 
-fn read_text_source(args: &MaskPseudonymizeArgs) -> Result<String> {
-    let bytes = match args.file.as_ref() {
-        Some(path) => std::fs::read(path).with_context(|| format!("read {}", path.display()))?,
-        None => read_stdin_bytes()?,
+fn read_text_source(req: &PseudonymizeRequest) -> Result<String> {
+    let bytes: Cow<'_, [u8]> = match &req.source {
+        PseudonymizeSource::File(path) => {
+            Cow::Owned(std::fs::read(path).with_context(|| format!("read {}", path.display()))?)
+        }
+        PseudonymizeSource::Stdin => Cow::Owned(read_stdin_bytes()?),
+        PseudonymizeSource::Buffer(bytes) => Cow::Borrowed(bytes.as_slice()),
     };
-    String::from_utf8(bytes).map_err(|_| encoding_error())
+    std::str::from_utf8(&bytes)
+        .map(str::to_owned)
+        .map_err(|_| encoding_error())
 }
 
 fn read_stdin_bytes() -> Result<Vec<u8>> {
@@ -804,8 +1230,8 @@ fn read_stdin_bytes() -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn table_delimiter(args: &MaskPseudonymizeArgs, path: Option<&Path>) -> u8 {
-    match args.format {
+fn table_delimiter(req: &PseudonymizeRequest, path: Option<&Path>) -> u8 {
+    match req.format {
         Some(PseudonymizeFormatArg::Tsv) => b'\t',
         Some(PseudonymizeFormatArg::Csv) => b',',
         None => delimiter_for_path(path),
@@ -857,17 +1283,18 @@ fn read_map_bounded(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn require_map_path(path: &Path) -> Result<()> {
+pub(crate) fn require_map_path(path: &Path) -> Result<()> {
     match path.extension().and_then(|ext| ext.to_str()) {
         Some(ext) if ext.eq_ignore_ascii_case("shk-map") => Ok(()),
         _ => Err(fail("--map path must end with .shk-map")),
     }
 }
 
-/// Scan the written output for anything `pii.*` / `secret.*` still detects.
-/// A file the scanner would silently skip (excluded by `[scan]` patterns or
-/// above `max_file_size_bytes`) is an error, never a pass.
-fn check_remaining(project_root: &Path, policy: &Policy, output: &Path) -> Result<()> {
+/// Scan the written output for anything `pii.*` / `secret.*` still detects
+/// and return the leftover rule ids. A file the scanner would silently skip
+/// (excluded by `[scan]` patterns or above `max_file_size_bytes`) is an
+/// error, never a pass.
+fn check_remaining(project_root: &Path, policy: &Policy, output: &Path) -> Result<Vec<String>> {
     let rel = policy_relative_label(project_root, output);
     if shk_core::scanner::path_is_excluded(policy, &rel)? {
         return Err(fail(format!(
@@ -915,16 +1342,18 @@ fn check_remaining(project_root: &Path, policy: &Policy, output: &Path) -> Resul
         .collect();
     leftover.sort();
     leftover.dedup();
-    if leftover.is_empty() {
-        return Ok(());
-    }
-    Err(anyhow!(CliExit::message(
+    Ok(leftover)
+}
+
+/// Leftovers are the one exit-1 outcome on the pseudonymize path.
+fn leftover_error(leftover: &[String]) -> anyhow::Error {
+    anyhow!(CliExit::message(
         1,
         format!(
             "--check-remaining found leftover detections (not a sufficiency guarantee): {}",
             leftover.join(", ")
         )
-    )))
+    ))
 }
 
 /// The scanner labels a single-file target by its path relative to the policy
@@ -1109,7 +1538,7 @@ fn with_pseudonymize_lock<T>(cwd: &Path, operation: impl FnOnce() -> Result<T>) 
     with_secret_store_lock(&project, OPERATION_LOCK, operation)
 }
 
-fn open_context(
+pub(crate) fn open_context(
     cwd: &Path,
     open_store: StoreOpener<'_>,
 ) -> Result<(
@@ -1128,29 +1557,20 @@ fn load_or_create_material(
     project: &ProjectIdentity,
     policy: &Policy,
     open_store: StoreOpener<'_>,
-    yes: bool,
-    no_create: bool,
+    interaction: &dyn Interaction,
 ) -> Result<KeyMaterial> {
     let (store, _backend) = open_store(project, policy)?;
     if let Some(material) = load_material(store.as_ref(), project)? {
         return Ok(material);
     }
-    if no_create {
-        return Err(fail(
-            "no pseudonymize key for this project; omit --no-create-key to create one",
-        ));
-    }
-    confirm(
-        yes,
-        "No pseudonymize key found. Create a new project key in the configured secret store?",
-    )?;
+    interaction.confirm_create_key()?;
     let material = KeyMaterial::generate()?;
     store_material(store.as_ref(), project, &material)
         .context("store new pseudonymize material")?;
     Ok(material)
 }
 
-fn load_material(
+pub(crate) fn load_material(
     store: &dyn SecretStore,
     project: &ProjectIdentity,
 ) -> Result<Option<KeyMaterial>> {
@@ -1355,7 +1775,7 @@ fn persist_temp_path(tmp: TempPath, path: &Path) -> Result<()> {
         .map_err(|err| anyhow!("write {}: {}", path.display(), err.error))
 }
 
-fn meta_sidecar(output: &Path) -> PathBuf {
+pub(crate) fn meta_sidecar(output: &Path) -> PathBuf {
     let mut name = output.as_os_str().to_os_string();
     name.push(".shk-meta.json");
     PathBuf::from(name)
@@ -1371,7 +1791,7 @@ fn key_namespace(root: &Path, project_id: Option<&str>) -> String {
         .replace('\\', "/")
 }
 
-fn backend_label(backend: SecretStoreBackend) -> &'static str {
+pub(crate) fn backend_label(backend: SecretStoreBackend) -> &'static str {
     match backend {
         SecretStoreBackend::Keyring => "OS credential store",
         SecretStoreBackend::OnePassword => "configured 1Password vault",
@@ -1393,10 +1813,11 @@ fn fail_run(err: anyhow::Error) -> anyhow::Error {
     CliExit::message(2, format!("{err:#}")).into()
 }
 
+/// Fixtures shared with `desktop_api` tests: an in-memory key store and
+/// minimal Office containers.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
-    use shk_core::pseudonymize::parse_columns_spec;
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::{Arc, Mutex};
     use zip::write::{FileOptions, ZipWriter};
@@ -1404,8 +1825,8 @@ mod tests {
     /// Single-project in-memory store; `Arc` so every `open_store` call
     /// sees the same entries, like a real keyring would.
     #[derive(Default)]
-    struct MemoryStore {
-        entries: Mutex<BTreeMap<String, String>>,
+    pub(crate) struct MemoryStore {
+        pub(crate) entries: Mutex<BTreeMap<String, String>>,
     }
 
     impl SecretStore for Arc<MemoryStore> {
@@ -1431,7 +1852,7 @@ mod tests {
         }
     }
 
-    fn opener(
+    pub(crate) fn opener(
         store: Arc<MemoryStore>,
     ) -> impl Fn(&ProjectIdentity, &Policy) -> Result<(Box<dyn SecretStore>, SecretStoreBackend)> + 'static
     {
@@ -1443,40 +1864,21 @@ mod tests {
         }
     }
 
-    fn project() -> tempfile::TempDir {
+    pub(crate) fn project() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("shk.toml"), "").unwrap();
         dir
     }
 
-    fn args(root: &Path, file: &str, output: Option<&str>) -> MaskPseudonymizeArgs {
-        MaskPseudonymizeArgs {
-            project_root: root.to_path_buf(),
-            file: Some(root.join(file)),
-            json: false,
-            output: output.map(|name| root.join(name)),
-            yes: true,
-            dry_run: false,
-            columns: None,
-            no_header: false,
-            no_create_key: false,
-            mode: None,
-            format: None,
-            sheet: None,
-            map: None,
-            check_remaining: false,
-        }
-    }
-
-    fn email() -> String {
+    pub(crate) fn email() -> String {
         ["ada", "@", "example.com"].concat()
     }
 
-    fn zip_options() -> FileOptions<'static, ()> {
+    pub(crate) fn zip_options() -> FileOptions<'static, ()> {
         FileOptions::default().compression_method(zip::CompressionMethod::Deflated)
     }
 
-    fn create_docx(path: &Path, text: &str) {
+    pub(crate) fn create_docx(path: &Path, text: &str) {
         let mut zip = ZipWriter::new(File::create(path).unwrap());
         zip.start_file("[Content_Types].xml", zip_options())
             .unwrap();
@@ -1490,7 +1892,7 @@ mod tests {
         zip.finish().unwrap();
     }
 
-    fn create_xlsx(path: &Path, header: &str, value: &str) {
+    pub(crate) fn create_xlsx(path: &Path, header: &str, value: &str) {
         let mut zip = ZipWriter::new(File::create(path).unwrap());
         zip.start_file("[Content_Types].xml", zip_options())
             .unwrap();
@@ -1513,7 +1915,7 @@ mod tests {
         zip.finish().unwrap();
     }
 
-    fn read_zip_entry(path: &Path, name: &str) -> String {
+    pub(crate) fn read_zip_entry(path: &Path, name: &str) -> String {
         let mut archive = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
         let mut body = String::new();
         archive
@@ -1523,9 +1925,285 @@ mod tests {
             .unwrap();
         body
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::*;
+    use super::*;
+    use shk_core::pseudonymize::parse_columns_spec;
+    use std::sync::Arc;
+
+    fn args(root: &Path, file: &str, output: Option<&str>) -> MaskPseudonymizeArgs {
+        MaskPseudonymizeArgs {
+            project_root: root.to_path_buf(),
+            file: Some(root.join(file)),
+            json: false,
+            output: output.map(|name| root.join(name)),
+            yes: true,
+            dry_run: false,
+            columns: None,
+            no_header: false,
+            no_create_key: false,
+            mode: None,
+            format: None,
+            sheet: None,
+            map: None,
+            check_remaining: false,
+        }
+    }
 
     fn exit_code(err: anyhow::Error) -> i32 {
         crate::exit::code_for(&err)
+    }
+
+    fn request(root: &Path, source: PseudonymizeSource) -> PseudonymizeRequest {
+        PseudonymizeRequest {
+            project_root: root.to_path_buf(),
+            source,
+            output: None,
+            dry_run: true,
+            columns: None,
+            no_header: false,
+            mode: None,
+            format: None,
+            sheet: None,
+            map: None,
+            check_remaining: false,
+        }
+    }
+
+    fn buffer(text: &str) -> PseudonymizeSource {
+        PseudonymizeSource::Buffer(Zeroizing::new(text.as_bytes().to_vec()))
+    }
+
+    #[test]
+    fn preview_plans_without_touching_the_key_store() {
+        let dir = project();
+        let root = dir.path();
+        let body = format!("Email,Note\n{},keep\n{},also\n", email(), email());
+        std::fs::write(root.join("orders.csv"), &body).unwrap();
+
+        let file = request(root, PseudonymizeSource::File(root.join("orders.csv")));
+        let Preview::Table(table) = preview(&file).unwrap() else {
+            panic!("csv previews as a table");
+        };
+        assert_eq!(table.headers, vec!["Email".to_string(), "Note".to_string()]);
+        assert_eq!(table.sample_rows.len(), 2);
+        assert_eq!(table.meta.rows_processed, 2);
+        assert_eq!(table.columns.len(), 1);
+        assert_eq!(table.columns[0].source, ColumnSource::Inferred);
+        assert!(
+            !root.join(".shk").exists(),
+            "preview must not write anything"
+        );
+
+        // A pasted buffer plans the same way, and an exact selection can skip
+        // what inference picked.
+        let mut pasted = request(root, buffer(&body));
+        pasted.mode = Some(PseudonymizeModeArg::Table);
+        pasted.columns = Some(ColumnSelection::Resolved(ColumnOverrides {
+            entries: vec![("Note".into(), Kind::Custom("note".into()))],
+            skip: vec!["Email".into()],
+        }));
+        let Preview::Table(table) = preview(&pasted).unwrap() else {
+            panic!("buffer previews as a table");
+        };
+        assert_eq!(table.columns.len(), 1);
+        assert_eq!(table.columns[0].name, "Note");
+        assert_eq!(table.columns[0].source, ColumnSource::Cli);
+
+        // Zero columns is a valid preview; the caller decides what to do.
+        let mut none = request(root, buffer("Note\nkeep\n"));
+        none.mode = Some(PseudonymizeModeArg::Table);
+        let Preview::Table(table) = preview(&none).unwrap() else {
+            panic!("table");
+        };
+        assert!(table.columns.is_empty());
+
+        let mut text = request(root, buffer("hello\n"));
+        text.mode = Some(PseudonymizeModeArg::Text);
+        assert!(matches!(
+            preview(&text).unwrap(),
+            Preview::Text { office: false }
+        ));
+        create_docx(&root.join("memo.docx"), "hello");
+        let office = request(root, PseudonymizeSource::File(root.join("memo.docx")));
+        assert!(matches!(
+            preview(&office).unwrap(),
+            Preview::Text { office: true }
+        ));
+        create_xlsx(&root.join("book.xlsx"), "Email", &email());
+        let mut sheet = request(root, PseudonymizeSource::File(root.join("book.xlsx")));
+        sheet.sheet = Some("Customers".into());
+        let Preview::Table(table) = preview(&sheet).unwrap() else {
+            panic!("xlsx");
+        };
+        assert_eq!(table.headers, vec!["Email".to_string()]);
+
+        let mut not_dry = request(root, buffer("x\n"));
+        not_dry.dry_run = false;
+        assert!(preview(&not_dry).is_err());
+    }
+
+    #[test]
+    fn decisions_replace_the_interactive_prompts() {
+        let dir = project();
+        let root = dir.path();
+        let store = Arc::new(MemoryStore::default());
+        let open = opener(Arc::clone(&store));
+        std::fs::write(root.join("orders.csv"), format!("Email\n{}\n", email())).unwrap();
+
+        let run = |accept_inferred: bool, create_key: bool, output: &str| {
+            let mut req = request(root, PseudonymizeSource::File(root.join("orders.csv")));
+            req.dry_run = false;
+            req.output = Some(root.join(output));
+            mask_core(
+                req,
+                &open,
+                &Decisions {
+                    accept_inferred,
+                    create_key,
+                },
+            )
+        };
+        let err = run(false, true, "a.csv").unwrap_err();
+        assert!(err.to_string().contains("confirmation"), "{err}");
+        let err = run(true, false, "b.csv").unwrap_err();
+        assert_eq!(err.to_string(), NO_KEY_MESSAGE);
+        assert!(store.entries.lock().unwrap().is_empty());
+        assert!(!root.join("b.csv").exists());
+
+        let outcome = run(true, true, "c.csv").unwrap();
+        assert_eq!(store.entries.lock().unwrap().len(), 1);
+        let written = outcome.written.expect("real run writes");
+        assert_eq!(written.output, root.join("c.csv"));
+        assert_eq!(written.meta, root.join("c.csv.shk-meta.json"));
+        assert!(written.map.is_none());
+        assert!(outcome.remaining.is_none());
+        assert_eq!(outcome.columns.map(|cols| cols.len()), Some(1));
+        assert!(written.output.exists() && written.meta.exists());
+
+        // Once the key exists, `create_key: false` no longer matters.
+        let outcome = run(true, false, "d.csv").unwrap();
+        assert!(outcome.written.is_some());
+    }
+
+    #[test]
+    fn inline_runs_keep_everything_in_memory() {
+        let dir = project();
+        let root = dir.path();
+        let store = Arc::new(MemoryStore::default());
+        let open = opener(Arc::clone(&store));
+        let decide = Decisions {
+            accept_inferred: true,
+            create_key: true,
+        };
+        let inline = |text: &str, mode, columns| InlineRequest {
+            project_root: root.to_path_buf(),
+            bytes: Zeroizing::new(text.as_bytes().to_vec()),
+            mode,
+            format: None,
+            columns,
+            no_header: false,
+        };
+
+        let text = pseudonymize_inline(
+            inline(
+                &format!("contact {}\n", email()),
+                PseudonymizeModeArg::Text,
+                None,
+            ),
+            &open,
+            &decide,
+        )
+        .unwrap();
+        assert!(text.output.contains("email_"), "{}", *text.output);
+        assert!(!text.output.contains(&email()));
+        assert!(text.columns.is_none());
+        assert_eq!(text.meta.mode, "text");
+
+        let table = pseudonymize_inline(
+            inline(
+                &format!("Email,Member\n{},m-1\n", email()),
+                PseudonymizeModeArg::Table,
+                Some(ColumnOverrides {
+                    entries: vec![("Member".into(), Kind::Custom("member".into()))],
+                    skip: vec!["Email".into()],
+                }),
+            ),
+            &open,
+            &decide,
+        )
+        .unwrap();
+        assert!(
+            table.output.starts_with("Email,Member\n"),
+            "{}",
+            *table.output
+        );
+        assert!(
+            table.output.contains(&email()),
+            "skipped column is untouched"
+        );
+        assert!(table.output.contains("member_"), "{}", *table.output);
+        assert_eq!(table.columns.as_ref().map(Vec::len), Some(1));
+        assert_eq!(store.entries.lock().unwrap().len(), 1);
+
+        let audit = std::fs::read_to_string(root.join(".shk").join("audit.log")).unwrap();
+        assert!(audit.contains("\"inline\":true"), "{audit}");
+        assert!(!audit.contains(&email()), "{audit}");
+        // Nothing but the audit log touched the disk.
+        let entries: Vec<_> = std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name != "shk.toml" && name != ".shk")
+            .collect();
+        assert!(entries.is_empty(), "{entries:?}");
+
+        let err = pseudonymize_inline(
+            inline("Note\nkeep\n", PseudonymizeModeArg::Table, None),
+            &open,
+            &decide,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no columns"), "{err}");
+        let err = pseudonymize_inline(
+            inline("x", PseudonymizeModeArg::Text, None),
+            &open,
+            &Decisions {
+                accept_inferred: true,
+                create_key: false,
+            },
+        );
+        assert!(err.is_ok(), "existing key needs no confirmation");
+    }
+
+    #[test]
+    fn outcome_carries_leftovers_for_the_cli_to_report() {
+        let dir = project();
+        let root = dir.path();
+        let open = opener(Arc::new(MemoryStore::default()));
+        let card = ["4111", "1111", "1111", "1111"].join(" ");
+        std::fs::write(
+            root.join("rows.csv"),
+            format!("Email,Card\n{},{card}\n", email()),
+        )
+        .unwrap();
+        let mut req = request(root, PseudonymizeSource::File(root.join("rows.csv")));
+        req.dry_run = false;
+        req.output = Some(root.join("out.csv"));
+        req.check_remaining = true;
+        let outcome = mask_core(
+            req,
+            &open,
+            &Decisions {
+                accept_inferred: true,
+                create_key: true,
+            },
+        )
+        .unwrap();
+        let leftover = outcome.remaining.unwrap().unwrap();
+        assert_eq!(leftover, vec!["pii.credit_card".to_string()]);
     }
 
     #[test]
@@ -1693,8 +2371,13 @@ mod tests {
             let output = root.join("out.txt");
             std::fs::write(&output, body).unwrap();
             let (policy, _) = Policy::load_from_dir(root).unwrap();
-            let err = check_remaining(root, &policy, &output).unwrap_err();
-            assert_eq!(exit_code(err), 1, "{policy_text}");
+            let leftover = check_remaining(root, &policy, &output).unwrap();
+            assert_eq!(
+                leftover,
+                vec!["pii.credit_card".to_string()],
+                "{policy_text}"
+            );
+            assert_eq!(exit_code(leftover_error(&leftover)), 1, "{policy_text}");
         }
     }
 
@@ -1706,18 +2389,21 @@ mod tests {
         let mut table = args(root, "rows.csv", Some("out.csv"));
         table.map = Some(root.join("out.shk-map"));
         table.format = Some(PseudonymizeFormatArg::Tsv);
-        assert!(validate_restore_compatible_output(&table, &InputKind::TableCsv).is_err());
-
+        let mut table_tsv = args(root, "rows.csv", Some("out.tsv"));
+        table_tsv.map = Some(root.join("out.shk-map"));
+        table_tsv.format = Some(PseudonymizeFormatArg::Tsv);
         let mut office = args(root, "report.docx", Some("out.bin"));
         office.map = Some(root.join("out.shk-map"));
-        assert!(validate_restore_compatible_output(&office, &InputKind::TextOffice).is_err());
-
         let mut text = args(root, "notes.md", Some("out.csv"));
         text.map = Some(root.join("out.shk-map"));
-        assert!(validate_restore_compatible_output(&text, &InputKind::TextPlain).is_err());
 
-        table.output = Some(root.join("out.tsv"));
-        assert!(validate_restore_compatible_output(&table, &InputKind::TableCsv).is_ok());
+        let check = |cli: MaskPseudonymizeArgs, kind: InputKind| {
+            validate_restore_compatible_output(&request_from_cli(cli), &kind)
+        };
+        assert!(check(table, InputKind::TableCsv).is_err());
+        assert!(check(office, InputKind::TextOffice).is_err());
+        assert!(check(text, InputKind::TextPlain).is_err());
+        assert!(check(table_tsv, InputKind::TableCsv).is_ok());
     }
 
     #[test]
@@ -1770,7 +2456,7 @@ mod tests {
         run.map = Some(root.join("out.shk-map"));
         mask_with(run, &open).unwrap();
         // Both spellings share a token; restore warns and uses the first one.
-        restore_with(
+        let summary = restore_with(
             root,
             root.join("out.md"),
             root.join("out.shk-map"),
@@ -1778,6 +2464,9 @@ mod tests {
             &open,
         )
         .unwrap();
+        assert_eq!(summary.output, root.join("back.md"));
+        assert_eq!(summary.replacements, 2);
+        assert!(summary.ambiguous >= 1, "{}", summary.ambiguous);
         let back = std::fs::read_to_string(root.join("back.md")).unwrap();
         assert_eq!(back, format!("{0} {0}\n", email()));
 
