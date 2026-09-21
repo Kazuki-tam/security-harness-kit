@@ -441,6 +441,7 @@ function App() {
           }}
           onOpenInApp={openProjectInAppHandler}
           onShowHelp={() => setHelpOpen(true)}
+          onShowWelcome={!showSidebar ? () => setCurrentView("welcome") : undefined}
         />
 
         {appNotice && <AppNotice message={appNotice} onDismiss={() => setAppNotice(null)} />}

@@ -105,6 +105,7 @@ export function usePseudonymizeWorkspace({
   });
   const [copied, setCopied] = useState(false);
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
+  const runPending = useRef(false);
   const keyResolver = useRef<((accepted: boolean) => void) | null>(null);
   const tracker = useMemo(() => createRequestTracker(), []);
 
@@ -133,6 +134,11 @@ export function usePseudonymizeWorkspace({
   /** Drop results only; the plan, column choices, and options survive edits. */
   const resetResult = useCallback(() => {
     tracker.begin(RUN_KEY);
+    runPending.current = false;
+    setPreparing(false);
+    keyResolver.current?.(false);
+    keyResolver.current = null;
+    setKeyDialog((dialog) => ({ ...dialog, open: false }));
     setPhase((current) => {
       if (current.status === "idle" || current.status === "inspecting") return current;
       if (current.status === "ready") return current;
@@ -149,6 +155,11 @@ export function usePseudonymizeWorkspace({
   const reset = useCallback(() => {
     tracker.begin(INSPECT_KEY);
     tracker.begin(RUN_KEY);
+    runPending.current = false;
+    setPreparing(false);
+    keyResolver.current?.(false);
+    keyResolver.current = null;
+    setKeyDialog((dialog) => ({ ...dialog, open: false }));
     setPhase({ status: "idle" });
     dispatchColumns({ type: "init", table: EMPTY_TABLE });
     setSheet(undefined);
@@ -156,6 +167,16 @@ export function usePseudonymizeWorkspace({
     setCopied(false);
     setCopiedPath(null);
     setPlanGeneration((generation) => generation + 1);
+  }, [tracker]);
+
+  useLayoutEffect(() => {
+    return () => {
+      tracker.begin(INSPECT_KEY);
+      tracker.begin(RUN_KEY);
+      runPending.current = false;
+      keyResolver.current?.(false);
+      keyResolver.current = null;
+    };
   }, [tracker]);
 
   const baseRequest = useCallback(
@@ -297,7 +318,7 @@ export function usePseudonymizeWorkspace({
   }, []);
 
   const run = useCallback(async () => {
-    if (!projectPath || !active) return;
+    if (!projectPath || !canRun || runPending.current) return;
     if (isTableInput && !hasPlan) return;
     const request = baseRequest();
     if (!request) return;
@@ -308,6 +329,7 @@ export function usePseudonymizeWorkspace({
     const runId = tracker.begin(RUN_KEY);
     const stillCurrent = () => tracker.isLatest(RUN_KEY, runId);
 
+    runPending.current = true;
     setPreparing(true);
     setCopied(false);
     setCopiedPath(null);
@@ -320,12 +342,13 @@ export function usePseudonymizeWorkspace({
           defaultPath: pseudonymizeSuggestedOutputPath(selectedFilePath),
           filters: [outputFilterFor(selectedFilePath)],
         });
-        if (typeof chosen !== "string" || !chosen) return;
+        if (!stillCurrent() || typeof chosen !== "string" || !chosen) return;
         outputPath = chosen;
         if (restoreMap) mapPath = restoreMapSuggestedPath(chosen);
       }
 
       const key = await pseudonymizeKeyStatus(projectPath);
+      if (!stillCurrent()) return;
       if (key.unavailableReason) {
         throw new Error(t(m.keyUnavailable, { reason: key.unavailableReason }));
       }
@@ -351,10 +374,13 @@ export function usePseudonymizeWorkspace({
       if (!stillCurrent()) return;
       setPhase({ status: "error", message: errorMessage(error), inspect: current });
     } finally {
-      setPreparing(false);
+      if (stillCurrent()) {
+        runPending.current = false;
+        setPreparing(false);
+      }
     }
   }, [
-    active,
+    canRun,
     baseRequest,
     columnErrors.length,
     columns,

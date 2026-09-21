@@ -34,9 +34,10 @@ export const en: Messages = {
     rename: "Rename",
     copyPath: "Copy path",
     removeConfirm: "Click again to confirm",
-    removeProject: "Remove project",
+    removeProject: "Remove from list (keep files)",
   },
   topBar: {
+    backToWelcome: "Back to welcome",
     projectBreadcrumb: "Project /",
     welcome: "Welcome",
     maskWorkspace: "Mask for AI",

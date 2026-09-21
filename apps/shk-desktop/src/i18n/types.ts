@@ -39,6 +39,7 @@ export type Messages = {
     removeProject: string;
   };
   topBar: {
+    backToWelcome: string;
     projectBreadcrumb: string;
     welcome: string;
     maskWorkspace: string;

@@ -55,6 +55,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: verify reviewed dependency backports
+        run: python3 .github/scripts/ci/verify-glib-patch.py
+
       - id: resolve
         shell: bash
         env:

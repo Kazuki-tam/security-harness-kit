@@ -34,9 +34,10 @@ export const ja: Messages = {
     rename: "名前を変更",
     copyPath: "パスをコピー",
     removeConfirm: "もう一度クリックで確定",
-    removeProject: "プロジェクトを削除",
+    removeProject: "一覧から外す（ファイルは保持）",
   },
   topBar: {
+    backToWelcome: "ホームに戻る",
     projectBreadcrumb: "プロジェクト /",
     welcome: "ようこそ",
     maskWorkspace: "AI向けマスク",
@@ -79,7 +80,7 @@ export const ja: Messages = {
   },
   mask: {
     title: "AI向けマスク",
-    subtitle: "AIツールへ渡す前にテキストやファイルをマスクし、安全な内容だけをコピーできます。",
+    subtitle: "テキストやファイルをマスクし、結果を確認してからAIツールへコピーできます。",
     policyProject: "shk.toml を使用中",
     policyProjectFallback: "既定を使用",
     policyChecking: "確認中…",

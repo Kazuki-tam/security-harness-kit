@@ -1,5 +1,5 @@
 import { save } from "@tauri-apps/plugin-dialog";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { openAiTool, type PreferredAiTool } from "../aiTool";
 import { useI18n } from "../i18n";
 import { operationErrorMessage } from "../i18n/interpolate";
@@ -51,6 +51,11 @@ export function useMaskWorkspace({
   const m = messages.mask;
   const { inputMode, inputText, selectedFilePath, hasInput } = input;
 
+  // Invalidate work before accepting new input; backend operations cannot be
+  // cancelled, but their results must never replace a newer workspace.
+  const generation = useRef(0);
+  const running = useRef(false);
+  const savingRef = useRef(false);
   const [maskState, setMaskState] = useState<MaskState>({ status: "idle" });
   const [copied, setCopied] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -66,12 +71,26 @@ export function useMaskWorkspace({
   const currentStep: 1 | 2 | 3 = maskState.status === "done" ? 3 : hasInput ? 2 : 1;
 
   const resetResult = useCallback(() => {
+    generation.current += 1;
+    running.current = false;
+    savingRef.current = false;
+    setSaving(false);
     setMaskState({ status: "idle" });
     setCopied(false);
     setSaveMessage(null);
   }, []);
 
+  useLayoutEffect(() => {
+    resetResult();
+    return () => {
+      generation.current += 1;
+      running.current = false;
+      savingRef.current = false;
+    };
+  }, [projectPath, resetResult]);
+
   const runMask = useCallback(async () => {
+    if (running.current || savingRef.current) return;
     if (inputMode === "text" && !inputText.trim()) {
       setMaskState({ status: "error", message: m.emptyInput });
       return;
@@ -81,6 +100,9 @@ export function useMaskWorkspace({
       return;
     }
 
+    const requestId = ++generation.current;
+    const isCurrent = () => generation.current === requestId;
+    running.current = true;
     setMaskState({ status: "loading" });
     setCopied(false);
     setSaveMessage(null);
@@ -88,6 +110,7 @@ export function useMaskWorkspace({
     try {
       if (inputMode === "file" && selectedFilePath) {
         const result = await maskFile(projectPath, selectedFilePath);
+        if (!isCurrent()) return;
         const nextFileMeta: MaskFileMeta = {
           inputPath: selectedFilePath,
           fileKind: result.fileKind,
@@ -107,12 +130,16 @@ export function useMaskWorkspace({
       }
 
       const result = await maskContent(projectPath, inputText);
+      if (!isCurrent()) return;
       setMaskState({ status: "done", source: "text", result });
     } catch (error) {
+      if (!isCurrent()) return;
       setMaskState({
         status: "error",
         message: error instanceof Error ? error.message : String(error),
       });
+    } finally {
+      if (isCurrent()) running.current = false;
     }
   }, [inputMode, inputText, m.emptyInput, projectPath, selectedFilePath]);
 
@@ -148,7 +175,10 @@ export function useMaskWorkspace({
   ]);
 
   const saveMaskedFile = useCallback(async () => {
-    if (!fileMeta || fileMeta.fileKind !== "office") return;
+    if (!fileMeta || fileMeta.fileKind !== "office" || savingRef.current || running.current) return;
+    const requestId = generation.current;
+    const isCurrent = () => generation.current === requestId;
+    savingRef.current = true;
     setSaving(true);
     setSaveMessage(null);
     try {
@@ -157,9 +187,10 @@ export function useMaskWorkspace({
         defaultPath: maskOfficeSuggestedName(fileMeta.sourceLabel),
         filters: [{ name: "Office", extensions: ["docx", "xlsx", "pptx"] }],
       });
-      if (typeof outputPath !== "string" || !outputPath) return;
+      if (!isCurrent() || typeof outputPath !== "string" || !outputPath) return;
 
       const result = await maskFile(projectPath, fileMeta.inputPath, outputPath);
+      if (!isCurrent()) return;
       setMaskState((prev) =>
         prev.status === "done"
           ? {
@@ -179,12 +210,16 @@ export function useMaskWorkspace({
         setSaveMessage(t(m.savedTo, { path: result.outputPath }));
       }
     } catch (error) {
+      if (!isCurrent()) return;
       setMaskState({
         status: "error",
         message: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      setSaving(false);
+      if (isCurrent()) {
+        savingRef.current = false;
+        setSaving(false);
+      }
     }
   }, [fileMeta, m.saveMaskedFile, m.savedTo, projectPath, t]);
 

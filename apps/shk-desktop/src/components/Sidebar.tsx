@@ -191,7 +191,6 @@ function ProjectRow({ project, active, onSelect, onRemove, onRename, onNotice }:
   const rowRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const removeTimer = useRef<number | null>(null);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -221,14 +220,6 @@ function ProjectRow({ project, active, onSelect, onRemove, onRename, onNotice }:
     }
   }, [editing, project.name]);
 
-  useEffect(() => {
-    return () => {
-      if (removeTimer.current !== null) {
-        window.clearTimeout(removeTimer.current);
-      }
-    };
-  }, []);
-
   function commitRename() {
     const next = draft.trim();
     if (next && next !== project.name) {
@@ -253,23 +244,16 @@ function ProjectRow({ project, active, onSelect, onRemove, onRename, onNotice }:
 
   function requestRemove() {
     if (confirmingRemove) {
-      if (removeTimer.current !== null) {
-        window.clearTimeout(removeTimer.current);
-        removeTimer.current = null;
-      }
       setConfirmingRemove(false);
       setMenuOpen(false);
       onRemove();
       return;
     }
     setConfirmingRemove(true);
-    removeTimer.current = window.setTimeout(() => {
-      setConfirmingRemove(false);
-      removeTimer.current = null;
-    }, 2500);
   }
 
   function openMenuAt() {
+    setConfirmingRemove(false);
     setMenuOpen(true);
   }
 
@@ -374,6 +358,7 @@ function ProjectRow({ project, active, onSelect, onRemove, onRename, onNotice }:
           type="button"
           onClick={(event) => {
             event.stopPropagation();
+            setConfirmingRemove(false);
             setMenuOpen((prev) => !prev);
           }}
           aria-label={t(m.menuAria, { name: project.name })}

@@ -172,24 +172,27 @@ export function MaskWorkspace({
     let disposed = false;
     let unlisten: (() => void) | undefined;
 
-    void getCurrentWebview()
-      .onDragDropEvent((event) => {
-        if (disposed) return;
+    // Native lookup can throw synchronously in a browser preview.
+    void Promise.resolve()
+      .then(() =>
+        getCurrentWebview().onDragDropEvent((event) => {
+          if (disposed) return;
 
-        if (event.payload.type === "drop") {
-          setDragActive(false);
-          const path = event.payload.paths[0];
-          if (path && !inputLockedRef.current) applySelectedFile(path);
-          return;
-        }
+          if (event.payload.type === "drop") {
+            setDragActive(false);
+            const path = event.payload.paths[0];
+            if (path && !inputLockedRef.current) applySelectedFile(path);
+            return;
+          }
 
-        if (event.payload.type === "leave") {
-          setDragActive(false);
-          return;
-        }
+          if (event.payload.type === "leave") {
+            setDragActive(false);
+            return;
+          }
 
-        if (inputMode === "file") setDragActive(true);
-      })
+          if (inputMode === "file") setDragActive(true);
+        }),
+      )
       .then((stopListening) => {
         if (disposed) {
           stopListening();

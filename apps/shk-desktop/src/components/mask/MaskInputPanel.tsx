@@ -1,5 +1,5 @@
 import { FileText, FileUp, X } from "lucide-react";
-import type { DragEvent, ReactNode } from "react";
+import { useId, type DragEvent, type ReactNode } from "react";
 import type { MaskInputMode } from "../../hooks/useMaskInput";
 import type { Messages } from "../../i18n/types";
 import { maskFileBasename, maskFileKind } from "../../mask";
@@ -69,9 +69,12 @@ export function MaskInputPanel({
   messages: m,
   t,
 }: Props) {
+  const inputId = useId();
+  const hintId = useId();
+
   function handleDragOver(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
-    onDragActive(true);
+    if (!inputLocked) onDragActive(true);
   }
 
   function handleDragLeave() {
@@ -81,6 +84,7 @@ export function MaskInputPanel({
   function handleDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
     onDragActive(false);
+    if (inputLocked) return;
     const file = event.dataTransfer.files[0];
     if (!file) return;
     const path = (file as File & { path?: string }).path;
@@ -106,12 +110,16 @@ export function MaskInputPanel({
     <section className="grid gap-3 rounded-xl border border-border bg-surface-2/70 p-4 ring-1 ring-inset ring-white/5">
       <div className="flex min-h-[52px] flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-semibold text-white">{m.inputTitle}</h2>
-          <p className="mt-1 text-[12px] text-muted">{inputHint}</p>
+          <h2 id={inputId} className="text-sm font-semibold text-white">
+            {m.inputTitle}
+          </h2>
+          <p id={hintId} className="mt-1 text-[12px] text-muted">
+            {inputHint}
+          </p>
         </div>
         <div
           className="inline-flex rounded-lg border border-border bg-canvas p-0.5"
-          role="tablist"
+          role="group"
           aria-label={m.inputTitle}
         >
           {(["text", "file"] as const).map((mode) => {
@@ -120,8 +128,7 @@ export function MaskInputPanel({
               <button
                 key={mode}
                 type="button"
-                role="tab"
-                aria-selected={active}
+                aria-pressed={active}
                 disabled={inputLocked}
                 onClick={() => onSwitchMode(mode)}
                 className={`rounded-md px-3 py-1.5 text-[11px] font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70 ${
@@ -137,9 +144,44 @@ export function MaskInputPanel({
         </div>
       </div>
 
+      <div className="flex flex-wrap items-center gap-2 border-b border-border/80 pb-3">
+        <Button
+          variant="primary"
+          onClick={onRun}
+          loading={isLoading}
+          disabled={isLoading || !hasInput || runDisabled}
+          aria-describedby={runDisabled ? runDisabledReasonId : undefined}
+          icon={runIcon}
+        >
+          {isLoading ? runningLabel : runLabel}
+        </Button>
+        <Button
+          variant="secondary"
+          onClick={onClear}
+          disabled={inputLocked || (!hasInput && !inputText)}
+        >
+          {m.clearInput}
+        </Button>
+        {inputMode === "file" && (
+          <button
+            type="button"
+            disabled={inputLocked}
+            onClick={() => onSwitchMode("text")}
+            className="text-[11px] font-medium text-sky-200 transition hover:text-white disabled:opacity-60"
+          >
+            {m.useTextInstead}
+          </button>
+        )}
+      </div>
+
       {inputMode === "text" ? (
         <>
           <textarea
+            aria-labelledby={inputId}
+            aria-describedby={hintId}
+            spellCheck={false}
+            autoCorrect="off"
+            autoCapitalize="off"
             value={inputText}
             disabled={inputLocked}
             onChange={(event) => onInputTextChange(event.target.value)}
@@ -214,36 +256,6 @@ export function MaskInputPanel({
           )}
         </div>
       )}
-
-      <div className="flex flex-wrap items-center gap-2 border-t border-border/80 pt-3">
-        <Button
-          variant="primary"
-          onClick={onRun}
-          loading={isLoading}
-          disabled={isLoading || !hasInput || runDisabled}
-          aria-describedby={runDisabled ? runDisabledReasonId : undefined}
-          icon={runIcon}
-        >
-          {isLoading ? runningLabel : runLabel}
-        </Button>
-        <Button
-          variant="secondary"
-          onClick={onClear}
-          disabled={inputLocked || (!hasInput && !inputText)}
-        >
-          {m.clearInput}
-        </Button>
-        {inputMode === "file" && (
-          <button
-            type="button"
-            disabled={inputLocked}
-            onClick={() => onSwitchMode("text")}
-            className="text-[11px] font-medium text-sky-200 transition hover:text-white disabled:opacity-60"
-          >
-            {m.useTextInstead}
-          </button>
-        )}
-      </div>
     </section>
   );
 }

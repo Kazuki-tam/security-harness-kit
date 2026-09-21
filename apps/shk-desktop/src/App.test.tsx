@@ -7,6 +7,7 @@ import { I18nProvider } from "./i18n";
 const invokeMock = vi.fn();
 const openMock = vi.fn();
 const saveMock = vi.fn();
+const webviewMock = vi.fn();
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
@@ -18,9 +19,12 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 
 vi.mock("@tauri-apps/api/webview", () => ({
-  getCurrentWebview: () => ({
-    onDragDropEvent: vi.fn().mockResolvedValue(() => undefined),
-  }),
+  getCurrentWebview: () => {
+    webviewMock();
+    return {
+      onDragDropEvent: vi.fn().mockResolvedValue(() => undefined),
+    };
+  },
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -128,7 +132,7 @@ function openMaskWorkspace() {
 
 async function chooseFileForPseudonymize(path: string) {
   fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
-  fireEvent.click(screen.getByRole("tab", { name: "Upload file" }));
+  fireEvent.click(screen.getByRole("button", { name: "Upload file" }));
   openMock.mockResolvedValue(path);
   fireEvent.click(screen.getByRole("button", { name: /Choose file/ }));
   return screen.findByRole("table");
@@ -160,6 +164,22 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Mask for AI" }));
 
     expect(screen.getByRole("heading", { name: "Mask for AI" })).toBeInTheDocument();
+  });
+
+  it("keeps the mask screen usable without a native webview and can return home", async () => {
+    webviewMock.mockImplementationOnce(() => {
+      throw new Error("No native webview");
+    });
+    render(
+      <I18nProvider>
+        <App />
+      </I18nProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Mask for AI" }));
+    await waitFor(() => expect(webviewMock).toHaveBeenCalled());
+    expect(screen.getByRole("textbox", { name: "Input" })).toHaveAttribute("spellcheck", "false");
+    fireEvent.click(screen.getByRole("button", { name: "Back to welcome" }));
+    expect(screen.getByRole("button", { name: "Open project" })).toBeInTheDocument();
   });
 
   it.each([
@@ -404,7 +424,7 @@ describe("App", () => {
     });
     openMaskWorkspace();
     fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
-    fireEvent.click(screen.getByRole("tab", { name: "Upload file" }));
+    fireEvent.click(screen.getByRole("button", { name: "Upload file" }));
     openMock.mockResolvedValue("/tmp/demo/orders.csv");
     fireEvent.click(screen.getByRole("button", { name: /Choose file/ }));
 
@@ -423,7 +443,7 @@ describe("App", () => {
     seedProject();
     mockPseudonymizeCommands();
     openMaskWorkspace();
-    fireEvent.click(screen.getByRole("tab", { name: "Upload file" }));
+    fireEvent.click(screen.getByRole("button", { name: "Upload file" }));
     openMock.mockResolvedValue("/tmp/demo/scan.pdf");
     fireEvent.click(screen.getByRole("button", { name: /Choose file/ }));
     await screen.findByRole("button", { name: "Remove file" });
@@ -554,7 +574,7 @@ describe("App", () => {
     });
 
     // Clicking the tab that is already active must not discard the plan.
-    fireEvent.click(screen.getByRole("tab", { name: "Upload file" }));
+    fireEvent.click(screen.getByRole("button", { name: "Upload file" }));
     expect(screen.getByRole("combobox", { name: "How to treat Note" })).toHaveValue("name");
 
     // Choosing the same file again (after editing it elsewhere) plans afresh.
