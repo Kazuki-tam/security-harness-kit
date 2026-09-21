@@ -11,8 +11,8 @@ use shk_core::policy::{Policy, SecretStoreBackend};
 use shk_core::pseudonymize::{
     ColumnOverrides, ColumnSource, KeyMaterial, Kind, MapCollector, NormalizeSettings,
     PseudonymizeMeta, ResolvedColumn, TableOptions, TableResult, TextOptions, TokenIndex,
-    decrypt_map, delimiter_for_path, encrypt_map, parse_columns_spec, parse_stored_material,
-    restore_table, run_office_text, run_table, run_text, run_xlsx,
+    decrypt_map, delimiter_for_path, encrypt_map, formula_cell_error, parse_columns_spec,
+    parse_stored_material, restore_table, run_office_text, run_table, run_text, run_xlsx,
 };
 use shk_core::scanner::{ScanOptions, scan_path};
 use std::borrow::Cow;
@@ -744,6 +744,11 @@ fn run_table_xlsx(
     interaction: &dyn Interaction,
 ) -> Result<PseudonymizeOutcome> {
     let plan = plan_table_xlsx(req, policy, !req.dry_run)?;
+    // The planning pass only reports formula cells; the CLI refuses them up
+    // front (as it always has), while a GUI preview shows them instead.
+    if let Some(&(row, col)) = plan.preview.formula_cells.first() {
+        return Err(formula_cell_error(row, col));
+    }
     confirm_table_plan(interaction, &plan.preview)?;
     if req.dry_run {
         return Ok(dry_run_outcome(
@@ -1909,6 +1914,16 @@ pub(crate) mod test_support {
         zip.finish().unwrap();
     }
 
+    /// Write an xlsx-shaped zip from raw entries.
+    pub(crate) fn build_xlsx(path: &Path, entries: &[(&str, String)]) {
+        let mut zip = ZipWriter::new(File::create(path).unwrap());
+        for (name, body) in entries {
+            zip.start_file(*name, zip_options()).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
     pub(crate) fn create_xlsx(path: &Path, header: &str, value: &str) {
         let mut zip = ZipWriter::new(File::create(path).unwrap());
         zip.start_file("[Content_Types].xml", zip_options())
@@ -2022,6 +2037,7 @@ mod tests {
         pasted.columns = Some(ColumnSelection::Resolved(ColumnOverrides {
             entries: vec![("Note".into(), Kind::Custom("note".into()))],
             skip: vec!["Email".into()],
+            positions: Vec::new(),
         }));
         let Preview::Table(table) = preview(&pasted).unwrap() else {
             panic!("buffer previews as a table");
@@ -2141,6 +2157,7 @@ mod tests {
                 Some(ColumnOverrides {
                     entries: vec![("Member".into(), Kind::Custom("member".into()))],
                     skip: vec!["Email".into()],
+                    positions: Vec::new(),
                 }),
             ),
             &open,

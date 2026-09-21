@@ -30,6 +30,10 @@ pub struct ColumnOverrides {
     /// inference would select them. Lets a caller that already reviewed the
     /// plan (the desktop app) send an exact column set.
     pub skip: Vec<String>,
+    /// Choices by column position (`None` leaves the column alone). They win
+    /// over names, so blank or repeated headers can still be addressed one by
+    /// one. A position past the header row is an error.
+    pub positions: Vec<(usize, Option<Kind>)>,
 }
 
 pub fn parse_columns_spec(spec: &str) -> Result<ColumnOverrides, ParseKindError> {
@@ -67,6 +71,7 @@ pub fn parse_columns_spec(spec: &str) -> Result<ColumnOverrides, ParseKindError>
     Ok(ColumnOverrides {
         entries,
         skip: Vec::new(),
+        positions: Vec::new(),
     })
 }
 
@@ -101,6 +106,7 @@ pub fn resolve_columns(
         }
     }
     let mut skip: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut positions: BTreeMap<usize, Option<Kind>> = BTreeMap::new();
     if let Some(cli) = cli {
         for (name, kind) in &cli.entries {
             explicit.insert(
@@ -109,11 +115,33 @@ pub fn resolve_columns(
             );
         }
         skip.extend(cli.skip.iter().map(|name| normalize_header_key(name)));
+        for (index, kind) in &cli.positions {
+            if *index >= headers.len() {
+                return Err(format!(
+                    "column position {} does not exist (the table has {} columns)",
+                    index + 1,
+                    headers.len()
+                ));
+            }
+            positions.insert(*index, kind.clone());
+        }
     }
 
     let mut resolved = Vec::new();
     let mut matched_explicit = std::collections::BTreeSet::new();
     for (index, header) in headers.iter().enumerate() {
+        if let Some(choice) = positions.get(&index) {
+            if let Some(kind) = choice {
+                resolved.push(ResolvedColumn {
+                    index,
+                    name: header.clone(),
+                    kind: kind.clone(),
+                    source: ColumnSource::Cli,
+                    match_rate: None,
+                });
+            }
+            continue;
+        }
         let key = normalize_header_key(header);
         // An explicit skip wins over config and inference: the caller has
         // already decided this column stays as it is.
@@ -366,6 +394,7 @@ mod tests {
         let overrides = ColumnOverrides {
             entries: vec![("Note".into(), Kind::Custom("note".into()))],
             skip: vec!["email".into(), "PHONE".into()],
+            positions: Vec::new(),
         };
         let resolved = resolve_columns(&headers, &rows, &config, Some(&overrides)).unwrap();
         assert_eq!(resolved.len(), 1);
@@ -375,10 +404,68 @@ mod tests {
         let unmatched = ColumnOverrides {
             entries: Vec::new(),
             skip: vec!["Missing".into()],
+            positions: Vec::new(),
         };
         let err = resolve_columns(&headers, &rows, &config, Some(&unmatched)).unwrap_err();
         assert!(err.contains("Missing"), "{err}");
         assert!(parse_columns_spec("Email:email").unwrap().skip.is_empty());
+    }
+
+    #[test]
+    fn positions_address_blank_and_repeated_headers() {
+        let headers = vec!["Email".into(), "".into(), "Email".into()];
+        let rows = vec![vec![
+            ["ada", "@", "example.com"].concat(),
+            ["090", "-", "1234", "-", "5678"].concat(),
+            ["bob", "@", "example.com"].concat(),
+        ]];
+        let overrides = ColumnOverrides {
+            entries: Vec::new(),
+            skip: Vec::new(),
+            positions: vec![(0, None), (1, Some(Kind::Phone)), (2, Some(Kind::Email))],
+        };
+        let resolved =
+            resolve_columns(&headers, &rows, &BTreeMap::new(), Some(&overrides)).unwrap();
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(
+            (resolved[0].index, resolved[0].kind.clone()),
+            (1, Kind::Phone)
+        );
+        assert_eq!(
+            (resolved[1].index, resolved[1].kind.clone()),
+            (2, Kind::Email)
+        );
+        assert!(
+            resolved
+                .iter()
+                .all(|column| column.source == ColumnSource::Cli)
+        );
+
+        // Positions beat names and config for the same column.
+        let mut config = BTreeMap::new();
+        config.insert("Email".into(), "email".into());
+        let both = ColumnOverrides {
+            entries: vec![("Email".into(), Kind::Name)],
+            skip: Vec::new(),
+            positions: vec![(0, None)],
+        };
+        let resolved = resolve_columns(&headers, &rows, &config, Some(&both)).unwrap();
+        // Column 0 is skipped by position; the blank column is still inferred
+        // (a phone-like sample) and the last one takes the name entry.
+        assert_eq!(
+            resolved.iter().map(|c| c.index).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(resolved[0].source, ColumnSource::Inferred);
+        assert_eq!(resolved[1].kind, Kind::Name);
+
+        let beyond = ColumnOverrides {
+            entries: Vec::new(),
+            skip: Vec::new(),
+            positions: vec![(5, None)],
+        };
+        let err = resolve_columns(&headers, &rows, &BTreeMap::new(), Some(&beyond)).unwrap_err();
+        assert!(err.contains("position 6"), "{err}");
     }
 
     #[test]

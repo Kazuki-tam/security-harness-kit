@@ -63,6 +63,10 @@ pub struct TableResult {
     /// Populated on dry-run planning passes only; a real run leaves it empty
     /// so raw values are never carried past the write.
     pub sample_rows: Vec<Vec<String>>,
+    /// xlsx dry runs only: the first formula cell (0-based row, column) found
+    /// in each selected column. A real run refuses such columns; a planner
+    /// can show them instead so the user deselects them.
+    pub formula_cells: Vec<(usize, usize)>,
 }
 
 pub fn delimiter_for_path(path: Option<&std::path::Path>) -> u8 {
@@ -152,6 +156,7 @@ pub fn run_table<R: Read, W: Write>(
             has_header,
             headers,
             sample_rows: pending_rows,
+            formula_cells: Vec::new(),
         });
     }
 
@@ -214,6 +219,7 @@ pub fn run_table<R: Read, W: Write>(
         has_header,
         headers,
         sample_rows: Vec::new(),
+        formula_cells: Vec::new(),
     })
 }
 
@@ -315,6 +321,7 @@ fn empty_result(
         has_header,
         headers: Vec::new(),
         sample_rows: Vec::new(),
+        formula_cells: Vec::new(),
     }
 }
 

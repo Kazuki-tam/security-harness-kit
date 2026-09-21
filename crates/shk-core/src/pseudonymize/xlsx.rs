@@ -102,19 +102,22 @@ pub fn run_xlsx(
     .map_err(|err| anyhow::anyhow!(err))?;
     let data_offset = leading_blank + usize::from(has_header);
     let selected_columns: BTreeSet<usize> = columns.iter().map(|column| column.index).collect();
-    if let Some((row, col)) = parse_formula_cells(&sheet_xml)?
-        .into_iter()
-        .find(|(row, col)| {
-            *row >= data_offset
-                && *row < data_offset + data_rows.len()
-                && selected_columns.contains(col)
-        })
+    // The first formula cell per selected column, in column order. A dry run
+    // reports them so a planner can steer the user away; a real run refuses.
+    let mut formula_cells: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
+    for (row, col) in parse_formula_cells(&sheet_xml)? {
+        if row >= data_offset
+            && row < data_offset + data_rows.len()
+            && selected_columns.contains(&col)
+        {
+            formula_cells.entry(col).or_insert((row, col));
+        }
+    }
+    let formula_cells: Vec<(usize, usize)> = formula_cells.into_values().collect();
+    if !options.dry_run
+        && let Some(&(row, col)) = formula_cells.first()
     {
-        bail!(
-            "refusing to pseudonymize formula cell at row {}, column {}; select a value-only column",
-            row + 1,
-            col + 1
-        );
+        return Err(formula_cell_error(row, col));
     }
 
     if options.dry_run {
@@ -133,6 +136,7 @@ pub fn run_xlsx(
             has_header,
             headers,
             sample_rows: data_rows[..sample_len].to_vec(),
+            formula_cells,
         });
     }
     let material = material.expect("checked above");
@@ -194,7 +198,17 @@ pub fn run_xlsx(
         has_header,
         headers,
         sample_rows: Vec::new(),
+        formula_cells: Vec::new(),
     })
+}
+
+/// The refusal a run raises for a formula cell (0-based row and column).
+pub fn formula_cell_error(row: usize, col: usize) -> anyhow::Error {
+    anyhow::anyhow!(
+        "refusing to pseudonymize formula cell at row {}, column {}; select a value-only column",
+        row + 1,
+        col + 1
+    )
 }
 
 /// Sheet names in workbook order. The position (1-based) is the number that
@@ -820,6 +834,7 @@ fn empty_xlsx_result(options: &TableOptions, material: Option<&KeyMaterial>) -> 
         has_header: !options.no_header,
         headers: Vec::new(),
         sample_rows: Vec::new(),
+        formula_cells: Vec::new(),
     }
 }
 
@@ -1071,8 +1086,24 @@ mod tests {
         );
         let mut dry = options();
         dry.dry_run = true;
-        let err = run_xlsx(&input, None, None, &dry, None, None).unwrap_err();
+        // A dry run reports the cell so a planner can show it; a run refuses.
+        let preview = run_xlsx(&input, None, None, &dry, None, None).unwrap();
+        assert_eq!(preview.formula_cells, vec![(1, 0)]);
+        let err = run_xlsx(
+            &input,
+            Some(&dir.path().join("out.xlsx")),
+            None,
+            &options(),
+            Some(&material()),
+            None,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("formula cell"), "{err}");
+        assert_eq!(
+            formula_cell_error(1, 0).to_string(),
+            "refusing to pseudonymize formula cell at row 2, column 1; select a value-only column"
+        );
+        assert!(!dir.path().join("out.xlsx").exists());
     }
 
     #[test]

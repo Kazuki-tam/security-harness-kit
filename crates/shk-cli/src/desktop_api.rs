@@ -540,6 +540,10 @@ const PSEUDONYMIZE_INLINE_LABEL: &str = "<pasted>";
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PseudonymizeColumnChoice {
+    /// Column position from the plan. When every choice carries one, columns
+    /// are addressed by position, so blank or repeated headers work too.
+    #[serde(default)]
+    pub index: Option<usize>,
     pub name: String,
     /// `email`, `phone`, `name`, `custom`, or `none` (leave the column as it is).
     pub kind: String,
@@ -580,6 +584,8 @@ pub struct PseudonymizeColumnPlan {
     /// `config`, `cli`, `inferred`, `rule`, or `none`.
     pub source: String,
     pub match_rate: Option<f64>,
+    /// xlsx only: the column holds a formula cell, which a run would refuse.
+    pub formula: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -677,6 +683,13 @@ pub fn pseudonymize_inspect(
     project_root: &Path,
     options: PseudonymizeInspectOptions,
 ) -> Result<PseudonymizeInspectResult> {
+    pseudonymize_inspect_inner(project_root, options).map_err(flatten_error)
+}
+
+fn pseudonymize_inspect_inner(
+    project_root: &Path,
+    options: PseudonymizeInspectOptions,
+) -> Result<PseudonymizeInspectResult> {
     let root = require_pseudonymize_project(project_root)?;
     let parsed = parse_pseudonymize_input(options)?;
     let (source, source_label) = match parsed.input {
@@ -690,6 +703,12 @@ pub fn pseudonymize_inspect(
         ),
     };
     let kind = pseudonymize::classify_input(source.path(), parsed.mode, parsed.format)?;
+    let (sheets, sheet, selected_sheet) = if kind == InputKind::TableXlsx {
+        let path = source.path().expect("xlsx input is a file");
+        sheet_selection(path, parsed.sheet.as_deref())?
+    } else {
+        (Vec::new(), parsed.sheet.clone(), None)
+    };
     let request = PseudonymizeRequest {
         project_root: root,
         source,
@@ -699,19 +718,12 @@ pub fn pseudonymize_inspect(
         no_header: parsed.no_header,
         mode: parsed.mode,
         format: parsed.format,
-        sheet: parsed.sheet.clone(),
+        sheet,
         map: None,
         check_remaining: false,
     };
-    let table = match pseudonymize::preview(&request).map_err(flatten_error)? {
+    let table = match pseudonymize::preview(&request)? {
         Preview::Table(table) => {
-            let (sheets, selected_sheet) = if kind == InputKind::TableXlsx {
-                let sheets = list_sheets(request.source.path().expect("xlsx input is a file"))?;
-                let selected = resolve_sheet_name(&sheets, parsed.sheet.as_deref());
-                (sheets, selected)
-            } else {
-                (Vec::new(), None)
-            };
             let delimiter = match (kind, parsed.format) {
                 (InputKind::TableXlsx, _) | (_, Some(PseudonymizeFormatArg::Csv)) => ",",
                 (_, Some(PseudonymizeFormatArg::Tsv)) => "\t",
@@ -734,6 +746,13 @@ pub fn pseudonymize_key_status(project_root: &Path) -> Result<PseudonymizeKeySta
 }
 
 pub(crate) fn pseudonymize_key_status_with(
+    project_root: &Path,
+    open_store: StoreOpener<'_>,
+) -> Result<PseudonymizeKeyStatus> {
+    pseudonymize_key_status_inner(project_root, open_store).map_err(flatten_error)
+}
+
+fn pseudonymize_key_status_inner(
     project_root: &Path,
     open_store: StoreOpener<'_>,
 ) -> Result<PseudonymizeKeyStatus> {
@@ -781,6 +800,14 @@ pub(crate) fn pseudonymize_run_with(
     options: PseudonymizeRunOptions,
     open_store: StoreOpener<'_>,
 ) -> Result<PseudonymizeRunResult> {
+    pseudonymize_run_inner(project_root, options, open_store).map_err(flatten_error)
+}
+
+fn pseudonymize_run_inner(
+    project_root: &Path,
+    options: PseudonymizeRunOptions,
+    open_store: StoreOpener<'_>,
+) -> Result<PseudonymizeRunResult> {
     let root = require_pseudonymize_project(project_root)?;
     let parsed = parse_pseudonymize_input(options.input)?;
     // The app is expected to send a choice for every header. Should a caller
@@ -811,6 +838,11 @@ pub(crate) fn pseudonymize_run_with(
             // Unlike redaction, outputs are not confined to the project tree:
             // business exports usually live outside the repository and the
             // location came from a save dialog the user drove.
+            let sheet = if kind == InputKind::TableXlsx {
+                sheet_selection(&path, parsed.sheet.as_deref())?.1
+            } else {
+                parsed.sheet
+            };
             let request = PseudonymizeRequest {
                 project_root: root,
                 source: PseudonymizeSource::File(path),
@@ -820,12 +852,11 @@ pub(crate) fn pseudonymize_run_with(
                 no_header: parsed.no_header,
                 mode: parsed.mode,
                 format: parsed.format,
-                sheet: parsed.sheet,
+                sheet,
                 map,
                 check_remaining: options.check_remaining,
             };
-            let outcome =
-                pseudonymize::mask_core(request, open_store, &decisions).map_err(flatten_error)?;
+            let outcome = pseudonymize::mask_core(request, open_store, &decisions)?;
             let written = outcome
                 .written
                 .ok_or_else(|| anyhow::anyhow!("pseudonymize run finished without writing"))?;
@@ -870,8 +901,7 @@ pub(crate) fn pseudonymize_run_with(
                 },
                 open_store,
                 &decisions,
-            )
-            .map_err(flatten_error)?;
+            )?;
             Ok(PseudonymizeRunResult {
                 mode: outcome.meta.mode.to_string(),
                 rows_processed: outcome.meta.rows_processed,
@@ -915,7 +945,7 @@ pub(crate) fn pseudonymize_restore_with(
     output_path: &Path,
     open_store: StoreOpener<'_>,
 ) -> Result<PseudonymizeRestoreResult> {
-    let root = require_pseudonymize_project(project_root)?;
+    let root = require_pseudonymize_project(project_root).map_err(flatten_error)?;
     let summary = pseudonymize::restore_with(
         &root,
         input_path.to_path_buf(),
@@ -1015,40 +1045,69 @@ fn column_overrides(choices: &[PseudonymizeColumnChoice]) -> Result<Option<Colum
     if choices.is_empty() {
         return Ok(None);
     }
+    let by_position = choices.iter().all(|choice| choice.index.is_some());
+    if !by_position && choices.iter().any(|choice| choice.index.is_some()) {
+        anyhow::bail!("column choices must all carry a position, or none of them");
+    }
     let mut overrides = ColumnOverrides::default();
     let mut seen = std::collections::BTreeSet::new();
     for choice in choices {
         let name = choice.name.trim();
-        if name.is_empty() {
-            anyhow::bail!("column choice has an empty name");
-        }
-        // Headers match case-insensitively, so two choices that fold to the
-        // same name would silently override each other.
-        if !seen.insert(name.to_ascii_lowercase()) {
-            anyhow::bail!("column `{name}` was chosen twice");
+        let label = if by_position {
+            format!("column {}", choice.index.unwrap_or_default() + 1)
+        } else {
+            format!("column `{name}`")
+        };
+        let key = match choice.index {
+            Some(index) => index.to_string(),
+            // Headers match case-insensitively, so two names that fold to the
+            // same key would silently override each other.
+            None if name.is_empty() => anyhow::bail!("column choice has an empty name"),
+            None => name.to_ascii_lowercase(),
+        };
+        if !seen.insert(key) {
+            anyhow::bail!("{label} was chosen twice");
         }
         let kind = match choice.kind.trim() {
-            "none" => {
-                overrides.skip.push(name.to_string());
-                continue;
-            }
+            "none" => None,
             "custom" => {
-                let label = choice
+                let custom = choice
                     .custom_label
                     .as_deref()
                     .map(str::trim)
                     .unwrap_or_default();
-                if label.is_empty() {
-                    anyhow::bail!("column `{name}` needs a label for the custom kind");
+                if custom.is_empty() {
+                    anyhow::bail!("{label} needs a label for the custom kind");
                 }
-                Kind::parse(&format!("custom:{label}"))
+                Some(Kind::parse(&format!("custom:{custom}")))
             }
-            other => Kind::parse(other),
+            other => Some(Kind::parse(other)),
         }
-        .map_err(|err| anyhow::anyhow!("column `{name}`: {}", err.0))?;
-        overrides.entries.push((name.to_string(), kind));
+        .transpose()
+        .map_err(|err| anyhow::anyhow!("{label}: {}", err.0))?;
+        match (choice.index, kind) {
+            (Some(index), kind) => overrides.positions.push((index, kind)),
+            (None, Some(kind)) => overrides.entries.push((name.to_string(), kind)),
+            (None, None) => overrides.skip.push(name.to_string()),
+        }
     }
     Ok(Some(overrides))
+}
+
+/// Sheets for the picker, the selector to hand to the engine, and the name
+/// that selector resolves to. The engine reads a numeric selector as a
+/// position, so a sheet whose *name* looks like a number is sent by position.
+fn sheet_selection(
+    path: &Path,
+    spec: Option<&str>,
+) -> Result<(Vec<String>, Option<String>, Option<String>)> {
+    let sheets = list_sheets(path)?;
+    let selector = spec.map(|spec| match sheets.iter().position(|name| name == spec) {
+        Some(index) => (index + 1).to_string(),
+        None => spec.to_string(),
+    });
+    let selected = resolve_sheet_name(&sheets, selector.as_deref());
+    Ok((sheets, selector, selected))
 }
 
 fn table_preview(
@@ -1068,19 +1127,23 @@ fn table_preview(
             .map(|row| row.iter().map(|cell| truncate_cell(cell)).collect())
             .collect(),
         row_count: result.meta.rows_processed,
-        columns: column_plans(&result.headers, &result.columns),
+        columns: column_plans(&result.headers, &result.columns, &result.formula_cells),
         sheets,
         selected_sheet,
     }
 }
 
 /// One plan entry per header, so the UI can render unselected columns too.
-fn column_plans(headers: &[String], resolved: &[ResolvedColumn]) -> Vec<PseudonymizeColumnPlan> {
+fn column_plans(
+    headers: &[String],
+    resolved: &[ResolvedColumn],
+    formula_cells: &[(usize, usize)],
+) -> Vec<PseudonymizeColumnPlan> {
     headers
         .iter()
         .enumerate()
         .map(|(index, name)| {
-            resolved
+            let mut plan = resolved
                 .iter()
                 .find(|column| column.index == index)
                 .map(column_plan)
@@ -1091,7 +1154,10 @@ fn column_plans(headers: &[String], resolved: &[ResolvedColumn]) -> Vec<Pseudony
                     custom_label: None,
                     source: "none".to_string(),
                     match_rate: None,
-                })
+                    formula: false,
+                });
+            plan.formula = formula_cells.iter().any(|(_, col)| *col == index);
+            plan
         })
         .collect()
 }
@@ -1114,6 +1180,7 @@ fn column_plan(column: &ResolvedColumn) -> PseudonymizeColumnPlan {
         }
         .to_string(),
         match_rate: column.match_rate,
+        formula: false,
     }
 }
 
@@ -4441,10 +4508,125 @@ mod tests {
 
         fn choice(name: &str, kind: &str) -> PseudonymizeColumnChoice {
             PseudonymizeColumnChoice {
+                index: None,
                 name: name.to_string(),
                 kind: kind.to_string(),
                 custom_label: None,
             }
+        }
+
+        fn at(index: usize, kind: &str) -> PseudonymizeColumnChoice {
+            PseudonymizeColumnChoice {
+                index: Some(index),
+                name: String::new(),
+                kind: kind.to_string(),
+                custom_label: None,
+            }
+        }
+
+        #[test]
+        fn positional_choices_handle_blank_and_repeated_headers() {
+            let dir = project();
+            let root = dir.path();
+            let store = Arc::new(MemoryStore::default());
+            let open = opener(Arc::clone(&store));
+            // A trailing comma and a repeated header, as exports often have.
+            fs::write(
+                root.join("export.csv"),
+                format!("Email,Email,\n{},{},note\n", email(), email()),
+            )
+            .unwrap();
+            let table = pseudonymize_inspect(root, file_options(&root.join("export.csv")))
+                .unwrap()
+                .table
+                .unwrap();
+            assert_eq!(
+                table.headers,
+                vec!["Email".to_string(), "Email".to_string(), "".to_string()]
+            );
+            assert_eq!(table.columns.len(), 3);
+            assert!(table.columns.iter().all(|column| !column.formula));
+
+            let mut run = run_options(
+                file_options(&root.join("export.csv")),
+                Some(&root.join("export.pseudo.csv")),
+            );
+            run.input.columns = vec![at(0, "email"), at(1, "none"), at(2, "name")];
+            let result = pseudonymize_run_with(root, run, &open).unwrap();
+            assert_eq!(result.columns.len(), 2);
+            assert_eq!(result.replaced.get("email"), Some(&1));
+            let pseudo = fs::read_to_string(root.join("export.pseudo.csv")).unwrap();
+            assert!(pseudo.contains(&email()), "second column stays");
+            assert!(pseudo.contains("name_"), "{pseudo}");
+
+            let mut twice = run_options(
+                file_options(&root.join("export.csv")),
+                Some(&root.join("t.csv")),
+            );
+            twice.input.columns = vec![at(0, "email"), at(0, "none"), at(1, "none"), at(2, "none")];
+            let err = pseudonymize_run_with(root, twice, &open).unwrap_err();
+            assert!(
+                err.to_string().contains("column 1 was chosen twice"),
+                "{err}"
+            );
+            let mut mixed = run_options(
+                file_options(&root.join("export.csv")),
+                Some(&root.join("t.csv")),
+            );
+            mixed.input.columns = vec![at(0, "email"), choice("Email", "none")];
+            assert!(pseudonymize_run_with(root, mixed, &open).is_err());
+            let mut beyond = run_options(
+                file_options(&root.join("export.csv")),
+                Some(&root.join("t.csv")),
+            );
+            beyond.input.columns =
+                vec![at(0, "none"), at(1, "none"), at(2, "none"), at(7, "email")];
+            let err = pseudonymize_run_with(root, beyond, &open).unwrap_err();
+            assert!(err.to_string().contains("position 8"), "{err}");
+            assert!(!root.join("t.csv").exists());
+        }
+
+        #[test]
+        fn numeric_sheet_names_are_sent_by_position() {
+            let dir = project();
+            let root = dir.path();
+            let workbook = r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Summary" sheetId="1" r:id="rId1"/><sheet name="2024" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
+            let rels = r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#;
+            let sheet = |header: &str| {
+                format!(
+                    r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{header}</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>{}</t></is></c></row></sheetData></worksheet>"#,
+                    email()
+                )
+            };
+            crate::commands::pseudonymize::test_support::build_xlsx(
+                &root.join("book.xlsx"),
+                &[
+                    ("[Content_Types].xml", "<Types/>".into()),
+                    ("xl/workbook.xml", workbook.into()),
+                    ("xl/_rels/workbook.xml.rels", rels.into()),
+                    ("xl/worksheets/sheet1.xml", sheet("Contact")),
+                    ("xl/worksheets/sheet2.xml", sheet("Mail")),
+                ],
+            );
+            let mut by_name = file_options(&root.join("book.xlsx"));
+            by_name.sheet = Some("2024".into());
+            let table = pseudonymize_inspect(root, by_name).unwrap().table.unwrap();
+            assert_eq!(
+                table.sheets,
+                vec!["Summary".to_string(), "2024".to_string()]
+            );
+            assert_eq!(table.selected_sheet.as_deref(), Some("2024"));
+            assert_eq!(table.headers, vec!["Mail".to_string()]);
+
+            let (sheets, selector, selected) =
+                sheet_selection(&root.join("book.xlsx"), Some("2024")).unwrap();
+            assert_eq!(sheets.len(), 2);
+            assert_eq!(selector.as_deref(), Some("2"));
+            assert_eq!(selected.as_deref(), Some("2024"));
+            let (_, selector, selected) =
+                sheet_selection(&root.join("book.xlsx"), Some("Nope")).unwrap();
+            assert_eq!(selector.as_deref(), Some("Nope"));
+            assert!(selected.is_none());
         }
 
         fn run_options(
@@ -4500,6 +4682,7 @@ mod tests {
             options.columns = vec![
                 choice("Email", "none"),
                 PseudonymizeColumnChoice {
+                    index: None,
                     name: "Note".into(),
                     kind: "custom".into(),
                     custom_label: Some("note".into()),
@@ -4744,6 +4927,7 @@ mod tests {
             table.input.columns = vec![
                 choice("Email", "email"),
                 PseudonymizeColumnChoice {
+                    index: None,
                     name: "Member".into(),
                     kind: "custom".into(),
                     custom_label: Some("member".into()),
@@ -4817,6 +5001,7 @@ mod tests {
 
             let mut bad_label = run_options(file_options(&csv), Some(&root.join("c.csv")));
             bad_label.input.columns = vec![PseudonymizeColumnChoice {
+                index: None,
                 name: "Note".into(),
                 kind: "custom".into(),
                 custom_label: Some("Bad Label".into()),

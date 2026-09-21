@@ -25,7 +25,7 @@ pub use table::{
     MetaColumn, PseudonymizeMeta, TableOptions, TableResult, delimiter_for_path, run_table,
 };
 pub use text::{TextOptions, TextResult, run_office_text, run_text};
-pub use xlsx::{list_sheets, run_xlsx};
+pub use xlsx::{formula_cell_error, list_sheets, run_xlsx};
 
 pub const NORM_V1: &str = "v1";
 pub const UNPARSED: &str = "[UNPARSED]";
