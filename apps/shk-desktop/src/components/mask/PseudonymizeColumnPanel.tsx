@@ -1,4 +1,4 @@
-import { Check, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { useId, type Dispatch } from "react";
 import type { Messages } from "../../i18n/types";
 import type { PseudonymizeInspectResult, PseudonymizeKindChoice } from "../../pseudonymize";
@@ -20,13 +20,15 @@ type Props = {
   onSheetChange: (sheet: string) => void;
   disabled: boolean;
   inspecting: boolean;
+  noHeader: boolean;
+  onNoHeaderChange: (value: boolean) => void;
   messages: Messages["mask"]["pseudonymize"];
   t: (template: string, vars?: Record<string, string | number>) => string;
 };
 
 const KIND_ORDER: PseudonymizeKindChoice[] = ["email", "phone", "name", "custom", "none"];
 
-/** One row per column: name, a couple of sample values, and how to treat it. */
+/** Keep the source table orientation so choices line up with the values they affect. */
 export function PseudonymizeColumnPanel({
   inspect,
   columns,
@@ -36,6 +38,8 @@ export function PseudonymizeColumnPanel({
   onSheetChange,
   disabled,
   inspecting,
+  noHeader,
+  onNoHeaderChange,
   messages: m,
   t,
 }: Props) {
@@ -46,7 +50,7 @@ export function PseudonymizeColumnPanel({
   const selected = selectedCount(columns);
   const errorFor = (index: number) => columnErrors.find((error) => error.index === index);
   const suggestionsPending = hasUnappliedSuggestions(columns);
-  const sampleCount = Math.min(2, table.sampleRows.length);
+  const locked = disabled || inspecting;
 
   return (
     <section
@@ -66,7 +70,7 @@ export function PseudonymizeColumnPanel({
             <select
               id={sheetId}
               value={sheet ?? table.selectedSheet ?? ""}
-              disabled={disabled}
+              disabled={locked}
               onChange={(event) => onSheetChange(event.target.value)}
               className="rounded-lg border border-border-strong bg-canvas/70 px-3 py-1.5 text-[12px] font-medium text-white outline-none transition focus:border-sky-300/70 focus:ring-2 focus:ring-sky-300/20 disabled:opacity-60"
             >
@@ -96,7 +100,7 @@ export function PseudonymizeColumnPanel({
           <Button
             variant="secondary"
             size="sm"
-            disabled={disabled || !suggestionsPending}
+            disabled={locked || !suggestionsPending}
             onClick={() => dispatch({ type: "applySuggestions" })}
           >
             {m.applySuggestions}
@@ -104,7 +108,7 @@ export function PseudonymizeColumnPanel({
           <Button
             variant="secondary"
             size="sm"
-            disabled={disabled || selected === 0}
+            disabled={locked || selected === 0}
             onClick={() => dispatch({ type: "clearAll" })}
           >
             {m.clearSelection}
@@ -112,73 +116,76 @@ export function PseudonymizeColumnPanel({
         </div>
       </div>
 
-      <div className="shk-scroll overflow-x-auto rounded-lg border border-border/70">
-        <table className="w-full min-w-[640px] border-collapse text-left text-[12px]">
+      <div className="flex flex-wrap items-center justify-between gap-3 text-[12px] text-muted">
+        <p>{t(m.previewRows, { count: table.sampleRows.length, total: table.rowCount })}</p>
+        <label className="inline-flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={!noHeader}
+            disabled={locked}
+            onChange={(event) => onNoHeaderChange(!event.target.checked)}
+            className="h-4 w-4 accent-sky-400"
+          />
+          {m.firstRowHeader}
+        </label>
+      </div>
+      <p className="text-[11px] text-muted">{m.previewHint}</p>
+      <div
+        className="shk-sheet shk-scroll max-h-[560px] overflow-auto rounded-xl border border-slate-300 bg-white text-slate-800 shadow-sm focus-visible:outline-2 focus-visible:outline-sky-600"
+        role="region"
+        aria-label={t(m.tableCaption, { file: inspect.sourceLabel })}
+        tabIndex={0}
+      >
+        <table className="w-full border-separate border-spacing-0 text-left text-[12px]">
           <caption className="sr-only">{t(m.tableCaption, { file: inspect.sourceLabel })}</caption>
-          <thead className="bg-canvas/60 text-[10px] font-semibold tracking-[0.08em] text-white/70 uppercase">
+          <thead className="sticky top-0 z-10 bg-slate-50 text-slate-800">
             <tr>
-              <th scope="col" className="w-8 px-3 py-2">
-                <span className="sr-only">{m.colSelected}</span>
+              <th
+                scope="col"
+                className="sticky left-0 z-20 w-10 border-b border-slate-300 bg-slate-100 px-3 py-3 text-center align-top font-medium text-slate-500"
+              >
+                <span className="sr-only">{m.rowNumber}</span>#
               </th>
-              <th scope="col" className="px-3 py-2">
-                {m.colHeader}
-              </th>
-              <th scope="col" className="px-3 py-2">
-                {m.colSamples}
-              </th>
-              <th scope="col" className="px-3 py-2">
-                {m.colKind}
-              </th>
-              <th scope="col" className="px-3 py-2">
-                {m.colSuggestion}
-              </th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border/70">
-            {columns.map((choice) => {
-              const active = choice.kind !== "none";
-              const error = errorFor(choice.index);
-              const samples = table.sampleRows
-                .slice(0, sampleCount)
-                .map((row) => row[choice.index] ?? "");
-              const suggestion = choice.suggestion;
-              const suggestionMatches = suggestion ? suggestion.kind === choice.kind : true;
-              // Without a header row the engine names columns 0, 1, …; people count from 1.
-              const displayName = table.hasHeader ? choice.name : String(choice.index + 1);
-              return (
-                <tr
-                  key={choice.index}
-                  className={active ? "bg-sky-500/5" : undefined}
-                  data-selected={active ? "true" : "false"}
-                >
-                  <td className="px-3 py-2 align-top text-sky-200">
-                    {active && <Check size={14} aria-hidden="true" />}
-                  </td>
-                  <th scope="row" className="px-3 py-2 align-top font-medium text-white">
-                    {displayName}
-                  </th>
-                  <td className="px-3 py-2 align-top">
-                    <ul className="grid gap-0.5">
-                      {samples.length === 0 && (
-                        <li className="text-[11px] text-faint">{m.noSamples}</li>
-                      )}
-                      {samples.map((sample, sampleIndex) => (
-                        <li
-                          key={sampleIndex}
-                          className="max-w-[220px] truncate font-mono text-[11px] text-muted"
-                          title={sample}
-                        >
-                          {sample === "" ? m.noSamples : sample}
-                        </li>
-                      ))}
-                    </ul>
-                  </td>
-                  <td className="px-3 py-2 align-top">
-                    <div className="grid gap-1.5">
+              {columns.map((choice) => {
+                const active = choice.kind !== "none";
+                const displayName =
+                  table.hasHeader && choice.name ? choice.name : String(choice.index + 1);
+                const suggestion = choice.suggestion;
+                return (
+                  <th
+                    key={choice.index}
+                    scope="col"
+                    data-selected={active ? "true" : "false"}
+                    className={`min-w-[220px] max-w-[300px] border-b border-l border-slate-300 px-3 py-3 align-top font-normal shadow-[inset_0_3px_0_var(--column-accent)] ${active ? "bg-blue-50 [--column-accent:var(--color-sky-600)]" : "bg-slate-50 [--column-accent:transparent]"}`}
+                  >
+                    <div className="grid gap-2">
+                      <label className="flex cursor-pointer items-start gap-2 font-semibold">
+                        <input
+                          type="checkbox"
+                          checked={active}
+                          disabled={locked || choice.formula}
+                          aria-label={t(m.selectColumn, {
+                            column: displayName,
+                            number: choice.index + 1,
+                          })}
+                          onChange={(event) =>
+                            dispatch({
+                              type: "setSelected",
+                              index: choice.index,
+                              selected: event.target.checked,
+                            })
+                          }
+                          className="mt-0.5 h-4 w-4 shrink-0 accent-sky-700"
+                        />
+                        <span className="break-words">{displayName}</span>
+                        <span className="ml-auto shrink-0 rounded bg-white/80 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-slate-500 ring-1 ring-slate-200">
+                          #{choice.index + 1}
+                        </span>
+                      </label>
                       <select
                         aria-label={t(m.kindSelectLabel, { column: displayName })}
                         value={choice.kind}
-                        disabled={disabled || choice.formula}
+                        disabled={locked || choice.formula}
                         onChange={(event) =>
                           dispatch({
                             type: "setKind",
@@ -186,7 +193,7 @@ export function PseudonymizeColumnPanel({
                             kind: event.target.value as PseudonymizeKindChoice,
                           })
                         }
-                        className="w-full min-w-[180px] rounded-lg border border-border-strong bg-canvas/70 px-2.5 py-1.5 text-[12px] font-medium text-white outline-none transition focus:border-sky-300/70 focus:ring-2 focus:ring-sky-300/20 disabled:opacity-60"
+                        className="w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-[12px] text-slate-800 shadow-sm outline-none focus:border-sky-600 focus:ring-2 focus:ring-sky-600/20 disabled:bg-slate-100 disabled:text-slate-500"
                       >
                         {KIND_ORDER.map((kind) => (
                           <option key={kind} value={kind}>
@@ -197,38 +204,61 @@ export function PseudonymizeColumnPanel({
                       {choice.kind === "custom" && (
                         <CustomLabelField
                           choice={choice}
-                          error={error}
-                          disabled={disabled}
+                          error={errorFor(choice.index)}
+                          disabled={locked}
                           dispatch={dispatch}
                           messages={m}
                         />
                       )}
-                    </div>
-                  </td>
-                  <td className="px-3 py-2 align-top">
-                    {choice.formula && (
-                      <span
-                        title={m.formulaBadgeTitle}
-                        className="inline-flex items-center rounded-md bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium whitespace-nowrap text-amber-100 ring-1 ring-inset ring-amber-400/30"
-                      >
-                        {m.formulaBadge}
-                      </span>
-                    )}
-                    {!choice.formula &&
-                      suggestion &&
-                      (suggestion.source === "inferred" || suggestion.source === "config") && (
+                      {choice.formula ? (
+                        <span title={m.formulaBadgeTitle} className="text-[11px] text-amber-800">
+                          {m.formulaBadge}
+                        </span>
+                      ) : suggestion &&
+                        (suggestion.source === "inferred" || suggestion.source === "config") ? (
                         <SuggestionBadge
                           source={suggestion.source}
                           matchRate={suggestion.matchRate}
-                          muted={!suggestionMatches}
+                          muted={suggestion.kind !== choice.kind}
                           messages={m}
                           t={t}
                         />
-                      )}
+                      ) : null}
+                    </div>
+                  </th>
+                );
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            {table.sampleRows.map((row, rowIndex) => (
+              <tr key={rowIndex} className="group">
+                <th
+                  scope="row"
+                  className="sticky left-0 z-[1] border-b border-slate-200 bg-slate-50 px-3 py-2.5 text-center align-top font-normal tabular-nums text-slate-500 group-hover:bg-slate-100"
+                >
+                  {rowIndex + 1}
+                </th>
+                {columns.map((choice) => (
+                  <td
+                    key={choice.index}
+                    data-selected={choice.kind !== "none" ? "true" : "false"}
+                    className={`max-w-[300px] border-b border-l border-slate-200 px-3 py-2.5 align-top text-slate-800 transition-colors ${choice.kind !== "none" ? "bg-blue-50/60 group-hover:bg-blue-100/70" : "bg-white group-hover:bg-slate-50"}`}
+                  >
+                    <div className="max-h-24 overflow-auto whitespace-pre-wrap break-words text-[12px] leading-5 tabular-nums">
+                      {row[choice.index] || m.noSamples}
+                    </div>
                   </td>
-                </tr>
-              );
-            })}
+                ))}
+              </tr>
+            ))}
+            {table.sampleRows.length === 0 && (
+              <tr>
+                <td colSpan={columns.length + 1} className="p-4 text-slate-600">
+                  {m.noPreviewRows}
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -277,13 +307,11 @@ function CustomLabelField({
         onChange={(event) =>
           dispatch({ type: "setCustomLabel", index: choice.index, label: event.target.value })
         }
-        className={`w-full rounded-lg border bg-canvas/70 px-2.5 py-1.5 font-mono text-[12px] text-white outline-none transition focus:ring-2 focus:ring-sky-300/20 disabled:opacity-60 ${
-          error
-            ? "border-red-400/60 focus:border-red-300/80"
-            : "border-border-strong focus:border-sky-300/70"
+        className={`w-full rounded-md border bg-white px-2.5 py-1.5 font-mono text-[12px] text-slate-800 shadow-sm outline-none transition focus:ring-2 focus:ring-sky-600/20 disabled:bg-slate-100 disabled:text-slate-500 ${
+          error ? "border-red-500 focus:border-red-600" : "border-slate-300 focus:border-sky-600"
         }`}
       />
-      <p id={hintId} className={`text-[10px] ${error ? "text-red-200" : "text-faint"}`}>
+      <p id={hintId} className={`text-[10px] ${error ? "text-red-700" : "text-slate-600"}`}>
         {message}
       </p>
     </div>
@@ -307,14 +335,14 @@ function SuggestionBadge({
   const label = source === "inferred" ? t(m.suggestedBadge, { percent }) : m.configuredBadge;
   const title = source === "inferred" ? t(m.suggestedBadgeTitle, { percent }) : undefined;
   const tone = muted
-    ? "bg-surface-3 text-faint ring-border"
+    ? "bg-slate-100 text-slate-600 ring-slate-200"
     : source === "inferred"
-      ? "bg-sky-500/15 text-sky-100 ring-sky-400/30"
-      : "bg-emerald-500/15 text-emerald-100 ring-emerald-400/30";
+      ? "bg-sky-100 text-sky-900 ring-sky-200"
+      : "bg-emerald-50 text-emerald-800 ring-emerald-200";
   return (
     <span
       title={title}
-      className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium whitespace-nowrap ring-1 ring-inset ${tone}`}
+      className={`inline-flex w-fit items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium whitespace-nowrap ring-1 ring-inset ${tone}`}
     >
       {label}
     </span>

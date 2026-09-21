@@ -1,5 +1,5 @@
 import { FileText, FileUp, X } from "lucide-react";
-import { useId, type DragEvent, type ReactNode } from "react";
+import { useId, useRef, useEffect, type DragEvent, type ReactNode } from "react";
 import type { MaskInputMode } from "../../hooks/useMaskInput";
 import type { Messages } from "../../i18n/types";
 import { maskFileBasename, maskFileKind } from "../../mask";
@@ -24,12 +24,14 @@ type Props = {
   runningLabel: string;
   runIcon: ReactNode;
   runDisabled: boolean;
+  showRun?: boolean;
   /** Element id describing why the run button is disabled (for `aria-describedby`). */
   runDisabledReasonId?: string;
   /** Extra controls under the text area, such as the pasted-content kind. */
   textControls?: ReactNode;
+  inputFeedback?: ReactNode;
   onSwitchMode: (mode: MaskInputMode) => void;
-  onInputTextChange: (value: string) => void;
+  onInputTextChange: (value: string, pasted?: boolean) => void;
   onChooseFile: () => void;
   onClear: () => void;
   onRun: () => void;
@@ -56,8 +58,10 @@ export function MaskInputPanel({
   runningLabel,
   runIcon,
   runDisabled,
+  showRun = true,
   runDisabledReasonId,
   textControls,
+  inputFeedback,
   onSwitchMode,
   onInputTextChange,
   onChooseFile,
@@ -71,6 +75,12 @@ export function MaskInputPanel({
 }: Props) {
   const inputId = useId();
   const hintId = useId();
+
+  // Some webviews omit inputType on a real paste. Scope the fallback to
+  // this event turn so a cancelled/empty paste cannot mark later typing.
+  const pastePending = useRef(false);
+  const pasteTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(pasteTimer.current), []);
 
   function handleDragOver(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -144,17 +154,21 @@ export function MaskInputPanel({
         </div>
       </div>
 
+      {inputFeedback}
+
       <div className="flex flex-wrap items-center gap-2 border-b border-border/80 pb-3">
-        <Button
-          variant="primary"
-          onClick={onRun}
-          loading={isLoading}
-          disabled={isLoading || !hasInput || runDisabled}
-          aria-describedby={runDisabled ? runDisabledReasonId : undefined}
-          icon={runIcon}
-        >
-          {isLoading ? runningLabel : runLabel}
-        </Button>
+        {showRun && (
+          <Button
+            variant="primary"
+            onClick={onRun}
+            loading={isLoading}
+            disabled={isLoading || !hasInput || runDisabled}
+            aria-describedby={runDisabled ? runDisabledReasonId : undefined}
+            icon={runIcon}
+          >
+            {isLoading ? runningLabel : runLabel}
+          </Button>
+        )}
         <Button
           variant="secondary"
           onClick={onClear}
@@ -177,6 +191,16 @@ export function MaskInputPanel({
       {inputMode === "text" ? (
         <>
           <textarea
+            onPaste={(event) => {
+              pastePending.current = Boolean(event.clipboardData?.getData("text/plain"));
+              window.clearTimeout(pasteTimer.current);
+              pasteTimer.current = window.setTimeout(() => {
+                pastePending.current = false;
+              }, 0);
+            }}
+            onBlur={() => {
+              pastePending.current = false;
+            }}
             aria-labelledby={inputId}
             aria-describedby={hintId}
             spellCheck={false}
@@ -184,7 +208,14 @@ export function MaskInputPanel({
             autoCapitalize="off"
             value={inputText}
             disabled={inputLocked}
-            onChange={(event) => onInputTextChange(event.target.value)}
+            onChange={(event) => {
+              const pasted =
+                pastePending.current ||
+                (event.nativeEvent as InputEvent).inputType === "insertFromPaste";
+              pastePending.current = false;
+              window.clearTimeout(pasteTimer.current);
+              onInputTextChange(event.target.value, pasted);
+            }}
             placeholder={inputPlaceholder}
             className="border-border bg-canvas placeholder:text-faint min-h-[300px] w-full resize-y rounded-lg border px-3 py-3 font-mono text-[12px] leading-relaxed text-white outline-none transition focus:border-sky-300/70 focus:ring-2 focus:ring-sky-300/25"
           />

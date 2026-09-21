@@ -122,4 +122,40 @@ describe("column choices", () => {
     state = columnsReducer(state, { type: "applySuggestions" });
     expect(state.map((choice) => choice.kind)).toEqual(["none", "email"]);
   });
+  it("does not carry a selected column into a formula column after reinspection", () => {
+    const state = columnsReducer(initialChoices(fixture), {
+      type: "setKind",
+      index: 2,
+      kind: "name",
+    });
+    const next = {
+      ...fixture,
+      columns: fixture.columns.map((column) => ({ ...column, formula: true })),
+    };
+    expect(
+      columnsReducer(state, { type: "reinspect", table: next, keep: "byName" }).every(
+        (column) => column.kind === "none",
+      ),
+    ).toBe(true);
+  });
+
+  it("preserves duplicate header edits by position without leaking choices across columns", () => {
+    const duplicate = table([plan({ index: 0, name: "ID" }), plan({ index: 1, name: "ID" })]);
+    const state = columnsReducer(initialChoices(duplicate), {
+      type: "setKind",
+      index: 0,
+      kind: "custom",
+    });
+    expect(
+      columnsReducer(state, { type: "reinspect", table: duplicate, keep: "byName" }).map(
+        (column) => column.kind,
+      ),
+    ).toEqual(["custom", "none"]);
+    const changed = table([plan({ index: 0, name: "ID" }), plan({ index: 1, name: "New" })]);
+    expect(
+      columnsReducer(state, { type: "reinspect", table: changed, keep: "byName" }).map(
+        (column) => column.kind,
+      ),
+    ).toEqual(["none", "none"]);
+  });
 });

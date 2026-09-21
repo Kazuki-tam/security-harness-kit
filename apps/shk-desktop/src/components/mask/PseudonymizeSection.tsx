@@ -1,4 +1,4 @@
-import { Check, Copy, Info, RefreshCw } from "lucide-react";
+import { Check, Copy, Info, RefreshCw, Loader2, KeyRound } from "lucide-react";
 import { useCallback } from "react";
 import type { PreferredAiTool } from "../../aiTool";
 import type { PseudonymizeWorkspaceApi } from "../../hooks/usePseudonymizeWorkspace";
@@ -103,6 +103,13 @@ export function PseudonymizeSection({
         {liveStatus}
       </p>
 
+      {hasInput && isTableInput && isInspecting && !inspect?.table && (
+        <div className="flex items-center gap-2 rounded-xl border border-border bg-surface-2/70 p-4 text-[13px] text-sky-100">
+          <Loader2 size={16} className="animate-spin" aria-hidden="true" />
+          {m.inspecting}
+        </div>
+      )}
+
       {showColumns && inspect && (
         <PseudonymizeColumnPanel
           inspect={inspect}
@@ -113,9 +120,24 @@ export function PseudonymizeSection({
           onSheetChange={changeSheet}
           disabled={busy}
           inspecting={isInspecting}
+          noHeader={noHeader}
+          onNoHeaderChange={changeNoHeader}
           messages={m}
           t={t}
         />
+      )}
+
+      {showColumns && (
+        <div className="flex justify-end">
+          <Button
+            variant="primary"
+            disabled={!workspace.canRun}
+            onClick={() => void workspace.run()}
+            icon={<KeyRound size={14} aria-hidden="true" />}
+          >
+            {isRunning ? m.running : isFileInput ? m.run : m.runText}
+          </Button>
+        </div>
       )}
 
       {showTextCard && (
@@ -144,7 +166,7 @@ export function PseudonymizeSection({
             noHeader={noHeader}
             onNoHeaderChange={changeNoHeader}
             isFileInput={isFileInput}
-            isTableInput={isTableInput}
+            isTableInput={isTableInput && !showColumns}
             restoreMapName={restoreMapName}
             disabled={busy}
             messages={m}

@@ -376,6 +376,109 @@ describe("App", () => {
     });
   });
 
+  it.each(["csv", "tsv", "xlsx"])(
+    "opens column selection from a selected %s file without picking it again",
+    async (extension) => {
+      seedProject();
+      mockPseudonymizeCommands({ keyExists: true });
+      openMaskWorkspace();
+      fireEvent.click(screen.getByRole("button", { name: "Upload file" }));
+      openMock.mockResolvedValue(`/tmp/demo/orders.${extension}`);
+      fireEvent.click(screen.getByRole("button", { name: /Choose file/ }));
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Preview table and choose columns" }),
+      );
+      await screen.findByRole("table");
+      expect(invokeMock).toHaveBeenCalledWith("pseudonymize_inspect", {
+        projectPath: "/tmp/demo",
+        options: expect.objectContaining({ inputPath: `/tmp/demo/orders.${extension}` }),
+      });
+      const note = screen.getByRole("checkbox", { name: "Pseudonymize Note (column 2)" });
+      fireEvent.click(note);
+      expect(note).toBeChecked();
+      expect(screen.getByRole("combobox", { name: "How to treat Note" })).toHaveValue("custom");
+      expect(screen.getAllByRole("button", { name: "Pseudonymize and save…" })).toHaveLength(1);
+    },
+  );
+
+  it("reveals the table after paste and returns focus to input without jumping during edits", async () => {
+    seedProject();
+    mockPseudonymizeCommands({ keyExists: true });
+    openMaskWorkspace();
+    fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Pasted content is" }), {
+      target: { value: "csv" },
+    });
+    const input = screen.getByPlaceholderText(
+      "Paste text that contains names, email addresses, or phone numbers…",
+    );
+    input.focus();
+    fireEvent.paste(input, { clipboardData: { getData: () => "Mail,Note\nsample-a,memo" } });
+    fireEvent.input(input, { target: { value: "Mail,Note\nsample-a,memo" } });
+    const region = await screen.findByRole("region", {
+      name: "Table preview and column selection",
+    });
+    await waitFor(() => expect(region).toHaveFocus());
+    expect(
+      screen.getByText("Table ready: 2 columns, 2 rows. Choose columns in the preview."),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Back to input" }));
+    expect(input).toHaveFocus();
+    expect(input).toHaveValue("Mail,Note\nsample-a,memo");
+    fireEvent.change(input, { target: { value: "Mail,Note\nsample-a,edited" } });
+    await waitFor(() =>
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === "pseudonymize_inspect"),
+      ).toHaveLength(2),
+    );
+    expect(input).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "Choose columns in preview" }));
+    expect(region).toHaveFocus();
+  });
+
+  it("cancels paste navigation when the user continues editing before the preview arrives", async () => {
+    seedProject();
+    mockPseudonymizeCommands({ keyExists: true });
+    openMaskWorkspace();
+    fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Pasted content is" }), {
+      target: { value: "tsv" },
+    });
+    const input = screen.getByPlaceholderText(
+      "Paste text that contains names, email addresses, or phone numbers…",
+    );
+    input.focus();
+    fireEvent.input(input, {
+      inputType: "insertFromPaste",
+      target: { value: "Mail\tNote\nsample-a\tmemo" },
+    });
+    fireEvent.change(input, { target: { value: "Mail\tNote\nsample-a\tediting" } });
+    await screen.findByRole("table");
+    expect(input).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Choose columns in preview" })).toBeEnabled();
+  });
+
+  it("does not navigate after an empty paste followed by normal typing", async () => {
+    seedProject();
+    mockPseudonymizeCommands({ keyExists: true });
+    openMaskWorkspace();
+    fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Pasted content is" }), {
+      target: { value: "csv" },
+    });
+    const input = screen.getByPlaceholderText(
+      "Paste text that contains names, email addresses, or phone numbers…",
+    );
+    input.focus();
+    fireEvent.paste(input);
+    fireEvent.input(input, {
+      inputType: "insertText",
+      target: { value: "Mail,Note\nsample-a,memo" },
+    });
+    await screen.findByRole("table");
+    expect(input).toHaveFocus();
+  });
+
   it("keeps column choices while a pasted table is edited", async () => {
     seedProject();
     mockPseudonymizeCommands({ keyExists: true });

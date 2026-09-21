@@ -24,10 +24,12 @@ export type ColumnChoice = {
   suggestion?: ColumnSuggestion;
   /** A formula column is always left as it is. */
   formula: boolean;
+  previousKind?: Exclude<PseudonymizeKindChoice, "none">;
 };
 
 export type ColumnAction =
   | { type: "init"; table: PseudonymizeTablePreview }
+  | { type: "setSelected"; index: number; selected: boolean }
   | { type: "setKind"; index: number; kind: PseudonymizeKindChoice }
   | { type: "setCustomLabel"; index: number; label: string }
   | { type: "applySuggestions" }
@@ -69,15 +71,44 @@ function userChanged(choice: ColumnChoice): boolean {
   return choice.kind === "custom" && choice.customLabel !== (choice.suggestion?.customLabel ?? "");
 }
 
+function withKind(choice: ColumnChoice, kind: PseudonymizeKindChoice): ColumnChoice {
+  if (choice.formula) return choice;
+  return {
+    ...choice,
+    kind,
+    previousKind:
+      kind !== "none" ? kind : choice.kind !== "none" ? choice.kind : choice.previousKind,
+  };
+}
+
+function uniqueColumns(choices: ColumnChoice[]): Map<string, ColumnChoice | null> {
+  const names = new Map<string, ColumnChoice | null>();
+  for (const choice of choices) {
+    const name = foldName(choice.name);
+    if (name) names.set(name, names.has(name) ? null : choice);
+  }
+  return names;
+}
+
 export function columnsReducer(state: ColumnChoice[], action: ColumnAction): ColumnChoice[] {
   switch (action.type) {
     case "init":
       return initialChoices(action.table);
+    case "setSelected":
+      return state.map((choice) => {
+        if (choice.index !== action.index) return choice;
+        return withKind(
+          choice,
+          action.selected
+            ? choice.kind !== "none"
+              ? choice.kind
+              : (choice.previousKind ?? choice.suggestion?.kind ?? "custom")
+            : "none",
+        );
+      });
     case "setKind":
       return state.map((choice) =>
-        choice.index === action.index && !choice.formula
-          ? { ...choice, kind: action.kind }
-          : choice,
+        choice.index === action.index ? withKind(choice, action.kind) : choice,
       );
     case "setCustomLabel":
       return state.map((choice) =>
@@ -87,24 +118,40 @@ export function columnsReducer(state: ColumnChoice[], action: ColumnAction): Col
       return state.map((choice) =>
         choice.suggestion && !choice.formula
           ? {
-              ...choice,
-              kind: choice.suggestion.kind,
+              ...withKind(choice, choice.suggestion.kind),
               customLabel: choice.suggestion.customLabel ?? choice.customLabel,
             }
           : choice,
       );
     case "clearAll":
-      return state.map((choice) => ({ ...choice, kind: "none" }));
+      return state.map((choice) => withKind(choice, "none"));
     case "reinspect": {
       const fresh = initialChoices(action.table);
       if (action.keep === "none") return fresh;
-      const edited = new Map(
-        state.filter(userChanged).map((choice) => [foldName(choice.name), choice] as const),
-      );
-      return fresh.map((choice) => {
-        const previous = edited.get(foldName(choice.name));
-        return previous
-          ? { ...choice, kind: previous.kind, customLabel: previous.customLabel }
+      const sameLayout =
+        state.length === fresh.length &&
+        state.every(
+          (choice, index) =>
+            choice.index === fresh[index].index && choice.name === fresh[index].name,
+        );
+      // Duplicate/blank headers cannot safely be matched by name after a layout change.
+      const oldNames = uniqueColumns(state);
+      const newNames = uniqueColumns(fresh);
+      return fresh.map((choice, index) => {
+        const name = foldName(choice.name);
+        const candidate = sameLayout
+          ? state[index]
+          : newNames.get(name)
+            ? oldNames.get(name)
+            : undefined;
+        const previous = candidate && userChanged(candidate) ? candidate : undefined;
+        return previous && !choice.formula
+          ? {
+              ...choice,
+              kind: previous.kind,
+              customLabel: previous.customLabel,
+              previousKind: previous.previousKind,
+            }
           : choice;
       });
     }
