@@ -180,7 +180,12 @@ jobs:
           python3 .github/scripts/ci/verify-glib-patch.py
 
       - name: cargo audit
-        run: cargo audit --deny unsound
+        # cargo-audit 0.22.1 matches path dependencies by name/version. This
+        # exception is valid only after verifying the exact upstream backport.
+        # Keep that verification adjacent to the exception, not in global config.
+        run: |
+          python3 .github/scripts/ci/verify-glib-patch.py
+          cargo audit --deny unsound --ignore RUSTSEC-2024-0429
 
       - name: cargo deny
         run: cargo deny check

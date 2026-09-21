@@ -16,6 +16,12 @@ vendored tree and proves that reversing exactly those two edits recovers the
 published source file. CI also exercises string iteration in optimized Linux
 builds, where the original undefined behavior is reproducible.
 
+CI uses cargo-audit 0.22.1, which also matches path dependencies by name/version.
+Only after re-verifying this source, the audit command excludes the already-fixed
+RUSTSEC-2024-0429. There is no global advisory exception. Other glib advisories and
+all other unsound advisories still fail the audit. When updating cargo-audit,
+preserve audit coverage of the upstream glib version: 0.22.2 skips path sources.
+
 Keep the upstream MIT license and copyright. Do not edit other files here or
-add new advisory ignores. Remove the patch, provenance and regression gate
+add blanket advisory ignores. Remove the patch, provenance and regression gate
 when the GTK/Tauri dependency line can use an unaffected published glib.

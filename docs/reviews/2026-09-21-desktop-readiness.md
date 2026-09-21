@@ -48,8 +48,11 @@ covered by the existing test suite, not an exhaustive manual source audit.
    and license. The provenance manifest records the verified crates.io archive
    and all file hashes. CI rejects unrelated modifications, symlinks, reverted
    patches and registry fallback; six rejection tests pass. Added an optimized
-   Linux iterator regression and made unsound advisories fail CI. This is a source
-   backport, not an advisory exception. Updated pdf-extract 0.12.0 → 0.12.1 too.
+   Linux iterator regression and made unsound advisories fail CI. Updated
+   pdf-extract 0.12.0 → 0.12.1 too. CI's cargo-audit 0.22.1 still matches the local
+   patched version, so its command excludes only RUSTSEC-2024-0429 immediately
+   after re-verifying the exact backport. No global exception was added; other
+   current/future glib advisories remain covered by this audit version.
 7. **Release configuration:** Build-time validation now decodes the updater public
    key with the same Base64/Minisign parsers and whitespace normalization as the
    application. Missing values require an explicit non-distribution override;
@@ -76,9 +79,11 @@ covered by the existing test suite, not an exhaustive manual source audit.
 - Frontend `fmt:check`, `lint`, and `build` (TypeScript + Vite): passed.
 - `pnpm -C apps/shk-desktop audit --prod`: no known vulnerabilities reported.
 - `cargo-audit` 0.22.2 against the freshly fetched RustSec DB: **0 vulnerability
-  entries, 0 unsound warnings, 0 ignores**. Seven unmaintained dependency warnings
+  entries, 0 unsound warnings, 0 ignores** locally. Seven unmaintained dependency warnings
   remain. The path-patched glib is protected by provenance verification plus the
   Linux optimized test; the audit count alone does not validate the backport.
+  CI deliberately retains 0.22.1's name/version matching with the source-verified
+  exception above, so future advisories on the vendored version remain visible.
 - Browser: Japanese welcome → mask → welcome, mask input/output layout, and
   recovery from the unavailable-webview initialization path checked at 1280×720.
   At 980×640, confirmed the run/clear toolbar is visible and sample input enables
