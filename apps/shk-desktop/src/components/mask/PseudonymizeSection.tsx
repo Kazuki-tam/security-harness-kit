@@ -62,14 +62,24 @@ export function PseudonymizeSection({
     inlineOutput,
     copied,
     copiedPath,
+    preparing,
+    resetResult,
     retryInspect,
     copyInlineOutput,
     copyPath,
   } = workspace;
   const confirmKey = useCallback(() => resolveKeyDialog(true), [resolveKeyDialog]);
   const cancelKey = useCallback(() => resolveKeyDialog(false), [resolveKeyDialog]);
+  // Changing a choice after a run makes the old summary stale.
+  const dispatchChoice = useCallback(
+    (action: Parameters<typeof dispatchColumns>[0]) => {
+      if (phase.status === "done") resetResult();
+      dispatchColumns(action);
+    },
+    [dispatchColumns, phase.status, resetResult],
+  );
 
-  const busy = isRunning || isInspecting;
+  const busy = isRunning || isInspecting || preparing;
   const showColumns = hasInput && isTableInput && inspect?.table != null;
   const showTextCard = hasInput && !isTableInput && phase.status !== "done";
   const planFailed = hasInput && isTableInput && phase.status === "error" && inspect === null;
@@ -97,7 +107,7 @@ export function PseudonymizeSection({
         <PseudonymizeColumnPanel
           inspect={inspect}
           columns={columns}
-          dispatch={dispatchColumns}
+          dispatch={dispatchChoice}
           columnErrors={columnErrors}
           sheet={sheet}
           onSheetChange={changeSheet}

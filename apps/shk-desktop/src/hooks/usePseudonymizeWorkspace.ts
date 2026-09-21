@@ -95,6 +95,10 @@ export function usePseudonymizeWorkspace({
   const [restoreMap, setRestoreMap] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [preparing, setPreparing] = useState(false);
+  /// Bumped by `reset()` so the same content can be planned again.
+  const [planGeneration, setPlanGeneration] = useState(0);
+  /** A pasted-table re-plan is scheduled but has not run yet. */
+  const [replanPending, setReplanPending] = useState(false);
   const [keyDialog, setKeyDialog] = useState<{ open: boolean; backend: string }>({
     open: false,
     backend: "",
@@ -121,6 +125,7 @@ export function usePseudonymizeWorkspace({
     !isRunning &&
     !isInspecting &&
     !preparing &&
+    !replanPending &&
     columnErrors.length === 0 &&
     // A table needs its plan first; text inputs run directly.
     (!isTableInput || hasPlan);
@@ -140,7 +145,7 @@ export function usePseudonymizeWorkspace({
     setCopiedPath(null);
   }, [tracker]);
 
-  /** Start from scratch: used when the mode, project, or content kind changes. */
+  /** Start from scratch: used when the mode, project, or content changes. */
   const reset = useCallback(() => {
     tracker.begin(INSPECT_KEY);
     tracker.begin(RUN_KEY);
@@ -150,6 +155,7 @@ export function usePseudonymizeWorkspace({
     setNoHeader(false);
     setCopied(false);
     setCopiedPath(null);
+    setPlanGeneration((generation) => generation + 1);
   }, [tracker]);
 
   const baseRequest = useCallback(
@@ -220,21 +226,34 @@ export function usePseudonymizeWorkspace({
   });
 
   // A newly selected file gets a fresh plan; the container already cleared
-  // the previous plan and options when the file was replaced.
+  // the previous plan and options when the file was replaced. Re-choosing
+  // the same file bumps the generation, so it is read again as well.
   useEffect(() => {
     if (!active || !projectPath || !isFileInput) return;
     void runInspectRef.current({ sheet: undefined }, (table) => ({ type: "init", table }));
-  }, [active, projectPath, isFileInput, selectedFilePath]);
+  }, [active, projectPath, isFileInput, selectedFilePath, planGeneration]);
 
   // Pasted tables re-plan after a short pause so typing does not spam the
   // engine; edits the user already made to same-named columns are kept.
   useEffect(() => {
     if (!active || !projectPath || !isPastedInput || pastedKind === "text") return;
+    setReplanPending(true);
     const timer = window.setTimeout(() => {
+      setReplanPending(false);
       void runInspectRef.current({}, (table) => ({ type: "reinspect", table, keep: "byName" }));
     }, PASTED_INSPECT_DELAY_MS);
-    return () => window.clearTimeout(timer);
-  }, [active, projectPath, isPastedInput, pastedKind, inputText]);
+    return () => {
+      window.clearTimeout(timer);
+      setReplanPending(false);
+    };
+  }, [active, projectPath, isPastedInput, pastedKind, inputText, planGeneration]);
+
+  // Content that was emptied by hand has nothing to plan or report.
+  useEffect(() => {
+    if (isFileInput || isPastedInput) return;
+    tracker.begin(INSPECT_KEY);
+    setPhase({ status: "idle" });
+  }, [isFileInput, isPastedInput, tracker]);
 
   const retryInspect = useCallback(() => {
     void runInspect({}, (table) => ({ type: "init", table }));

@@ -544,6 +544,31 @@ describe("App", () => {
     expect(screen.getByRole("listitem", { current: "step" })).toHaveTextContent("Add content");
   });
 
+  it("re-reads a file that is chosen again and ignores clicks on the active tab", async () => {
+    seedProject();
+    mockPseudonymizeCommands({ keyExists: true });
+    openMaskWorkspace();
+    await chooseFileForPseudonymize("/tmp/demo/orders.csv");
+    fireEvent.change(screen.getByRole("combobox", { name: "How to treat Note" }), {
+      target: { value: "name" },
+    });
+
+    // Clicking the tab that is already active must not discard the plan.
+    fireEvent.click(screen.getByRole("tab", { name: "Upload file" }));
+    expect(screen.getByRole("combobox", { name: "How to treat Note" })).toHaveValue("name");
+
+    // Choosing the same file again (after editing it elsewhere) plans afresh.
+    openMock.mockResolvedValue("/tmp/demo/orders.csv");
+    fireEvent.click(screen.getByRole("button", { name: "Choose file" }));
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === "pseudonymize_inspect"),
+      ).toHaveLength(2);
+    });
+    expect(await screen.findByRole("combobox", { name: "How to treat Note" })).toHaveValue("none");
+    expect(screen.getByRole("button", { name: "Pseudonymize and save…" })).toBeEnabled();
+  });
+
   it("gates pseudonymize until a project with shk.toml is selected", async () => {
     openMaskWorkspace();
     fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));

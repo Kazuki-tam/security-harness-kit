@@ -65,6 +65,7 @@ export function useMaskInput({
 
   const switchInputMode = useCallback(
     (mode: MaskInputMode) => {
+      if (mode === inputMode) return;
       setInputMode(mode);
       if (mode === "text") {
         setSelectedFilePath(null);
@@ -73,7 +74,7 @@ export function useMaskInput({
       }
       notifyChange("replace");
     },
-    [notifyChange],
+    [inputMode, notifyChange],
   );
 
   const applySelectedFile = useCallback(

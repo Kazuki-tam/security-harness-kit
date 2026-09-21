@@ -218,7 +218,8 @@ export const en: Messages = {
       textModeTitle: "No columns to choose",
       textModeHint:
         "This input is treated as text: every name, email address, and phone number found will be replaced.",
-      textModeOfficeHint: "Word and PowerPoint text is replaced in place; formatting is kept.",
+      textModeOfficeHint:
+        "In Word and PowerPoint files only the matching text is replaced; formatting is kept.",
       advancedTitle: "Advanced options",
       advancedHint: "Restore map, header row, and other settings",
       restoreMapLabel: "Also save a restore map",

@@ -110,11 +110,16 @@ export function MaskWorkspace({
     clearInput,
   } = input;
 
-  // "Start over" returns to step 1: no content, no plan, no result.
-  const startOver = useCallback(() => {
-    resetAll();
-    clearInput();
-  }, [clearInput, resetAll]);
+  // "Start over" returns to step 1: clearing the content is a replacement,
+  // which already resets both modes.
+  const startOver = clearInput;
+  // While a pseudonymize run depends on the content, drops and the pasted
+  // kind are ignored along with the frozen input controls.
+  const inputLocked = isPseudonymize && (pseudonymize.isRunning || pseudonymize.preparing);
+  const inputLockedRef = useRef(inputLocked);
+  useLayoutEffect(() => {
+    inputLockedRef.current = inputLocked;
+  });
 
   useEffect(() => {
     if (policyProjectId && !policyProject) {
@@ -174,7 +179,7 @@ export function MaskWorkspace({
         if (event.payload.type === "drop") {
           setDragActive(false);
           const path = event.payload.paths[0];
-          if (path) applySelectedFile(path);
+          if (path && !inputLockedRef.current) applySelectedFile(path);
           return;
         }
 
@@ -303,7 +308,7 @@ export function MaskWorkspace({
               selectedFilePath={selectedFilePath}
               dragActive={dragActive}
               isLoading={pseudonymize.isRunning}
-              inputLocked={pseudonymize.isRunning || pseudonymize.preparing}
+              inputLocked={inputLocked}
               hasInput={hasInput}
               fileKindLabel={pseudonymizeFileKind}
               inputHint={mp.inputHint}
@@ -322,6 +327,7 @@ export function MaskWorkspace({
                   <select
                     id={pastedKindId}
                     value={pseudonymize.pastedKind}
+                    disabled={inputLocked}
                     onChange={(event) =>
                       pseudonymize.changePastedKind(event.target.value as PastedKind)
                     }
@@ -342,7 +348,9 @@ export function MaskWorkspace({
               onRun={() => void runPseudonymize()}
               onRemoveFile={input.removeSelectedFile}
               onDragActive={setDragActive}
-              onDropFile={(path) => void applySelectedFile(path)}
+              onDropFile={(path) => {
+                if (!inputLocked) applySelectedFile(path);
+              }}
               messages={m}
               t={t}
             />
