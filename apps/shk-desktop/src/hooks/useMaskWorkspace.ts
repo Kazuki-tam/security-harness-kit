@@ -1,4 +1,4 @@
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { save } from "@tauri-apps/plugin-dialog";
 import { useCallback, useMemo, useState } from "react";
 import { openAiTool, type PreferredAiTool } from "../aiTool";
 import { useI18n } from "../i18n";
@@ -12,16 +12,18 @@ import {
   type MaskState,
 } from "../mask";
 import { actionableCount } from "../scan";
+import type { MaskInputApi } from "./useMaskInput";
 
-export type MaskInputMode = "text" | "file";
+export type { MaskInputMode } from "./useMaskInput";
 
-const MASK_FILE_EXTENSIONS = [
+export const MASK_FILE_EXTENSIONS = [
   "txt",
   "md",
   "json",
   "yaml",
   "yml",
   "csv",
+  "tsv",
   "log",
   "docx",
   "xlsx",
@@ -31,28 +33,28 @@ const MASK_FILE_EXTENSIONS = [
 
 type UseMaskWorkspaceOptions = {
   projectPath: string | null;
+  input: MaskInputApi;
   preferredAiTool: PreferredAiTool;
   onPreferredAiToolChange: (tool: PreferredAiTool) => void;
   onNotice?: (message: string) => void;
 };
 
+/** The redaction path: `[REDACTED]` replacement with findings to review. */
 export function useMaskWorkspace({
   projectPath,
+  input,
   preferredAiTool,
   onPreferredAiToolChange,
   onNotice,
 }: UseMaskWorkspaceOptions) {
   const { messages, t } = useI18n();
   const m = messages.mask;
+  const { inputMode, inputText, selectedFilePath, hasInput } = input;
 
-  const [inputMode, setInputMode] = useState<MaskInputMode>("text");
-  const [inputText, setInputText] = useState("");
-  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
   const [maskState, setMaskState] = useState<MaskState>({ status: "idle" });
   const [copied, setCopied] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
-  const [dragActive, setDragActive] = useState(false);
 
   const maskedOutput = maskState.status === "done" ? maskState.result.masked_content : "";
   const findings = maskState.status === "done" ? maskState.result.findings : [];
@@ -61,7 +63,6 @@ export function useMaskWorkspace({
   const actionableFindings = actionableCount(severityCounts);
   const isLoading = maskState.status === "loading";
   const canCopy = maskedOutput.length > 0 && maskState.status === "done";
-  const hasInput = inputMode === "text" ? inputText.trim().length > 0 : Boolean(selectedFilePath);
   const currentStep: 1 | 2 | 3 = maskState.status === "done" ? 3 : hasInput ? 2 : 1;
 
   const resetResult = useCallback(() => {
@@ -69,51 +70,6 @@ export function useMaskWorkspace({
     setCopied(false);
     setSaveMessage(null);
   }, []);
-
-  const clearInput = useCallback(() => {
-    setInputText("");
-    setSelectedFilePath(null);
-    resetResult();
-  }, [resetResult]);
-
-  const switchInputMode = useCallback(
-    (mode: MaskInputMode) => {
-      setInputMode(mode);
-      resetResult();
-      if (mode === "text") {
-        setSelectedFilePath(null);
-      } else {
-        setInputText("");
-      }
-    },
-    [resetResult],
-  );
-
-  const applySelectedFile = useCallback(
-    (path: string) => {
-      setSelectedFilePath(path);
-      setInputMode("file");
-      setInputText("");
-      resetResult();
-    },
-    [resetResult],
-  );
-
-  const chooseFile = useCallback(async () => {
-    try {
-      const path = await open({
-        directory: false,
-        multiple: false,
-        title: m.selectFile,
-        filters: [{ name: "Supported", extensions: [...MASK_FILE_EXTENSIONS] }],
-      });
-      if (typeof path === "string" && path) {
-        applySelectedFile(path);
-      }
-    } catch (error) {
-      onNotice?.(operationErrorMessage(messages.app.operationFailed, error));
-    }
-  }, [applySelectedFile, messages.app.operationFailed, m.selectFile, onNotice]);
 
   const runMask = useCallback(async () => {
     if (inputMode === "text" && !inputText.trim()) {
@@ -232,24 +188,13 @@ export function useMaskWorkspace({
     }
   }, [fileMeta, m.saveMaskedFile, m.savedTo, projectPath, t]);
 
-  const removeSelectedFile = useCallback(() => {
-    setSelectedFilePath(null);
-    resetResult();
-  }, [resetResult]);
-
   return {
     messages: m,
     t,
-    inputMode,
-    inputText,
-    setInputText,
-    selectedFilePath,
     maskState,
     copied,
     saving,
     saveMessage,
-    dragActive,
-    setDragActive,
     maskedOutput,
     findings,
     severityCounts,
@@ -257,19 +202,13 @@ export function useMaskWorkspace({
     actionableFindings,
     isLoading,
     canCopy,
-    hasInput,
     currentStep,
     preferredAiTool,
     onPreferredAiToolChange,
     resetResult,
-    clearInput,
-    switchInputMode,
-    applySelectedFile,
-    chooseFile,
     runMask,
     copyMasked,
     copyAndOpenTool,
     saveMaskedFile,
-    removeSelectedFile,
   };
 }

@@ -1,13 +1,20 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { I18nProvider } from "./i18n";
 
 const invokeMock = vi.fn();
+const openMock = vi.fn();
+const saveMock = vi.fn();
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: (...args: unknown[]) => openMock(...args),
+  save: (...args: unknown[]) => saveMock(...args),
 }));
 
 vi.mock("@tauri-apps/api/webview", () => ({
@@ -26,9 +33,103 @@ vi.mock("@tauri-apps/plugin-notification", () => ({
   sendNotification: vi.fn(),
 }));
 
+const DEMO_PROJECT = {
+  id: "p1",
+  name: "Demo",
+  path: "/tmp/demo",
+  addedAt: "2026-01-01T00:00:00.000Z",
+};
+
+const TABLE_PREVIEW = {
+  inputKind: "table-csv",
+  sourceLabel: "orders.csv",
+  table: {
+    hasHeader: true,
+    delimiter: ",",
+    headers: ["Mail", "Note"],
+    sampleRows: [["sample-a", "memo"]],
+    rowCount: 2,
+    columns: [
+      {
+        index: 0,
+        name: "Mail",
+        kind: "email",
+        customLabel: null,
+        source: "inferred",
+        matchRate: 0.9,
+      },
+      { index: 1, name: "Note", kind: "none", customLabel: null, source: "none", matchRate: null },
+    ],
+    sheets: [],
+    selectedSheet: null,
+  },
+};
+
+const RUN_RESULT = {
+  mode: "table",
+  rowsProcessed: 2,
+  replaced: { email: 2 },
+  unparsed: {},
+  columns: [TABLE_PREVIEW.table.columns[0]],
+  keyFingerprint: "0123abcd",
+  outputPath: "/tmp/demo/orders.pseudo.csv",
+  metaPath: "/tmp/demo/orders.pseudo.csv.shk-meta.json",
+  mapPath: null,
+  inlineOutput: null,
+  remainingRuleIds: [],
+  remainingCheckError: null,
+};
+
+function seedProject() {
+  window.localStorage.setItem("shk.desktop.projects.v1", JSON.stringify([DEMO_PROJECT]));
+  window.localStorage.setItem("shk.desktop.selectedProjectId.v1", DEMO_PROJECT.id);
+}
+
+function mockPseudonymizeCommands(overrides: { keyExists?: boolean } = {}) {
+  invokeMock.mockImplementation(async (command: string) => {
+    switch (command) {
+      case "mask_policy_status":
+        return { usesProjectPolicy: true, policyPath: "/tmp/demo/shk.toml" };
+      case "pseudonymize_inspect":
+        return TABLE_PREVIEW;
+      case "pseudonymize_key_status":
+        return {
+          exists: overrides.keyExists ?? false,
+          backend: "OS credential store",
+          fingerprint: null,
+          unavailableReason: null,
+        };
+      case "pseudonymize_run":
+        return RUN_RESULT;
+      default:
+        return undefined;
+    }
+  });
+}
+
+function openMaskWorkspace() {
+  render(
+    <I18nProvider>
+      <App />
+    </I18nProvider>,
+  );
+  // The sidebar button carries a keyboard hint in its name once a project exists.
+  fireEvent.click(screen.getAllByRole("button", { name: /Mask for AI/ })[0]);
+}
+
+async function chooseFileForPseudonymize(path: string) {
+  fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
+  fireEvent.click(screen.getByRole("tab", { name: "Upload file" }));
+  openMock.mockResolvedValue(path);
+  fireEvent.click(screen.getByRole("button", { name: /Choose file/ }));
+  return screen.findByRole("table");
+}
+
 describe("App", () => {
   beforeEach(() => {
     invokeMock.mockReset();
+    openMock.mockReset();
+    saveMock.mockReset();
     // Commands are promises in the app; a bare `vi.fn()` would return
     // undefined and break fire-and-forget callers such as the audit watcher.
     invokeMock.mockResolvedValue(undefined);
@@ -124,5 +225,142 @@ describe("App", () => {
     expect(
       await screen.findByText("Could not copy to clipboard: clipboard denied"),
     ).toBeInTheDocument();
+  });
+
+  it("pseudonymizes a table with the user's column choices after confirming the key", async () => {
+    seedProject();
+    mockPseudonymizeCommands();
+    openMaskWorkspace();
+
+    await chooseFileForPseudonymize("/tmp/demo/orders.csv");
+    expect(invokeMock).toHaveBeenCalledWith("pseudonymize_inspect", {
+      projectPath: "/tmp/demo",
+      options: expect.objectContaining({ inputPath: "/tmp/demo/orders.csv" }),
+    });
+    expect(screen.getByText("Auto-detected 90%")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("combobox", { name: "How to treat Note" }), {
+      target: { value: "name" },
+    });
+    saveMock.mockResolvedValue("/tmp/demo/orders.pseudo.csv");
+    fireEvent.click(screen.getByRole("button", { name: "Pseudonymize and save…" }));
+
+    await waitFor(() => {
+      expect(saveMock).toHaveBeenCalledWith(
+        expect.objectContaining({ defaultPath: "/tmp/demo/orders.pseudo.csv" }),
+      );
+    });
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("Create a pseudonymize key for Demo?");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create key and continue" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("pseudonymize_run", {
+        projectPath: "/tmp/demo",
+        options: expect.objectContaining({
+          inputPath: "/tmp/demo/orders.csv",
+          outputPath: "/tmp/demo/orders.pseudo.csv",
+          createKey: true,
+          columns: [
+            { name: "Mail", kind: "email", customLabel: null },
+            { name: "Note", kind: "name", customLabel: null },
+          ],
+        }),
+      });
+    });
+    const heading = await screen.findByRole("heading", { name: "Pseudonymized" });
+    expect(heading).toHaveFocus();
+    expect(screen.getByText("2 rows processed")).toBeInTheDocument();
+    expect(screen.getByText("Email address: 2")).toBeInTheDocument();
+    expect(screen.getByText("/tmp/demo/orders.pseudo.csv")).toBeInTheDocument();
+    expect(screen.queryByText(/mapPath|Restore map/)).not.toBeInTheDocument();
+  });
+
+  it("does not run when the save dialog is cancelled and skips the key dialog when a key exists", async () => {
+    seedProject();
+    mockPseudonymizeCommands({ keyExists: true });
+    openMaskWorkspace();
+    await chooseFileForPseudonymize("/tmp/demo/orders.csv");
+
+    saveMock.mockResolvedValue(null);
+    fireEvent.click(screen.getByRole("button", { name: "Pseudonymize and save…" }));
+    await waitFor(() => expect(saveMock).toHaveBeenCalled());
+    expect(invokeMock).not.toHaveBeenCalledWith("pseudonymize_run", expect.anything());
+    expect(screen.getByRole("table")).toBeInTheDocument();
+
+    saveMock.mockResolvedValue("/tmp/demo/orders.pseudo.csv");
+    fireEvent.click(screen.getByRole("button", { name: "Pseudonymize and save…" }));
+    await screen.findByRole("heading", { name: "Pseudonymized" });
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("pseudonymize_run", {
+      projectPath: "/tmp/demo",
+      options: expect.objectContaining({ createKey: false }),
+    });
+  });
+
+  it("returns pasted text in place", async () => {
+    seedProject();
+    mockPseudonymizeCommands({ keyExists: true });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "mask_policy_status") {
+        return { usesProjectPolicy: true, policyPath: "/tmp/demo/shk.toml" };
+      }
+      if (command === "pseudonymize_key_status") {
+        return {
+          exists: true,
+          backend: "OS credential store",
+          fingerprint: "x",
+          unavailableReason: null,
+        };
+      }
+      if (command === "pseudonymize_run") {
+        return {
+          ...RUN_RESULT,
+          mode: "text",
+          rowsProcessed: 1,
+          outputPath: null,
+          metaPath: null,
+          inlineOutput: "contact email_abc",
+        };
+      }
+      return undefined;
+    });
+    openMaskWorkspace();
+    fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
+    fireEvent.change(
+      screen.getByPlaceholderText(
+        "Paste text that contains names, email addresses, or phone numbers…",
+      ),
+      { target: { value: "contact someone" } },
+    );
+    // The project's policy status arrives asynchronously and gates the run.
+    const run = screen.getByRole("button", { name: "Pseudonymize" });
+    await waitFor(() => expect(run).toBeEnabled());
+    fireEvent.click(run);
+
+    expect(await screen.findByRole("textbox", { name: "Pseudonymized text" })).toHaveValue(
+      "contact email_abc",
+    );
+    expect(saveMock).not.toHaveBeenCalled();
+    expect(invokeMock).toHaveBeenCalledWith("pseudonymize_run", {
+      projectPath: "/tmp/demo",
+      options: expect.objectContaining({ inlineText: "contact someone", mode: "text" }),
+    });
+  });
+
+  it("gates pseudonymize until a project with shk.toml is selected", async () => {
+    openMaskWorkspace();
+    fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
+
+    expect(screen.getByRole("note")).toHaveTextContent("Choose a project to pseudonymize");
+    fireEvent.change(
+      screen.getByPlaceholderText(
+        "Paste text that contains names, email addresses, or phone numbers…",
+      ),
+      { target: { value: "hello" } },
+    );
+    expect(screen.getByRole("button", { name: "Pseudonymize" })).toBeDisabled();
+    expect(invokeMock).not.toHaveBeenCalledWith("pseudonymize_inspect", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith("pseudonymize_run", expect.anything());
   });
 });
