@@ -24,9 +24,20 @@ class BackportIntegrityTests(unittest.TestCase):
         shutil.copytree(ROOT / "vendor/glib", self.package)
         self.manifest = json.loads((ROOT / "vendor/glib-provenance.json").read_text())
         self.lock = (ROOT / "Cargo.lock").read_text()
+        self.cargo_manifest = (ROOT / "Cargo.toml").read_text()
 
     def verify(self):
-        module.verify(self.package, self.manifest, self.lock)
+        module.verify(self.package, self.manifest, self.lock, self.cargo_manifest)
+
+    def test_redirected_dependency_fails_even_when_lockfile_is_unchanged(self):
+        self.cargo_manifest = self.cargo_manifest.replace('glib = { path = "vendor/glib" }', 'glib = { path = "elsewhere/glib" }')
+        with self.assertRaises(ValueError):
+            self.verify()
+
+    def test_removed_patch_fails_even_when_lockfile_is_unchanged(self):
+        self.cargo_manifest = self.cargo_manifest.replace('[patch.crates-io]', '[dependencies]')
+        with self.assertRaises(ValueError):
+            self.verify()
 
     def test_reviewed_source_passes(self):
         self.verify()

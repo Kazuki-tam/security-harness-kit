@@ -11,7 +11,15 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def verify(package, manifest, lockfile):
+def verify(package, manifest, lockfile, cargo_manifest):
+    # A path crate has no path recorded in Cargo.lock. Check the reviewed
+    # declaration too, so redirecting Cargo to a different copy fails closed.
+    patch = re.search(r"(?ms)^\[patch\.crates-io\][ \t]*\n(.*?)(?=^\[|\Z)", cargo_manifest)
+    declarations = [] if patch is None else [
+        line.strip() for line in patch[1].splitlines() if re.match(r"\s*glib\s*=", line)
+    ]
+    if declarations != ['glib = { path = "vendor/glib" }']:
+        raise ValueError("Cargo.toml must select the reviewed vendor/glib backport")
     if package.is_symlink():
         raise ValueError("vendored package must not be a symlink")
     expected = dict(manifest["upstream_files"])
@@ -42,7 +50,7 @@ def verify(package, manifest, lockfile):
 def main():
     root = Path(__file__).resolve().parents[3]
     manifest = json.loads((root / "vendor/glib-provenance.json").read_text())
-    verify(root / "vendor/glib", manifest, (root / "Cargo.lock").read_text())
+    verify(root / "vendor/glib", manifest, (root / "Cargo.lock").read_text(), (root / "Cargo.toml").read_text())
     print("glib upstream package hashes and RUSTSEC-2024-0429 backport verified")
 
 
