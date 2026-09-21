@@ -132,6 +132,7 @@ export function PseudonymizeSection({
           <Button
             variant="primary"
             disabled={!workspace.canRun}
+            loading={isRunning}
             onClick={() => void workspace.run()}
             icon={<KeyRound size={14} aria-hidden="true" />}
           >

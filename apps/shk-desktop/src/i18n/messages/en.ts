@@ -198,11 +198,6 @@ export const en: Messages = {
         "Check the columns to process, then choose their data type. Unchecked columns are copied unchanged.",
       columnsLoaded: "{{count}} columns found ({{rows}} rows)",
       tableCaption: "Columns in {{file}}",
-      colSelected: "Selected",
-      colHeader: "Column",
-      colSamples: "Sample values",
-      colKind: "Treat as",
-      colSuggestion: "Suggestion",
       kindSelectLabel: "How to treat {{column}}",
       kinds: {
         email: "Email address",

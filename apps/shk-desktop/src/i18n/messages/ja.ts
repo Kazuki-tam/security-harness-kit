@@ -199,11 +199,6 @@ export const ja: Messages = {
         "処理したい列にチェックを入れ、データの種類を選んでください。チェックのない列は変更されません。",
       columnsLoaded: "{{count}} 列・{{rows}} 行を読み込みました",
       tableCaption: "{{file}} の列",
-      colSelected: "選択",
-      colHeader: "列名",
-      colSamples: "内容の例",
-      colKind: "扱い",
-      colSuggestion: "判定",
       kindSelectLabel: "{{column}} の扱い",
       kinds: {
         email: "メールアドレス",

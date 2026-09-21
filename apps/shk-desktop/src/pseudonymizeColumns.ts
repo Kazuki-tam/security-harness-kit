@@ -135,14 +135,14 @@ export function columnsReducer(state: ColumnChoice[], action: ColumnAction): Col
             choice.index === fresh[index].index && choice.name === fresh[index].name,
         );
       // Duplicate/blank headers cannot safely be matched by name after a layout change.
-      const oldNames = uniqueColumns(state);
-      const newNames = uniqueColumns(fresh);
+      const oldNames = sameLayout ? null : uniqueColumns(state);
+      const newNames = sameLayout ? null : uniqueColumns(fresh);
       return fresh.map((choice, index) => {
         const name = foldName(choice.name);
         const candidate = sameLayout
           ? state[index]
-          : newNames.get(name)
-            ? oldNames.get(name)
+          : newNames?.get(name)
+            ? oldNames?.get(name)
             : undefined;
         const previous = candidate && userChanged(candidate) ? candidate : undefined;
         return previous && !choice.formula

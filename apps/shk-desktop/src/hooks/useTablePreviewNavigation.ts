@@ -21,7 +21,10 @@ function reveal(region: HTMLElement | null, focusTarget: HTMLElement | null = re
   });
 }
 
-/** A completed paste may navigate once; typing and unrelated focus changes must not. */
+/**
+ * A completed paste, or a kind change that turns pasted content into a table,
+ * may navigate once; typing and unrelated focus changes must not.
+ */
 export function useTablePreviewNavigation({
   active,
   hasInput,
@@ -52,6 +55,16 @@ export function useTablePreviewNavigation({
     },
     [active, inspect, pastedKind, projectPath],
   );
+  /** Choosing CSV/TSV for content that is already pasted is the other way a table appears. */
+  const kindChanged = useCallback(
+    (next: PastedKind) => {
+      pending.current =
+        active && hasInput && next !== "text"
+          ? { previous: inspect, projectPath, kind: next, source: document.activeElement }
+          : null;
+    },
+    [active, hasInput, inspect, projectPath],
+  );
   const revealPreview = useCallback(() => reveal(previewRegion.current), []);
   const returnToInput = useCallback(() => {
     const region = inputRegion.current;
@@ -78,5 +91,13 @@ export function useTablePreviewNavigation({
     }
   }, [active, hasInput, projectPath, pastedKind, failed, ready, inspect, cancel, revealPreview]);
 
-  return { inputRegion, previewRegion, inputChanged, cancel, revealPreview, returnToInput };
+  return {
+    inputRegion,
+    previewRegion,
+    inputChanged,
+    kindChanged,
+    cancel,
+    revealPreview,
+    returnToInput,
+  };
 }

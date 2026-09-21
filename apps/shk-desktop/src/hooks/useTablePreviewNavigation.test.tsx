@@ -77,17 +77,41 @@ describe("table preview navigation", () => {
     expect(preview.scrollIntoView).not.toHaveBeenCalled();
   });
 
-  it.each(["clear", "project", "error", "cancel"])("cancels a pending reveal on %s", (reason) => {
+  it("navigates when already pasted content is declared a table", () => {
+    const { result, rerender, preview } = setup();
+    const select = document.createElement("select");
+    document.body.append(select);
+    nodes.push(select);
+    select.focus();
+    act(() => result.current.kindChanged("tsv"));
+    rerender({ ...initial, pastedKind: "tsv", inspect, ready: true });
+    expect(preview).toHaveFocus();
+    expect(preview.scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not arm navigation when the kind returns to plain text", () => {
     const { result, rerender, preview } = setup();
     act(() => result.current.inputChanged(true));
-    if (reason === "cancel") act(() => result.current.cancel());
-    rerender({
-      ...initial,
-      hasInput: reason !== "clear",
-      projectPath: reason === "project" ? "/other" : "/demo",
-      failed: reason === "error",
-    });
-    rerender({ ...initial, inspect, ready: true });
+    act(() => result.current.kindChanged("text"));
+    rerender({ ...initial, pastedKind: "text", inspect, ready: true });
     expect(preview.scrollIntoView).not.toHaveBeenCalled();
   });
+
+  it.each(["clear", "project", "kind", "error", "cancel"])(
+    "cancels a pending reveal on %s",
+    (reason) => {
+      const { result, rerender, preview } = setup();
+      act(() => result.current.inputChanged(true));
+      if (reason === "cancel") act(() => result.current.cancel());
+      rerender({
+        ...initial,
+        hasInput: reason !== "clear",
+        projectPath: reason === "project" ? "/other" : "/demo",
+        pastedKind: reason === "kind" ? "tsv" : "csv",
+        failed: reason === "error",
+      });
+      rerender({ ...initial, inspect, ready: true });
+      expect(preview.scrollIntoView).not.toHaveBeenCalled();
+    },
+  );
 });

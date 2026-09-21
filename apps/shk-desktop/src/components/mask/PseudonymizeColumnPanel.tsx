@@ -245,7 +245,10 @@ export function PseudonymizeColumnPanel({
                     data-selected={choice.kind !== "none" ? "true" : "false"}
                     className={`max-w-[300px] border-b border-l border-slate-200 px-3 py-2.5 align-top text-slate-800 transition-colors ${choice.kind !== "none" ? "bg-blue-50/60 group-hover:bg-blue-100/70" : "bg-white group-hover:bg-slate-50"}`}
                   >
-                    <div className="max-h-24 overflow-auto whitespace-pre-wrap break-words text-[12px] leading-5 tabular-nums">
+                    <div
+                      title={row[choice.index] || undefined}
+                      className="line-clamp-4 whitespace-pre-wrap break-words text-[12px] leading-5 tabular-nums"
+                    >
                       {row[choice.index] || m.noSamples}
                     </div>
                   </td>

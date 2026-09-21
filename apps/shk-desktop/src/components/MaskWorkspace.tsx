@@ -82,6 +82,7 @@ export function MaskWorkspace({
     inputRegion,
     previewRegion,
     inputChanged,
+    kindChanged,
     cancel: cancelPreviewNavigation,
     revealPreview,
     returnToInput,
@@ -94,6 +95,9 @@ export function MaskWorkspace({
     ready: pseudonymize.phase.status === "ready" && !pseudonymize.isInspecting,
     failed: pseudonymize.phase.status === "error",
   });
+  const showTablePreview = Boolean(
+    input.hasInput && pseudonymizeReady && pseudonymize.isTableInput && pseudonymize.inspect?.table,
+  );
   const { resetResult: resetRedact, runMask } = redact;
   const {
     resetResult: resetPseudonymizeResult,
@@ -353,14 +357,7 @@ export function MaskWorkspace({
                 runningLabel={mp.running}
                 runIcon={<KeyRound size={14} aria-hidden="true" />}
                 runDisabled={!pseudonymize.canRun}
-                showRun={
-                  !(
-                    hasInput &&
-                    pseudonymizeReady &&
-                    pseudonymize.isTableInput &&
-                    pseudonymize.inspect?.table
-                  )
-                }
+                showRun={!showTablePreview}
                 runDisabledReasonId={gate ? gateId : undefined}
                 textControls={
                   <label
@@ -372,9 +369,11 @@ export function MaskWorkspace({
                       id={pastedKindId}
                       value={pseudonymize.pastedKind}
                       disabled={inputLocked}
-                      onChange={(event) =>
-                        pseudonymize.changePastedKind(event.target.value as PastedKind)
-                      }
+                      onChange={(event) => {
+                        const next = event.target.value as PastedKind;
+                        pseudonymize.changePastedKind(next);
+                        kindChanged(next);
+                      }}
                       className="rounded-md border border-border-strong bg-canvas/70 px-2 py-1 text-[11px] font-medium text-white outline-none transition focus:border-sky-300/70 focus:ring-2 focus:ring-sky-300/20"
                     >
                       {PASTED_KINDS.map((kind) => (
@@ -393,7 +392,8 @@ export function MaskWorkspace({
                 inputFeedback={
                   hasInput && pseudonymizeReady && pseudonymize.isTableInput ? (
                     <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-sky-400/30 bg-sky-500/10 px-3 py-2">
-                      <p role="status" className="text-[12px] text-sky-100">
+                      {/* PseudonymizeSection already announces this; keep it visual only. */}
+                      <p className="text-[12px] text-sky-100">
                         {pseudonymize.isInspecting
                           ? mp.inspecting
                           : pseudonymize.inspect?.table
@@ -431,22 +431,19 @@ export function MaskWorkspace({
             </div>
             <div
               ref={previewRegion}
-              role={pseudonymize.isTableInput ? "region" : undefined}
-              aria-label={pseudonymize.isTableInput ? mp.previewRegion : undefined}
+              role={showTablePreview ? "region" : undefined}
+              aria-label={showTablePreview ? mp.previewRegion : undefined}
               tabIndex={-1}
               className="grid scroll-mt-4 gap-4 rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-sky-400/50"
             >
-              {hasInput &&
-                pseudonymizeReady &&
-                pseudonymize.isTableInput &&
-                pseudonymize.inspect?.table && (
-                  <div className="flex items-center justify-between gap-3">
-                    <h2 className="text-sm font-semibold text-white">{mp.previewRegion}</h2>
-                    <Button size="sm" disabled={inputLocked} onClick={returnToInput}>
-                      {mp.returnToInput}
-                    </Button>
-                  </div>
-                )}
+              {showTablePreview && (
+                <div className="flex items-center justify-between gap-3">
+                  <h2 className="text-sm font-semibold text-white">{mp.previewRegion}</h2>
+                  <Button size="sm" disabled={inputLocked} onClick={returnToInput}>
+                    {mp.returnToInput}
+                  </Button>
+                </div>
+              )}
               <PseudonymizeSection
                 workspace={pseudonymize}
                 projectName={policyProject?.name ?? null}

@@ -183,11 +183,6 @@ export type Messages = {
       columnsHint: string;
       columnsLoaded: string;
       tableCaption: string;
-      colSelected: string;
-      colHeader: string;
-      colSamples: string;
-      colKind: string;
-      colSuggestion: string;
       kindSelectLabel: string;
       kinds: {
         email: string;
