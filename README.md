@@ -46,6 +46,15 @@ scanning, AI-oriented masking, setup automation, and audit review. Installers
 are published from GitHub Releases; macOS builds are Developer ID signed and
 notarized as of `desktop-v0.6.0`. <!-- shk-version-pin -->
 
+The Mask screen offers two methods: **Redact** replaces detected secrets and
+PII with `[REDACTED]`, and **Pseudonymize** replaces names, email addresses,
+and phone numbers with consistent codes. For CSV, TSV, and Excel files you
+pick what each column holds from a preview with sample values and
+auto-detected suggestions, then save the pseudonymized copy next to the
+original, optionally with an encrypted restore map. It uses the same
+per-project key as `shk mask --pseudonymize`, so codes match across the CLI
+and the app.
+
 While it is open it also raises an OS notification when a hook blocks AI
 activity in any of your projects.
 

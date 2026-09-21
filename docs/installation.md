@@ -191,6 +191,15 @@ Developer ID signed, notarized, and stapled. Windows installers are currently
 
 See [`desktop-release.md`](desktop-release.md) for maintainer release steps.
 
+The Mask screen can redact (`[REDACTED]`) or pseudonymize (consistent codes)
+content before it goes to an AI tool. Pseudonymize needs a project with
+`shk.toml` selected because the key that keeps codes consistent is stored per
+project, in the same credential store the CLI uses; the first run from the app
+asks before creating it, and macOS may ask once before the app can read a key
+the CLI created (or the other way round), since they are separate signed
+binaries. See [`shk mask --pseudonymize`](commands.md#shk-mask) for the
+underlying behaviour and restore maps.
+
 ### Choose an installer
 
 | Platform | Asset pattern | Notes |
