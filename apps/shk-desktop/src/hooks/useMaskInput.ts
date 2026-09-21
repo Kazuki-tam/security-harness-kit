@@ -6,6 +6,9 @@ import { fileExtension } from "../pseudonymize";
 
 export type MaskInputMode = "text" | "file";
 
+/** `edit` keeps the same content and changes it; `replace` swaps it for other content. */
+export type MaskInputChange = "edit" | "replace";
+
 type UseMaskInputOptions = {
   /** Extensions offered by the file picker. */
   extensions: readonly string[];
@@ -13,7 +16,7 @@ type UseMaskInputOptions = {
   enforceExtensions?: boolean;
   unsupportedMessage?: string;
   /** Called whenever the text, file, or input mode changes, so result state can reset. */
-  onInputChange?: () => void;
+  onInputChange?: (change: MaskInputChange) => void;
   onNotice?: (message: string) => void;
 };
 
@@ -41,12 +44,15 @@ export function useMaskInput({
     onNoticeRef.current = onNotice;
   });
 
-  const notifyChange = useCallback(() => onInputChangeRef.current?.(), []);
+  const notifyChange = useCallback(
+    (change: MaskInputChange) => onInputChangeRef.current?.(change),
+    [],
+  );
 
   const setInputText = useCallback(
     (value: string) => {
       setInputTextState(value);
-      notifyChange();
+      notifyChange("edit");
     },
     [notifyChange],
   );
@@ -54,7 +60,7 @@ export function useMaskInput({
   const clearInput = useCallback(() => {
     setInputTextState("");
     setSelectedFilePath(null);
-    notifyChange();
+    notifyChange("replace");
   }, [notifyChange]);
 
   const switchInputMode = useCallback(
@@ -65,7 +71,7 @@ export function useMaskInput({
       } else {
         setInputTextState("");
       }
-      notifyChange();
+      notifyChange("replace");
     },
     [notifyChange],
   );
@@ -79,7 +85,7 @@ export function useMaskInput({
       setSelectedFilePath(path);
       setInputMode("file");
       setInputTextState("");
-      notifyChange();
+      notifyChange("replace");
       return true;
     },
     [enforceExtensions, extensions, notifyChange, unsupportedMessage],
@@ -103,7 +109,7 @@ export function useMaskInput({
 
   const removeSelectedFile = useCallback(() => {
     setSelectedFilePath(null);
-    notifyChange();
+    notifyChange("replace");
   }, [notifyChange]);
 
   const hasInput = inputMode === "text" ? inputText.trim().length > 0 : Boolean(selectedFilePath);

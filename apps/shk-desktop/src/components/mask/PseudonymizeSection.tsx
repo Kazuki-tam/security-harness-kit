@@ -1,4 +1,5 @@
 import { Check, Copy, Info, RefreshCw } from "lucide-react";
+import { useCallback } from "react";
 import type { PreferredAiTool } from "../../aiTool";
 import type { PseudonymizeWorkspaceApi } from "../../hooks/usePseudonymizeWorkspace";
 import type { Messages } from "../../i18n/types";
@@ -20,6 +21,7 @@ type Props = {
   preferredAiTool: PreferredAiTool;
   onPreferredAiToolChange: (tool: PreferredAiTool) => void;
   onCopyAndOpen: () => void;
+  onStartOver: () => void;
   maskMessages: Messages["mask"];
 };
 
@@ -32,6 +34,7 @@ export function PseudonymizeSection({
   preferredAiTool,
   onPreferredAiToolChange,
   onCopyAndOpen,
+  onStartOver,
   maskMessages,
 }: Props) {
   const {
@@ -59,11 +62,12 @@ export function PseudonymizeSection({
     inlineOutput,
     copied,
     copiedPath,
-    reset,
     retryInspect,
     copyInlineOutput,
     copyPath,
   } = workspace;
+  const confirmKey = useCallback(() => resolveKeyDialog(true), [resolveKeyDialog]);
+  const cancelKey = useCallback(() => resolveKeyDialog(false), [resolveKeyDialog]);
 
   const busy = isRunning || isInspecting;
   const showColumns = hasInput && isTableInput && inspect?.table != null;
@@ -144,9 +148,7 @@ export function PseudonymizeSection({
           role="alert"
           className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-[13px] text-red-200"
         >
-          <span>
-            {m.failed}: {phase.message}
-          </span>
+          <span>{planFailed ? phase.message : `${m.failed}: ${phase.message}`}</span>
           {planFailed && (
             <Button
               variant="secondary"
@@ -207,7 +209,7 @@ export function PseudonymizeSection({
             result={phase.result}
             copiedPath={copiedPath}
             onCopyPath={(path) => void copyPath(path)}
-            onStartOver={reset}
+            onStartOver={onStartOver}
             messages={m}
             t={t}
           />
@@ -219,8 +221,8 @@ export function PseudonymizeSection({
         title={t(m.keyDialogTitle, { project: projectName ?? "" })}
         description={t(m.keyDialogBody, { backend: keyDialog.backend })}
         confirmLabel={m.keyDialogConfirm}
-        onConfirm={() => resolveKeyDialog(true)}
-        onCancel={() => resolveKeyDialog(false)}
+        onConfirm={confirmKey}
+        onCancel={cancelKey}
       />
     </>
   );

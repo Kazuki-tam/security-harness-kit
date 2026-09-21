@@ -12,6 +12,8 @@ type Props = {
   selectedFilePath: string | null;
   dragActive: boolean;
   isLoading: boolean;
+  /** Freeze the content controls while a run that depends on them is in flight. */
+  inputLocked?: boolean;
   hasInput: boolean;
   fileMeta?: { fileKind: string; sourceLabel: string };
   /** Overrides the label derived from the file kind (pseudonymize names tables). */
@@ -44,6 +46,7 @@ export function MaskInputPanel({
   selectedFilePath,
   dragActive,
   isLoading,
+  inputLocked = false,
   hasInput,
   fileMeta,
   fileKindLabel: fileKindLabelOverride,
@@ -119,6 +122,7 @@ export function MaskInputPanel({
                 type="button"
                 role="tab"
                 aria-selected={active}
+                disabled={inputLocked}
                 onClick={() => onSwitchMode(mode)}
                 className={`rounded-md px-3 py-1.5 text-[11px] font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70 ${
                   active
@@ -137,6 +141,7 @@ export function MaskInputPanel({
         <>
           <textarea
             value={inputText}
+            disabled={inputLocked}
             onChange={(event) => onInputTextChange(event.target.value)}
             placeholder={inputPlaceholder}
             className="border-border bg-canvas placeholder:text-faint min-h-[300px] w-full resize-y rounded-lg border px-3 py-3 font-mono text-[12px] leading-relaxed text-white outline-none transition focus:border-sky-300/70 focus:ring-2 focus:ring-sky-300/25"
@@ -177,13 +182,14 @@ export function MaskInputPanel({
                 {shortenPath(selectedFilePath)}
               </p>
               <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
-                <Button variant="secondary" size="sm" onClick={onChooseFile}>
+                <Button variant="secondary" size="sm" disabled={inputLocked} onClick={onChooseFile}>
                   {m.selectFile}
                 </Button>
                 <Button
                   variant="secondary"
                   size="sm"
                   icon={<X size={14} aria-hidden="true" />}
+                  disabled={inputLocked}
                   onClick={onRemoveFile}
                 >
                   {m.removeFile}
@@ -193,6 +199,7 @@ export function MaskInputPanel({
           ) : (
             <button
               type="button"
+              disabled={inputLocked}
               onClick={onChooseFile}
               className="grid w-full max-w-sm gap-3 rounded-xl px-4 py-6 transition hover:bg-surface-3/30 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70"
             >
@@ -219,14 +226,19 @@ export function MaskInputPanel({
         >
           {isLoading ? runningLabel : runLabel}
         </Button>
-        <Button variant="secondary" onClick={onClear} disabled={!hasInput && !inputText}>
+        <Button
+          variant="secondary"
+          onClick={onClear}
+          disabled={inputLocked || (!hasInput && !inputText)}
+        >
           {m.clearInput}
         </Button>
         {inputMode === "file" && (
           <button
             type="button"
+            disabled={inputLocked}
             onClick={() => onSwitchMode("text")}
-            className="text-[11px] font-medium text-sky-200 transition hover:text-white"
+            className="text-[11px] font-medium text-sky-200 transition hover:text-white disabled:opacity-60"
           >
             {m.useTextInstead}
           </button>

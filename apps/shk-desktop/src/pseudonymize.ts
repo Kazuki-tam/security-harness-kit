@@ -10,6 +10,8 @@ export type PseudonymizeMode = "table" | "text";
 export type PseudonymizeFormat = "csv" | "tsv";
 
 export type PseudonymizeColumnChoiceDto = {
+  /** Column position from the plan, so blank or repeated headers stay addressable. */
+  index: number;
   name: string;
   kind: PseudonymizeKindChoice;
   customLabel?: string | null;
@@ -32,6 +34,8 @@ export type PseudonymizeColumnPlan = {
   customLabel: string | null;
   source: PseudonymizeColumnSource;
   matchRate: number | null;
+  /** Excel only: the column holds a formula, which cannot be pseudonymized. */
+  formula: boolean;
 };
 
 export type PseudonymizeTablePreview = {

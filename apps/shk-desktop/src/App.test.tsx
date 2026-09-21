@@ -57,8 +57,17 @@ const TABLE_PREVIEW = {
         customLabel: null,
         source: "inferred",
         matchRate: 0.9,
+        formula: false,
       },
-      { index: 1, name: "Note", kind: "none", customLabel: null, source: "none", matchRate: null },
+      {
+        index: 1,
+        name: "Note",
+        kind: "none",
+        customLabel: null,
+        source: "none",
+        matchRate: null,
+        formula: false,
+      },
     ],
     sheets: [],
     selectedSheet: null,
@@ -262,8 +271,8 @@ describe("App", () => {
           outputPath: "/tmp/demo/orders.pseudo.csv",
           createKey: true,
           columns: [
-            { name: "Mail", kind: "email", customLabel: null },
-            { name: "Note", kind: "name", customLabel: null },
+            { index: 0, name: "Mail", kind: "email", customLabel: null },
+            { index: 1, name: "Note", kind: "name", customLabel: null },
           ],
         }),
       });
@@ -423,6 +432,116 @@ describe("App", () => {
     expect(await screen.findByText(/This file type cannot be pseudonymized/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Remove file" })).not.toBeInTheDocument();
     expect(invokeMock).not.toHaveBeenCalledWith("pseudonymize_inspect", expect.anything());
+  });
+
+  it("recovers when the input changes while a run is in flight", async () => {
+    seedProject();
+    let finishRun: (value: unknown) => void = () => {};
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "mask_policy_status") {
+        return { usesProjectPolicy: true, policyPath: "/tmp/demo/shk.toml" };
+      }
+      if (command === "pseudonymize_key_status") {
+        return {
+          exists: true,
+          backend: "OS credential store",
+          fingerprint: "x",
+          unavailableReason: null,
+        };
+      }
+      if (command === "pseudonymize_run") {
+        return new Promise((resolve) => {
+          finishRun = resolve;
+        });
+      }
+      return undefined;
+    });
+    openMaskWorkspace();
+    fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
+    const textarea = screen.getByPlaceholderText(
+      "Paste text that contains names, email addresses, or phone numbers…",
+    );
+    fireEvent.change(textarea, { target: { value: "first draft" } });
+    const run = screen.getByRole("button", { name: "Pseudonymize" });
+    await waitFor(() => expect(run).toBeEnabled());
+    fireEvent.click(run);
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("pseudonymize_run", expect.anything()),
+    );
+
+    // The content is frozen while running; "Clear" replaces it once unlocked.
+    expect(textarea).toBeDisabled();
+    finishRun({
+      ...RUN_RESULT,
+      mode: "text",
+      inlineOutput: "email_abc",
+      outputPath: null,
+      metaPath: null,
+    });
+    await screen.findByRole("textbox", { name: "Pseudonymized text" });
+    fireEvent.change(textarea, { target: { value: "second draft" } });
+    expect(screen.queryByRole("textbox", { name: "Pseudonymized text" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pseudonymize" })).toBeEnabled();
+  });
+
+  it("clears the sheet and plan when another file is chosen, and start over returns to step 1", async () => {
+    seedProject();
+    invokeMock.mockImplementation(
+      async (command: string, args?: { options?: { sheet?: string } }) => {
+        if (command === "mask_policy_status") {
+          return { usesProjectPolicy: true, policyPath: "/tmp/demo/shk.toml" };
+        }
+        if (command === "pseudonymize_inspect") {
+          return {
+            ...TABLE_PREVIEW,
+            inputKind: "table-xlsx",
+            table: {
+              ...TABLE_PREVIEW.table,
+              sheets: ["Customers", "Archive"],
+              selectedSheet: args?.options?.sheet ?? "Customers",
+            },
+          };
+        }
+        if (command === "pseudonymize_key_status") {
+          return {
+            exists: true,
+            backend: "OS credential store",
+            fingerprint: "x",
+            unavailableReason: null,
+          };
+        }
+        if (command === "pseudonymize_run") return RUN_RESULT;
+        return undefined;
+      },
+    );
+    openMaskWorkspace();
+    await chooseFileForPseudonymize("/tmp/demo/a.xlsx");
+    fireEvent.change(screen.getByRole("combobox", { name: /Sheet/ }), {
+      target: { value: "Archive" },
+    });
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenLastCalledWith("pseudonymize_inspect", {
+        projectPath: "/tmp/demo",
+        options: expect.objectContaining({ sheet: "Archive" }),
+      });
+    });
+
+    openMock.mockResolvedValue("/tmp/demo/b.xlsx");
+    fireEvent.click(screen.getByRole("button", { name: "Choose file" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenLastCalledWith("pseudonymize_inspect", {
+        projectPath: "/tmp/demo",
+        options: { inputPath: "/tmp/demo/b.xlsx", sheet: undefined, noHeader: false },
+      });
+    });
+
+    saveMock.mockResolvedValue("/tmp/demo/b.pseudo.xlsx");
+    fireEvent.click(screen.getByRole("button", { name: "Pseudonymize and save…" }));
+    await screen.findByRole("heading", { name: "Pseudonymized" });
+    fireEvent.click(screen.getByRole("button", { name: "Start over" }));
+    expect(screen.queryByRole("heading", { name: "Pseudonymized" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    expect(screen.getByRole("listitem", { current: "step" })).toHaveTextContent("Add content");
   });
 
   it("gates pseudonymize until a project with shk.toml is selected", async () => {

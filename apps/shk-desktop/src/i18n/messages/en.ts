@@ -164,7 +164,7 @@ export const en: Messages = {
       requiresPolicyError:
         "Could not read the policy for {{project}} ({{message}}). Check that the folder still exists, then choose it again.",
       inputHint:
-        "Choose a CSV, TSV, or Excel file to pick columns, or paste text / choose a document to replace everything found.",
+        "Choose a CSV, TSV, or Excel file (or paste a table) to pick columns. Text and documents replace everything found.",
       inputPlaceholder: "Paste text that contains names, email addresses, or phone numbers…",
       unsupportedFile:
         "This file type cannot be pseudonymized. Use CSV, TSV, Excel, text, Markdown, Word, or PowerPoint.",
@@ -200,10 +200,12 @@ export const en: Messages = {
       suggestedBadge: "Auto-detected {{percent}}%",
       suggestedBadgeTitle: "{{percent}}% of sample values looked like this",
       configuredBadge: "Project setting",
+      formulaBadge: "Formula (kept as is)",
+      formulaBadgeTitle: "This column contains formulas, so it cannot be pseudonymized.",
       applySuggestions: "Use all suggestions",
       clearSelection: 'Set all to "Leave as is"',
       selectedCount: "{{count}} of {{total}} columns will be pseudonymized",
-      nothingSelected: "No columns selected. The file will be copied without changes.",
+      nothingSelected: "No columns selected. The content will be copied without changes.",
       noSamples: "(empty)",
       customLabelLabel: "Label",
       customLabelHint:

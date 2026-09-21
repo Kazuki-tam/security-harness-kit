@@ -165,7 +165,7 @@ export const ja: Messages = {
       requiresPolicyError:
         "{{project}} のポリシーを読み込めませんでした（{{message}}）。フォルダが存在するか確認して、選び直してください。",
       inputHint:
-        "CSV・TSV・Excel を選ぶと列ごとに設定できます。テキストや Word/PowerPoint は見つかった項目をすべて仮名化します。",
+        "CSV・TSV・Excel（または貼り付けた表）は列ごとに設定できます。文章や Word/PowerPoint は見つかった項目をすべて仮名化します。",
       inputPlaceholder: "氏名・メールアドレス・電話番号を含むテキストを貼り付け…",
       unsupportedFile:
         "このファイル形式は仮名化に対応していません。CSV・TSV・Excel・テキスト・Markdown・Word・PowerPoint を選んでください。",
@@ -200,11 +200,12 @@ export const ja: Messages = {
       suggestedBadge: "自動判定 {{percent}}%",
       suggestedBadgeTitle: "サンプルの {{percent}}% がこの種類に見えました",
       configuredBadge: "プロジェクト設定",
+      formulaBadge: "数式（そのまま）",
+      formulaBadgeTitle: "この列には数式が含まれているため仮名化できません。",
       applySuggestions: "おすすめをすべて使う",
       clearSelection: "すべて「そのまま」にする",
       selectedCount: "{{total}} 列中 {{count}} 列を仮名化します",
-      nothingSelected:
-        "仮名化する列がありません。このまま実行するとファイルは変更されずにコピーされます。",
+      nothingSelected: "仮名化する列がありません。このまま実行しても内容は変更されません。",
       noSamples: "（空）",
       customLabelLabel: "ラベル",
       customLabelHint: "英小文字・数字・_ のみ（例: member_id）。仮名コードの先頭に付きます。",

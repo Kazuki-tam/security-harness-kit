@@ -178,7 +178,7 @@ export function PseudonymizeColumnPanel({
                       <select
                         aria-label={t(m.kindSelectLabel, { column: displayName })}
                         value={choice.kind}
-                        disabled={disabled}
+                        disabled={disabled || choice.formula}
                         onChange={(event) =>
                           dispatch({
                             type: "setKind",
@@ -206,7 +206,16 @@ export function PseudonymizeColumnPanel({
                     </div>
                   </td>
                   <td className="px-3 py-2 align-top">
-                    {suggestion &&
+                    {choice.formula && (
+                      <span
+                        title={m.formulaBadgeTitle}
+                        className="inline-flex items-center rounded-md bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium whitespace-nowrap text-amber-100 ring-1 ring-inset ring-amber-400/30"
+                      >
+                        {m.formulaBadge}
+                      </span>
+                    )}
+                    {!choice.formula &&
+                      suggestion &&
                       (suggestion.source === "inferred" || suggestion.source === "config") && (
                         <SuggestionBadge
                           source={suggestion.source}

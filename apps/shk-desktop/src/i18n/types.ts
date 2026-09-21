@@ -187,6 +187,8 @@ export type Messages = {
       suggestedBadge: string;
       suggestedBadgeTitle: string;
       configuredBadge: string;
+      formulaBadge: string;
+      formulaBadgeTitle: string;
       applySuggestions: string;
       clearSelection: string;
       selectedCount: string;

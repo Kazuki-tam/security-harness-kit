@@ -29,6 +29,7 @@ function preview(overrides: Partial<PseudonymizeTablePreview> = {}): Pseudonymiz
           customLabel: null,
           source: "inferred",
           matchRate: 0.9,
+          formula: false,
         },
         {
           index: 1,
@@ -37,6 +38,7 @@ function preview(overrides: Partial<PseudonymizeTablePreview> = {}): Pseudonymiz
           customLabel: "member",
           source: "config",
           matchRate: null,
+          formula: false,
         },
         {
           index: 2,
@@ -45,6 +47,7 @@ function preview(overrides: Partial<PseudonymizeTablePreview> = {}): Pseudonymiz
           customLabel: null,
           source: "none",
           matchRate: null,
+          formula: false,
         },
       ],
       sheets: [],
@@ -148,6 +151,14 @@ describe("PseudonymizeColumnPanel", () => {
     expect(sheet).toHaveValue("Customers");
     fireEvent.change(sheet, { target: { value: "Archive" } });
     expect(onSheetChange).toHaveBeenCalledWith("Archive");
+  });
+
+  it("marks formula columns and keeps them unselectable", () => {
+    const withFormula = preview();
+    withFormula.table!.columns[2] = { ...withFormula.table!.columns[2], formula: true };
+    renderPanel({ inspect: withFormula });
+    expect(screen.getByText("Formula (kept as is)")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "How to treat Note" })).toBeDisabled();
   });
 
   it("shows numbered columns and the reading state", () => {

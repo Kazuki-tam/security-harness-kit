@@ -22,6 +22,8 @@ export type ColumnChoice = {
   kind: PseudonymizeKindChoice;
   customLabel: string;
   suggestion?: ColumnSuggestion;
+  /** A formula column is always left as it is. */
+  formula: boolean;
 };
 
 export type ColumnAction =
@@ -49,9 +51,10 @@ export function initialChoices(table: PseudonymizeTablePreview): ColumnChoice[] 
     return {
       index: plan.index,
       name: plan.name,
-      kind: suggestion?.kind ?? "none",
+      kind: plan.formula ? "none" : (suggestion?.kind ?? "none"),
       customLabel: suggestion?.customLabel ?? suggestCustomLabel(plan.name),
       suggestion,
+      formula: plan.formula,
     };
   });
 }
@@ -72,7 +75,9 @@ export function columnsReducer(state: ColumnChoice[], action: ColumnAction): Col
       return initialChoices(action.table);
     case "setKind":
       return state.map((choice) =>
-        choice.index === action.index ? { ...choice, kind: action.kind } : choice,
+        choice.index === action.index && !choice.formula
+          ? { ...choice, kind: action.kind }
+          : choice,
       );
     case "setCustomLabel":
       return state.map((choice) =>
@@ -80,7 +85,7 @@ export function columnsReducer(state: ColumnChoice[], action: ColumnAction): Col
       );
     case "applySuggestions":
       return state.map((choice) =>
-        choice.suggestion
+        choice.suggestion && !choice.formula
           ? {
               ...choice,
               kind: choice.suggestion.kind,
@@ -106,9 +111,10 @@ export function columnsReducer(state: ColumnChoice[], action: ColumnAction): Col
   }
 }
 
-/** Every column is sent, so the engine applies exactly this selection. */
+/** Every column is sent by position, so the engine applies exactly this selection. */
 export function toRunColumns(choices: ColumnChoice[]): PseudonymizeColumnChoiceDto[] {
   return choices.map((choice) => ({
+    index: choice.index,
     name: choice.name,
     kind: choice.kind,
     customLabel: choice.kind === "custom" ? choice.customLabel.trim() : null,
@@ -135,6 +141,7 @@ export function hasUnappliedSuggestions(choices: ColumnChoice[]): boolean {
   return choices.some(
     (choice) =>
       choice.suggestion &&
+      !choice.formula &&
       (choice.kind !== choice.suggestion.kind ||
         (choice.kind === "custom" &&
           choice.suggestion.customLabel !== undefined &&

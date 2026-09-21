@@ -15,6 +15,7 @@ function plan(overrides: Partial<PseudonymizeColumnPlan> & { index: number; name
     customLabel: null,
     source: "none",
     matchRate: null,
+    formula: false,
     ...overrides,
   } as PseudonymizeColumnPlan;
 }
@@ -94,9 +95,31 @@ describe("column choices", () => {
     let state = initialChoices(fixture);
     state = columnsReducer(state, { type: "setCustomLabel", index: 1, label: " member " });
     expect(toRunColumns(state)).toEqual([
-      { name: "Mail", kind: "email", customLabel: null },
-      { name: "Member ID", kind: "custom", customLabel: "member" },
-      { name: "Note", kind: "none", customLabel: null },
+      { index: 0, name: "Mail", kind: "email", customLabel: null },
+      { index: 1, name: "Member ID", kind: "custom", customLabel: "member" },
+      { index: 2, name: "Note", kind: "none", customLabel: null },
     ]);
+  });
+
+  it("never selects a formula column", () => {
+    const withFormula = table([
+      plan({
+        index: 0,
+        name: "Total",
+        kind: "email",
+        source: "inferred",
+        matchRate: 1,
+        formula: true,
+      }),
+      plan({ index: 1, name: "Mail", kind: "email", source: "inferred", matchRate: 1 }),
+    ]);
+    let state = initialChoices(withFormula);
+    expect(state.map((choice) => choice.kind)).toEqual(["none", "email"]);
+    expect(hasUnappliedSuggestions(state)).toBe(false);
+    state = columnsReducer(state, { type: "setKind", index: 0, kind: "email" });
+    expect(state[0].kind).toBe("none");
+    state = columnsReducer(state, { type: "clearAll" });
+    state = columnsReducer(state, { type: "applySuggestions" });
+    expect(state.map((choice) => choice.kind)).toEqual(["none", "email"]);
   });
 });

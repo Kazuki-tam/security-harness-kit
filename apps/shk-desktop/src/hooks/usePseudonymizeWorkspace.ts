@@ -128,9 +128,14 @@ export function usePseudonymizeWorkspace({
   /** Drop results only; the plan, column choices, and options survive edits. */
   const resetResult = useCallback(() => {
     tracker.begin(RUN_KEY);
-    setPhase((current) =>
-      current.status === "done" || current.status === "error" ? { status: "idle" } : current,
-    );
+    setPhase((current) => {
+      if (current.status === "idle" || current.status === "inspecting") return current;
+      if (current.status === "ready") return current;
+      // A run in flight is abandoned (its result is ignored by the guard);
+      // a finished or failed one goes back to its plan when there is one.
+      const plan = current.inspect;
+      return plan?.table ? { status: "ready", inspect: plan } : { status: "idle" };
+    });
     setCopied(false);
     setCopiedPath(null);
   }, [tracker]);
@@ -149,11 +154,13 @@ export function usePseudonymizeWorkspace({
 
   const baseRequest = useCallback(
     (overrides: { sheet?: string; noHeader?: boolean } = {}): PseudonymizeInspectOptions | null => {
-      const nextNoHeader = overrides.noHeader ?? noHeader;
+      // An override that is present but `undefined` clears the value.
+      const nextSheet = "sheet" in overrides ? overrides.sheet : sheet;
+      const nextNoHeader = "noHeader" in overrides ? overrides.noHeader : noHeader;
       if (inputMode === "file" && selectedFilePath) {
         return {
           inputPath: selectedFilePath,
-          sheet: overrides.sheet ?? sheet,
+          sheet: nextSheet,
           noHeader: nextNoHeader,
         };
       }
@@ -193,6 +200,7 @@ export function usePseudonymizeWorkspace({
         setPhase({ status: "ready", inspect: result });
       } catch (error) {
         if (!tracker.isLatest(INSPECT_KEY, requestId)) return;
+        dispatchColumns({ type: "init", table: EMPTY_TABLE });
         setPhase({
           status: "error",
           message: `${m.inspectFailed}: ${errorMessage(error)}`,
@@ -211,10 +219,10 @@ export function usePseudonymizeWorkspace({
     runInspectRef.current = runInspect;
   });
 
-  // A newly selected file gets a fresh plan.
+  // A newly selected file gets a fresh plan; the container already cleared
+  // the previous plan and options when the file was replaced.
   useEffect(() => {
     if (!active || !projectPath || !isFileInput) return;
-    setSheet(undefined);
     void runInspectRef.current({ sheet: undefined }, (table) => ({ type: "init", table }));
   }, [active, projectPath, isFileInput, selectedFilePath]);
 

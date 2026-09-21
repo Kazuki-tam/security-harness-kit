@@ -4,7 +4,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from
 import { openAiTool, type PreferredAiTool } from "../aiTool";
 import { useI18n } from "../i18n";
 import { operationErrorMessage } from "../i18n/interpolate";
-import { useMaskInput } from "../hooks/useMaskInput";
+import { useMaskInput, type MaskInputChange } from "../hooks/useMaskInput";
 import { useMaskPolicyStatus } from "../hooks/useMaskPolicyStatus";
 import { MASK_FILE_EXTENSIONS, useMaskWorkspace } from "../hooks/useMaskWorkspace";
 import { usePseudonymizeWorkspace, type PastedKind } from "../hooks/usePseudonymizeWorkspace";
@@ -55,12 +55,12 @@ export function MaskWorkspace({
   // Results of both modes are dropped whenever the input changes, so
   // switching back never shows stale output for new content. The ref is
   // written after render so the input hook can keep stable callbacks.
-  const resetRef = useRef<() => void>(() => {});
+  const resetRef = useRef<(change: MaskInputChange) => void>(() => {});
   const input = useMaskInput({
     extensions: isPseudonymize ? PSEUDONYMIZE_FILE_EXTENSIONS : MASK_FILE_EXTENSIONS,
     enforceExtensions: isPseudonymize,
     unsupportedMessage: mp.unsupportedFile,
-    onInputChange: () => resetRef.current(),
+    onInputChange: (change) => resetRef.current(change),
     onNotice,
   });
   const redact = useMaskWorkspace({
@@ -95,7 +95,8 @@ export function MaskWorkspace({
     resetPseudonymize();
   }, [resetPseudonymize, resetRedact]);
   useLayoutEffect(() => {
-    resetRef.current = resetResults;
+    // Editing the same content keeps its plan; replacing it starts over.
+    resetRef.current = (change) => (change === "edit" ? resetResults() : resetAll());
   });
 
   const {
@@ -106,7 +107,14 @@ export function MaskWorkspace({
     setDragActive,
     hasInput,
     removeSelectedFile,
+    clearInput,
   } = input;
+
+  // "Start over" returns to step 1: no content, no plan, no result.
+  const startOver = useCallback(() => {
+    resetAll();
+    clearInput();
+  }, [clearInput, resetAll]);
 
   useEffect(() => {
     if (policyProjectId && !policyProject) {
@@ -295,6 +303,7 @@ export function MaskWorkspace({
               selectedFilePath={selectedFilePath}
               dragActive={dragActive}
               isLoading={pseudonymize.isRunning}
+              inputLocked={pseudonymize.isRunning || pseudonymize.preparing}
               hasInput={hasInput}
               fileKindLabel={pseudonymizeFileKind}
               inputHint={mp.inputHint}
@@ -345,6 +354,7 @@ export function MaskWorkspace({
               preferredAiTool={preferredAiTool}
               onPreferredAiToolChange={onPreferredAiToolChange}
               onCopyAndOpen={() => void copyAndOpenInline()}
+              onStartOver={startOver}
               maskMessages={m}
             />
           </>
