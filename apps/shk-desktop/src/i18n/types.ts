@@ -152,9 +152,11 @@ export type Messages = {
       requiresProjectTitle: string;
       requiresProject: string;
       requiresPolicy: string;
+      requiresPolicyError: string;
       inputHint: string;
       inputPlaceholder: string;
       unsupportedFile: string;
+      fileKindTable: string;
       pastedKindLabel: string;
       pastedKinds: {
         text: string;
@@ -163,10 +165,12 @@ export type Messages = {
       };
       inspecting: string;
       inspectFailed: string;
+      retryInspect: string;
       columnsTitle: string;
       columnsHint: string;
       columnsLoaded: string;
       tableCaption: string;
+      colSelected: string;
       colHeader: string;
       colSamples: string;
       colKind: string;

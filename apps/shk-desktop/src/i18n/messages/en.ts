@@ -161,11 +161,14 @@ export const en: Messages = {
       requiresProject:
         "Pseudonymize needs a project with shk.toml, because the key that keeps codes consistent is stored per project.",
       requiresPolicy: "{{project}} has no shk.toml yet. Open the project and run setup first.",
+      requiresPolicyError:
+        "Could not read the policy for {{project}} ({{message}}). Check that the folder still exists, then choose it again.",
       inputHint:
         "Choose a CSV, TSV, or Excel file to pick columns, or paste text / choose a document to replace everything found.",
       inputPlaceholder: "Paste text that contains names, email addresses, or phone numbers…",
       unsupportedFile:
         "This file type cannot be pseudonymized. Use CSV, TSV, Excel, text, Markdown, Word, or PowerPoint.",
+      fileKindTable: "Table (CSV, TSV, or Excel)",
       pastedKindLabel: "Pasted content is",
       pastedKinds: {
         text: "Text",
@@ -174,11 +177,13 @@ export const en: Messages = {
       },
       inspecting: "Reading columns…",
       inspectFailed: "Could not read the content",
+      retryInspect: "Try reading again",
       columnsTitle: "Choose columns to pseudonymize",
       columnsHint:
         'Pick what each column contains. Columns set to "Leave as is" are copied unchanged.',
       columnsLoaded: "{{count}} columns found ({{rows}} rows)",
       tableCaption: "Columns in {{file}}",
+      colSelected: "Selected",
       colHeader: "Column",
       colSamples: "Sample values",
       colKind: "Treat as",
@@ -217,7 +222,7 @@ export const en: Messages = {
       restoreMapLabel: "Also save a restore map",
       restoreMapHint:
         "A restore map lets you turn the codes back into the original values later. It is encrypted, but anyone with this project's key and the map can restore the data. Keep it private and never give it to the AI tool.",
-      restoreMapPath: "Saved next to the output as {{name}}",
+      restoreMapPath: "Saved next to the output file and named after it (for example {{name}})",
       restoreMapUnavailableText: "Restore maps can be saved when pseudonymizing a file.",
       noHeaderLabel: "The first row is data, not column names",
       noHeaderHint: "Columns will be shown as 1, 2, 3…",

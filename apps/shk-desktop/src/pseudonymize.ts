@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { interpolate } from "./i18n/interpolate";
 import type { Messages } from "./i18n/types";
 import { basenameOf, dirnameOf } from "./utils";
 
@@ -61,7 +62,6 @@ export type PseudonymizeRunOptions = PseudonymizeInspectOptions & {
   outputPath?: string;
   mapPath?: string;
   createKey?: boolean;
-  checkRemaining?: boolean;
 };
 
 export type PseudonymizeRunResult = {
@@ -77,12 +77,6 @@ export type PseudonymizeRunResult = {
   inlineOutput: string | null;
   remainingRuleIds: string[];
   remainingCheckError: string | null;
-};
-
-export type PseudonymizeRestoreResult = {
-  outputPath: string;
-  replacements: number;
-  ambiguousTokens: number;
 };
 
 export function pseudonymizeInspect(
@@ -101,20 +95,6 @@ export function pseudonymizeRun(
   options: PseudonymizeRunOptions,
 ): Promise<PseudonymizeRunResult> {
   return invoke<PseudonymizeRunResult>("pseudonymize_run", { projectPath, options });
-}
-
-export function pseudonymizeRestore(
-  projectPath: string,
-  inputPath: string,
-  mapPath: string,
-  outputPath: string,
-): Promise<PseudonymizeRestoreResult> {
-  return invoke<PseudonymizeRestoreResult>("pseudonymize_restore", {
-    projectPath,
-    inputPath,
-    mapPath,
-    outputPath,
-  });
 }
 
 export const PSEUDONYMIZE_FILE_EXTENSIONS = [
@@ -183,7 +163,9 @@ export function restoreMapSuggestedPath(outputPath: string): string {
 /** Save-dialog filter that pins the output to the input's extension. */
 export function outputFilterFor(path: string): { name: string; extensions: string[] } {
   const ext = fileExtension(path);
-  return { name: ext ? ext.toUpperCase() : "File", extensions: ext ? [ext] : ["*"] };
+  return ext
+    ? { name: ext.toUpperCase(), extensions: [ext] }
+    : { name: "Supported", extensions: [...PSEUDONYMIZE_FILE_EXTENSIONS] };
 }
 
 export type CustomLabelValidity = "ok" | "invalid" | "reserved";
@@ -211,7 +193,7 @@ export function suggestCustomLabel(header: string): string {
 export function kindDisplayLabel(kind: string, m: Messages["mask"]["pseudonymize"]): string {
   if (kind === "email" || kind === "phone" || kind === "name") return m.kinds[kind];
   if (kind.startsWith("custom:")) {
-    return m.kindCustomDisplay.replace("{{label}}", kind.slice("custom:".length));
+    return interpolate(m.kindCustomDisplay, { label: kind.slice("custom:".length) });
   }
   return kind;
 }

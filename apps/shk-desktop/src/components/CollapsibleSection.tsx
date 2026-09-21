@@ -18,7 +18,7 @@ export function CollapsibleSection({ title, description, open, onToggle, childre
         type="button"
         onClick={onToggle}
         aria-expanded={open}
-        aria-controls={bodyId}
+        aria-controls={open ? bodyId : undefined}
         className="flex w-full items-center justify-between gap-3 rounded-xl border border-border bg-surface-2/70 px-4 py-3 text-left transition hover:bg-surface-3/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70"
       >
         <div className="min-w-0">

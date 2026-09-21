@@ -1,4 +1,4 @@
-import { Check, Copy, Info } from "lucide-react";
+import { Check, Copy, Info, RefreshCw } from "lucide-react";
 import type { PreferredAiTool } from "../../aiTool";
 import type { PseudonymizeWorkspaceApi } from "../../hooks/usePseudonymizeWorkspace";
 import type { Messages } from "../../i18n/types";
@@ -60,13 +60,15 @@ export function PseudonymizeSection({
     copied,
     copiedPath,
     reset,
+    retryInspect,
     copyInlineOutput,
     copyPath,
   } = workspace;
 
   const busy = isRunning || isInspecting;
-  const showColumns = hasInput && isTableInput && inspect?.table;
+  const showColumns = hasInput && isTableInput && inspect?.table != null;
   const showTextCard = hasInput && !isTableInput && phase.status !== "done";
+  const planFailed = hasInput && isTableInput && phase.status === "error" && inspect === null;
   const restoreMapName = selectedFilePath
     ? basenameOf(restoreMapSuggestedPath(pseudonymizeSuggestedOutputPath(selectedFilePath)))
     : null;
@@ -115,7 +117,7 @@ export function PseudonymizeSection({
         </section>
       )}
 
-      {hasInput && phase.status !== "done" && (
+      {hasInput && (
         <CollapsibleSection
           title={m.advancedTitle}
           description={m.advancedHint}
@@ -140,13 +142,25 @@ export function PseudonymizeSection({
       {phase.status === "error" && (
         <div
           role="alert"
-          className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-[13px] text-red-200"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-[13px] text-red-200"
         >
-          {m.failed}: {phase.message}
+          <span>
+            {m.failed}: {phase.message}
+          </span>
+          {planFailed && (
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<RefreshCw size={12} aria-hidden="true" />}
+              onClick={retryInspect}
+            >
+              {m.retryInspect}
+            </Button>
+          )}
         </div>
       )}
 
-      {phase.status === "done" && (
+      {hasInput && phase.status === "done" && (
         <>
           {inlineOutput && (
             <section className="grid gap-3 rounded-xl border border-emerald-400/45 bg-emerald-500/12 p-4 ring-1 ring-inset ring-emerald-400/20">

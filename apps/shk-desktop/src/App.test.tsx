@@ -273,7 +273,7 @@ describe("App", () => {
     expect(screen.getByText("2 rows processed")).toBeInTheDocument();
     expect(screen.getByText("Email address: 2")).toBeInTheDocument();
     expect(screen.getByText("/tmp/demo/orders.pseudo.csv")).toBeInTheDocument();
-    expect(screen.queryByText(/mapPath|Restore map/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Restore map (keep private)")).not.toBeInTheDocument();
   });
 
   it("does not run when the save dialog is cancelled and skips the key dialog when a key exists", async () => {
@@ -300,7 +300,6 @@ describe("App", () => {
 
   it("returns pasted text in place", async () => {
     seedProject();
-    mockPseudonymizeCommands({ keyExists: true });
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "mask_policy_status") {
         return { usesProjectPolicy: true, policyPath: "/tmp/demo/shk.toml" };
@@ -346,6 +345,84 @@ describe("App", () => {
       projectPath: "/tmp/demo",
       options: expect.objectContaining({ inlineText: "contact someone", mode: "text" }),
     });
+  });
+
+  it("keeps column choices while a pasted table is edited", async () => {
+    seedProject();
+    mockPseudonymizeCommands({ keyExists: true });
+    openMaskWorkspace();
+    fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Pasted content is" }), {
+      target: { value: "csv" },
+    });
+    const textarea = screen.getByPlaceholderText(
+      "Paste text that contains names, email addresses, or phone numbers…",
+    );
+    fireEvent.change(textarea, { target: { value: "Mail,Note\nsample-a,memo" } });
+
+    await screen.findByRole("table");
+    fireEvent.change(screen.getByRole("combobox", { name: "How to treat Note" }), {
+      target: { value: "name" },
+    });
+
+    // Editing the text re-plans after a pause; the user's choice survives.
+    fireEvent.change(textarea, { target: { value: "Mail,Note\nsample-a,memo\nsample-b,more" } });
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === "pseudonymize_inspect"),
+      ).toHaveLength(2);
+    });
+    expect(screen.getByRole("combobox", { name: "How to treat Note" })).toHaveValue("name");
+    expect(invokeMock).toHaveBeenLastCalledWith("pseudonymize_inspect", {
+      projectPath: "/tmp/demo",
+      options: expect.objectContaining({ mode: "table", format: "csv" }),
+    });
+  });
+
+  it("disables the run button when the plan fails and offers a retry", async () => {
+    seedProject();
+    let inspectCalls = 0;
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "mask_policy_status") {
+        return { usesProjectPolicy: true, policyPath: "/tmp/demo/shk.toml" };
+      }
+      if (command === "pseudonymize_inspect") {
+        inspectCalls += 1;
+        if (inspectCalls === 1) throw new Error("input changed");
+        return TABLE_PREVIEW;
+      }
+      return undefined;
+    });
+    openMaskWorkspace();
+    fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
+    fireEvent.click(screen.getByRole("tab", { name: "Upload file" }));
+    openMock.mockResolvedValue("/tmp/demo/orders.csv");
+    fireEvent.click(screen.getByRole("button", { name: /Choose file/ }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Could not read the content: input changed");
+    expect(screen.getByRole("button", { name: "Pseudonymize and save…" })).toBeDisabled();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Try reading again" }));
+    await screen.findByRole("table");
+    expect(screen.getByRole("button", { name: "Pseudonymize and save…" })).toBeEnabled();
+    expect(saveMock).not.toHaveBeenCalled();
+  });
+
+  it("drops an unsupported file when switching to pseudonymize", async () => {
+    seedProject();
+    mockPseudonymizeCommands();
+    openMaskWorkspace();
+    fireEvent.click(screen.getByRole("tab", { name: "Upload file" }));
+    openMock.mockResolvedValue("/tmp/demo/scan.pdf");
+    fireEvent.click(screen.getByRole("button", { name: /Choose file/ }));
+    await screen.findByRole("button", { name: "Remove file" });
+
+    fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
+    expect(await screen.findByText(/This file type cannot be pseudonymized/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove file" })).not.toBeInTheDocument();
+    expect(invokeMock).not.toHaveBeenCalledWith("pseudonymize_inspect", expect.anything());
   });
 
   it("gates pseudonymize until a project with shk.toml is selected", async () => {

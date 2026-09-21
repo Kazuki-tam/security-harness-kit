@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { en } from "./i18n/messages/en";
 import {
+  PSEUDONYMIZE_FILE_EXTENSIONS,
   fileExtension,
   isPseudonymizableFile,
   isTableFile,
@@ -48,7 +49,10 @@ describe("pseudonymize file helpers", () => {
   it("pins the save filter to the input family", () => {
     expect(outputFilterFor("/x/a.csv")).toEqual({ name: "CSV", extensions: ["csv"] });
     expect(outputFilterFor("/x/a.pptx")).toEqual({ name: "PPTX", extensions: ["pptx"] });
-    expect(outputFilterFor("/x/README")).toEqual({ name: "File", extensions: ["*"] });
+    expect(outputFilterFor("/x/README")).toEqual({
+      name: "Supported",
+      extensions: [...PSEUDONYMIZE_FILE_EXTENSIONS],
+    });
   });
 });
 

@@ -14,6 +14,8 @@ type Props = {
   isLoading: boolean;
   hasInput: boolean;
   fileMeta?: { fileKind: string; sourceLabel: string };
+  /** Overrides the label derived from the file kind (pseudonymize names tables). */
+  fileKindLabel?: string;
   inputHint: string;
   inputPlaceholder: string;
   runLabel: string;
@@ -44,6 +46,7 @@ export function MaskInputPanel({
   isLoading,
   hasInput,
   fileMeta,
+  fileKindLabel: fileKindLabelOverride,
   inputHint,
   inputPlaceholder,
   runLabel,
@@ -87,13 +90,14 @@ export function MaskInputPanel({
   const selectedFileKind =
     fileMeta?.fileKind ?? (selectedFilePath ? maskFileKind(selectedFilePath) : null);
   const fileKindLabel =
-    selectedFileKind === "office"
+    fileKindLabelOverride ??
+    (selectedFileKind === "office"
       ? m.fileKinds.office
       : selectedFileKind === "pdf"
         ? m.fileKinds.pdf
         : selectedFilePath
           ? m.fileKinds.text
-          : null;
+          : null);
 
   return (
     <section className="grid gap-3 rounded-xl border border-border bg-surface-2/70 p-4 ring-1 ring-inset ring-white/5">

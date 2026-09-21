@@ -81,6 +81,7 @@ export function useMaskPolicyStatus(policyProject: Project | undefined) {
 
   return {
     status: current.status,
+    errorMessage: current.status === "error" ? current.message : undefined,
     usesProjectPolicy,
     policyLabel,
     policyPath,

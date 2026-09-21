@@ -118,7 +118,7 @@ export function PseudonymizeColumnPanel({
           <thead className="bg-canvas/60 text-[10px] font-semibold tracking-[0.08em] text-white/70 uppercase">
             <tr>
               <th scope="col" className="w-8 px-3 py-2">
-                <span className="sr-only">{m.colKind}</span>
+                <span className="sr-only">{m.colSelected}</span>
               </th>
               <th scope="col" className="px-3 py-2">
                 {m.colHeader}
@@ -143,6 +143,8 @@ export function PseudonymizeColumnPanel({
                 .map((row) => row[choice.index] ?? "");
               const suggestion = choice.suggestion;
               const suggestionMatches = suggestion ? suggestion.kind === choice.kind : true;
+              // Without a header row the engine names columns 0, 1, …; people count from 1.
+              const displayName = table.hasHeader ? choice.name : String(choice.index + 1);
               return (
                 <tr
                   key={choice.index}
@@ -153,7 +155,7 @@ export function PseudonymizeColumnPanel({
                     {active && <Check size={14} aria-hidden="true" />}
                   </td>
                   <th scope="row" className="px-3 py-2 align-top font-medium text-white">
-                    {table.hasHeader ? choice.name : String(choice.index + 1)}
+                    {displayName}
                   </th>
                   <td className="px-3 py-2 align-top">
                     <ul className="grid gap-0.5">
@@ -174,7 +176,7 @@ export function PseudonymizeColumnPanel({
                   <td className="px-3 py-2 align-top">
                     <div className="grid gap-1.5">
                       <select
-                        aria-label={t(m.kindSelectLabel, { column: choice.name })}
+                        aria-label={t(m.kindSelectLabel, { column: displayName })}
                         value={choice.kind}
                         disabled={disabled}
                         onChange={(event) =>
@@ -204,15 +206,16 @@ export function PseudonymizeColumnPanel({
                     </div>
                   </td>
                   <td className="px-3 py-2 align-top">
-                    {suggestion && (
-                      <SuggestionBadge
-                        source={suggestion.source}
-                        matchRate={suggestion.matchRate}
-                        muted={!suggestionMatches}
-                        messages={m}
-                        t={t}
-                      />
-                    )}
+                    {suggestion &&
+                      (suggestion.source === "inferred" || suggestion.source === "config") && (
+                        <SuggestionBadge
+                          source={suggestion.source}
+                          matchRate={suggestion.matchRate}
+                          muted={!suggestionMatches}
+                          messages={m}
+                          t={t}
+                        />
+                      )}
                   </td>
                 </tr>
               );
@@ -285,7 +288,7 @@ function SuggestionBadge({
   messages: m,
   t,
 }: {
-  source: "config" | "cli" | "inferred" | "rule";
+  source: "config" | "inferred";
   matchRate: number | undefined;
   muted: boolean;
   messages: Messages["mask"]["pseudonymize"];

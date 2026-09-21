@@ -1,5 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { operationErrorMessage } from "../i18n/interpolate";
 import { fileExtension } from "../pseudonymize";
@@ -33,11 +33,13 @@ export function useMaskInput({
   const [dragActive, setDragActive] = useState(false);
 
   // Callbacks below stay stable across renders even when the caller passes
-  // a fresh closure each time.
+  // a fresh closure each time; the refs are written after render, not during.
   const onInputChangeRef = useRef(onInputChange);
-  onInputChangeRef.current = onInputChange;
   const onNoticeRef = useRef(onNotice);
-  onNoticeRef.current = onNotice;
+  useLayoutEffect(() => {
+    onInputChangeRef.current = onInputChange;
+    onNoticeRef.current = onNotice;
+  });
 
   const notifyChange = useCallback(() => onInputChangeRef.current?.(), []);
 

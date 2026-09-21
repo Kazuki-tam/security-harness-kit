@@ -1,10 +1,17 @@
 import { save } from "@tauri-apps/plugin-dialog";
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import { useI18n } from "../i18n";
 import { operationErrorMessage } from "../i18n/interpolate";
 import {
   isTableFile,
-  isTableInputKind,
   outputFilterFor,
   pseudonymizeInspect,
   pseudonymizeKeyStatus,
@@ -16,6 +23,7 @@ import {
   type PseudonymizeInspectResult,
   type PseudonymizeRunOptions,
   type PseudonymizeRunResult,
+  type PseudonymizeTablePreview,
 } from "../pseudonymize";
 import {
   columnsReducer,
@@ -32,7 +40,7 @@ export type PastedKind = "text" | "csv" | "tsv";
 
 export type PseudonymizePhase =
   | { status: "idle" }
-  | { status: "inspecting" }
+  | { status: "inspecting"; inspect: PseudonymizeInspectResult | null }
   | { status: "ready"; inspect: PseudonymizeInspectResult }
   | { status: "running"; inspect: PseudonymizeInspectResult | null }
   | { status: "done"; inspect: PseudonymizeInspectResult | null; result: PseudonymizeRunResult }
@@ -47,10 +55,22 @@ type UsePseudonymizeWorkspaceOptions = {
 };
 
 const INSPECT_KEY = "inspect";
+const RUN_KEY = "run";
 const PASTED_INSPECT_DELAY_MS = 400;
 
+const EMPTY_TABLE: PseudonymizeTablePreview = {
+  hasHeader: true,
+  delimiter: ",",
+  headers: [],
+  sampleRows: [],
+  rowCount: 0,
+  columns: [],
+  sheets: [],
+  selectedSheet: null,
+};
+
 function inspectOf(phase: PseudonymizePhase): PseudonymizeInspectResult | null {
-  return phase.status === "idle" || phase.status === "inspecting" ? null : phase.inspect;
+  return phase.status === "idle" ? null : phase.inspect;
 }
 
 function errorMessage(error: unknown): string {
@@ -90,6 +110,7 @@ export function usePseudonymizeWorkspace({
     ? isTableFile(selectedFilePath ?? "")
     : isPastedInput && pastedKind !== "text";
   const inspect = inspectOf(phase);
+  const hasPlan = inspect?.table != null;
   const isRunning = phase.status === "running";
   const isInspecting = phase.status === "inspecting";
   const columnErrors = useMemo(() => validationErrors(columns), [columns]);
@@ -102,15 +123,24 @@ export function usePseudonymizeWorkspace({
     !preparing &&
     columnErrors.length === 0 &&
     // A table needs its plan first; text inputs run directly.
-    (!isTableInput ||
-      phase.status === "ready" ||
-      phase.status === "done" ||
-      phase.status === "error");
+    (!isTableInput || hasPlan);
 
+  /** Drop results only; the plan, column choices, and options survive edits. */
+  const resetResult = useCallback(() => {
+    tracker.begin(RUN_KEY);
+    setPhase((current) =>
+      current.status === "done" || current.status === "error" ? { status: "idle" } : current,
+    );
+    setCopied(false);
+    setCopiedPath(null);
+  }, [tracker]);
+
+  /** Start from scratch: used when the mode, project, or content kind changes. */
   const reset = useCallback(() => {
     tracker.begin(INSPECT_KEY);
+    tracker.begin(RUN_KEY);
     setPhase({ status: "idle" });
-    dispatchColumns({ type: "init", table: emptyTable() });
+    dispatchColumns({ type: "init", table: EMPTY_TABLE });
     setSheet(undefined);
     setNoHeader(false);
     setCopied(false);
@@ -146,21 +176,20 @@ export function usePseudonymizeWorkspace({
   const runInspect = useCallback(
     async (
       overrides: { sheet?: string; noHeader?: boolean },
-      columnAction: (table: NonNullable<PseudonymizeInspectResult["table"]>) => ColumnAction,
+      columnAction: (table: PseudonymizeTablePreview) => ColumnAction,
     ) => {
       if (!projectPath || !active) return;
       const request = baseRequest(overrides);
       if (!request) return;
       const requestId = tracker.begin(INSPECT_KEY);
-      setPhase({ status: "inspecting" });
+      // Keep the previous plan on screen while the new one loads.
+      setPhase((current) => ({ status: "inspecting", inspect: inspectOf(current) }));
       try {
         const result = await pseudonymizeInspect(projectPath, request);
         if (!tracker.isLatest(INSPECT_KEY, requestId)) return;
-        if (result.table) {
-          dispatchColumns(columnAction(result.table));
-        } else {
-          dispatchColumns({ type: "init", table: emptyTable() });
-        }
+        dispatchColumns(
+          result.table ? columnAction(result.table) : { type: "init", table: EMPTY_TABLE },
+        );
         setPhase({ status: "ready", inspect: result });
       } catch (error) {
         if (!tracker.isLatest(INSPECT_KEY, requestId)) return;
@@ -174,26 +203,34 @@ export function usePseudonymizeWorkspace({
     [active, baseRequest, m.inspectFailed, projectPath, tracker],
   );
 
-  // Plan as soon as there is something to plan: immediately for a file,
-  // after a short pause for pasted tables so typing does not spam the engine.
-  // The latest `runInspect` is read through a ref so this effect re-runs only
-  // when the input itself changes, not when options such as the sheet do.
+  // The effects below read the latest `runInspect` through a ref so they
+  // re-run only when the input itself changes, not when options such as the
+  // sheet do. The ref is written after render, never during it.
   const runInspectRef = useRef(runInspect);
-  runInspectRef.current = runInspect;
+  useLayoutEffect(() => {
+    runInspectRef.current = runInspect;
+  });
+
+  // A newly selected file gets a fresh plan.
   useEffect(() => {
-    if (!active || !projectPath) return;
-    if (isFileInput) {
-      void runInspectRef.current({}, (table) => ({ type: "init", table }));
-      return;
-    }
-    if (isPastedInput && pastedKind !== "text") {
-      const timer = window.setTimeout(() => {
-        void runInspectRef.current({}, (table) => ({ type: "init", table }));
-      }, PASTED_INSPECT_DELAY_MS);
-      return () => window.clearTimeout(timer);
-    }
-    // Plain text needs no plan.
-  }, [active, projectPath, isFileInput, isPastedInput, pastedKind, selectedFilePath, inputText]);
+    if (!active || !projectPath || !isFileInput) return;
+    setSheet(undefined);
+    void runInspectRef.current({ sheet: undefined }, (table) => ({ type: "init", table }));
+  }, [active, projectPath, isFileInput, selectedFilePath]);
+
+  // Pasted tables re-plan after a short pause so typing does not spam the
+  // engine; edits the user already made to same-named columns are kept.
+  useEffect(() => {
+    if (!active || !projectPath || !isPastedInput || pastedKind === "text") return;
+    const timer = window.setTimeout(() => {
+      void runInspectRef.current({}, (table) => ({ type: "reinspect", table, keep: "byName" }));
+    }, PASTED_INSPECT_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [active, projectPath, isPastedInput, pastedKind, inputText]);
+
+  const retryInspect = useCallback(() => {
+    void runInspect({}, (table) => ({ type: "init", table }));
+  }, [runInspect]);
 
   const changeSheet = useCallback(
     (next: string) => {
@@ -234,10 +271,15 @@ export function usePseudonymizeWorkspace({
 
   const run = useCallback(async () => {
     if (!projectPath || !active) return;
+    if (isTableInput && !hasPlan) return;
     const request = baseRequest();
     if (!request) return;
     if (columnErrors.length > 0) return;
-    const current = inspectOf(phase);
+    const current = inspect;
+    // An input change during the run invalidates this generation, so a late
+    // result never overwrites what the user now sees.
+    const runId = tracker.begin(RUN_KEY);
+    const stillCurrent = () => tracker.isLatest(RUN_KEY, runId);
 
     setPreparing(true);
     setCopied(false);
@@ -265,6 +307,7 @@ export function usePseudonymizeWorkspace({
         if (!(await confirmKeyCreation(key.backend))) return;
         createKey = true;
       }
+      if (!stillCurrent()) return;
 
       setPhase({ status: "running", inspect: current });
       const options: PseudonymizeRunOptions = {
@@ -275,8 +318,10 @@ export function usePseudonymizeWorkspace({
         createKey,
       };
       const result = await pseudonymizeRun(projectPath, options);
+      if (!stillCurrent()) return;
       setPhase({ status: "done", inspect: current, result });
     } catch (error) {
+      if (!stillCurrent()) return;
       setPhase({ status: "error", message: errorMessage(error), inspect: current });
     } finally {
       setPreparing(false);
@@ -287,15 +332,17 @@ export function usePseudonymizeWorkspace({
     columnErrors.length,
     columns,
     confirmKeyCreation,
+    hasPlan,
     inputMode,
+    inspect,
     isTableInput,
     m.chooseOutput,
     m.keyUnavailable,
-    phase,
     projectPath,
     restoreMap,
     selectedFilePath,
     t,
+    tracker,
   ]);
 
   const inlineOutput = phase.status === "done" ? (phase.result.inlineOutput ?? "") : "";
@@ -333,9 +380,6 @@ export function usePseudonymizeWorkspace({
     [copyText],
   );
 
-  const tableInputKind =
-    inspect?.inputKind !== undefined ? isTableInputKind(inspect.inputKind) : isTableInput;
-
   return {
     messages: m,
     t,
@@ -356,7 +400,7 @@ export function usePseudonymizeWorkspace({
     setAdvancedOpen,
     keyDialog,
     resolveKeyDialog,
-    isTableInput: tableInputKind,
+    isTableInput,
     isFileInput,
     isRunning,
     isInspecting,
@@ -365,7 +409,9 @@ export function usePseudonymizeWorkspace({
     inlineOutput,
     copied,
     copiedPath,
+    resetResult,
     reset,
+    retryInspect,
     run,
     copyInlineOutput,
     copyPath,
@@ -373,16 +419,3 @@ export function usePseudonymizeWorkspace({
 }
 
 export type PseudonymizeWorkspaceApi = ReturnType<typeof usePseudonymizeWorkspace>;
-
-function emptyTable() {
-  return {
-    hasHeader: true,
-    delimiter: ",",
-    headers: [],
-    sampleRows: [],
-    rowCount: 0,
-    columns: [],
-    sheets: [],
-    selectedSheet: null,
-  };
-}

@@ -1,6 +1,6 @@
 import { ArrowRight, Eraser, KeyRound } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { openAiTool, type PreferredAiTool } from "../aiTool";
 import { useI18n } from "../i18n";
 import { operationErrorMessage } from "../i18n/interpolate";
@@ -8,7 +8,7 @@ import { useMaskInput } from "../hooks/useMaskInput";
 import { useMaskPolicyStatus } from "../hooks/useMaskPolicyStatus";
 import { MASK_FILE_EXTENSIONS, useMaskWorkspace } from "../hooks/useMaskWorkspace";
 import { usePseudonymizeWorkspace, type PastedKind } from "../hooks/usePseudonymizeWorkspace";
-import { PSEUDONYMIZE_FILE_EXTENSIONS, isPseudonymizableFile } from "../pseudonymize";
+import { PSEUDONYMIZE_FILE_EXTENSIONS, isPseudonymizableFile, isTableFile } from "../pseudonymize";
 import type { Project } from "../types";
 import { MaskHeader, type MaskStep } from "./mask/MaskHeader";
 import { MaskInputPanel } from "./mask/MaskInputPanel";
@@ -52,8 +52,9 @@ export function MaskWorkspace({
   const isPseudonymize = mode === "pseudonymize";
   const pseudonymizeReady = Boolean(policyProject) && policy.usesProjectPolicy;
 
-  // Result state of whichever mode is inactive is reset whenever the input
-  // changes, so switching back never shows stale output for new content.
+  // Results of both modes are dropped whenever the input changes, so
+  // switching back never shows stale output for new content. The ref is
+  // written after render so the input hook can keep stable callbacks.
   const resetRef = useRef<() => void>(() => {});
   const input = useMaskInput({
     extensions: isPseudonymize ? PSEUDONYMIZE_FILE_EXTENSIONS : MASK_FILE_EXTENSIONS,
@@ -75,41 +76,65 @@ export function MaskWorkspace({
     input,
     onNotice,
   });
+  const { resetResult: resetRedact, runMask } = redact;
+  const {
+    resetResult: resetPseudonymizeResult,
+    reset: resetPseudonymize,
+    canRun: canRunPseudonymize,
+    run: runPseudonymize,
+    copyInlineOutput,
+  } = pseudonymize;
+  // Edits keep the plan and column choices; only results are dropped.
   const resetResults = useCallback(() => {
-    redact.resetResult();
-    pseudonymize.reset();
-  }, [pseudonymize.reset, redact.resetResult]);
-  resetRef.current = resetResults;
+    resetRedact();
+    resetPseudonymizeResult();
+  }, [resetPseudonymizeResult, resetRedact]);
+  // A different mode or project starts the pseudonymize flow from scratch.
+  const resetAll = useCallback(() => {
+    resetRedact();
+    resetPseudonymize();
+  }, [resetPseudonymize, resetRedact]);
+  useLayoutEffect(() => {
+    resetRef.current = resetResults;
+  });
 
-  const { inputMode, inputText, selectedFilePath, dragActive, setDragActive, hasInput } = input;
+  const {
+    inputMode,
+    inputText,
+    selectedFilePath,
+    dragActive,
+    setDragActive,
+    hasInput,
+    removeSelectedFile,
+  } = input;
 
   useEffect(() => {
     if (policyProjectId && !policyProject) {
       setPolicyProjectId(null);
-      resetResults();
+      resetAll();
     }
-  }, [policyProject, policyProjectId, resetResults]);
+  }, [policyProject, policyProjectId, resetAll]);
 
   const changeMode = useCallback(
     (next: MaskMode) => {
       if (next === mode) return;
       setMode(next);
-      resetResults();
+      resetAll();
       if (next === "pseudonymize" && selectedFilePath && !isPseudonymizableFile(selectedFilePath)) {
-        input.removeSelectedFile();
+        removeSelectedFile();
         onNotice?.(mp.unsupportedFile);
       }
     },
-    [input, mode, mp.unsupportedFile, onNotice, resetResults, selectedFilePath],
+    [mode, mp.unsupportedFile, onNotice, removeSelectedFile, resetAll, selectedFilePath],
   );
 
   const runActive = useCallback(() => {
     if (isPseudonymize) {
-      if (pseudonymize.canRun) void pseudonymize.run();
+      if (canRunPseudonymize) void runPseudonymize();
     } else {
-      void redact.runMask();
+      void runMask();
     }
-  }, [isPseudonymize, pseudonymize, redact]);
+  }, [canRunPseudonymize, isPseudonymize, runMask, runPseudonymize]);
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
@@ -170,7 +195,7 @@ export function MaskWorkspace({
   }, [applySelectedFile, inputMode, setDragActive]);
 
   const copyAndOpenInline = useCallback(async () => {
-    if (!(await pseudonymize.copyInlineOutput())) return;
+    if (!(await copyInlineOutput())) return;
     onPreferredAiToolChange(preferredAiTool);
     try {
       await openAiTool(preferredAiTool);
@@ -178,11 +203,11 @@ export function MaskWorkspace({
       onNotice?.(operationErrorMessage(messages.app.operationFailed, error));
     }
   }, [
+    copyInlineOutput,
     messages.app.operationFailed,
     onNotice,
     onPreferredAiToolChange,
     preferredAiTool,
-    pseudonymize,
   ]);
 
   const gate =
@@ -193,7 +218,10 @@ export function MaskWorkspace({
         : policy.status === "error"
           ? {
               title: mp.requiresProjectTitle,
-              body: t(m.policyError, { project: policyProject.name }),
+              body: t(mp.requiresPolicyError, {
+                project: policyProject.name,
+                message: policy.errorMessage ?? "",
+              }),
             }
           : {
               title: mp.requiresProjectTitle,
@@ -223,6 +251,13 @@ export function MaskWorkspace({
           : 1;
 
   const isLoading = isPseudonymize ? pseudonymize.isRunning : redact.isLoading;
+  const pseudonymizeFileKind = !selectedFilePath
+    ? undefined
+    : isTableFile(selectedFilePath)
+      ? mp.fileKindTable
+      : /\.(docx|pptx)$/i.test(selectedFilePath)
+        ? m.fileKinds.office
+        : m.fileKinds.text;
 
   return (
     <div className="shk-scroll shk-fade-in min-h-0 flex-1 overflow-y-auto">
@@ -243,7 +278,7 @@ export function MaskWorkspace({
           policySelectionDisabled={isLoading || pseudonymize.preparing}
           onPolicyProjectChange={(projectId) => {
             setPolicyProjectId(projectId);
-            resetResults();
+            resetAll();
           }}
           gate={gate}
           gateId={gateId}
@@ -259,8 +294,9 @@ export function MaskWorkspace({
               inputText={inputText}
               selectedFilePath={selectedFilePath}
               dragActive={dragActive}
-              isLoading={pseudonymize.isRunning || pseudonymize.preparing}
+              isLoading={pseudonymize.isRunning}
               hasInput={hasInput}
+              fileKindLabel={pseudonymizeFileKind}
               inputHint={mp.inputHint}
               inputPlaceholder={mp.inputPlaceholder}
               runLabel={inputMode === "file" ? mp.run : mp.runText}
@@ -294,7 +330,7 @@ export function MaskWorkspace({
               onInputTextChange={input.setInputText}
               onChooseFile={() => void input.chooseFile()}
               onClear={input.clearInput}
-              onRun={() => void pseudonymize.run()}
+              onRun={() => void runPseudonymize()}
               onRemoveFile={input.removeSelectedFile}
               onDragActive={setDragActive}
               onDropFile={(path) => void applySelectedFile(path)}
@@ -333,7 +369,7 @@ export function MaskWorkspace({
                 onInputTextChange={input.setInputText}
                 onChooseFile={() => void input.chooseFile()}
                 onClear={input.clearInput}
-                onRun={() => void redact.runMask()}
+                onRun={() => void runMask()}
                 onRemoveFile={input.removeSelectedFile}
                 onDragActive={setDragActive}
                 onDropFile={(path) => void applySelectedFile(path)}
@@ -362,6 +398,7 @@ export function MaskWorkspace({
             </div>
 
             <RedactResultsSection
+              key={policyProjectId ?? "default"}
               maskState={redact.maskState}
               findings={redact.findings}
               fileMeta={redact.fileMeta}

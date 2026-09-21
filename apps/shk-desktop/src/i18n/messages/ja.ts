@@ -162,11 +162,14 @@ export const ja: Messages = {
         "同じ値に同じ仮名コードを付けるためのキーはプロジェクトごとに保存されるため、shk.toml のあるプロジェクトを選んでください。",
       requiresPolicy:
         "{{project}} にはまだ shk.toml がありません。プロジェクト画面で初期設定を行ってください。",
+      requiresPolicyError:
+        "{{project}} のポリシーを読み込めませんでした（{{message}}）。フォルダが存在するか確認して、選び直してください。",
       inputHint:
         "CSV・TSV・Excel を選ぶと列ごとに設定できます。テキストや Word/PowerPoint は見つかった項目をすべて仮名化します。",
       inputPlaceholder: "氏名・メールアドレス・電話番号を含むテキストを貼り付け…",
       unsupportedFile:
         "このファイル形式は仮名化に対応していません。CSV・TSV・Excel・テキスト・Markdown・Word・PowerPoint を選んでください。",
+      fileKindTable: "表データ（CSV・TSV・Excel）",
       pastedKindLabel: "貼り付けた内容",
       pastedKinds: {
         text: "文章",
@@ -175,10 +178,12 @@ export const ja: Messages = {
       },
       inspecting: "列を読み込んでいます…",
       inspectFailed: "内容を読み込めませんでした",
+      retryInspect: "もう一度読み込む",
       columnsTitle: "仮名化する列を選ぶ",
       columnsHint: "各列に何が入っているかを選んでください。「そのまま」の列は変更されません。",
       columnsLoaded: "{{count}} 列・{{rows}} 行を読み込みました",
       tableCaption: "{{file}} の列",
+      colSelected: "選択",
       colHeader: "列名",
       colSamples: "内容の例",
       colKind: "扱い",
@@ -216,7 +221,7 @@ export const ja: Messages = {
       restoreMapLabel: "復元マップも保存する",
       restoreMapHint:
         "復元マップがあると、後で仮名コードを元の値に戻せます。暗号化されますが、このプロジェクトのキーとマップがあれば誰でも元に戻せるため、社外や AI ツールには渡さず大切に保管してください。",
-      restoreMapPath: "出力ファイルの隣に {{name}} として保存します",
+      restoreMapPath: "出力ファイルと同じ場所に、出力名に合わせて保存します（例: {{name}}）",
       restoreMapUnavailableText: "復元マップはファイルを仮名化したときに保存できます。",
       noHeaderLabel: "1行目は見出しではなくデータ",
       noHeaderHint: "列は 1, 2, 3… の番号で表示されます",
