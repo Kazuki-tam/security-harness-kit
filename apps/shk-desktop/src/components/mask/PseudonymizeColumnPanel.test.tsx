@@ -61,10 +61,12 @@ function Harness({
   inspect,
   onSheetChange = () => {},
   inspecting = false,
+  onNoHeaderChange = () => {},
 }: {
   inspect: PseudonymizeInspectResult;
   onSheetChange?: (sheet: string) => void;
   inspecting?: boolean;
+  onNoHeaderChange?: (value: boolean) => void;
 }) {
   const { messages, t } = useI18n();
   const [columns, dispatch] = useReducer(columnsReducer, inspect.table!, initialChoices);
@@ -78,6 +80,8 @@ function Harness({
       onSheetChange={onSheetChange}
       disabled={false}
       inspecting={inspecting}
+      noHeader={!inspect.table!.hasHeader}
+      onNoHeaderChange={onNoHeaderChange}
       messages={messages.mask.pseudonymize}
       t={t}
     />
@@ -109,7 +113,7 @@ describe("PseudonymizeColumnPanel", () => {
     expect(screen.getByText("Project setting")).toBeInTheDocument();
     expect(screen.getByText("sample-a")).toBeInTheDocument();
     expect(screen.getByText("sample-b")).toBeInTheDocument();
-    expect(screen.queryByText("sample-c")).not.toBeInTheDocument();
+    expect(screen.getByText("sample-c")).toBeInTheDocument();
     expect(screen.getByText("2 of 3 columns will be pseudonymized")).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Label" })).toHaveValue("member");
     expect(screen.queryByRole("combobox", { name: "Sheet" })).not.toBeInTheDocument();
@@ -166,7 +170,74 @@ describe("PseudonymizeColumnPanel", () => {
       inspect: preview({ hasHeader: false, headers: ["0", "1", "2"] }),
       inspecting: true,
     });
-    expect(screen.getByRole("rowheader", { name: "1" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Pseudonymize 1 (column 1)" })).toBeDisabled();
     expect(screen.getByText("Reading columns…")).toBeInTheDocument();
+  });
+  it("selects columns from the preview and preserves the chosen kind when toggled", () => {
+    renderPanel({ inspect: preview() });
+    const mail = screen.getByRole("checkbox", { name: "Pseudonymize Mail (column 1)" });
+    const note = screen.getByRole("checkbox", { name: "Pseudonymize Note (column 3)" });
+    expect(mail).toBeChecked();
+    expect(note).not.toBeChecked();
+    fireEvent.click(note);
+    expect(screen.getByRole("combobox", { name: "How to treat Note" })).toHaveValue("custom");
+    fireEvent.change(screen.getByRole("combobox", { name: "How to treat Note" }), {
+      target: { value: "name" },
+    });
+    fireEvent.click(note);
+    fireEvent.click(note);
+    expect(screen.getByRole("combobox", { name: "How to treat Note" })).toHaveValue("name");
+    expect(screen.getByText("3 of 3 columns will be pseudonymized")).toBeInTheDocument();
+    const rows = within(screen.getByRole("table")).getAllByRole("row");
+    expect(
+      within(rows[1])
+        .getAllByRole("cell")
+        .map((cell) => cell.textContent),
+    ).toEqual(["sample-a", "m-1", "first"]);
+  });
+
+  it("keeps duplicate headers individually selectable by position", () => {
+    const inspect = preview({ headers: ["Mail", "Mail", "Note"] });
+    inspect.table!.columns[1].name = "Mail";
+    renderPanel({ inspect });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Pseudonymize Mail (column 2)" }));
+    expect(screen.getByRole("checkbox", { name: "Pseudonymize Mail (column 1)" })).toBeChecked();
+    expect(
+      screen.getByRole("checkbox", { name: "Pseudonymize Mail (column 2)" }),
+    ).not.toBeChecked();
+  });
+
+  it("renders markup in input as text", () => {
+    renderPanel({ inspect: preview({ sampleRows: [["<img src=x onerror=alert(1)>", "", ""]] }) });
+    expect(screen.getByText("<img src=x onerror=alert(1)>")).toBeInTheDocument();
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+  });
+  it.each(["csv", "tsv", "xlsx"])("shows a row-oriented preview for %s", (extension) => {
+    const inspect = preview();
+    inspect.sourceLabel = `demo.${extension}`;
+    inspect.inputKind = extension === "xlsx" ? "table-xlsx" : "table-csv";
+    renderPanel({ inspect });
+    expect(screen.getByRole("table", { name: `Columns in demo.${extension}` })).toBeInTheDocument();
+    expect(screen.getByText("Showing the first 3 of 12 rows")).toBeInTheDocument();
+  });
+
+  it("changes header interpretation next to the preview", () => {
+    const onNoHeaderChange = vi.fn();
+    renderPanel({ inspect: preview(), onNoHeaderChange });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Use the first row as column names" }));
+    expect(onNoHeaderChange).toHaveBeenCalledWith(true);
+  });
+
+  it("explains an empty table and locks every control while reloading", () => {
+    renderPanel({ inspect: preview({ sampleRows: [] }), inspecting: true });
+    expect(
+      screen.getByText("No data rows to preview. Check the header setting."),
+    ).toBeInTheDocument();
+    for (const control of [
+      ...screen.getAllByRole("checkbox"),
+      ...screen.getAllByRole("combobox"),
+    ]) {
+      expect(control).toBeDisabled();
+    }
   });
 });

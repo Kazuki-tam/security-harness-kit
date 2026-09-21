@@ -154,3 +154,22 @@ button {
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
+
+/* Spreadsheet previews remain light inside the dark application chrome. */
+.shk-sheet {
+  color-scheme: light;
+  scrollbar-color: #94a3b8 #f8fafc;
+}
+
+.shk-sheet ::selection {
+  background: #bfdbfe;
+  color: #0f172a;
+}
+
+.shk-sheet::-webkit-scrollbar-track {
+  background: #f8fafc;
+}
+
+.shk-sheet::-webkit-scrollbar-thumb {
+  background-color: #94a3b8;
+}

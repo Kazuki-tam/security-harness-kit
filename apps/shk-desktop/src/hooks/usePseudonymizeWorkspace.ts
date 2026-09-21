@@ -262,6 +262,7 @@ export function usePseudonymizeWorkspace({
   // engine; edits the user already made to same-named columns are kept.
   useEffect(() => {
     if (!active || !projectPath || !isPastedInput || pastedKind === "text") return;
+    tracker.begin(INSPECT_KEY);
     setReplanPending(true);
     const timer = window.setTimeout(() => {
       setReplanPending(false);
@@ -271,7 +272,7 @@ export function usePseudonymizeWorkspace({
       window.clearTimeout(timer);
       setReplanPending(false);
     };
-  }, [active, projectPath, isPastedInput, pastedKind, inputText, planGeneration]);
+  }, [active, projectPath, isPastedInput, pastedKind, inputText, planGeneration, tracker]);
 
   // Content that was emptied by hand has nothing to plan or report.
   useEffect(() => {
@@ -468,7 +469,7 @@ export function usePseudonymizeWorkspace({
     isTableInput,
     isFileInput,
     isRunning,
-    isInspecting,
+    isInspecting: isInspecting || replanPending,
     preparing,
     canRun,
     inlineOutput,

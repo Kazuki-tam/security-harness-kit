@@ -4,12 +4,14 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from
 import { openAiTool, type PreferredAiTool } from "../aiTool";
 import { useI18n } from "../i18n";
 import { operationErrorMessage } from "../i18n/interpolate";
+import { useTablePreviewNavigation } from "../hooks/useTablePreviewNavigation";
 import { useMaskInput, type MaskInputChange } from "../hooks/useMaskInput";
 import { useMaskPolicyStatus } from "../hooks/useMaskPolicyStatus";
 import { MASK_FILE_EXTENSIONS, useMaskWorkspace } from "../hooks/useMaskWorkspace";
 import { usePseudonymizeWorkspace, type PastedKind } from "../hooks/usePseudonymizeWorkspace";
 import { PSEUDONYMIZE_FILE_EXTENSIONS, isPseudonymizableFile, isTableFile } from "../pseudonymize";
 import type { Project } from "../types";
+import { Button } from "./Button";
 import { MaskHeader, type MaskStep } from "./mask/MaskHeader";
 import { MaskInputPanel } from "./mask/MaskInputPanel";
 import type { MaskMode } from "./mask/MaskModeToggle";
@@ -76,6 +78,26 @@ export function MaskWorkspace({
     input,
     onNotice,
   });
+  const {
+    inputRegion,
+    previewRegion,
+    inputChanged,
+    kindChanged,
+    cancel: cancelPreviewNavigation,
+    revealPreview,
+    returnToInput,
+  } = useTablePreviewNavigation({
+    active: isPseudonymize,
+    hasInput: input.hasInput,
+    projectPath,
+    pastedKind: pseudonymize.pastedKind,
+    inspect: pseudonymize.inspect,
+    ready: pseudonymize.phase.status === "ready" && !pseudonymize.isInspecting,
+    failed: pseudonymize.phase.status === "error",
+  });
+  const showTablePreview = Boolean(
+    input.hasInput && pseudonymizeReady && pseudonymize.isTableInput && pseudonymize.inspect?.table,
+  );
   const { resetResult: resetRedact, runMask } = redact;
   const {
     resetResult: resetPseudonymizeResult,
@@ -91,9 +113,10 @@ export function MaskWorkspace({
   }, [resetPseudonymizeResult, resetRedact]);
   // A different mode or project starts the pseudonymize flow from scratch.
   const resetAll = useCallback(() => {
+    cancelPreviewNavigation();
     resetRedact();
     resetPseudonymize();
-  }, [resetPseudonymize, resetRedact]);
+  }, [cancelPreviewNavigation, resetPseudonymize, resetRedact]);
   useLayoutEffect(() => {
     // Editing the same content keeps its plan; replacing it starts over.
     resetRef.current = (change) => (change === "edit" ? resetResults() : resetAll());
@@ -303,71 +326,136 @@ export function MaskWorkspace({
           messages={m}
         />
 
+        {!isPseudonymize && selectedFilePath && isTableFile(selectedFilePath) && (
+          <section className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-sky-400/30 bg-sky-500/10 p-4">
+            <p className="max-w-xl text-[12px] text-muted">{mp.openTableSelectionHint}</p>
+            <Button
+              variant="secondary"
+              disabled={isLoading}
+              onClick={() => changeMode("pseudonymize")}
+            >
+              {mp.openTableSelection}
+            </Button>
+          </section>
+        )}
+
         {isPseudonymize ? (
           <>
-            <MaskInputPanel
-              inputMode={inputMode}
-              inputText={inputText}
-              selectedFilePath={selectedFilePath}
-              dragActive={dragActive}
-              isLoading={pseudonymize.isRunning}
-              inputLocked={inputLocked}
-              hasInput={hasInput}
-              fileKindLabel={pseudonymizeFileKind}
-              inputHint={mp.inputHint}
-              inputPlaceholder={mp.inputPlaceholder}
-              runLabel={inputMode === "file" ? mp.run : mp.runText}
-              runningLabel={mp.running}
-              runIcon={<KeyRound size={14} aria-hidden="true" />}
-              runDisabled={!pseudonymize.canRun}
-              runDisabledReasonId={gate ? gateId : undefined}
-              textControls={
-                <label
-                  htmlFor={pastedKindId}
-                  className="inline-flex items-center gap-2 text-[11px] text-muted"
-                >
-                  <span>{mp.pastedKindLabel}</span>
-                  <select
-                    id={pastedKindId}
-                    value={pseudonymize.pastedKind}
-                    disabled={inputLocked}
-                    onChange={(event) =>
-                      pseudonymize.changePastedKind(event.target.value as PastedKind)
-                    }
-                    className="rounded-md border border-border-strong bg-canvas/70 px-2 py-1 text-[11px] font-medium text-white outline-none transition focus:border-sky-300/70 focus:ring-2 focus:ring-sky-300/20"
+            <div ref={inputRegion} tabIndex={-1} className="scroll-mt-4 outline-none">
+              <MaskInputPanel
+                inputMode={inputMode}
+                inputText={inputText}
+                selectedFilePath={selectedFilePath}
+                dragActive={dragActive}
+                isLoading={pseudonymize.isRunning}
+                inputLocked={inputLocked}
+                hasInput={hasInput}
+                fileKindLabel={pseudonymizeFileKind}
+                inputHint={mp.inputHint}
+                inputPlaceholder={mp.inputPlaceholder}
+                runLabel={inputMode === "file" ? mp.run : mp.runText}
+                runningLabel={mp.running}
+                runIcon={<KeyRound size={14} aria-hidden="true" />}
+                runDisabled={!pseudonymize.canRun}
+                showRun={!showTablePreview}
+                runDisabledReasonId={gate ? gateId : undefined}
+                textControls={
+                  <label
+                    htmlFor={pastedKindId}
+                    className="inline-flex items-center gap-2 text-[11px] text-muted"
                   >
-                    {PASTED_KINDS.map((kind) => (
-                      <option key={kind} value={kind}>
-                        {mp.pastedKinds[kind]}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              }
-              onSwitchMode={input.switchInputMode}
-              onInputTextChange={input.setInputText}
-              onChooseFile={() => void input.chooseFile()}
-              onClear={input.clearInput}
-              onRun={() => void runPseudonymize()}
-              onRemoveFile={input.removeSelectedFile}
-              onDragActive={setDragActive}
-              onDropFile={(path) => {
-                if (!inputLocked) applySelectedFile(path);
-              }}
-              messages={m}
-              t={t}
-            />
-            <PseudonymizeSection
-              workspace={pseudonymize}
-              projectName={policyProject?.name ?? null}
-              selectedFilePath={selectedFilePath}
-              hasInput={hasInput && pseudonymizeReady}
-              preferredAiTool={preferredAiTool}
-              onPreferredAiToolChange={onPreferredAiToolChange}
-              onCopyAndOpen={() => void copyAndOpenInline()}
-              onStartOver={startOver}
-              maskMessages={m}
-            />
+                    <span>{mp.pastedKindLabel}</span>
+                    <select
+                      id={pastedKindId}
+                      value={pseudonymize.pastedKind}
+                      disabled={inputLocked}
+                      onChange={(event) => {
+                        const next = event.target.value as PastedKind;
+                        pseudonymize.changePastedKind(next);
+                        kindChanged(next);
+                      }}
+                      className="rounded-md border border-border-strong bg-canvas/70 px-2 py-1 text-[11px] font-medium text-white outline-none transition focus:border-sky-300/70 focus:ring-2 focus:ring-sky-300/20"
+                    >
+                      {PASTED_KINDS.map((kind) => (
+                        <option key={kind} value={kind}>
+                          {mp.pastedKinds[kind]}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                }
+                onSwitchMode={input.switchInputMode}
+                onInputTextChange={(value, pasted) => {
+                  input.setInputText(value);
+                  inputChanged(pasted ?? false);
+                }}
+                inputFeedback={
+                  hasInput && pseudonymizeReady && pseudonymize.isTableInput ? (
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-sky-400/30 bg-sky-500/10 px-3 py-2">
+                      {/* PseudonymizeSection already announces this; keep it visual only. */}
+                      <p className="text-[12px] text-sky-100">
+                        {pseudonymize.isInspecting
+                          ? mp.inspecting
+                          : pseudonymize.inspect?.table
+                            ? t(mp.previewReady, {
+                                count: pseudonymize.inspect.table.headers.length,
+                                rows: pseudonymize.inspect.table.rowCount,
+                              })
+                            : pseudonymize.phase.status === "error"
+                              ? mp.inspectFailed
+                              : mp.inspecting}
+                      </p>
+                      {pseudonymize.inspect?.table && (
+                        <Button
+                          size="sm"
+                          disabled={pseudonymize.isInspecting}
+                          onClick={revealPreview}
+                        >
+                          {mp.viewPreview}
+                        </Button>
+                      )}
+                    </div>
+                  ) : null
+                }
+                onChooseFile={() => void input.chooseFile()}
+                onClear={input.clearInput}
+                onRun={() => void runPseudonymize()}
+                onRemoveFile={input.removeSelectedFile}
+                onDragActive={setDragActive}
+                onDropFile={(path) => {
+                  if (!inputLocked) applySelectedFile(path);
+                }}
+                messages={m}
+                t={t}
+              />
+            </div>
+            <div
+              ref={previewRegion}
+              role={showTablePreview ? "region" : undefined}
+              aria-label={showTablePreview ? mp.previewRegion : undefined}
+              tabIndex={-1}
+              className="grid scroll-mt-4 gap-4 rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-sky-400/50"
+            >
+              {showTablePreview && (
+                <div className="flex items-center justify-between gap-3">
+                  <h2 className="text-sm font-semibold text-white">{mp.previewRegion}</h2>
+                  <Button size="sm" disabled={inputLocked} onClick={returnToInput}>
+                    {mp.returnToInput}
+                  </Button>
+                </div>
+              )}
+              <PseudonymizeSection
+                workspace={pseudonymize}
+                projectName={policyProject?.name ?? null}
+                selectedFilePath={selectedFilePath}
+                hasInput={hasInput && pseudonymizeReady}
+                preferredAiTool={preferredAiTool}
+                onPreferredAiToolChange={onPreferredAiToolChange}
+                onCopyAndOpen={() => void copyAndOpenInline()}
+                onStartOver={startOver}
+                maskMessages={m}
+              />
+            </div>
           </>
         ) : (
           <>

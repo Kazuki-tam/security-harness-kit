@@ -167,15 +167,22 @@ export type Messages = {
       inspecting: string;
       inspectFailed: string;
       retryInspect: string;
+      previewReady: string;
+      viewPreview: string;
+      previewRegion: string;
+      returnToInput: string;
+      previewRows: string;
+      previewHint: string;
+      firstRowHeader: string;
+      rowNumber: string;
+      selectColumn: string;
+      noPreviewRows: string;
+      openTableSelection: string;
+      openTableSelectionHint: string;
       columnsTitle: string;
       columnsHint: string;
       columnsLoaded: string;
       tableCaption: string;
-      colSelected: string;
-      colHeader: string;
-      colSamples: string;
-      colKind: string;
-      colSuggestion: string;
       kindSelectLabel: string;
       kinds: {
         email: string;
