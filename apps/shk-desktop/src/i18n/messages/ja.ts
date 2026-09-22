@@ -80,7 +80,7 @@ export const ja: Messages = {
   },
   mask: {
     title: "AI向けマスク",
-    subtitle: "テキストやファイルをマスクし、結果を確認してからAIツールへコピーできます。",
+    subtitle: "AIへの共有前に、機密情報を伏せ字にします。",
     policyProject: "shk.toml を使用中",
     policyProjectFallback: "既定を使用",
     policyChecking: "確認中…",
@@ -149,8 +149,7 @@ export const ja: Messages = {
       pseudonymizeHint: "同じ値には同じ仮名コードを付けて置き換えます",
     },
     pseudonymize: {
-      subtitle:
-        "氏名・メールアドレス・電話番号などを、同じ値には同じ仮名コードが付く形に置き換えます。AIに渡しても表の関係性は保てます。",
+      subtitle: "同じ値を同じ仮名に置き換えます。",
       steps: {
         input: "内容を追加",
         columns: "列を選ぶ",
@@ -185,8 +184,7 @@ export const ja: Messages = {
       previewRegion: "表のプレビュー・列選択",
       returnToInput: "入力に戻る",
       previewRows: "先頭 {{count}} 行を表示（全 {{total}} 行）",
-      previewHint:
-        "入力データのプレビューです。列見出しにチェックを入れると、その列全体が仮名化の対象になります。縦にスクロールして先頭100行まで、横にスクロールして全列を確認できます。",
+      previewHint: "スクロールして先頭100行・すべての列を確認できます。",
       firstRowHeader: "1行目を列名として扱う",
       rowNumber: "データ行",
       selectColumn: "{{column}}（{{number}}列目）を仮名化する",
@@ -195,8 +193,7 @@ export const ja: Messages = {
       openTableSelectionHint:
         "列を指定して処理する場合は「仮名化」を使います。プロジェクトを選び、表を確認して対象列を指定できます。",
       columnsTitle: "仮名化する列を選ぶ",
-      columnsHint:
-        "処理したい列にチェックを入れ、データの種類を選んでください。チェックのない列は変更されません。",
+      columnsHint: "選択した列だけを仮名化します。",
       columnsLoaded: "{{count}} 列・{{rows}} 行を読み込みました",
       tableCaption: "{{file}} の列",
       kindSelectLabel: "{{column}} の扱い",

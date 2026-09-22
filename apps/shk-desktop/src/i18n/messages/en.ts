@@ -80,7 +80,7 @@ export const en: Messages = {
   },
   mask: {
     title: "Mask for AI",
-    subtitle: "Paste or upload content, mask secrets and PII, then copy into your AI tool.",
+    subtitle: "Redact sensitive information before sharing with AI.",
     policyProject: "Using shk.toml",
     policyProjectFallback: "Using default",
     policyChecking: "Checking…",
@@ -149,8 +149,7 @@ export const en: Messages = {
       pseudonymizeHint: "Give each value a consistent code so the same person keeps the same code",
     },
     pseudonymize: {
-      subtitle:
-        "Replace names, email addresses, and phone numbers with consistent codes before sharing with an AI tool. The same value always gets the same code, so tables stay useful.",
+      subtitle: "Replace matching values with consistent pseudonyms.",
       steps: {
         input: "Add content",
         columns: "Choose columns",
@@ -184,8 +183,7 @@ export const en: Messages = {
       previewRegion: "Table preview and column selection",
       returnToInput: "Back to input",
       previewRows: "Showing the first {{count}} of {{total}} rows",
-      previewHint:
-        "Input preview. Check a column header to pseudonymize the entire column. Scroll vertically to preview up to the first 100 rows, and horizontally to see all columns.",
+      previewHint: "Scroll to preview up to 100 rows and all columns.",
       firstRowHeader: "Use the first row as column names",
       rowNumber: "Data row",
       selectColumn: "Pseudonymize {{column}} (column {{number}})",
@@ -194,8 +192,7 @@ export const en: Messages = {
       openTableSelectionHint:
         "Use pseudonymization to process selected columns. Choose a project, review the table, and select the columns.",
       columnsTitle: "Choose columns to pseudonymize",
-      columnsHint:
-        "Check the columns to process, then choose their data type. Unchecked columns are copied unchanged.",
+      columnsHint: "Only selected columns are pseudonymized.",
       columnsLoaded: "{{count}} columns found ({{rows}} rows)",
       tableCaption: "Columns in {{file}}",
       kindSelectLabel: "How to treat {{column}}",
