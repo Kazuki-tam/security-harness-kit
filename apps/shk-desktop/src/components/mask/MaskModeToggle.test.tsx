@@ -18,8 +18,10 @@ describe("MaskModeToggle", () => {
       </I18nProvider>,
     );
 
-    const redact = screen.getByRole("radio", { name: /Redact/ });
-    const pseudonymize = screen.getByRole("radio", { name: /Pseudonymize/ });
+    const redact = screen.getByRole("radio", { name: "Redact" });
+    const pseudonymize = screen.getByRole("radio", { name: "Pseudonymize" });
+    expect(redact).toHaveAccessibleDescription(en.mask.mode.redactHint);
+    expect(pseudonymize).toHaveAccessibleDescription(en.mask.mode.pseudonymizeHint);
     expect(redact).toBeChecked();
     expect(pseudonymize).not.toBeChecked();
 

@@ -4,7 +4,7 @@ use super::columns::{
 };
 use super::derive::KeyMaterial;
 use super::normalize::NormalizeSettings;
-use super::{INFER_SAMPLE_ROWS, validate_norm, validate_token_bits};
+use super::{INFER_SAMPLE_ROWS, TABLE_PREVIEW_ROWS, validate_norm, validate_token_bits};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -59,7 +59,7 @@ pub struct TableResult {
     pub has_header: bool,
     /// Header names, or the synthetic `0`, `1`, … names when `has_header` is false.
     pub headers: Vec<String>,
-    /// The rows buffered for column inference (at most `INFER_SAMPLE_ROWS`).
+    /// The first rows for dry-run previews (at most `TABLE_PREVIEW_ROWS`).
     /// Populated on dry-run planning passes only; a real run leaves it empty
     /// so raw values are never carried past the write.
     pub sample_rows: Vec<Vec<String>>,
@@ -70,6 +70,34 @@ pub struct TableResult {
     /// xlsx dry runs only: every column with a formula in the data rows,
     /// selected or not, so a planner can warn before a column is picked.
     pub formula_columns: Vec<usize>,
+}
+
+impl TableResult {
+    pub(crate) fn empty(
+        options: &TableOptions,
+        columns: Vec<ResolvedColumn>,
+        has_header: bool,
+        material: Option<&KeyMaterial>,
+    ) -> Self {
+        Self {
+            meta: meta_from_parts(
+                options,
+                "table",
+                &columns,
+                0,
+                BTreeMap::new(),
+                BTreeMap::new(),
+                material,
+                options.dry_run,
+            ),
+            columns,
+            has_header,
+            headers: Vec::new(),
+            sample_rows: Vec::new(),
+            formula_cells: Vec::new(),
+            formula_columns: Vec::new(),
+        }
+    }
 }
 
 pub fn delimiter_for_path(path: Option<&std::path::Path>) -> u8 {
@@ -103,8 +131,12 @@ pub fn run_table<R: Read, W: Write>(
 
     let mut records = reader.records();
     let Some(first) = records.next() else {
-        let columns = Vec::new();
-        return Ok(empty_result(options, columns, !options.no_header, material));
+        return Ok(TableResult::empty(
+            options,
+            Vec::new(),
+            !options.no_header,
+            material,
+        ));
     };
     let first = first.context("read first CSV row")?;
     let first_row = record_to_row(&first);
@@ -141,7 +173,10 @@ pub fn run_table<R: Read, W: Write>(
         // Count the remaining rows so the plan reports the real table size.
         let mut rows_processed = pending_rows.len() as u64;
         for row in records {
-            row.context("read CSV row")?;
+            let row = row.context("read CSV row")?;
+            if pending_rows.len() < TABLE_PREVIEW_ROWS {
+                pending_rows.push(record_to_row(&row));
+            }
             rows_processed += 1;
         }
         return Ok(TableResult {
@@ -305,32 +340,6 @@ pub(crate) fn meta_from_parts(
     }
 }
 
-fn empty_result(
-    options: &TableOptions,
-    columns: Vec<ResolvedColumn>,
-    has_header: bool,
-    material: Option<&KeyMaterial>,
-) -> TableResult {
-    TableResult {
-        meta: meta_from_parts(
-            options,
-            "table",
-            &columns,
-            0,
-            BTreeMap::new(),
-            BTreeMap::new(),
-            material,
-            options.dry_run,
-        ),
-        columns,
-        has_header,
-        headers: Vec::new(),
-        sample_rows: Vec::new(),
-        formula_cells: Vec::new(),
-        formula_columns: Vec::new(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,11 +408,61 @@ mod tests {
     }
 
     #[test]
+    fn preview_preserves_row_order_and_caps_csv_and_tsv_with_or_without_headers() {
+        for delimiter in [b',', b'\t'] {
+            for no_header in [false, true] {
+                for count in [0, 1, 5, 99, 100, 101] {
+                    let mut opts = options("Value:custom:sample", true);
+                    opts.cli_columns = None;
+                    opts.delimiter = delimiter;
+                    opts.no_header = no_header;
+                    let separator = char::from(delimiter);
+                    let mut body = if no_header {
+                        String::new()
+                    } else {
+                        format!("Value{separator}Note\n")
+                    };
+                    for index in 0..count {
+                        body.push_str(&format!("sample-{index}{separator}note-{index}\n"));
+                    }
+                    let preview =
+                        run_table(body.as_bytes(), None::<&mut Vec<u8>>, &opts, None, None)
+                            .unwrap();
+                    assert_eq!(preview.meta.rows_processed, count as u64);
+                    assert_eq!(preview.sample_rows.len(), count.min(TABLE_PREVIEW_ROWS));
+                    for (index, row) in preview.sample_rows.iter().enumerate() {
+                        assert_eq!(
+                            row,
+                            &vec![format!("sample-{index}"), format!("note-{index}")]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn larger_preview_does_not_expand_the_inference_sample() {
+        let mut opts = options("0:email", true);
+        opts.cli_columns = None;
+        let mut body = String::from("Contact\n");
+        for _ in 0..INFER_SAMPLE_ROWS {
+            body.push_str(&["sample", "@", "example.com", "\n"].concat());
+        }
+        for _ in INFER_SAMPLE_ROWS..TABLE_PREVIEW_ROWS {
+            body.push_str("not-an-address\n");
+        }
+        let preview = run_table(body.as_bytes(), None::<&mut Vec<u8>>, &opts, None, None).unwrap();
+        assert_eq!(preview.sample_rows.len(), TABLE_PREVIEW_ROWS);
+        assert_eq!(preview.columns[0].kind, Kind::Email);
+    }
+
+    #[test]
     fn dry_run_does_not_need_material_and_counts_every_row() {
         let opts = options("Email:email", true);
         let email = ["ada", "@", "example.com"].concat();
         let mut body = String::from("\u{feff}Email\n");
-        for _ in 0..(INFER_SAMPLE_ROWS + 5) {
+        for _ in 0..(TABLE_PREVIEW_ROWS + 5) {
             body.push_str(&email);
             body.push('\n');
         }
@@ -411,9 +470,9 @@ mod tests {
         assert!(result.meta.dry_run);
         assert_eq!(result.columns[0].kind, Kind::Email);
         assert_eq!(result.columns[0].name, "Email");
-        assert_eq!(result.meta.rows_processed, (INFER_SAMPLE_ROWS + 5) as u64);
+        assert_eq!(result.meta.rows_processed, (TABLE_PREVIEW_ROWS + 5) as u64);
         assert_eq!(result.headers, vec!["Email".to_string()]);
-        assert_eq!(result.sample_rows.len(), INFER_SAMPLE_ROWS);
+        assert_eq!(result.sample_rows.len(), TABLE_PREVIEW_ROWS);
         assert_eq!(result.sample_rows[0], vec![email.clone()]);
 
         let mut out = Vec::new();

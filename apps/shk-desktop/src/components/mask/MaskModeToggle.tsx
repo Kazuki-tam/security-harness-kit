@@ -19,10 +19,8 @@ export function MaskModeToggle({ mode, onChange, disabled = false, messages: m }
   ];
 
   return (
-    <fieldset className="grid gap-1.5" disabled={disabled}>
-      <legend className="text-[10px] font-semibold tracking-[0.12em] text-white/70 uppercase">
-        {m.label}
-      </legend>
+    <fieldset disabled={disabled}>
+      <legend className="sr-only">{m.label}</legend>
       <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-canvas p-0.5">
         {options.map((option) => {
           const checked = mode === option.value;
@@ -30,7 +28,7 @@ export function MaskModeToggle({ mode, onChange, disabled = false, messages: m }
             <label
               key={option.value}
               title={option.hint}
-              className={`grid cursor-pointer gap-0.5 rounded-md px-2.5 py-1.5 text-left transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-sky-300/70 ${
+              className={`flex min-h-9 cursor-pointer items-center justify-center rounded-md px-3 py-2 transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-sky-300/70 ${
                 checked
                   ? "bg-sky-500/15 text-sky-100 ring-1 ring-inset ring-sky-400/30"
                   : "text-muted hover:text-text"
@@ -42,10 +40,16 @@ export function MaskModeToggle({ mode, onChange, disabled = false, messages: m }
                 value={option.value}
                 checked={checked}
                 onChange={() => onChange(option.value)}
+                aria-labelledby={`${name}-${option.value}-label`}
+                aria-describedby={`${name}-${option.value}-hint`}
                 className="sr-only"
               />
-              <span className="text-[12px] font-medium">{option.label}</span>
-              <span className="text-[10px] leading-snug opacity-80">{option.hint}</span>
+              <span id={`${name}-${option.value}-label`} className="text-[12px] font-medium">
+                {option.label}
+              </span>
+              <span id={`${name}-${option.value}-hint`} className="sr-only">
+                {option.hint}
+              </span>
             </label>
           );
         })}

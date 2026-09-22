@@ -1,5 +1,5 @@
 import { FileText, FileUp, X } from "lucide-react";
-import { useId, useRef, useEffect, type DragEvent, type ReactNode } from "react";
+import { useId, useRef, useEffect, useLayoutEffect, type DragEvent, type ReactNode } from "react";
 import type { MaskInputMode } from "../../hooks/useMaskInput";
 import type { Messages } from "../../i18n/types";
 import { maskFileBasename, maskFileKind } from "../../mask";
@@ -18,6 +18,7 @@ type Props = {
   fileMeta?: { fileKind: string; sourceLabel: string };
   /** Overrides the label derived from the file kind (pseudonymize names tables). */
   fileKindLabel?: string;
+  compactFileSelection?: boolean;
   inputHint: string;
   inputPlaceholder: string;
   runLabel: string;
@@ -52,6 +53,7 @@ export function MaskInputPanel({
   hasInput,
   fileMeta,
   fileKindLabel: fileKindLabelOverride,
+  compactFileSelection = false,
   inputHint,
   inputPlaceholder,
   runLabel,
@@ -75,6 +77,28 @@ export function MaskInputPanel({
 }: Props) {
   const inputId = useId();
   const hintId = useId();
+  const chooseFileRef = useRef<HTMLButtonElement>(null);
+  const selectedFileRef = useRef<HTMLElement>(null);
+  const previousFilePath = useRef(selectedFilePath);
+  useLayoutEffect(() => {
+    if (
+      compactFileSelection &&
+      previousFilePath.current &&
+      !selectedFilePath &&
+      inputMode === "file"
+    ) {
+      chooseFileRef.current?.focus();
+    }
+    if (
+      compactFileSelection &&
+      selectedFilePath &&
+      previousFilePath.current !== selectedFilePath &&
+      document.activeElement === document.body
+    ) {
+      selectedFileRef.current?.focus({ preventScroll: true });
+    }
+    previousFilePath.current = selectedFilePath;
+  }, [compactFileSelection, selectedFilePath, inputMode]);
 
   // Some webviews omit inputType on a real paste. Scope the fallback to
   // this event turn so a cancelled/empty paste cannot mark later typing.
@@ -115,6 +139,53 @@ export function MaskInputPanel({
         : selectedFilePath
           ? m.fileKinds.text
           : null);
+
+  if (compactFileSelection && inputMode === "file" && selectedFilePath) {
+    return (
+      <section
+        ref={selectedFileRef}
+        tabIndex={-1}
+        aria-label={m.inputTitle}
+        className="grid gap-3 rounded-xl border border-border bg-surface-2/70 p-4 outline-none focus-visible:ring-2 focus-visible:ring-sky-400/50"
+      >
+        <div className="flex flex-wrap items-center gap-3">
+          <FileText size={20} className="shrink-0 text-sky-200" aria-hidden="true" />
+          <div className="min-w-0 flex-1">
+            <p className="break-all text-sm font-semibold text-white" title={selectedFilePath}>
+              {fileLabel}
+            </p>
+            {fileKindLabel && <p className="mt-1 text-[11px] text-muted">{fileKindLabel}</p>}
+          </div>
+          <Button variant="secondary" size="sm" disabled={inputLocked} onClick={onChooseFile}>
+            {m.selectFile}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={<X size={14} aria-hidden="true" />}
+            disabled={inputLocked}
+            onClick={onRemoveFile}
+          >
+            {m.removeFile}
+          </Button>
+        </div>
+        {showRun && (
+          <div>
+            <Button
+              variant="primary"
+              onClick={onRun}
+              loading={isLoading}
+              disabled={isLoading || !hasInput || runDisabled}
+              aria-describedby={runDisabled ? runDisabledReasonId : undefined}
+              icon={runIcon}
+            >
+              {isLoading ? runningLabel : runLabel}
+            </Button>
+          </div>
+        )}
+      </section>
+    );
+  }
 
   return (
     <section className="grid gap-3 rounded-xl border border-border bg-surface-2/70 p-4 ring-1 ring-inset ring-white/5">
@@ -271,6 +342,7 @@ export function MaskInputPanel({
             </div>
           ) : (
             <button
+              ref={chooseFileRef}
               type="button"
               disabled={inputLocked}
               onClick={onChooseFile}

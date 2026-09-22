@@ -1,8 +1,8 @@
-use super::INFER_SAMPLE_ROWS;
 use super::apply::{CellAction, MapCollector, apply_cell, replacement_text};
 use super::columns::{infer_header, resolve_columns};
 use super::derive::KeyMaterial;
 use super::table::{TableOptions, TableResult, meta_from_parts};
+use super::{INFER_SAMPLE_ROWS, TABLE_PREVIEW_ROWS};
 use crate::document_masker::{
     copy_entry_bounded, decode_general_ref, decode_xml_text as decode_text, local_name,
     read_entry_bounded,
@@ -78,7 +78,12 @@ pub fn run_xlsx(
                 &worksheet_paths,
             )?;
         }
-        return Ok(empty_xlsx_result(options, material));
+        return Ok(TableResult::empty(
+            options,
+            Vec::new(),
+            !options.no_header,
+            material,
+        ));
     }
 
     let has_header = if options.no_header {
@@ -138,7 +143,7 @@ pub fn run_xlsx(
             columns,
             has_header,
             headers,
-            sample_rows: data_rows[..sample_len].to_vec(),
+            sample_rows: data_rows[..data_rows.len().min(TABLE_PREVIEW_ROWS)].to_vec(),
             formula_cells,
             formula_columns,
         });
@@ -823,27 +828,6 @@ fn attr(tag: &BytesStart<'_>, name: &str) -> Option<String> {
         })
 }
 
-fn empty_xlsx_result(options: &TableOptions, material: Option<&KeyMaterial>) -> TableResult {
-    TableResult {
-        meta: meta_from_parts(
-            options,
-            "table",
-            &[],
-            0,
-            BTreeMap::new(),
-            BTreeMap::new(),
-            material,
-            options.dry_run,
-        ),
-        columns: Vec::new(),
-        has_header: !options.no_header,
-        headers: Vec::new(),
-        sample_rows: Vec::new(),
-        formula_cells: Vec::new(),
-        formula_columns: Vec::new(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -991,6 +975,37 @@ mod tests {
         .unwrap();
         assert!(output.exists());
         assert!(run_xlsx(&input, Some(&output), None, &options(), None, None).is_err());
+    }
+
+    #[test]
+    fn dry_run_preview_is_bounded_to_one_hundred_rows() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("preview.xlsx");
+        let mut rows =
+            String::from(r#"<row r="1"><c r="A1" t="inlineStr"><is><t>Email</t></is></c></row>"#);
+        for index in 2..=106 {
+            rows.push_str(&format!(r#"<row r="{index}"><c r="A{index}" t="inlineStr"><is><t>sample-{index}</t></is></c></row>"#));
+        }
+        build_xlsx(
+            &input,
+            &[
+                ("xl/workbook.xml", WORKBOOK.into()),
+                ("xl/_rels/workbook.xml.rels", RELS.into()),
+                (
+                    "xl/worksheets/sheet1.xml",
+                    format!("<worksheet><sheetData>{rows}</sheetData></worksheet>"),
+                ),
+            ],
+            &[],
+        );
+        let dry = TableOptions {
+            dry_run: true,
+            ..options()
+        };
+        let preview = run_xlsx(&input, None, None, &dry, None, None).unwrap();
+        assert_eq!(preview.meta.rows_processed, 105);
+        assert_eq!(preview.sample_rows.len(), 100);
+        assert_eq!(preview.sample_rows[99], vec!["sample-101"]);
     }
 
     #[test]
