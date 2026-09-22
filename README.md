@@ -264,7 +264,7 @@ shk ci init github
 shk ci init github --upload-sarif
 shk ci init github --dry-run
 shk ci init github --mode audit
-shk ci init github --shk-version v0.7.1
+shk ci init github --shk-version v0.7.2
 
 shk skills install
 shk skills install --tool claude-code --global

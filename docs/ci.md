@@ -108,7 +108,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          SHK_VERSION=v0.7.1
+          SHK_VERSION=v0.7.2
           REPO=Kazuki-tam/security-harness-kit
           mkdir -p "$HOME/.cargo/bin"
           case "$(uname -s)-$(uname -m)" in
@@ -215,7 +215,7 @@ shk ci init github --mode audit
 Generated workflows default to the `shk` version that produced them (`v` + crate version). Override when pointing CI at a different tag:
 
 ```bash
-shk ci init github --shk-version v0.7.1
+shk ci init github --shk-version v0.7.2
 ```
 
 Re-run `shk ci init github --shk-version <new tag> --force` after upgrading `shk` locally to refresh the pin.
@@ -272,7 +272,7 @@ The install step downloads a single release archive, so a cache is usually unnec
         id: shk-cache
         with:
           path: ~/.cargo/bin/shk
-          key: shk-${{ runner.os }}-v0.7.1
+          key: shk-${{ runner.os }}-v0.7.2
 
       - name: Install shk
         if: steps.shk-cache.outputs.cache-hit != 'true'
