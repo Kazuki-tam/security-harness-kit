@@ -40,7 +40,7 @@ jobs:
           mode: blocking
           mcp-audit: true
           upload-sarif: false
-          shk-version: v0.7.1
+          shk-version: v0.7.3
 
   rust:
     strategy:
