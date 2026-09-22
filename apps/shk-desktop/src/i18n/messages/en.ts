@@ -185,7 +185,7 @@ export const en: Messages = {
       returnToInput: "Back to input",
       previewRows: "Showing the first {{count}} of {{total}} rows",
       previewHint:
-        "Input preview. Check a column header to pseudonymize the entire column. Scroll horizontally to see all columns.",
+        "Input preview. Check a column header to pseudonymize the entire column. Scroll vertically to preview up to the first 100 rows, and horizontally to see all columns.",
       firstRowHeader: "Use the first row as column names",
       rowNumber: "Data row",
       selectColumn: "Pseudonymize {{column}} (column {{number}})",

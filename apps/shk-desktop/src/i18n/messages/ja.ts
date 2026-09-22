@@ -186,7 +186,7 @@ export const ja: Messages = {
       returnToInput: "入力に戻る",
       previewRows: "先頭 {{count}} 行を表示（全 {{total}} 行）",
       previewHint:
-        "入力データのプレビューです。列見出しにチェックを入れると、その列全体が仮名化の対象になります。横にスクロールして全列を確認できます。",
+        "入力データのプレビューです。列見出しにチェックを入れると、その列全体が仮名化の対象になります。縦にスクロールして先頭100行まで、横にスクロールして全列を確認できます。",
       firstRowHeader: "1行目を列名として扱う",
       rowNumber: "データ行",
       selectColumn: "{{column}}（{{number}}列目）を仮名化する",

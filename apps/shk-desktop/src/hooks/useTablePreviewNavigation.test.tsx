@@ -24,6 +24,7 @@ const initial = {
   projectPath: "/demo",
   pastedKind: "csv" as const,
   inspect: null as PseudonymizeInspectResult | null,
+  selectedFilePath: null as string | null,
   ready: false,
   failed: false,
 };
@@ -63,6 +64,35 @@ describe("table preview navigation", () => {
     act(() => result.current.returnToInput());
     expect(textarea).toHaveFocus();
     expect(inputRegion.scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+
+  it("reveals the selected file controls and table together after loading", () => {
+    const { result, rerender, preview, inputRegion } = setup();
+    rerender({ ...initial, selectedFilePath: "/demo/orders.csv" });
+    rerender({ ...initial, selectedFilePath: "/demo/orders.csv", inspect, ready: true });
+    expect(preview).toHaveFocus();
+    expect(inputRegion.scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(result.current.inputCollapsed).toBe(false);
+  });
+
+  it("cancels an in-flight reveal when the user explicitly returns to input", () => {
+    const { result, rerender } = setup();
+    act(() => result.current.inputChanged(true));
+    act(() => result.current.returnToInput());
+    rerender({ ...initial, inspect, ready: true });
+    expect(result.current.inputCollapsed).toBe(false);
+  });
+
+  it("keeps the editor open after a failed re-plan is corrected", () => {
+    const { result, rerender } = setup();
+    act(() => result.current.inputChanged(true));
+    rerender({ ...initial, inspect, ready: true });
+    expect(result.current.inputCollapsed).toBe(true);
+    rerender({ ...initial, failed: true });
+    expect(result.current.inputCollapsed).toBe(false);
+    act(() => result.current.inputChanged(false));
+    rerender({ ...initial, inspect: { ...inspect }, ready: true });
+    expect(result.current.inputCollapsed).toBe(false);
   });
 
   it("does not steal focus after the user moves to another control", () => {

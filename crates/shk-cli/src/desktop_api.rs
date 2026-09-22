@@ -532,7 +532,7 @@ fn mask_office_file_for_desktop(
 // ---------------------------------------------------------------------------
 
 /// Sample rows shown next to each column so a person can tell what it holds.
-const PSEUDONYMIZE_PREVIEW_ROWS: usize = 3;
+const PSEUDONYMIZE_PREVIEW_ROWS: usize = shk_core::pseudonymize::TABLE_PREVIEW_ROWS;
 /// Cells are cut for display; the engine never sees the truncated copy.
 const PSEUDONYMIZE_PREVIEW_CELL_CHARS: usize = 40;
 const PSEUDONYMIZE_INLINE_LABEL: &str = "<pasted>";
@@ -4665,7 +4665,7 @@ mod tests {
             let root = dir.path();
             let long = "x".repeat(PSEUDONYMIZE_PREVIEW_CELL_CHARS + 5);
             let mut body = format!("Email,Note\n{},{long}\n", email());
-            for _ in 0..5 {
+            for _ in 0..105 {
                 body.push_str(&format!("{},short\n", email()));
             }
             fs::write(root.join("orders.csv"), &body).unwrap();
@@ -4678,7 +4678,7 @@ mod tests {
             assert!(table.has_header);
             assert_eq!(table.delimiter, ",");
             assert_eq!(table.headers, vec!["Email".to_string(), "Note".to_string()]);
-            assert_eq!(table.row_count, 6);
+            assert_eq!(table.row_count, 106);
             assert_eq!(table.sample_rows.len(), PSEUDONYMIZE_PREVIEW_ROWS);
             assert!(table.sample_rows[0][1].ends_with('…'));
             assert_eq!(

@@ -132,7 +132,10 @@ function openMaskWorkspace() {
 
 async function chooseFileForPseudonymize(path: string) {
   fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
-  fireEvent.click(screen.getByRole("button", { name: "Upload file" }));
+  expect(screen.getByRole("button", { name: "Upload file" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   openMock.mockResolvedValue(path);
   fireEvent.click(screen.getByRole("button", { name: /Choose file/ }));
   return screen.findByRole("table");
@@ -256,6 +259,24 @@ describe("App", () => {
     ).toBeInTheDocument();
   });
 
+  it("replaces the attachment area with a preview and restores it on removal", async () => {
+    seedProject();
+    mockPseudonymizeCommands();
+    openMaskWorkspace();
+    await chooseFileForPseudonymize("/tmp/demo/orders.csv");
+    expect(screen.queryByText("Drag a file here, or click to browse")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Paste text" })).not.toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Remove file" }));
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    expect(screen.getByText("Drag a file here, or click to browse")).toBeVisible();
+    expect(screen.getByRole("button", { name: /Drag a file here/ })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Upload file" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
   it("pseudonymizes a table with the user's column choices after confirming the key", async () => {
     seedProject();
     mockPseudonymizeCommands();
@@ -355,6 +376,7 @@ describe("App", () => {
     });
     openMaskWorkspace();
     fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Paste text" }));
     fireEvent.change(
       screen.getByPlaceholderText(
         "Paste text that contains names, email addresses, or phone numbers…",
@@ -406,6 +428,7 @@ describe("App", () => {
     mockPseudonymizeCommands({ keyExists: true });
     openMaskWorkspace();
     fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Paste text" }));
     fireEvent.change(screen.getByRole("combobox", { name: "Pasted content is" }), {
       target: { value: "csv" },
     });
@@ -419,10 +442,12 @@ describe("App", () => {
       name: "Table preview and column selection",
     });
     await waitFor(() => expect(region).toHaveFocus());
+    expect(input).not.toBeVisible();
     expect(
       screen.getByText("Table ready: 2 columns, 2 rows. Choose columns in the preview."),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Back to input" }));
+    expect(input).toBeVisible();
     expect(input).toHaveFocus();
     expect(input).toHaveValue("Mail,Note\nsample-a,memo");
     fireEvent.change(input, { target: { value: "Mail,Note\nsample-a,edited" } });
@@ -441,6 +466,7 @@ describe("App", () => {
     mockPseudonymizeCommands({ keyExists: true });
     openMaskWorkspace();
     fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Paste text" }));
     fireEvent.change(screen.getByRole("combobox", { name: "Pasted content is" }), {
       target: { value: "tsv" },
     });
@@ -463,6 +489,7 @@ describe("App", () => {
     mockPseudonymizeCommands({ keyExists: true });
     openMaskWorkspace();
     fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Paste text" }));
     fireEvent.change(screen.getByRole("combobox", { name: "Pasted content is" }), {
       target: { value: "csv" },
     });
@@ -484,6 +511,7 @@ describe("App", () => {
     mockPseudonymizeCommands({ keyExists: true });
     openMaskWorkspace();
     fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Paste text" }));
     fireEvent.change(screen.getByRole("combobox", { name: "Pasted content is" }), {
       target: { value: "csv" },
     });
@@ -581,6 +609,7 @@ describe("App", () => {
     });
     openMaskWorkspace();
     fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Paste text" }));
     const textarea = screen.getByPlaceholderText(
       "Paste text that contains names, email addresses, or phone numbers…",
     );
@@ -667,7 +696,7 @@ describe("App", () => {
     expect(screen.getByRole("listitem", { current: "step" })).toHaveTextContent("Add content");
   });
 
-  it("re-reads a file that is chosen again and ignores clicks on the active tab", async () => {
+  it("re-reads a file that is chosen again from the compact attachment", async () => {
     seedProject();
     mockPseudonymizeCommands({ keyExists: true });
     openMaskWorkspace();
@@ -676,8 +705,8 @@ describe("App", () => {
       target: { value: "name" },
     });
 
-    // Clicking the tab that is already active must not discard the plan.
-    fireEvent.click(screen.getByRole("button", { name: "Upload file" }));
+    // The selected file replaces the input tabs and large drop area.
+    expect(screen.queryByRole("button", { name: "Upload file" })).not.toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "How to treat Note" })).toHaveValue("name");
 
     // Choosing the same file again (after editing it elsewhere) plans afresh.
@@ -695,6 +724,7 @@ describe("App", () => {
   it("gates pseudonymize until a project with shk.toml is selected", async () => {
     openMaskWorkspace();
     fireEvent.click(screen.getByRole("radio", { name: /Pseudonymize/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Paste text" }));
 
     expect(screen.getByRole("note")).toHaveTextContent("Choose a project to pseudonymize");
     fireEvent.change(

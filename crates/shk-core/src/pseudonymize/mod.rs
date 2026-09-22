@@ -32,6 +32,8 @@ pub const UNPARSED: &str = "[UNPARSED]";
 pub const MIN_TOKEN_BITS: u16 = 64;
 pub const MAX_TOKEN_BITS: u16 = 128;
 pub const INFER_SAMPLE_ROWS: usize = 20;
+/// Maximum raw rows retained for a dry-run table preview; independent of inference.
+pub const TABLE_PREVIEW_ROWS: usize = 100;
 pub const INFER_MATCH_THRESHOLD: f64 = 0.60;
 
 pub fn validate_token_bits(token_bits: u16) -> Result<(), String> {

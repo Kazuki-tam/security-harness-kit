@@ -79,6 +79,7 @@ export function MaskWorkspace({
     onNotice,
   });
   const {
+    inputCollapsed,
     inputRegion,
     previewRegion,
     inputChanged,
@@ -91,6 +92,7 @@ export function MaskWorkspace({
     hasInput: input.hasInput,
     projectPath,
     pastedKind: pseudonymize.pastedKind,
+    selectedFilePath: input.inputMode === "file" ? input.selectedFilePath : null,
     inspect: pseudonymize.inspect,
     ready: pseudonymize.phase.status === "ready" && !pseudonymize.isInspecting,
     failed: pseudonymize.phase.status === "error",
@@ -131,6 +133,7 @@ export function MaskWorkspace({
     hasInput,
     removeSelectedFile,
     clearInput,
+    switchInputMode,
   } = input;
 
   // "Start over" returns to step 1: clearing the content is a replacement,
@@ -156,12 +159,24 @@ export function MaskWorkspace({
       if (next === mode) return;
       setMode(next);
       resetAll();
+      if (next === "pseudonymize" && !hasInput) {
+        switchInputMode("file");
+      }
       if (next === "pseudonymize" && selectedFilePath && !isPseudonymizableFile(selectedFilePath)) {
         removeSelectedFile();
         onNotice?.(mp.unsupportedFile);
       }
     },
-    [mode, mp.unsupportedFile, onNotice, removeSelectedFile, resetAll, selectedFilePath],
+    [
+      hasInput,
+      mode,
+      mp.unsupportedFile,
+      onNotice,
+      removeSelectedFile,
+      resetAll,
+      selectedFilePath,
+      switchInputMode,
+    ],
   );
 
   const runActive = useCallback(() => {
@@ -341,7 +356,12 @@ export function MaskWorkspace({
 
         {isPseudonymize ? (
           <>
-            <div ref={inputRegion} tabIndex={-1} className="scroll-mt-4 outline-none">
+            <div
+              ref={inputRegion}
+              hidden={inputMode === "text" && showTablePreview && inputCollapsed}
+              tabIndex={-1}
+              className="scroll-mt-4 outline-none"
+            >
               <MaskInputPanel
                 inputMode={inputMode}
                 inputText={inputText}
@@ -350,6 +370,7 @@ export function MaskWorkspace({
                 isLoading={pseudonymize.isRunning}
                 inputLocked={inputLocked}
                 hasInput={hasInput}
+                compactFileSelection
                 fileKindLabel={pseudonymizeFileKind}
                 inputHint={mp.inputHint}
                 inputPlaceholder={mp.inputPlaceholder}
@@ -439,9 +460,11 @@ export function MaskWorkspace({
               {showTablePreview && (
                 <div className="flex items-center justify-between gap-3">
                   <h2 className="text-sm font-semibold text-white">{mp.previewRegion}</h2>
-                  <Button size="sm" disabled={inputLocked} onClick={returnToInput}>
-                    {mp.returnToInput}
-                  </Button>
+                  {inputMode === "text" && (
+                    <Button size="sm" disabled={inputLocked} onClick={returnToInput}>
+                      {mp.returnToInput}
+                    </Button>
+                  )}
                 </div>
               )}
               <PseudonymizeSection

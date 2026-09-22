@@ -1,5 +1,5 @@
 import { Loader2 } from "lucide-react";
-import { useId, type Dispatch } from "react";
+import { useId, useLayoutEffect, useRef, type Dispatch } from "react";
 import type { Messages } from "../../i18n/types";
 import type { PseudonymizeInspectResult, PseudonymizeKindChoice } from "../../pseudonymize";
 import {
@@ -45,6 +45,34 @@ export function PseudonymizeColumnPanel({
 }: Props) {
   const sheetId = useId();
   const table = inspect.table;
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const tableRef = useRef<HTMLTableElement>(null);
+
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    const element = tableRef.current;
+    if (!viewport || !element) return;
+
+    const resize = () => {
+      const headerHeight = element.tHead?.getBoundingClientRect().height ?? 0;
+      const rows = Array.from(element.tBodies[0]?.rows ?? []).slice(0, 5);
+      const rowsHeight = rows.reduce(
+        (height, row) => height + row.getBoundingClientRect().height,
+        0,
+      );
+      // Include the border and any horizontal scrollbar so all five rows fit.
+      const chromeHeight = viewport.offsetHeight - viewport.clientHeight;
+      viewport.style.maxHeight = `${headerHeight + rowsHeight + chromeHeight}px`;
+    };
+    resize();
+    const observer = new ResizeObserver(resize);
+    observer.observe(element);
+    if (element.tHead) observer.observe(element.tHead);
+    for (const row of Array.from(element.tBodies[0]?.rows ?? []).slice(0, 5)) {
+      observer.observe(row);
+    }
+    return () => observer.disconnect();
+  }, [table, columns, columnErrors]);
   if (!table) return null;
 
   const selected = selectedCount(columns);
@@ -131,12 +159,16 @@ export function PseudonymizeColumnPanel({
       </div>
       <p className="text-[11px] text-muted">{m.previewHint}</p>
       <div
-        className="shk-sheet shk-scroll max-h-[560px] overflow-auto rounded-xl border border-slate-300 bg-white text-slate-800 shadow-sm focus-visible:outline-2 focus-visible:outline-sky-600"
+        ref={viewportRef}
+        className="shk-sheet shk-scroll overflow-auto rounded-xl border border-slate-300 bg-white text-slate-800 shadow-sm focus-visible:outline-2 focus-visible:outline-sky-600"
         role="region"
         aria-label={t(m.tableCaption, { file: inspect.sourceLabel })}
         tabIndex={0}
       >
-        <table className="w-full border-separate border-spacing-0 text-left text-[12px]">
+        <table
+          ref={tableRef}
+          className="w-full border-separate border-spacing-0 text-left text-[12px]"
+        >
           <caption className="sr-only">{t(m.tableCaption, { file: inspect.sourceLabel })}</caption>
           <thead className="sticky top-0 z-10 bg-slate-50 text-slate-800">
             <tr>

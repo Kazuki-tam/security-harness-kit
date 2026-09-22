@@ -101,6 +101,30 @@ describe("PseudonymizeColumnPanel", () => {
     window.localStorage.setItem("shk.desktop.locale.v1", "en");
   });
 
+  it("fits five rows while retaining all 100 preview rows", () => {
+    const measure = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: HTMLElement) {
+        return { height: this.tagName === "THEAD" ? 140 : 40 } as DOMRect;
+      });
+    try {
+      renderPanel({
+        inspect: preview({
+          sampleRows: Array.from({ length: 100 }, (_, index) => [`row-${index + 1}`, "", ""]),
+          rowCount: 150,
+        }),
+      });
+      expect(screen.getByRole("region", { name: "Columns in orders.csv" })).toHaveStyle({
+        maxHeight: "340px",
+      });
+      expect(within(screen.getByRole("table")).getAllByRole("row")).toHaveLength(101);
+      expect(screen.getByText("row-100")).toBeInTheDocument();
+      expect(screen.getByText("Showing the first 100 of 150 rows")).toBeInTheDocument();
+    } finally {
+      measure.mockRestore();
+    }
+  });
+
   it("lists every column with samples, a choice, and the suggestion", () => {
     renderPanel({ inspect: preview() });
 
