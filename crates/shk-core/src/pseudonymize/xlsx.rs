@@ -78,7 +78,12 @@ pub fn run_xlsx(
                 &worksheet_paths,
             )?;
         }
-        return Ok(empty_xlsx_result(options, material));
+        return Ok(TableResult::empty(
+            options,
+            Vec::new(),
+            !options.no_header,
+            material,
+        ));
     }
 
     let has_header = if options.no_header {
@@ -821,27 +826,6 @@ fn attr(tag: &BytesStart<'_>, name: &str) -> Option<String> {
                 .ok()
                 .map(|value| value.into_owned())
         })
-}
-
-fn empty_xlsx_result(options: &TableOptions, material: Option<&KeyMaterial>) -> TableResult {
-    TableResult {
-        meta: meta_from_parts(
-            options,
-            "table",
-            &[],
-            0,
-            BTreeMap::new(),
-            BTreeMap::new(),
-            material,
-            options.dry_run,
-        ),
-        columns: Vec::new(),
-        has_header: !options.no_header,
-        headers: Vec::new(),
-        sample_rows: Vec::new(),
-        formula_cells: Vec::new(),
-        formula_columns: Vec::new(),
-    }
 }
 
 #[cfg(test)]

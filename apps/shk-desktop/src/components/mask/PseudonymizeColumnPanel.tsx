@@ -52,11 +52,11 @@ export function PseudonymizeColumnPanel({
     const viewport = viewportRef.current;
     const element = tableRef.current;
     if (!viewport || !element) return;
+    const previewRows = Array.from(element.tBodies[0]?.rows ?? []).slice(0, 5);
 
     const resize = () => {
       const headerHeight = element.tHead?.getBoundingClientRect().height ?? 0;
-      const rows = Array.from(element.tBodies[0]?.rows ?? []).slice(0, 5);
-      const rowsHeight = rows.reduce(
+      const rowsHeight = previewRows.reduce(
         (height, row) => height + row.getBoundingClientRect().height,
         0,
       );
@@ -68,7 +68,7 @@ export function PseudonymizeColumnPanel({
     const observer = new ResizeObserver(resize);
     observer.observe(element);
     if (element.tHead) observer.observe(element.tHead);
-    for (const row of Array.from(element.tBodies[0]?.rows ?? []).slice(0, 5)) {
+    for (const row of previewRows) {
       observer.observe(row);
     }
     return () => observer.disconnect();

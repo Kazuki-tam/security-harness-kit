@@ -72,6 +72,34 @@ pub struct TableResult {
     pub formula_columns: Vec<usize>,
 }
 
+impl TableResult {
+    pub(crate) fn empty(
+        options: &TableOptions,
+        columns: Vec<ResolvedColumn>,
+        has_header: bool,
+        material: Option<&KeyMaterial>,
+    ) -> Self {
+        Self {
+            meta: meta_from_parts(
+                options,
+                "table",
+                &columns,
+                0,
+                BTreeMap::new(),
+                BTreeMap::new(),
+                material,
+                options.dry_run,
+            ),
+            columns,
+            has_header,
+            headers: Vec::new(),
+            sample_rows: Vec::new(),
+            formula_cells: Vec::new(),
+            formula_columns: Vec::new(),
+        }
+    }
+}
+
 pub fn delimiter_for_path(path: Option<&std::path::Path>) -> u8 {
     match path
         .and_then(|p| p.extension())
@@ -103,8 +131,12 @@ pub fn run_table<R: Read, W: Write>(
 
     let mut records = reader.records();
     let Some(first) = records.next() else {
-        let columns = Vec::new();
-        return Ok(empty_result(options, columns, !options.no_header, material));
+        return Ok(TableResult::empty(
+            options,
+            Vec::new(),
+            !options.no_header,
+            material,
+        ));
     };
     let first = first.context("read first CSV row")?;
     let first_row = record_to_row(&first);
@@ -305,32 +337,6 @@ pub(crate) fn meta_from_parts(
         unparsed,
         map_created: false,
         dry_run,
-    }
-}
-
-fn empty_result(
-    options: &TableOptions,
-    columns: Vec<ResolvedColumn>,
-    has_header: bool,
-    material: Option<&KeyMaterial>,
-) -> TableResult {
-    TableResult {
-        meta: meta_from_parts(
-            options,
-            "table",
-            &columns,
-            0,
-            BTreeMap::new(),
-            BTreeMap::new(),
-            material,
-            options.dry_run,
-        ),
-        columns,
-        has_header,
-        headers: Vec::new(),
-        sample_rows: Vec::new(),
-        formula_cells: Vec::new(),
-        formula_columns: Vec::new(),
     }
 }
 
