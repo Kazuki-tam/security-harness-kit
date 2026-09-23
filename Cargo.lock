@@ -4582,7 +4582,7 @@ dependencies = [
 name = "shk-desktop"
 version = "0.7.3"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "glib",
  "libc",
  "minisign-verify",
@@ -7137,7 +7137,7 @@ name = "xtask"
 version = "0.7.3"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "minisign-verify",
  "regex",
  "serde",

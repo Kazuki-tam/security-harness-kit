@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-base64 = "0.22"
+base64 = "0.23"
 minisign-verify = "0.2"
 regex.workspace = true
 serde = { workspace = true, features = ["derive"] }
