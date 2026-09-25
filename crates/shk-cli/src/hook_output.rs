@@ -179,7 +179,7 @@ pub fn deny_stdout_for_event(tool: AiTool, event: HookEvent, reason: &str) -> St
         AiTool::ClaudeCode => claude_deny_stdout(event, reason),
         // Grok Build: PreToolUse denies with `decision: deny` (exit 2 also
         // denies). UserPromptSubmit blocks with `decision: block` on any exit
-        // code. PostToolUse stdout is ignored.
+        // code. PostToolUse cannot block an already completed operation.
         AiTool::Grok => match event {
             HookEvent::UserPromptSubmit => decision_json("block", Some(reason)),
             HookEvent::PostToolUse => "{}".to_string(),
@@ -214,11 +214,19 @@ pub fn allow_stdout_for_event(tool: AiTool, event: HookEvent, info: Option<&str>
             let reason = info.unwrap_or("shk: OK");
             permission_output(event, "allow", reason).to_string()
         }
-        // An allowing UserPromptSubmit's stdout is discarded. PostToolUse
-        // stdout is ignored. PreToolUse `allow` means "not blocked".
-        AiTool::Grok if event == HookEvent::UserPromptSubmit || event == HookEvent::PostToolUse => {
-            "{}".to_string()
-        }
+        // An allowing UserPromptSubmit's stdout is discarded.
+        AiTool::Grok if event == HookEvent::UserPromptSubmit => "{}".to_string(),
+        // Post-tool feedback reaches the model without blocking the operation.
+        AiTool::Grok if event == HookEvent::PostToolUse => match info {
+            Some(message) => json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": message
+                }
+            })
+            .to_string(),
+            None => "{}".to_string(),
+        },
         AiTool::Grok => decision_json("allow", info),
         // Cascade ignores hook stdout; exit 0 already lets the action proceed.
         AiTool::Windsurf => "{}".to_string(),
@@ -243,7 +251,8 @@ pub fn mask_stdout(
         // hooks must return `{}` and pre hooks report via decision/reason only.
         AiTool::Antigravity if post => "{}".to_string(),
         AiTool::Antigravity => decision_json("allow", Some(&msg)),
-        // PostToolUse stdout is ignored. A pre-tool mask cannot safely rewrite
+        // Post-tool replacement requires the original tool result schema,
+        // which this text-only helper does not have. A pre-tool mask cannot rewrite
         // `updatedInput` without the tool schema, so findings block via
         // `decision: block` (honored for PreToolUse and UserPromptSubmit even
         // when the process exits 0) and the reason carries the redacted text.
@@ -692,6 +701,16 @@ mod tests {
                 .contains("safe")
         );
         assert_eq!(mask_stdout(AiTool::Grok, true, 1, Some("safe")), "{}");
+        let post =
+            allow_stdout_for_event(AiTool::Grok, HookEvent::PostToolUse, Some("review output"));
+        assert_eq!(
+            parse_json(&post)["hookSpecificOutput"]["additionalContext"],
+            "review output"
+        );
+        assert_eq!(
+            allow_stdout_for_event(AiTool::Grok, HookEvent::PostToolUse, None),
+            "{}"
+        );
     }
 
     #[test]

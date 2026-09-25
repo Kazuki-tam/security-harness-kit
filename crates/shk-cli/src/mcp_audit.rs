@@ -462,7 +462,11 @@ fn parse_toml_map(client: &str, source: &Path, value: Option<&toml::Value>) -> V
                 } else if let Some(url) = config.get("url").and_then(toml::Value::as_str) {
                     McpTransport::Http {
                         url: url.into(),
-                        headers: toml_map(config.get("http_headers")),
+                        headers: toml_map(config.get(if client == "grok" {
+                            "headers"
+                        } else {
+                            "http_headers"
+                        })),
                     }
                 } else {
                     McpTransport::Unknown

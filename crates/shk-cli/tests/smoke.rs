@@ -6661,3 +6661,141 @@ fn mask_pseudonymize_only_flags_without_pseudonymize_exit_2() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+// Exercise the actual hook process: fail-closed clients care about its exit
+// status, not merely whether the extraction helper returns a body.
+fn run_hook_payload(root: &Path, tool: &str, payload: serde_json::Value) -> std::process::Output {
+    let mut child = Command::new(shk_bin())
+        .args(["scan", "--hook-mode", tool])
+        .current_dir(root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn grok_hook_scans_arbitrary_nested_mcp_arguments() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let secret = synthetic_openai_key('a');
+    for envelope in ["toolInput", "tool_input"] {
+        for args in [
+            serde_json::json!({ "body": secret }),
+            serde_json::json!({ "message": secret, "text": "clean" }),
+            serde_json::json!({ "custom": [{ "value": secret }] }),
+        ] {
+            let payload = serde_json::json!({
+                "hookEventName": "pre_tool_use", "toolName": "mail__send_email",
+                envelope: args
+            });
+            let out = run_hook_payload(dir.path(), "grok", payload);
+            assert_eq!(out.status.code(), Some(2));
+            let response: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(response["decision"], "deny");
+            assert!(!String::from_utf8_lossy(&out.stdout).contains(&secret));
+            assert!(!String::from_utf8_lossy(&out.stderr).contains(&secret));
+        }
+    }
+    let out = run_hook_payload(
+        dir.path(),
+        "grok",
+        serde_json::json!({
+            "hookEventName": "pre_tool_use", "toolName": "mail__send_email",
+            "toolInput": { "body": "hello" }, "sessionId": secret
+        }),
+    );
+    assert!(out.status.success());
+}
+
+#[test]
+fn cursor_hook_handles_binary_files_without_bypassing_text_guards() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let secret = synthetic_openai_key('a');
+    // Binary signatures and invalid UTF-8, with and without a NUL byte.
+    for (name, bytes) in [
+        ("image.png", b"\x89PNG\r\n\x1a\n\0".as_slice()),
+        ("image.jpg", b"\xff\xd8\xff\xe0JFIF\0".as_slice()),
+        ("file.pdf", b"%PDF-1.7\n%\xe2\xe3\xcf\xd3".as_slice()),
+    ] {
+        std::fs::write(dir.path().join(name), bytes).unwrap();
+        let payload = serde_json::json!({ "file_path": name });
+        assert!(
+            run_hook_payload(dir.path(), "cursor", payload)
+                .status
+                .success()
+        );
+        // Skipping the binary must not skip the rest of the tool input.
+        let payload = serde_json::json!({ "file_path": name, "text": secret });
+        assert_eq!(
+            run_hook_payload(dir.path(), "cursor", payload)
+                .status
+                .code(),
+            Some(2)
+        );
+    }
+    for name in ["disguised.png", "legacy.txt"] {
+        let mut bytes = secret.as_bytes().to_vec();
+        if name == "legacy.txt" {
+            bytes.extend_from_slice(b"\n\x94\xe9\x96\xa7");
+        }
+        std::fs::write(dir.path().join(name), bytes).unwrap();
+        let out = run_hook_payload(
+            dir.path(),
+            "cursor",
+            serde_json::json!({ "file_path": name }),
+        );
+        assert_eq!(out.status.code(), Some(2));
+    }
+    // The action guard still rejects sensitive paths before binary extraction.
+    std::fs::write(dir.path().join(".env"), b"\0\xff").unwrap();
+    let out = run_hook_payload(
+        dir.path(),
+        "cursor",
+        serde_json::json!({ "hook_event_name": "beforeReadFile", "file_path": ".env" }),
+    );
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn mcp_audit_scans_grok_and_codex_authentication_headers() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let secret = synthetic_openai_key('a');
+    for (client, field) in [("grok", "headers"), ("codex", "http_headers")] {
+        let config_dir = dir.path().join(format!(".{client}"));
+        std::fs::create_dir(&config_dir).unwrap();
+        let config = format!(
+            "[mcp_servers.demo]\nurl = \"https://example.com/mcp\"\n[{field_prefix}.{field}]\nAuthorization = \"Bearer {secret}\"\n",
+            field_prefix = "mcp_servers.demo"
+        );
+        std::fs::write(config_dir.join("config.toml"), config).unwrap();
+    }
+    let out = Command::new(shk_bin())
+        .args(["mcp", "audit", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    for client in ["grok", "codex"] {
+        assert!(
+            report["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["rule_id"] == "secret.openai_api_key"
+                    && f["file"].as_str().unwrap_or_default().contains(client))
+        );
+    }
+    assert!(!String::from_utf8_lossy(&out.stdout).contains(&secret));
+}

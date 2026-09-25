@@ -135,16 +135,9 @@ const WINDSURF_POST_TEXT_KEYS: &[&str] = &[
     "content",
     "text",
 ];
-// Grok Build PreToolUse nests tool arguments under `toolInput`. Shell calls use
-// `command`; edits use `new_string` / `old_string` (and the camelCase aliases).
-const GROK_PRE_EXTRA_TEXT_KEYS: &[&str] = &[
-    "new_string",
-    "old_string",
-    "newString",
-    "oldString",
-    "replacement",
-    "query",
-];
+// Scan every argument value, including arbitrary MCP schemas. Keep this
+// scoped to the input envelope so session metadata is not treated as input.
+const GROK_PRE_EXTRA_TEXT_KEYS: &[&str] = &["toolInput", "tool_input"];
 // PostToolUse output is `toolResult` (not Claude's `tool_response`).
 const GROK_POST_TEXT_KEYS: &[&str] = &[
     "toolResult",
@@ -290,12 +283,20 @@ fn read_files_from_candidates(
             && abs.is_file()
             && abs.starts_with(&repo_root)
         {
+            let bytes =
+                fs::read(&abs).with_context(|| format!("read scanned file {}", abs.display()))?;
+            // Match the ordinary scanner's default NUL-in-head heuristic.
+            // Do not skip by extension: text disguised as an image still needs
+            // scanning. Lossy decoding preserves ASCII secrets in legacy text
+            // and binary formats without NUL bytes, without a UTF-8 error.
+            if bytes.iter().take(8192).any(|byte| *byte == 0) {
+                continue;
+            }
+            let t = String::from_utf8_lossy(&bytes);
             let rel = rel_from_repo(&repo_root, &abs);
             if first_rel.is_none() {
                 first_rel = Some(rel.clone());
             }
-            let t = fs::read_to_string(&abs)
-                .with_context(|| format!("read scanned file {}", abs.display()))?;
             texts.push(format!("// ---- {rel}\n{t}"));
         }
     }

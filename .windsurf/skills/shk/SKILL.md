@@ -280,7 +280,7 @@ Grok Build gets schema-clean hooks in `.grok/hooks/shk-security.json`: `UserProm
 (`--fail-on medium`), `PreToolUse`, and `PostToolUse`, each with a 30-second timeout.
 Matchers are omitted so every tool is covered, including MCP tools named `server__tool`.
 `PreToolUse` denies with `{"decision":"deny","reason":...}` and exit 2. `UserPromptSubmit`
-blocks with `{"decision":"block","reason":...}`. `PostToolUse` stdout is ignored.
+blocks with `{"decision":"block","reason":...}`. `PostToolUse` reports finding counts via `additionalContext` without blocking.
 Project hooks do not run until the folder is trusted with `/hooks-trust` or `grok --trust`.
 Grok also runs hooks from `.claude/settings.json` and `.cursor/hooks.json`, so managed
 Claude Code or Cursor hooks scan Grok sessions too.
