@@ -45,6 +45,7 @@ pub struct ConfigureAiOptions {
     pub scan_hooks_codex: bool,
     pub scan_hooks_copilot: bool,
     pub scan_hooks_antigravity: bool,
+    pub scan_hooks_grok: bool,
     pub scan_hooks_windsurf: bool,
     pub claude_deny: bool,
     pub claude_sandbox: bool,
@@ -58,6 +59,7 @@ fn scan_hooks_enabled_for(opts: &ConfigureAiOptions, tool: AiTool) -> bool {
         AiTool::Codex => opts.scan_hooks_codex,
         AiTool::Copilot => opts.scan_hooks_copilot,
         AiTool::Antigravity => opts.scan_hooks_antigravity,
+        AiTool::Grok => opts.scan_hooks_grok,
         AiTool::Windsurf => opts.scan_hooks_windsurf,
     }
 }
@@ -73,6 +75,7 @@ fn ai_config_relative_path(tool: AiTool) -> &'static str {
         AiTool::Codex => CONFIG_REL_PATH,
         AiTool::Copilot => ".github/hooks/shk-security.json",
         AiTool::Antigravity => ".agents/hooks.json",
+        AiTool::Grok => ".grok/hooks/shk-security.json",
         AiTool::Windsurf => ".windsurf/hooks.json",
     }
 }
@@ -115,6 +118,8 @@ fn project_hook_root_arg(tool: AiTool) -> Option<&'static str> {
         AiTool::ClaudeCode => Some(CLAUDE_PROJECT_DIR_ARG),
         AiTool::Cursor => Some(CURSOR_PROJECT_DIR_ARG),
         // Codex embeds CODEX_GIT_ROOT_ARG via codex_hook_command instead.
+        // Grok sets `CLAUDE_PROJECT_DIR` on every hook process.
+        AiTool::Grok => Some(CLAUDE_PROJECT_DIR_ARG),
         AiTool::Codex | AiTool::Copilot | AiTool::Antigravity | AiTool::Windsurf => None,
     }
 }
@@ -206,6 +211,7 @@ pub fn install_ai_with_summaries(
             AiTool::Cursor,
             AiTool::Copilot,
             AiTool::Antigravity,
+            AiTool::Grok,
             AiTool::Windsurf,
         ]
     };
@@ -253,6 +259,7 @@ pub fn configure_ai_with_summaries(cwd: &Path, opts: ConfigureAiOptions) -> Resu
         AiTool::Cursor,
         AiTool::Copilot,
         AiTool::Antigravity,
+        AiTool::Grok,
         AiTool::Windsurf,
     ] {
         let path = resolve_ai_config_path(tool, &cwd, opts.global)?;
@@ -346,6 +353,7 @@ fn apply_tool(
             opts.apply_deny,
             root_arg,
         ),
+        AiTool::Grok => apply_grok(path, opts.audit, opts.log_blocked, opts.dry_run, root_arg),
         AiTool::Windsurf => {
             apply_windsurf(path, opts.audit, opts.log_blocked, opts.dry_run, root_arg)
         }
@@ -359,6 +367,7 @@ fn remove_scan_hooks_for_tool(path: &Path, tool: AiTool, dry_run: bool) -> Resul
         AiTool::Codex => remove_codex_scan_hooks(path, dry_run),
         AiTool::Copilot => remove_copilot_scan_hooks(path, dry_run),
         AiTool::Antigravity => remove_antigravity_scan_hooks(path, dry_run),
+        AiTool::Grok => remove_grok_scan_hooks(path, dry_run),
         AiTool::Windsurf => remove_windsurf_scan_hooks(path, dry_run),
     }
 }
@@ -1123,6 +1132,126 @@ fn remove_windsurf_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
     })
 }
 
+const GROK_HOOK_EVENTS: &[&str] = &["UserPromptSubmit", "PreToolUse", "PostToolUse"];
+
+fn grok_command_is_managed(command: &str) -> bool {
+    command.contains("shk scan") && command.contains("--hook-mode grok")
+}
+
+/// Drops managed handlers from every matcher group of one event, then drops
+/// the groups that became empty as a result. User handlers sharing a group with
+/// a managed handler are kept, and pre-existing empty groups are left alone.
+/// Returns how many handlers were removed.
+fn strip_managed_grok_handlers(groups: &mut Vec<Value>) -> usize {
+    let mut removed = 0;
+    groups.retain_mut(|group| {
+        let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+            return true;
+        };
+        let before = hooks.len();
+        hooks.retain(|handler| {
+            !handler
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(grok_command_is_managed)
+        });
+        let stripped = before - hooks.len();
+        removed += stripped;
+        stripped == 0 || !hooks.is_empty()
+    });
+    removed
+}
+
+fn grok_handler(command: String) -> Value {
+    json!({
+        "type": "command",
+        "command": command,
+        "timeout": HOOK_CLI_TIMEOUT_SEC
+    })
+}
+
+/// Grok reads every `*.json` file under `.grok/hooks/` and rejects unknown
+/// handler fields, so this file stays schema-clean. Managed handlers are the
+/// ones whose command contains `--hook-mode grok`. An omitted matcher matches
+/// every tool, including MCP tools named `server__tool`. The explicit timeout
+/// avoids Grok's 5-second observe-hook default, which fails open.
+fn apply_grok(
+    path: &Path,
+    audit: bool,
+    log_blocked: bool,
+    dry_run: bool,
+    root_arg: Option<&str>,
+) -> Result<String> {
+    let commands = hook_scan_commands(AiTool::Grok, audit, log_blocked, root_arg);
+    let mut root = if path.is_file() {
+        load_json(path)?
+    } else {
+        json!({ "hooks": {} })
+    };
+    for (event, command) in [
+        ("UserPromptSubmit", commands.user_prompt),
+        ("PreToolUse", commands.pre),
+        ("PostToolUse", commands.post),
+    ] {
+        push_grok_group(&mut root, event, grok_handler(command))?;
+    }
+    save_json_formatted(path, &root, dry_run)?;
+    Ok(if dry_run {
+        format!(
+            "dry-run: would write managed UserPromptSubmit/PreToolUse/PostToolUse hooks (audit={audit}, logBlocked={log_blocked})"
+        )
+    } else {
+        format!(
+            "wrote managed UserPromptSubmit/PreToolUse/PostToolUse hooks (audit={audit}, logBlocked={log_blocked})"
+        )
+    })
+}
+
+fn push_grok_group(root: &mut Value, event: &str, handler: Value) -> Result<()> {
+    let hooks = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("Grok hooks root must be a JSON object"))?
+        .entry("hooks")
+        .or_insert_with(|| json!({}));
+    let hooks = hooks
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("hooks must be an object"))?;
+    let groups = hooks
+        .entry(event)
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("{event} hook list must be an array"))?;
+    strip_managed_grok_handlers(groups);
+    groups.push(json!({ "hooks": [handler] }));
+    Ok(())
+}
+
+fn remove_grok_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
+    if !path.is_file() {
+        return Ok("no Grok hooks file".to_string());
+    }
+    let mut root = load_json(path)?;
+    let mut removed = 0;
+    if let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) {
+        for event in GROK_HOOK_EVENTS {
+            let Some(groups) = hooks.get_mut(*event).and_then(Value::as_array_mut) else {
+                continue;
+            };
+            let stripped = strip_managed_grok_handlers(groups);
+            removed += stripped;
+            if stripped > 0 && groups.is_empty() {
+                hooks.remove(*event);
+            }
+        }
+    }
+    save_json_formatted(path, &root, dry_run)?;
+    Ok(if dry_run {
+        format!("dry-run: would remove {removed} managed Grok hook handler(s)")
+    } else {
+        format!("removed {removed} managed Grok hook handler(s)")
+    })
+}
+
 fn codex_root_arg(use_git_root_path: bool) -> Option<&'static str> {
     use_git_root_path.then_some(CODEX_GIT_ROOT_ARG)
 }
@@ -1599,6 +1728,7 @@ mod tests {
             AiTool::Codex,
             AiTool::Copilot,
             AiTool::Antigravity,
+            AiTool::Grok,
             AiTool::Windsurf,
         ] {
             let config_path = project.path().join(ai_config_relative_path(tool));
@@ -1608,11 +1738,11 @@ mod tests {
             // absolute path may leak into managed hook commands.
             assert!(!body.contains(project_root.as_ref()), "{tool:?}: {body}");
             match tool {
-                AiTool::ClaudeCode | AiTool::Cursor => {
-                    let expected = if tool == AiTool::ClaudeCode {
-                        CLAUDE_PROJECT_DIR_ARG
-                    } else {
+                AiTool::ClaudeCode | AiTool::Cursor | AiTool::Grok => {
+                    let expected = if tool == AiTool::Cursor {
                         CURSOR_PROJECT_DIR_ARG
+                    } else {
+                        CLAUDE_PROJECT_DIR_ARG
                     };
                     let config: Value = serde_json::from_str(&body).unwrap();
                     assert!(json_string_contains(&config, expected), "{tool:?}: {body}");
@@ -2095,6 +2225,7 @@ sandbox_mode = "danger-full-access"
                 scan_hooks_codex: false,
                 scan_hooks_copilot: false,
                 scan_hooks_antigravity: false,
+                scan_hooks_grok: false,
                 scan_hooks_windsurf: false,
                 claude_deny: false,
                 claude_sandbox: true,
@@ -2109,5 +2240,84 @@ sandbox_mode = "danger-full-access"
         assert_eq!(root["hooks"]["PostToolUse"].as_array().unwrap().len(), 1);
         assert_eq!(root["permissions"]["deny"][0], "Bash(rm -rf *)");
         assert_eq!(root["sandbox"]["enabled"], true);
+    }
+
+    #[test]
+    fn strip_managed_grok_handlers_drops_only_groups_it_emptied() {
+        let mut groups = vec![
+            json!({ "hooks": [] }),
+            json!({ "hooks": [{ "type": "command", "command": "shk scan --hook-mode grok" }] }),
+            json!({ "matcher": "Bash", "hooks": [
+                { "type": "command", "command": "./mine.sh" },
+                { "type": "command", "command": "shk scan --hook-mode grok --post" }
+            ] }),
+        ];
+
+        assert_eq!(strip_managed_grok_handlers(&mut groups), 2);
+        assert_eq!(
+            groups,
+            vec![
+                json!({ "hooks": [] }),
+                json!({ "matcher": "Bash", "hooks": [{ "type": "command", "command": "./mine.sh" }] }),
+            ]
+        );
+    }
+
+    #[test]
+    fn remove_grok_scan_hooks_drops_emptied_events_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shk-security.json");
+        fs::write(
+            &path,
+            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"shk scan --hook-mode grok"}]}],"PostToolUse":[],"Stop":[{"hooks":[{"type":"command","command":"./stop.sh"}]}]}}"#,
+        )
+        .unwrap();
+
+        let summary = remove_grok_scan_hooks(&path, false).unwrap();
+        assert!(summary.contains("removed 1"), "{summary}");
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(root["hooks"].get("PreToolUse").is_none(), "{root}");
+        assert_eq!(root["hooks"]["PostToolUse"], json!([]), "{root}");
+        assert_eq!(root["hooks"]["Stop"][0]["hooks"][0]["command"], "./stop.sh");
+    }
+
+    #[test]
+    fn configure_ai_grok_removal_keeps_user_handlers_in_the_same_group() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "").unwrap();
+        let path = dir.path().join(".grok/hooks/shk-security.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"./mine.sh"},{"type":"command","command":"shk scan --hook-mode grok"}]}]}}"#,
+        )
+        .unwrap();
+
+        configure_ai_with_summaries(
+            dir.path(),
+            ConfigureAiOptions {
+                audit: false,
+                log_blocked: false,
+                dry_run: false,
+                global: false,
+                fail_closed: false,
+                scan_hooks_claude_code: false,
+                scan_hooks_cursor: false,
+                scan_hooks_codex: false,
+                scan_hooks_copilot: false,
+                scan_hooks_antigravity: false,
+                scan_hooks_grok: false,
+                scan_hooks_windsurf: false,
+                claude_deny: false,
+                claude_sandbox: false,
+                codex_sandbox: false,
+            },
+        )
+        .unwrap();
+
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let handlers = root["hooks"]["PreToolUse"][0]["hooks"].as_array().unwrap();
+        assert_eq!(handlers.len(), 1, "{root}");
+        assert_eq!(handlers[0]["command"], "./mine.sh");
     }
 }

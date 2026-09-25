@@ -399,6 +399,8 @@ pub enum AiTool {
     Codex,
     Copilot,
     Cursor,
+    /// Grok Build (`.grok/hooks/*.json` + `~/.grok/hooks/*.json`).
+    Grok,
     /// Windsurf (Cascade hooks; `.windsurf/` + `~/.codeium/windsurf/`).
     Windsurf,
 }
@@ -411,6 +413,7 @@ impl AiTool {
             Self::Codex => "codex",
             Self::Copilot => "copilot",
             Self::Cursor => "cursor",
+            Self::Grok => "grok",
             Self::Windsurf => "windsurf",
         }
     }
@@ -422,6 +425,7 @@ impl AiTool {
             Self::Codex => shk_integrations::AiHookTool::Codex,
             Self::Copilot => shk_integrations::AiHookTool::Copilot,
             Self::Cursor => shk_integrations::AiHookTool::Cursor,
+            Self::Grok => shk_integrations::AiHookTool::Grok,
             Self::Windsurf => shk_integrations::AiHookTool::Windsurf,
         }
     }
@@ -479,7 +483,7 @@ pub enum HooksCmd {
         dry_run: bool,
         #[arg(
             long,
-            help = "Write user-level configs (~/.cursor, ~/.codex, ~/.claude, ~/.gemini/config, ~/.copilot, ~/.codeium/windsurf)."
+            help = "Write user-level configs (~/.cursor, ~/.codex, ~/.claude, ~/.grok, ~/.gemini/config, ~/.copilot, ~/.codeium/windsurf)."
         )]
         global: bool,
         #[arg(long, value_enum)]
@@ -1277,6 +1281,7 @@ pub enum SkillToolArg {
     Codex,
     Copilot,
     Cursor,
+    Grok,
     Windsurf,
     All,
 }

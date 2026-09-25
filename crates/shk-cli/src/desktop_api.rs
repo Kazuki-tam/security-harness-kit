@@ -55,6 +55,7 @@ pub struct AiSafetyAppliedStatus {
     pub scan_hooks_copilot: bool,
     pub scan_hooks_antigravity: bool,
     pub scan_hooks_windsurf: bool,
+    pub scan_hooks_grok: bool,
     pub claude_deny: bool,
     pub claude_sandbox: bool,
     pub codex_sandbox: bool,
@@ -1409,6 +1410,9 @@ pub struct ApplyAiHookSettingsOptions {
     /// Defaults to false for payloads from older desktop frontends.
     #[serde(default)]
     pub scan_hooks_windsurf: bool,
+    /// Defaults to false for payloads from older desktop frontends.
+    #[serde(default)]
+    pub scan_hooks_grok: bool,
     #[serde(default = "default_cursor_fail_closed")]
     pub cursor_fail_closed: bool,
     pub claude_deny: bool,
@@ -1466,6 +1470,7 @@ fn desktop_configure_ai_options(options: &ApplyAiHookSettingsOptions) -> Configu
         scan_hooks_copilot: options.scan_hooks_copilot,
         scan_hooks_antigravity: options.scan_hooks_antigravity,
         scan_hooks_windsurf: options.scan_hooks_windsurf,
+        scan_hooks_grok: options.scan_hooks_grok,
         claude_deny: options.claude_deny,
         claude_sandbox: options.claude_sandbox,
         codex_sandbox: options.codex_sandbox,
@@ -1498,6 +1503,7 @@ struct ProjectCheckStatus {
     scan_hooks_copilot: bool,
     scan_hooks_antigravity: bool,
     scan_hooks_windsurf: bool,
+    scan_hooks_grok: bool,
     ignore: IgnoreStatus,
     claude: ClaudePermissionsStatus,
     codex: CodexConfigStatus,
@@ -1640,6 +1646,7 @@ fn ai_safety_applied_matches(a: &AiSafetyAppliedStatus, b: &AiSafetyAppliedStatu
         && a.scan_hooks_copilot == b.scan_hooks_copilot
         && a.scan_hooks_antigravity == b.scan_hooks_antigravity
         && a.scan_hooks_windsurf == b.scan_hooks_windsurf
+        && a.scan_hooks_grok == b.scan_hooks_grok
         && a.claude_deny == b.claude_deny
         && a.claude_sandbox == b.claude_sandbox
         && a.codex_sandbox == b.codex_sandbox
@@ -1652,6 +1659,7 @@ fn ai_safety_fully_disabled(status: &AiSafetyAppliedStatus) -> bool {
         && !status.scan_hooks_copilot
         && !status.scan_hooks_antigravity
         && !status.scan_hooks_windsurf
+        && !status.scan_hooks_grok
         && !status.claude_deny
         && !status.claude_sandbox
         && !status.codex_sandbox
@@ -1670,6 +1678,7 @@ fn current_ai_hook_settings_options(root: &Path) -> ApplyAiHookSettingsOptions {
         scan_hooks_copilot: applied.scan_hooks_copilot,
         scan_hooks_antigravity: applied.scan_hooks_antigravity,
         scan_hooks_windsurf: applied.scan_hooks_windsurf,
+        scan_hooks_grok: applied.scan_hooks_grok,
         cursor_fail_closed: true,
         claude_deny: applied.claude_deny,
         claude_sandbox: applied.claude_sandbox,
@@ -2293,6 +2302,7 @@ fn collect_project_check_status(root: &Path) -> ProjectCheckStatus {
         scan_hooks_copilot: scan_hooks_for("copilot"),
         scan_hooks_antigravity: scan_hooks_for("antigravity"),
         scan_hooks_windsurf: scan_hooks_for("windsurf"),
+        scan_hooks_grok: scan_hooks_for("grok"),
         ignore: collect_ignore_status(root),
         claude: collect_claude_permissions_status(root),
         codex: collect_codex_config_status(root),
@@ -2336,6 +2346,7 @@ fn ai_tool_statuses(root: &Path, global: bool) -> Vec<AiHookToolStatus> {
         AiTool::Cursor,
         AiTool::Copilot,
         AiTool::Antigravity,
+        AiTool::Grok,
         AiTool::Windsurf,
     ]
     .into_iter()
@@ -2357,7 +2368,7 @@ fn ai_tool_statuses(root: &Path, global: bool) -> Vec<AiHookToolStatus> {
 fn has_managed_hook_marker(tool: AiTool, content: &str) -> bool {
     content.contains(MANAGED_MARKER_JSON)
         || content.contains(MANAGED_MARKER_SH)
-        || ((tool == AiTool::Copilot || tool == AiTool::Windsurf)
+        || ((tool == AiTool::Copilot || tool == AiTool::Windsurf || tool == AiTool::Grok)
             && content.contains("shk scan")
             && content.contains(&format!("--hook-mode {}", tool.kebab_str())))
 }
@@ -2400,7 +2411,7 @@ fn build_recommended_fixes(
         fixes.push(RecommendedFixDto {
             id: "ai_hooks".into(),
             severity: "warn".into(),
-            message: "Install managed AI scan hooks for Cursor, Claude Code, Codex, Copilot, Antigravity, and Windsurf"
+            message: "Install managed AI scan hooks for Cursor, Claude Code, Codex, Copilot, Antigravity, Grok Build, and Windsurf"
                 .into(),
             requires_policy: true,
             default_selected: true,
@@ -2600,6 +2611,7 @@ fn ai_safety_applied_from(checks: &ProjectCheckStatus) -> AiSafetyAppliedStatus 
         scan_hooks_copilot: checks.scan_hooks_copilot,
         scan_hooks_antigravity: checks.scan_hooks_antigravity,
         scan_hooks_windsurf: checks.scan_hooks_windsurf,
+        scan_hooks_grok: checks.scan_hooks_grok,
         claude_deny: checks.claude.settings_exists && checks.claude.deny_ok,
         claude_sandbox: checks.claude.settings_exists && checks.claude.sandbox_ok,
         codex_sandbox: checks.codex.config_exists
@@ -2699,6 +2711,7 @@ fn parse_ai_tool(value: &str) -> Result<AiTool> {
         "copilot" => Ok(AiTool::Copilot),
         "cursor" => Ok(AiTool::Cursor),
         "antigravity" => Ok(AiTool::Antigravity),
+        "grok" => Ok(AiTool::Grok),
         "windsurf" => Ok(AiTool::Windsurf),
         other => anyhow::bail!("unknown AI tool: {other}"),
     }
@@ -2720,6 +2733,7 @@ fn parse_skill_tool(value: &str) -> Result<SkillTool> {
         "copilot" => Ok(SkillTool::Copilot),
         "cursor" => Ok(SkillTool::Cursor),
         "antigravity" => Ok(SkillTool::Antigravity),
+        "grok" => Ok(SkillTool::Grok),
         "windsurf" => Ok(SkillTool::Windsurf),
         "all" => Ok(SkillTool::All),
         other => anyhow::bail!("unknown skill tool: {other}"),
@@ -4000,6 +4014,7 @@ mod tests {
                 scan_hooks_cursor: false,
                 scan_hooks_antigravity: false,
                 scan_hooks_windsurf: false,
+                scan_hooks_grok: false,
                 scan_hooks_codex: false,
                 scan_hooks_copilot: false,
                 cursor_fail_closed: true,
@@ -4047,6 +4062,7 @@ mod tests {
                 scan_hooks_cursor: false,
                 scan_hooks_antigravity: false,
                 scan_hooks_windsurf: false,
+                scan_hooks_grok: false,
                 scan_hooks_codex: false,
                 scan_hooks_copilot: false,
                 cursor_fail_closed: true,
@@ -4137,6 +4153,7 @@ mod tests {
                 scan_hooks_cursor: false,
                 scan_hooks_antigravity: false,
                 scan_hooks_windsurf: true,
+                scan_hooks_grok: false,
                 scan_hooks_codex: false,
                 scan_hooks_copilot: false,
                 cursor_fail_closed: true,
@@ -4193,6 +4210,7 @@ mod tests {
                 scan_hooks_cursor: false,
                 scan_hooks_antigravity: false,
                 scan_hooks_windsurf: false,
+                scan_hooks_grok: false,
                 scan_hooks_codex: false,
                 scan_hooks_copilot: false,
                 cursor_fail_closed: true,
@@ -4225,6 +4243,7 @@ mod tests {
             scan_hooks_cursor: false,
             scan_hooks_antigravity: false,
             scan_hooks_windsurf: true,
+            scan_hooks_grok: false,
             scan_hooks_codex: false,
             scan_hooks_copilot: false,
             cursor_fail_closed: true,
@@ -4245,6 +4264,7 @@ mod tests {
             scan_hooks_cursor: true,
             scan_hooks_antigravity: false,
             scan_hooks_windsurf: false,
+            scan_hooks_grok: false,
             scan_hooks_codex: false,
             scan_hooks_copilot: false,
             cursor_fail_closed: true,

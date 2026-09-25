@@ -125,8 +125,9 @@ cargo run -p shk-cli --bin shk -- hooks install-ai --dry-run
 cargo run -p shk-cli --bin shk -- hooks install-ai --tool copilot --dry-run # .github/hooks/shk-security.json (global: ~/.copilot/hooks/shk-security.json)
 cargo run -p shk-cli --bin shk -- hooks install-ai --tool antigravity --dry-run # .agents/hooks.json (global: ~/.gemini/config/hooks.json)
 cargo run -p shk-cli --bin shk -- hooks install-ai --tool windsurf --dry-run # Windsurf Cascade: .windsurf/hooks.json (global: ~/.codeium/windsurf/hooks.json)
+cargo run -p shk-cli --bin shk -- hooks install-ai --tool grok --dry-run # Grok Build: .grok/hooks/shk-security.json (global: ~/.grok/hooks/shk-security.json)
 
-# Skills (deploy embedded Claude Code / Codex / Cursor / Copilot / Antigravity / Windsurf skill to project)
+# Skills (deploy embedded Claude Code / Codex / Cursor / Copilot / Antigravity / Grok Build / Windsurf skill to project)
 cargo run -p shk-cli --bin shk -- skills install --dry-run
 cargo run -p shk-cli --bin shk -- skills install                   # .claude/skills/ + .agents/skills/ + .github/skills/
 cargo run -p shk-cli --bin shk -- skills install --tool claude-code
@@ -134,6 +135,7 @@ cargo run -p shk-cli --bin shk -- skills install --tool codex
 cargo run -p shk-cli --bin shk -- skills install --tool copilot
 cargo run -p shk-cli --bin shk -- skills install --tool antigravity --global # ~/.gemini/config/skills/
 cargo run -p shk-cli --bin shk -- skills install --tool windsurf # .windsurf/skills/ (global: ~/.codeium/windsurf/skills/)
+cargo run -p shk-cli --bin shk -- skills install --tool grok # .grok/skills/ (global: ~/.grok/skills/)
 cargo run -p shk-cli --bin shk -- hooks install-ai --tool cursor --audit
 cargo run -p shk-cli --bin shk -- hooks install-ai --tool cursor --log-blocked
 cargo run -p shk-cli --bin shk -- hooks install-ai --tool claude-code --global --dry-run

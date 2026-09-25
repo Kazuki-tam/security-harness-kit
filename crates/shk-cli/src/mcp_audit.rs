@@ -18,6 +18,7 @@ const PROJECT_CONFIGS: &[(&str, &str, Format)] = &[
     ("cursor", ".cursor/mcp.json", Format::JsonMcp),
     ("vscode", ".vscode/mcp.json", Format::JsonServers),
     ("codex", ".codex/config.toml", Format::Toml),
+    ("grok", ".grok/config.toml", Format::Toml),
 ];
 
 #[derive(Clone, Copy)]
@@ -249,6 +250,7 @@ fn global_candidates(home: &Path) -> Vec<Candidate> {
         ),
         ("cursor", ".cursor/mcp.json", Format::JsonMcp),
         ("codex", ".codex/config.toml", Format::Toml),
+        ("grok", ".grok/config.toml", Format::Toml),
         (
             "windsurf",
             ".codeium/windsurf/mcp_config.json",
