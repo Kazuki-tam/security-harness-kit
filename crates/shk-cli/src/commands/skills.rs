@@ -12,6 +12,7 @@ pub enum SkillTool {
     Cursor,
     Copilot,
     Antigravity,
+    Grok,
     Windsurf,
     All,
 }
@@ -57,6 +58,7 @@ pub(crate) fn selected_tools(tool: SkillTool) -> Vec<SkillTool> {
             SkillTool::Cursor,
             SkillTool::Copilot,
             SkillTool::Antigravity,
+            SkillTool::Grok,
             SkillTool::Windsurf,
         ],
         t => vec![t],
@@ -100,6 +102,8 @@ pub fn status_entries_for(root: &Path) -> Vec<SkillStatus> {
         ("copilot (project)", SkillTool::Copilot, false),
         ("copilot (global)", SkillTool::Copilot, true),
         ("antigravity (global)", SkillTool::Antigravity, true),
+        ("grok (project)", SkillTool::Grok, false),
+        ("grok (global)", SkillTool::Grok, true),
         ("windsurf (project)", SkillTool::Windsurf, false),
         ("windsurf (global)", SkillTool::Windsurf, true),
     ];
@@ -260,6 +264,12 @@ fn dest_path_for(base: &Path, tool: SkillTool, global: bool) -> Result<PathBuf> 
             .join("skills")
             .join(SKILL_NAME)
             .join("SKILL.md"),
+        // Grok Build reads `.grok/skills/` and `~/.grok/skills/`.
+        SkillTool::Grok => base
+            .join(".grok")
+            .join("skills")
+            .join(SKILL_NAME)
+            .join("SKILL.md"),
         // Cascade (Windsurf) reads workspace `.windsurf/skills/`
         // and user-level `~/.codeium/windsurf/skills/`.
         SkillTool::Windsurf if global => base
@@ -298,6 +308,7 @@ impl SkillTool {
             Self::Cursor => "cursor",
             Self::Copilot => "copilot",
             Self::Antigravity => "antigravity",
+            Self::Grok => "grok",
             Self::Windsurf => "windsurf",
             Self::All => "all",
         }
@@ -318,6 +329,7 @@ mod tests {
                 SkillTool::Cursor,
                 SkillTool::Copilot,
                 SkillTool::Antigravity,
+                SkillTool::Grok,
                 SkillTool::Windsurf,
             ]
         );

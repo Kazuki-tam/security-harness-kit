@@ -135,6 +135,22 @@ const WINDSURF_POST_TEXT_KEYS: &[&str] = &[
     "content",
     "text",
 ];
+// Scan every argument value, including arbitrary MCP schemas. Keep this
+// scoped to the input envelope so session metadata is not treated as input.
+const GROK_PRE_EXTRA_TEXT_KEYS: &[&str] = &["toolInput", "tool_input"];
+// PostToolUse output is `toolResult` (not Claude's `tool_response`).
+const GROK_POST_TEXT_KEYS: &[&str] = &[
+    "toolResult",
+    "tool_result",
+    "stdout",
+    "stderr",
+    "output",
+    "result",
+    "content",
+    "text",
+    "error",
+    "command",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AiHookTool {
@@ -143,6 +159,7 @@ pub enum AiHookTool {
     Codex,
     Copilot,
     Cursor,
+    Grok,
     Windsurf,
 }
 
@@ -154,6 +171,7 @@ impl AiHookTool {
             Self::Codex => "codex",
             Self::Copilot => "copilot",
             Self::Cursor => "cursor",
+            Self::Grok => "grok",
             Self::Windsurf => "windsurf",
         }
     }
@@ -165,6 +183,7 @@ impl AiHookTool {
             Self::Codex => "<codex-hook>",
             Self::Copilot => "<copilot-hook>",
             Self::Cursor => "<cursor-hook>",
+            Self::Grok => "<grok-hook>",
             Self::Windsurf => "<windsurf-hook>",
         }
     }
@@ -185,6 +204,10 @@ pub fn extract_user_prompt(stdin: &str) -> Option<Cow<'_, str>> {
     struct UserPromptPayload<'a> {
         #[serde(borrow)]
         prompt: Option<Cow<'a, str>>,
+        #[serde(borrow, rename = "userPrompt")]
+        user_prompt_camel: Option<Cow<'a, str>>,
+        #[serde(borrow)]
+        user_prompt: Option<Cow<'a, str>>,
         #[serde(borrow)]
         tool_info: Option<ToolInfo<'a>>,
     }
@@ -192,6 +215,8 @@ pub fn extract_user_prompt(stdin: &str) -> Option<Cow<'_, str>> {
     let payload = serde_json::from_str::<UserPromptPayload<'_>>(stdin).ok()?;
     payload
         .prompt
+        .or(payload.user_prompt_camel)
+        .or(payload.user_prompt)
         .or_else(|| payload.tool_info.and_then(|info| info.user_prompt))
 }
 
@@ -258,12 +283,20 @@ fn read_files_from_candidates(
             && abs.is_file()
             && abs.starts_with(&repo_root)
         {
+            let bytes =
+                fs::read(&abs).with_context(|| format!("read scanned file {}", abs.display()))?;
+            // Match the ordinary scanner's default NUL-in-head heuristic.
+            // Do not skip by extension: text disguised as an image still needs
+            // scanning. Lossy decoding preserves ASCII secrets in legacy text
+            // and binary formats without NUL bytes, without a UTF-8 error.
+            if bytes.iter().take(8192).any(|byte| *byte == 0) {
+                continue;
+            }
+            let t = String::from_utf8_lossy(&bytes);
             let rel = rel_from_repo(&repo_root, &abs);
             if first_rel.is_none() {
                 first_rel = Some(rel.clone());
             }
-            let t = fs::read_to_string(&abs)
-                .with_context(|| format!("read scanned file {}", abs.display()))?;
             texts.push(format!("// ---- {rel}\n{t}"));
         }
     }
@@ -339,6 +372,7 @@ fn priority_text_key_sets(post: bool, tool: AiHookTool) -> &'static [&'static [&
     if !post {
         return match tool {
             AiHookTool::Antigravity => &[PRE_TEXT_KEYS, ANTIGRAVITY_PRE_EXTRA_TEXT_KEYS],
+            AiHookTool::Grok => &[PRE_TEXT_KEYS, GROK_PRE_EXTRA_TEXT_KEYS],
             AiHookTool::Windsurf => &[PRE_TEXT_KEYS, WINDSURF_PRE_EXTRA_TEXT_KEYS],
             _ => &[PRE_TEXT_KEYS],
         };
@@ -350,6 +384,7 @@ fn priority_text_key_sets(post: bool, tool: AiHookTool) -> &'static [&'static [&
         AiHookTool::ClaudeCode => &[CLAUDE_POST_TEXT_KEYS],
         AiHookTool::Copilot => &[COPILOT_POST_TEXT_KEYS],
         AiHookTool::Cursor => &[CURSOR_POST_TEXT_KEYS],
+        AiHookTool::Grok => &[GROK_POST_TEXT_KEYS],
         AiHookTool::Windsurf => &[WINDSURF_POST_TEXT_KEYS],
     }
 }
@@ -440,8 +475,62 @@ mod tests {
             AiHookTool::Antigravity.virtual_path_label(),
             "<antigravity-hook>"
         );
+        assert_eq!(AiHookTool::Grok.kebab_str(), "grok");
+        assert_eq!(AiHookTool::Grok.virtual_path_label(), "<grok-hook>");
         assert_eq!(AiHookTool::Windsurf.kebab_str(), "windsurf");
         assert_eq!(AiHookTool::Windsurf.virtual_path_label(), "<windsurf-hook>");
+    }
+
+    #[test]
+    fn grok_pre_extracts_tool_input_command_and_edit() {
+        let dir = tempdir().unwrap();
+        let stdin = serde_json::json!({
+            "hookEventName": "pre_tool_use",
+            "cwd": dir.path(),
+            "toolName": "run_terminal_command",
+            "toolInput": { "command": "echo grok-command-marker" }
+        })
+        .to_string();
+        let (_disp, body) =
+            stdin_to_hook_body(AiHookTool::Grok, false, &stdin, dir.path(), dir.path()).unwrap();
+        assert!(body.contains("grok-command-marker"), "{body}");
+
+        let edit = serde_json::json!({
+            "hookEventName": "pre_tool_use",
+            "toolName": "search_replace",
+            "toolInput": { "new_string": "grok-edit-marker" }
+        })
+        .to_string();
+        let (_disp, body) =
+            stdin_to_hook_body(AiHookTool::Grok, false, &edit, dir.path(), dir.path()).unwrap();
+        assert!(body.contains("grok-edit-marker"), "{body}");
+    }
+
+    #[test]
+    fn grok_post_extracts_tool_result() {
+        let dir = tempdir().unwrap();
+        let stdin = serde_json::json!({
+            "hookEventName": "post_tool_use",
+            "toolName": "run_terminal_command",
+            "toolResult": "grok-result-marker"
+        })
+        .to_string();
+        let (_disp, body) =
+            stdin_to_hook_body(AiHookTool::Grok, true, &stdin, dir.path(), dir.path()).unwrap();
+        assert!(body.contains("grok-result-marker"), "{body}");
+    }
+
+    #[test]
+    fn extract_user_prompt_reads_grok_prompt_aliases() {
+        assert_eq!(
+            extract_user_prompt(r#"{"hookEventName":"user_prompt_submit","prompt":"typed"}"#)
+                .as_deref(),
+            Some("typed")
+        );
+        assert_eq!(
+            extract_user_prompt(r#"{"userPrompt":"camel"}"#).as_deref(),
+            Some("camel")
+        );
     }
 
     #[test]

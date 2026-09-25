@@ -65,6 +65,7 @@ function status(overrides: Partial<ProjectStatus> = {}): ProjectStatus {
       scanHooksCopilot: false,
       scanHooksAntigravity: false,
       scanHooksWindsurf: false,
+      scanHooksGrok: false,
       claudeDeny: false,
       claudeSandbox: false,
       codexSandbox: false,
@@ -268,6 +269,7 @@ describe("AI hook selection helpers", () => {
       ...status().aiSafetyApplied,
       cursorFailClosed: true,
       scanHooksWindsurf: false,
+      scanHooksGrok: false,
     };
     const withWindsurf = { ...applied, scanHooksWindsurf: true };
 

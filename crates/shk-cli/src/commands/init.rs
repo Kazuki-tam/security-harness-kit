@@ -62,6 +62,10 @@ const AI_TOOL_CHOICES: &[PromptChoice<AiTool>] = &[
         label: "Antigravity",
     },
     PromptChoice {
+        value: AiTool::Grok,
+        label: "Grok Build",
+    },
+    PromptChoice {
         value: AiTool::Windsurf,
         label: "Windsurf",
     },
@@ -236,6 +240,7 @@ fn resolve_tools(prompt: &mut Prompt, args: &InitArgs) -> Result<Vec<AiTool>> {
             AiTool::Cursor,
             AiTool::Copilot,
             AiTool::Antigravity,
+            AiTool::Grok,
             AiTool::Windsurf,
         ]);
     }
@@ -247,6 +252,7 @@ fn resolve_tools(prompt: &mut Prompt, args: &InitArgs) -> Result<Vec<AiTool>> {
             AiTool::Cursor,
             AiTool::Copilot,
             AiTool::Antigravity,
+            AiTool::Grok,
             AiTool::Windsurf,
         ],
     )
@@ -265,6 +271,7 @@ fn skill_tools_for(tools: &[AiTool]) -> Vec<SkillTool> {
             AiTool::Cursor => SkillTool::Cursor,
             AiTool::Copilot => SkillTool::Copilot,
             AiTool::Antigravity => SkillTool::Antigravity,
+            AiTool::Grok => SkillTool::Grok,
             AiTool::Windsurf => SkillTool::Windsurf,
         };
         if !skill_tools.contains(&skill_tool) {

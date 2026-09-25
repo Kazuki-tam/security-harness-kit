@@ -410,6 +410,7 @@ export const en: Messages = {
       copilot: "GitHub Copilot",
       antigravity: "Antigravity",
       windsurf: "Windsurf",
+      grok: "Grok Build",
     },
     actionCategories: {
       secret_file_access: "Sensitive file read",
@@ -571,7 +572,7 @@ export const en: Messages = {
     aiHooks: {
       title: "AI editor safety",
       description:
-        "Configure scan hooks and safety settings for Cursor, Claude Code, Codex, Copilot, Antigravity, and Windsurf.",
+        "Configure scan hooks and safety settings for Cursor, Claude Code, Codex, Copilot, Antigravity, Windsurf, and Grok Build.",
       install: "Install scan hooks",
       applySelected: "Apply checked settings",
       syncSelected: "Apply changes",
@@ -595,6 +596,7 @@ export const en: Messages = {
         copilot: "GitHub Copilot",
         antigravity: "Antigravity",
         windsurf: "Windsurf",
+        grok: "Grok Build",
       },
       installClaudeDeny: "Apply deny",
       installCodexSandbox: "Apply sandbox",

@@ -770,7 +770,13 @@ fn emit_blocking_reason_to_stderr(tool: AiTool, event: hook_output::HookEvent, r
         tool == AiTool::Copilot && event == hook_output::HookEvent::UserPromptSubmit;
     // Cascade (Windsurf) surfaces the stderr message of a
     // blocking pre-hook (exit 2) to the agent; stdout is ignored.
-    if tool == AiTool::Codex || tool == AiTool::Windsurf || copilot_user_prompt {
+    // Grok surfaces stderr on exit 2, and uses it as the deny reason when
+    // stdout JSON carries none.
+    if tool == AiTool::Codex
+        || tool == AiTool::Windsurf
+        || tool == AiTool::Grok
+        || copilot_user_prompt
+    {
         eprintln!("{reason}");
     }
 }
@@ -783,9 +789,12 @@ fn hook_event_from_stdin(stdin: &str, post: bool) -> hook_output::HookEvent {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(stdin) else {
         return hook_output::HookEvent::PreToolUse;
     };
-    match hook_event_name(&value) {
-        Some("PermissionRequest") => hook_output::HookEvent::PermissionRequest,
-        Some("UserPromptSubmit" | "UserPromptSubmitted") => {
+    match hook_event_name(&value)
+        .map(canonical_hook_event_name)
+        .as_deref()
+    {
+        Some("permissionrequest") => hook_output::HookEvent::PermissionRequest,
+        Some("userpromptsubmit" | "userpromptsubmitted") => {
             hook_output::HookEvent::UserPromptSubmit
         }
         // Cascade (Windsurf) uses `agent_action_name`; only
@@ -797,6 +806,15 @@ fn hook_event_from_stdin(stdin: &str, post: bool) -> hook_output::HookEvent {
         _ if looks_like_user_prompt_payload(&value) => hook_output::HookEvent::UserPromptSubmit,
         _ => hook_output::HookEvent::PreToolUse,
     }
+}
+
+/// Collapses `UserPromptSubmit`, `user_prompt_submit`, and `user-prompt-submit`
+/// to the same token. Grok Build sends snake_case `hookEventName` values.
+fn canonical_hook_event_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
 }
 
 fn hook_event_name(value: &serde_json::Value) -> Option<&str> {
@@ -1105,6 +1123,17 @@ mod tests {
         assert_eq!(
             hook_event_from_stdin(r#"{"hookEventName":"UserPromptSubmitted"}"#, false),
             HookEvent::UserPromptSubmit
+        );
+        assert_eq!(
+            hook_event_from_stdin(r#"{"hookEventName":"user_prompt_submit"}"#, false),
+            HookEvent::UserPromptSubmit
+        );
+        assert_eq!(
+            hook_event_from_stdin(
+                r#"{"hookEventName":"pre_tool_use","toolName":"read_file"}"#,
+                false
+            ),
+            HookEvent::PreToolUse
         );
     }
 

@@ -114,9 +114,10 @@ fn mask_replacement_message(finding_count: usize, content: &str) -> String {
     )
 }
 
-/// Antigravity PreToolUse contract: `{"decision":"allow"|"deny","reason":...}`.
-/// PostToolUse hooks must return an empty JSON object.
-fn antigravity_decision(decision: &str, reason: Option<&str>) -> String {
+/// Top-level `{"decision":...,"reason":...}` object shared by Antigravity
+/// (`allow`/`deny`) and Grok Build (`allow`/`deny`, plus `block` for
+/// `UserPromptSubmit`, which `PreToolUse` also accepts).
+fn decision_json(decision: &str, reason: Option<&str>) -> String {
     let mut out = json!({ "decision": decision });
     if let Some(reason) = reason {
         out["reason"] = json!(reason);
@@ -166,7 +167,7 @@ fn copilot_allow(event: HookEvent, info: Option<&str>) -> String {
 
 pub fn deny_stdout_for_event(tool: AiTool, event: HookEvent, reason: &str) -> String {
     match tool {
-        AiTool::Antigravity => antigravity_decision("deny", Some(reason)),
+        AiTool::Antigravity => decision_json("deny", Some(reason)),
         AiTool::Copilot => copilot_deny(event, reason),
         AiTool::Cursor => json!({
             "permission":"deny",
@@ -176,6 +177,14 @@ pub fn deny_stdout_for_event(tool: AiTool, event: HookEvent, reason: &str) -> St
         .to_string(),
         AiTool::Codex => codex_deny_stdout(event, reason),
         AiTool::ClaudeCode => claude_deny_stdout(event, reason),
+        // Grok Build: PreToolUse denies with `decision: deny` (exit 2 also
+        // denies). UserPromptSubmit blocks with `decision: block` on any exit
+        // code. PostToolUse cannot block an already completed operation.
+        AiTool::Grok => match event {
+            HookEvent::UserPromptSubmit => decision_json("block", Some(reason)),
+            HookEvent::PostToolUse => "{}".to_string(),
+            _ => decision_json("deny", Some(reason)),
+        },
         // Cascade (Windsurf) does not parse hook stdout for
         // decisions; a block travels via exit code 2 + the stderr message.
         AiTool::Windsurf => "{}".to_string(),
@@ -185,7 +194,7 @@ pub fn deny_stdout_for_event(tool: AiTool, event: HookEvent, reason: &str) -> St
 pub fn allow_stdout_for_event(tool: AiTool, event: HookEvent, info: Option<&str>) -> String {
     match tool {
         AiTool::Antigravity if event == HookEvent::PostToolUse => "{}".to_string(),
-        AiTool::Antigravity => antigravity_decision("allow", info),
+        AiTool::Antigravity => decision_json("allow", info),
         AiTool::Copilot => copilot_allow(event, info),
         AiTool::Cursor => {
             let msg = info.unwrap_or("shk: OK");
@@ -205,6 +214,20 @@ pub fn allow_stdout_for_event(tool: AiTool, event: HookEvent, info: Option<&str>
             let reason = info.unwrap_or("shk: OK");
             permission_output(event, "allow", reason).to_string()
         }
+        // An allowing UserPromptSubmit's stdout is discarded.
+        AiTool::Grok if event == HookEvent::UserPromptSubmit => "{}".to_string(),
+        // Post-tool feedback reaches the model without blocking the operation.
+        AiTool::Grok if event == HookEvent::PostToolUse => match info {
+            Some(message) => json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": message
+                }
+            })
+            .to_string(),
+            None => "{}".to_string(),
+        },
+        AiTool::Grok => decision_json("allow", info),
         // Cascade ignores hook stdout; exit 0 already lets the action proceed.
         AiTool::Windsurf => "{}".to_string(),
     }
@@ -227,7 +250,20 @@ pub fn mask_stdout(
         // Antigravity has no schema field for replacing tool payloads; post
         // hooks must return `{}` and pre hooks report via decision/reason only.
         AiTool::Antigravity if post => "{}".to_string(),
-        AiTool::Antigravity => antigravity_decision("allow", Some(&msg)),
+        AiTool::Antigravity => decision_json("allow", Some(&msg)),
+        // Post-tool replacement requires the original tool result schema,
+        // which this text-only helper does not have. A pre-tool mask cannot rewrite
+        // `updatedInput` without the tool schema, so findings block via
+        // `decision: block` (honored for PreToolUse and UserPromptSubmit even
+        // when the process exits 0) and the reason carries the redacted text.
+        AiTool::Grok if post => "{}".to_string(),
+        AiTool::Grok => match masked_content {
+            Some(content) => decision_json(
+                "block",
+                Some(&mask_replacement_message(finding_count, content)),
+            ),
+            None => decision_json("allow", Some(&msg)),
+        },
         // Cascade has no schema for replacing tool payloads via hook stdout, so
         // masking is advisory only (the stderr hint reports the finding count).
         AiTool::Windsurf => "{}".to_string(),
@@ -637,6 +673,44 @@ mod tests {
     fn copilot_post_mask_without_findings_is_empty_object() {
         let output = mask_stdout(AiTool::Copilot, true, 0, None);
         assert_eq!(parse_json(&output), json!({}));
+    }
+
+    #[test]
+    fn grok_decisions_match_pre_tool_and_prompt_contracts() {
+        let grok_pre = deny_stdout_for_event(AiTool::Grok, HookEvent::PreToolUse, "blocked");
+        let grok_pre_value = parse_json(&grok_pre);
+        assert_eq!(grok_pre_value["decision"], "deny");
+        assert_eq!(grok_pre_value["reason"], "blocked");
+        let grok_prompt =
+            deny_stdout_for_event(AiTool::Grok, HookEvent::UserPromptSubmit, "prompt blocked");
+        assert_eq!(parse_json(&grok_prompt)["decision"], "block");
+        assert_eq!(
+            allow_stdout_for_event(AiTool::Grok, HookEvent::PreToolUse, None),
+            r#"{"decision":"allow"}"#
+        );
+        assert_eq!(
+            allow_stdout_for_event(AiTool::Grok, HookEvent::UserPromptSubmit, None),
+            "{}"
+        );
+        let grok_mask = mask_stdout(AiTool::Grok, false, 1, Some("safe"));
+        assert_eq!(parse_json(&grok_mask)["decision"], "block");
+        assert!(
+            parse_json(&grok_mask)["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("safe")
+        );
+        assert_eq!(mask_stdout(AiTool::Grok, true, 1, Some("safe")), "{}");
+        let post =
+            allow_stdout_for_event(AiTool::Grok, HookEvent::PostToolUse, Some("review output"));
+        assert_eq!(
+            parse_json(&post)["hookSpecificOutput"]["additionalContext"],
+            "review output"
+        );
+        assert_eq!(
+            allow_stdout_for_event(AiTool::Grok, HookEvent::PostToolUse, None),
+            "{}"
+        );
     }
 
     #[test]

@@ -36,6 +36,7 @@ function status(): ProjectStatus {
       scanHooksCopilot: false,
       scanHooksAntigravity: false,
       scanHooksWindsurf: false,
+      scanHooksGrok: false,
       claudeDeny: false,
       claudeSandbox: false,
       codexSandbox: false,

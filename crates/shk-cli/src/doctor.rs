@@ -1053,6 +1053,7 @@ pub fn has_managed_ai_hooks(root: &Path) -> bool {
         root.join(".agents/hooks.json"),
         root.join(".github/hooks/shk-security.json"),
         root.join(".windsurf/hooks.json"),
+        root.join(".grok/hooks/shk-security.json"),
         root.join(CONFIG_REL_PATH),
     ];
     for p in paths {
@@ -1060,7 +1061,9 @@ pub fn has_managed_ai_hooks(root: &Path) -> bool {
             && (s.contains(MANAGED_MARKER_JSON)
                 || s.contains(MANAGED_MARKER_SH)
                 || (s.contains("shk scan")
-                    && (s.contains("--hook-mode copilot") || s.contains("--hook-mode windsurf"))))
+                    && (s.contains("--hook-mode copilot")
+                        || s.contains("--hook-mode windsurf")
+                        || s.contains("--hook-mode grok"))))
         {
             return true;
         }

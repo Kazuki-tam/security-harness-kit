@@ -31,12 +31,12 @@ With `shk`, you can:
 - Encrypt `.env` files, store private keys in the configured secret store, and run commands with decrypted values injected only at runtime.
 - Push dotenv values to AWS Secrets Manager or GCP Secret Manager with `shk secrets push`, as a single blob or one secret per key.
 - Install Git pre-commit hooks.
-- Install managed hooks for Claude Code, Cursor, Codex, GitHub Copilot, Antigravity, and Windsurf.
+- Install managed hooks for Claude Code, Cursor, Codex, GitHub Copilot, Antigravity, Grok Build, and Windsurf.
 - Preview metadata-only audit logs to understand blocked hook activity without storing detected values.
 - Statically audit MCP client configurations for unsafe package, credential, HTTP, and filesystem settings.
 - Generate a GitHub Actions workflow that runs `shk scan` on every pull request.
 - Diagnose ignore file and `.env` safety coverage.
-- Deploy AI agent skills to Claude Code, Codex, Cursor, GitHub Copilot, Antigravity, and Windsurf project directories.
+- Deploy AI agent skills to Claude Code, Codex, Cursor, GitHub Copilot, Antigravity, Grok Build, and Windsurf project directories.
 - Use the **shk Desktop** app for local scanning, masking, setup, and audit review with a GUI.
 
 ## Desktop App
@@ -180,7 +180,7 @@ Set `upload-sarif: false` when GitHub code scanning is unavailable. Private repo
 need GitHub Code Security enabled to upload SARIF. Pull requests from forks normally receive
 a read-only token; disable upload for those runs if the repository does not permit SARIF upload.
 
-Install the shk agent skill for Claude Code, Codex/Cursor, Copilot, Antigravity, and Windsurf:
+Install the shk agent skill for Claude Code, Codex/Cursor, Copilot, Antigravity, Grok Build, and Windsurf:
 
 ```bash
 shk skills install

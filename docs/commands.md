@@ -34,7 +34,7 @@ Options:
 | `-y, --yes` | Accept the recommended defaults without prompting. Without `--tool`, all supported AI tools are configured. |
 | `--audit` | Install AI hooks in audit-only mode. Mutually exclusive with `--log-blocked`. |
 | `--log-blocked` | Install blocking AI hooks that append metadata-only block entries to `.shk/audit.log`. |
-| `--tool <tool>` | AI tools to configure: `claude-code`, `codex`, `cursor`, `copilot`, `antigravity`, `windsurf`. Repeat the flag or separate values with commas. |
+| `--tool <tool>` | AI tools to configure: `claude-code`, `codex`, `cursor`, `copilot`, `antigravity`, `grok`, `windsurf`. Repeat the flag or separate values with commas. |
 | `--no-git-hook` | Skip Git pre-commit hook setup. |
 | `--no-ai-hooks` | Skip AI editor hook setup. |
 | `--no-skills` | Skip bundled agent skill setup. |
@@ -87,7 +87,7 @@ Options:
 | `PATH` | Project path whose `.shk/audit.log` should be read. Defaults to `.`. |
 | `--json` | Print the audit preview as JSON. |
 | `--since <duration>` | Limit entries to a relative duration such as `30m`, `24h`, `7d`, or `1w`. |
-| `--tool <tool>` | Limit entries to `claude-code`, `codex`, `cursor`, `copilot`, `antigravity`, or `windsurf`. |
+| `--tool <tool>` | Limit entries to `claude-code`, `codex`, `cursor`, `copilot`, `antigravity`, `grok`, or `windsurf`. |
 | `--reason <reason>` | Limit entries to `blocked`, `finding-threshold`, or `action-guard`. |
 | `--limit <n>` | Limit the recent event rows. Defaults to `10`. |
 | `--no-paths` | Omit `display_path` from recent event rows. |
@@ -118,6 +118,7 @@ Project configuration locations:
 | Cursor | `.cursor/mcp.json` | `mcpServers` |
 | VS Code / Copilot | `.vscode/mcp.json` | `servers` |
 | Codex | `.codex/config.toml` | `mcp_servers` |
+| Grok Build | `.grok/config.toml` | `mcp_servers` |
 
 Additional locations with `--global`:
 
@@ -127,6 +128,7 @@ Additional locations with `--global`:
 | Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 | Cursor | `~/.cursor/mcp.json` |
 | Codex | `~/.codex/config.toml` |
+| Grok Build | `~/.grok/config.toml` |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` |
 
 Rules:
@@ -276,11 +278,14 @@ shk scan . --hook-mode codex --post < payload.json
 shk scan . --hook-mode copilot < payload.json
 shk scan . --hook-mode antigravity < payload.json
 shk scan . --hook-mode windsurf < payload.json
+shk scan . --hook-mode grok < payload.json
 ```
 
-Supported hook mode tools are `claude-code`, `codex`, `cursor`, `copilot`, `antigravity`, and `windsurf` (Windsurf Cascade). Cascade ignores hook stdout, so `--hook-mode windsurf` signals a block via exit code 2 + a stderr message rather than a stdout decision payload.
+Supported hook mode tools are `claude-code`, `codex`, `cursor`, `copilot`, `antigravity`, `grok`, and `windsurf` (Windsurf Cascade). Cascade ignores hook stdout, so `--hook-mode windsurf` signals a block via exit code 2 + a stderr message rather than a stdout decision payload. Grok Build `PreToolUse` blocks with `{"decision":"deny","reason":...}` and exit 2. `UserPromptSubmit` blocks with `{"decision":"block","reason":...}` (exit 2 also blocks). `PostToolUse` is non-blocking and reports finding counts via `additionalContext`.
 
 Hook mode notes:
+
+- Candidate file bodies use a NUL-byte check in the first 8 KiB to skip binary content. Other files are decoded lossily if needed, so an invalid UTF-8 byte does not fail the hook. File extensions do not bypass scanning. Tool arguments and action guards are still checked when a binary body is skipped. Hook file-body extraction does not perform OCR or document text extraction; use ordinary `shk scan` for supported documents.
 
 - `--hook-mode` cannot be combined with `--staged`, `--changed-since`, or `--git-history`.
 - `--audit` appends metadata-only JSON lines to `.shk/audit.log`, always exits `0`, and requires a project `shk.toml`.
@@ -738,14 +743,14 @@ Options:
 | `--audit` | Add `--audit` to installed hook commands. Hooks log metadata and never block. |
 | `--log-blocked` | Add `--log-blocked` to installed hook commands. Pre hooks still block and append metadata-only block entries to `.shk/audit.log`; post hooks stay non-blocking and append post audit entries. Mutually exclusive with `--audit`. |
 | `--global` | Write user-level config files under the user's home directory. |
-| `--tool <tool>` | Limit installation to one of `claude-code`, `codex`, `cursor`, `copilot`, `antigravity`, or `windsurf`. |
+| `--tool <tool>` | Limit installation to one of `claude-code`, `codex`, `cursor`, `copilot`, `antigravity`, `grok`, or `windsurf`. |
 | `--fail-closed` | Cursor hooks only. Sets `failClosed` on managed entries. |
 | `--apply-deny` | Claude Code: merges recommended `permissions.deny` entries for sensitive files and dangerous actions. Antigravity: prints recommended permission Deny list entries in the `action(target)` format (e.g. `command(rm -rf)`, `read_file(**/.env)`) for manual entry — Antigravity's Allow/Ask/Deny lists are managed in its settings UI, not a documented project file. |
 | `--apply-sandbox` | Applies supported sandbox hardening. Claude Code gets `sandbox.enabled`, hard-fail, and no unsandboxed escape hatch. Project installs also add a home-read deny with project read re-allow; global installs skip those project-relative read rules. Codex gets `sandbox_mode = "workspace-write"` and `approval_policy = "on-request"` when absent or risky. Cursor has no local sandbox setting in `hooks.json`, so managed hooks are set fail-closed. |
 
-Without `--tool`, the command targets Claude Code, Codex, Cursor, Copilot, Antigravity, and Windsurf. Non-dry-run installation requires a project `shk.toml`.
+Without `--tool`, the command targets Claude Code, Codex, Cursor, Copilot, Antigravity, Grok Build, and Windsurf. Non-dry-run installation requires a project `shk.toml`.
 
-Project installs keep managed hook commands portable so committed config files work on every teammate's machine: Claude Code commands scan `"${CLAUDE_PROJECT_DIR:-.}"`, Cursor commands scan `"${CURSOR_PROJECT_DIR:-.}"` (both expanded by the editor's hook shell at run time, degrading to `.` when the variable is absent), and Codex commands scan `$(git rev-parse --show-toplevel)`. Copilot, Antigravity, and Windsurf commands take no path argument; `shk scan --hook-mode` resolves the project root from the hook process working directory. When an embedded path is missing or points at a different checkout (for example an unexpanded variable or a moved clone), hook mode falls back to cwd-based project-root discovery.
+Project installs keep managed hook commands portable so committed config files work on every teammate's machine: Claude Code and Grok Build commands scan `"${CLAUDE_PROJECT_DIR:-.}"` (Grok sets that variable on every hook), Cursor commands scan `"${CURSOR_PROJECT_DIR:-.}"` (both expanded by the editor's hook shell at run time, degrading to `.` when the variable is absent), and Codex commands scan `$(git rev-parse --show-toplevel)`. Copilot, Antigravity, and Windsurf commands take no path argument; `shk scan --hook-mode` resolves the project root from the hook process working directory. When an embedded path is missing or points at a different checkout (for example an unexpanded variable or a moved clone), hook mode falls back to cwd-based project-root discovery. Project Grok hooks stay inactive until the folder is trusted with `/hooks-trust` or `grok --trust`.
 
 Installed entries:
 
@@ -756,11 +761,12 @@ Installed entries:
 | Codex | `.codex/config.toml` | `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, and `PostToolUse` blocks; also ensures `features.hooks = true`. Project-local commands scan `$(git rev-parse --show-toplevel)` so Codex can start from a subdirectory. |
 | Copilot | `.github/hooks/shk-security.json` (global: `~/.copilot/hooks/shk-security.json`) | Command hooks for `preToolUse`, `PermissionRequest`, `UserPromptSubmit`, `postToolUse`, and `postToolUseFailure`. Pre-tool and permission denials use Copilot's stdout JSON contract. |
 | Antigravity | `.agents/hooks.json` (global: `~/.gemini/config/hooks.json`) | A managed `shk-security` entry with blocking `PreToolUse` and non-blocking `PostToolUse` hooks matching all Antigravity tools (`.*`). This covers commands, file operations, searches, scheduled prompts, subagents, permission requests, and future tool names by default. Post hooks run with `--post` and return `{}`. |
+| Grok Build | `.grok/hooks/shk-security.json` (global: `~/.grok/hooks/shk-security.json`) | Schema-clean `UserPromptSubmit`, `PreToolUse`, and `PostToolUse` groups with a 30-second timeout. Matchers are omitted so every tool is covered, including MCP tools named `server__tool`. Managed groups are identified by `--hook-mode grok`. `PreToolUse` denies with `decision: deny` and exit 2. `UserPromptSubmit` blocks with `decision: block`. `PostToolUse` reports finding counts via `additionalContext` without blocking. Grok also runs hooks from `.claude/settings.json` and `.cursor/hooks.json`, so projects with managed Claude Code or Cursor hooks are scanned by those entries too. |
 | Windsurf | `.windsurf/hooks.json` (global: `~/.codeium/windsurf/hooks.json`) | Cascade hook commands for `pre_read_code`, `pre_write_code`, `pre_run_command`, `pre_mcp_tool_use` (blocking), `pre_user_prompt` (`--fail-on medium`), plus non-blocking post scans on `post_run_command` and `post_mcp_tool_use`. Cascade ignores hook stdout, so a block travels via exit code 2 + the stderr message; managed entries are identified by their `--hook-mode windsurf` command. |
 
 Antigravity also has a unified permission engine (`Deny > Ask > Allow`, resources formatted as `action(target)`), but those lists are managed in the Antigravity settings UI and internal per-project config. Use `shk hooks install-ai --tool antigravity --apply-deny` to print recommended Deny entries to paste there; the shk PreToolUse hook provides equivalent runtime blocking regardless.
 
-Managed entries are tagged with `"_shk_managed": true` or `# shk-managed-start` / `# shk-managed-end`. Copilot and Windsurf instead keep a schema-clean config and identify managed entries by their `--hook-mode <tool>` command string. Re-running replaces managed entries and leaves non-managed entries in place.
+Managed entries are tagged with `"_shk_managed": true` or `# shk-managed-start` / `# shk-managed-end`. Copilot, Grok Build, and Windsurf instead keep a schema-clean config and identify managed entries by their `--hook-mode <tool>` command string. Re-running replaces managed entries and leaves non-managed entries in place.
 
 See [Uninstall](installation.md#uninstall) for removing managed hooks, skills, generated workflows, and stored dotenvx keys.
 
@@ -835,8 +841,8 @@ Options:
 
 | Option | Behavior |
 |--------|----------|
-| `--tool <tool>` | Target: `claude-code`, `codex`, `cursor`, `copilot`, `antigravity`, `windsurf`, or `all` (default: `all`). |
-| `--global` | Write to user-level directories (`~/.claude/skills/`, `~/.agents/skills/`, `~/.copilot/skills/`, `~/.gemini/config/skills/`, or `~/.codeium/windsurf/skills/`) instead of the project. |
+| `--tool <tool>` | Target: `claude-code`, `codex`, `cursor`, `copilot`, `antigravity`, `grok`, `windsurf`, or `all` (default: `all`). |
+| `--global` | Write to user-level directories (`~/.claude/skills/`, `~/.agents/skills/`, `~/.grok/skills/`, `~/.copilot/skills/`, `~/.gemini/config/skills/`, or `~/.codeium/windsurf/skills/`) instead of the project. |
 | `--dry-run` | Print planned paths without writing files. |
 | `--force` | Overwrite an existing skill file. |
 
@@ -848,6 +854,7 @@ Install destinations:
 | `codex` / `cursor` | `.agents/skills/shk/SKILL.md` | `~/.agents/skills/shk/SKILL.md` |
 | `copilot` | `.github/skills/shk/SKILL.md` | `~/.copilot/skills/shk/SKILL.md` |
 | `antigravity` | `.agents/skills/shk/SKILL.md` (shared with codex/cursor) | `~/.gemini/config/skills/shk/SKILL.md` |
+| `grok` | `.grok/skills/shk/SKILL.md` | `~/.grok/skills/shk/SKILL.md` |
 | `windsurf` | `.windsurf/skills/shk/SKILL.md` | `~/.codeium/windsurf/skills/shk/SKILL.md` |
 
 All destinations use the directory-plus-`SKILL.md` layout from the [open agent skills standard](https://agentskills.io), which is also the layout Claude Code loads skills from. The skill file is embedded in the `shk` binary at build time and requires no network access.
