@@ -1418,10 +1418,11 @@ impl SecretStore for OnePasswordSecretStore {
             let Some(title) = item.title.as_deref() else {
                 continue;
             };
-            if let Some(key) = title.strip_prefix(&prefix) {
-                if !key.is_empty() && !key.contains(':') {
-                    keys.insert(key.to_string());
-                }
+            if let Some(key) = title.strip_prefix(&prefix)
+                && !key.is_empty()
+                && !key.contains(':')
+            {
+                keys.insert(key.to_string());
             }
         }
         Ok(keys)

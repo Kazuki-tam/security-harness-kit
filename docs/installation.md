@@ -300,7 +300,7 @@ the recommended install.
 
 ## Build From Source
 
-Building from source requires Rust 1.88 or newer.
+Building from source requires Rust 1.90 or newer.
 
 ```bash
 git clone https://github.com/Kazuki-tam/security-harness-kit.git

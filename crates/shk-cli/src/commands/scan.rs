@@ -201,10 +201,10 @@ fn hook_action_guard_policy_root(path: &Path) -> Option<PathBuf> {
 }
 
 fn push_unique_guard_root(roots: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBuf) {
-    if let Some(root) = hook_action_guard_policy_root(&path) {
-        if seen.insert(root.clone()) {
-            roots.push(root);
-        }
+    if let Some(root) = hook_action_guard_policy_root(&path)
+        && seen.insert(root.clone())
+    {
+        roots.push(root);
     }
 }
 

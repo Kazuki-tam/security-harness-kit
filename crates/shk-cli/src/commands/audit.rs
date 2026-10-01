@@ -159,16 +159,16 @@ fn entry_matches_filters(
     since_cutoff: Option<DateTime<Utc>>,
     time_filter_skipped_entries: &mut usize,
 ) -> bool {
-    if let Some(tool) = inv.tool {
-        if entry.get("tool").and_then(serde_json::Value::as_str) != Some(tool.kebab_str()) {
-            return false;
-        }
+    if let Some(tool) = inv.tool
+        && entry.get("tool").and_then(serde_json::Value::as_str) != Some(tool.kebab_str())
+    {
+        return false;
     }
 
-    if let Some(reason) = inv.reason {
-        if !matches_reason_filter(entry, reason) {
-            return false;
-        }
+    if let Some(reason) = inv.reason
+        && !matches_reason_filter(entry, reason)
+    {
+        return false;
     }
 
     if let Some(cutoff) = since_cutoff {
