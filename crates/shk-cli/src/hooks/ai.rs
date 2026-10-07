@@ -112,7 +112,8 @@ fn hook_scan_cli_command(tool: AiTool, audit: bool, log_blocked: bool, post: boo
 /// variables where available, otherwise no argument (the hook process cwd is
 /// the project root for these tools, matching global installs). Shells that
 /// don't expand the variable leave a nonexistent path, which
-/// `resolve_hook_repo_root` resolves from cwd instead.
+/// `resolve_hook_repo_root` resolves from cwd instead. Commands without the
+/// argument still read the same variable through `AiTool::project_dir_env`.
 fn project_hook_root_arg(tool: AiTool) -> Option<&'static str> {
     match tool {
         AiTool::ClaudeCode => Some(CLAUDE_PROJECT_DIR_ARG),
@@ -1622,6 +1623,28 @@ fn parse_toml_string_value(raw: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_hook_root_arg_expands_the_hook_mode_project_dir_env() {
+        for tool in [
+            AiTool::Antigravity,
+            AiTool::ClaudeCode,
+            AiTool::Codex,
+            AiTool::Copilot,
+            AiTool::Cursor,
+            AiTool::Grok,
+            AiTool::Windsurf,
+        ] {
+            let expected = tool
+                .project_dir_env()
+                .map(|env| format!("\"${{{env}:-.}}\""));
+            assert_eq!(
+                project_hook_root_arg(tool).map(str::to_string),
+                expected,
+                "{tool:?}"
+            );
+        }
+    }
 
     fn json_string_contains(value: &Value, needle: &str) -> bool {
         match value {

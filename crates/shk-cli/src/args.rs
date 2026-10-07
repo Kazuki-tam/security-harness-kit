@@ -418,6 +418,17 @@ impl AiTool {
         }
     }
 
+    /// Environment variable the editor sets on every hook process to the
+    /// project directory, when it provides one.
+    pub fn project_dir_env(self) -> Option<&'static str> {
+        match self {
+            // Grok sets `CLAUDE_PROJECT_DIR` on every hook process.
+            Self::ClaudeCode | Self::Grok => Some("CLAUDE_PROJECT_DIR"),
+            Self::Cursor => Some("CURSOR_PROJECT_DIR"),
+            Self::Antigravity | Self::Codex | Self::Copilot | Self::Windsurf => None,
+        }
+    }
+
     pub fn integration_tool(self) -> shk_integrations::AiHookTool {
         match self {
             Self::Antigravity => shk_integrations::AiHookTool::Antigravity,

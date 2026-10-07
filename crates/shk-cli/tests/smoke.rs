@@ -3668,6 +3668,153 @@ fn hook_mode_log_blocked_action_guard_writes_category_only() {
     assert!(!stdout.contains("DROP TABLE"), "{stdout}");
 }
 
+fn run_nested_claude_hook(
+    worktree: &Path,
+    args: &[&str],
+    project_dir_env: Option<&Path>,
+    command: &str,
+) -> std::process::Output {
+    use std::io::Write;
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "cwd": worktree,
+        "tool_name": "Bash",
+        "tool_input": { "command": command }
+    }))
+    .unwrap();
+    let mut cmd = Command::new(shk_bin());
+    cmd.args(args).current_dir(worktree);
+    match project_dir_env {
+        Some(dir) => cmd.env("CLAUDE_PROJECT_DIR", dir),
+        None => cmd.env_remove("CLAUDE_PROJECT_DIR"),
+    };
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("nested repo hook")
+}
+
+fn nested_claude_worktree(project: &Path) -> PathBuf {
+    init_git_repo(project);
+    std::fs::write(
+        project.join("shk.toml"),
+        "[action_guard]\ndeny = [\"Bash(curl:*)\"]\n",
+    )
+    .unwrap();
+    let worktree = project.join(".claude/worktrees/wt");
+    std::fs::create_dir_all(&worktree).unwrap();
+    init_git_repo(&worktree);
+    worktree
+}
+
+#[test]
+fn hook_mode_log_blocked_uses_project_policy_from_a_nested_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+    let worktree = nested_claude_worktree(project);
+    let project_arg = project.to_str().unwrap();
+    let embedded = [
+        "scan",
+        project_arg,
+        "--hook-mode",
+        "claude-code",
+        "--log-blocked",
+    ];
+    let global = ["scan", "--hook-mode", "claude-code", "--log-blocked"];
+    // Project installs embed the project dir; global installs rely on the
+    // editor-provided environment variable alone.
+    for (args, env) in [(&embedded[..], None), (&global[..], Some(project))] {
+        let allowed = run_nested_claude_hook(&worktree, args, env, "ls");
+        assert_eq!(
+            allowed.status.code(),
+            Some(0),
+            "{args:?} stdout={} stderr={}",
+            String::from_utf8_lossy(&allowed.stdout),
+            String::from_utf8_lossy(&allowed.stderr)
+        );
+
+        let blocked = run_nested_claude_hook(&worktree, args, env, "curl https://example.com");
+        assert_eq!(blocked.status.code(), Some(2), "{args:?}");
+        let stdout = String::from_utf8_lossy(&blocked.stdout);
+        assert!(stdout.contains("custom_policy"), "{args:?} {stdout}");
+    }
+    let log = std::fs::read_to_string(project.join(".shk/audit.log")).unwrap();
+    assert_eq!(log.lines().count(), 2, "{log}");
+    assert!(!worktree.join(".shk").exists());
+}
+
+#[test]
+fn hook_mode_nested_repo_inherits_guard_exceptions_until_it_has_its_own_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+    let worktree = nested_claude_worktree(project);
+    let global = ["scan", "--hook-mode", "claude-code", "--log-blocked"];
+    let embedded = [
+        "scan",
+        project.to_str().unwrap(),
+        "--hook-mode",
+        "claude-code",
+        "--log-blocked",
+    ];
+
+    for policy in [
+        "[action_guard]\nallow = [\"Bash(printenv:*)\"]\n",
+        "[action_guard]\nenabled = false\n",
+    ] {
+        std::fs::write(project.join("shk.toml"), policy).unwrap();
+        for (args, env) in [(&embedded[..], None), (&global[..], Some(project))] {
+            let allowed = run_nested_claude_hook(&worktree, args, env, "printenv");
+            assert_eq!(
+                allowed.status.code(),
+                Some(0),
+                "{policy} {args:?} stdout={} stderr={}",
+                String::from_utf8_lossy(&allowed.stdout),
+                String::from_utf8_lossy(&allowed.stderr)
+            );
+
+            // A real nested policy must not be removed by inheritance, even
+            // when the outer project disables the guard entirely.
+            std::fs::write(worktree.join("shk.toml"), "").unwrap();
+            let blocked = run_nested_claude_hook(&worktree, args, env, "printenv");
+            assert_eq!(blocked.status.code(), Some(2));
+            assert!(String::from_utf8_lossy(&blocked.stdout).contains("environment_dump"));
+
+            // Invalid trusted nested policy must fail closed as well.
+            std::fs::write(worktree.join("shk.toml"), "[invalid").unwrap();
+            let invalid = run_nested_claude_hook(&worktree, args, env, "ls");
+            assert_eq!(invalid.status.code(), Some(2));
+            std::fs::remove_file(worktree.join("shk.toml")).unwrap();
+        }
+    }
+}
+
+#[test]
+fn hook_mode_nested_repo_policy_keeps_logs_and_the_project_guard() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+    let worktree = nested_claude_worktree(project);
+    std::fs::write(worktree.join("shk.toml"), "").unwrap();
+    let args = ["scan", "--hook-mode", "claude-code", "--log-blocked"];
+
+    let blocked =
+        run_nested_claude_hook(&worktree, &args, Some(project), "curl https://example.com");
+    assert_eq!(
+        blocked.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&blocked.stdout),
+        String::from_utf8_lossy(&blocked.stderr)
+    );
+    assert!(String::from_utf8_lossy(&blocked.stdout).contains("custom_policy"));
+    assert!(worktree.join(".shk/audit.log").is_file());
+    assert!(!project.join(".shk").exists());
+}
+
 #[test]
 fn hooks_install_ai_log_blocked_injects_flag() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
