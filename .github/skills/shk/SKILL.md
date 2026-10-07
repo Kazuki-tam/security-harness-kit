@@ -259,7 +259,11 @@ audit-log destination), and Copilot/Antigravity/Windsurf resolve the
 project root from the hook process cwd. Codex project hooks resolve that
 root dynamically with `$(git rev-parse --show-toplevel)` and also ensure `features.hooks = true`
 while installing `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, and `PostToolUse`.
-Global hooks keep the session cwd because they are not bound to one project.
+Global hooks have no embedded path: Claude Code, Grok Build, and Cursor read
+`CLAUDE_PROJECT_DIR` / `CURSOR_PROJECT_DIR` from the hook environment, and other tools
+use the session cwd. When the session moves into a nested repository (a
+`.claude/worktrees/` worktree, a submodule, or a nested clone) without its own
+`shk.toml`, the project's `shk.toml` still applies.
 
 Antigravity gets a managed `shk-security` entry with blocking `PreToolUse` and
 non-blocking `PostToolUse` hooks matching all Antigravity tools (`.*`) so

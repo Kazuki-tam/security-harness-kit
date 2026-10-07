@@ -10,6 +10,7 @@ use shk_core::scanner::{
 };
 use shk_integrations::ActionGuardMatch;
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -208,25 +209,26 @@ fn push_unique_guard_root(roots: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>,
     }
 }
 
+/// Policy root of the hook command or editor-provided project path, trusted
+/// only when the process cwd is outside any project or within that project.
+/// A process root nested inside it (worktree, submodule, nested clone) keeps
+/// the outer project's guard policy alongside its own; an unrelated process
+/// root means the path is stale.
+fn trusted_explicit_guard_root(
+    cwd: &Path,
+    path_arg: &Path,
+    process_root: Option<&Path>,
+) -> Option<PathBuf> {
+    let root = hook_action_guard_policy_root(&hook_explicit_path(cwd, path_arg)?)?;
+    process_root
+        .is_none_or(|process_root| is_same_or_nested_root(process_root, &root))
+        .then_some(root)
+}
+
 fn hook_action_guard_trusted_policy_roots(cwd: &Path, path_arg: &Path) -> HashSet<PathBuf> {
-    let mut roots = HashSet::new();
     let process_root = hook_action_guard_policy_root(cwd);
-    roots.extend(process_root.iter().cloned());
-    if path_arg != Path::new(".") {
-        let explicit_path = if path_arg.is_absolute() {
-            path_arg.to_path_buf()
-        } else {
-            cwd.join(path_arg)
-        };
-        if let Some(root) = hook_action_guard_policy_root(&explicit_path)
-            && process_root
-                .as_ref()
-                .is_none_or(|process_root| process_root == &root)
-        {
-            roots.insert(root);
-        }
-    }
-    roots
+    let explicit_root = trusted_explicit_guard_root(cwd, path_arg, process_root.as_deref());
+    process_root.into_iter().chain(explicit_root).collect()
 }
 
 /// Collect every policy root that may apply to a hook payload. Action guard
@@ -238,21 +240,10 @@ fn hook_action_guard_policy_roots(cwd: &Path, path_arg: &Path, stdin: &str) -> V
     let process_root = hook_action_guard_policy_root(cwd);
     let mut has_trusted_root = process_root.is_some();
 
-    if path_arg != Path::new(".") {
-        let explicit_path = if path_arg.is_absolute() {
-            path_arg.to_path_buf()
-        } else {
-            cwd.join(path_arg)
-        };
-        if let Some(root) = hook_action_guard_policy_root(&explicit_path)
-            && process_root
-                .as_ref()
-                .is_none_or(|process_root| process_root == &root)
-        {
-            has_trusted_root = true;
-            if seen.insert(root.clone()) {
-                roots.push(root);
-            }
+    if let Some(root) = trusted_explicit_guard_root(cwd, path_arg, process_root.as_deref()) {
+        has_trusted_root = true;
+        if seen.insert(root.clone()) {
+            roots.push(root);
         }
     }
 
@@ -301,33 +292,64 @@ fn hook_action_guard_policy_roots(cwd: &Path, path_arg: &Path, stdin: &str) -> V
 /// target paths, so payload hints may add stricter action-guard evaluations but
 /// must never choose the scan policy or audit-log destination.
 fn resolve_hook_repo_root(cwd: &Path, path_arg: &Path) -> PathBuf {
-    if path_arg != Path::new(".") {
-        let explicit_path = if path_arg.is_absolute() {
-            path_arg.to_path_buf()
-        } else {
-            cwd.join(path_arg)
-        };
-        let cwd_root = hook_project_root_for_path(cwd);
-        let explicit_root = explicit_path
-            .exists()
-            .then(|| hook_project_root_for_path(&explicit_path))
-            .flatten();
-        return match (cwd_root, explicit_root) {
-            // Project hook files are commonly committed. Prefer the trusted
-            // launch cwd when an embedded install-time path is stale or points
-            // at a different checkout after a clone or directory move.
-            (Some(cwd_root), Some(explicit_root)) if cwd_root != explicit_root => cwd_root,
-            (_, Some(explicit_root)) => explicit_root,
-            (Some(cwd_root), None) => cwd_root,
-            (None, None) => hook_root_for_path(&explicit_path),
-        };
+    let Some(explicit_path) = hook_explicit_path(cwd, path_arg) else {
+        return hook_root_for_path(cwd);
+    };
+    let cwd_root = hook_project_root_for_path(cwd);
+    let explicit_root = hook_project_root_for_path(&explicit_path);
+    match (cwd_root, explicit_root) {
+        // Project hook files are commonly committed. Prefer the trusted
+        // launch cwd when the project path points at a different checkout
+        // after a clone or directory move, or when cwd is a nested repository
+        // with its own policy.
+        (Some(cwd_root), Some(explicit_root))
+            if cwd_root != explicit_root && !inherits_project_policy(&cwd_root, &explicit_root) =>
+        {
+            cwd_root
+        }
+        (_, Some(explicit_root)) => explicit_root,
+        (Some(cwd_root), None) => cwd_root,
+        (None, None) => hook_root_for_path(&explicit_path),
     }
+}
 
-    if let Some(root) = hook_project_root_for_path(cwd) {
-        return root;
+/// Hook commands without a path argument (global installs, hand-edited
+/// entries) use the editor-provided project directory, the same value that
+/// project installs embed as `"${CLAUDE_PROJECT_DIR:-.}"`. The editor sets it
+/// on the hook process, so it is launch context rather than model input, and
+/// `resolve_hook_repo_root` still prefers cwd when it names another checkout.
+fn hook_path_arg_or_project_dir(path_arg: PathBuf, project_dir: Option<OsString>) -> PathBuf {
+    match project_dir {
+        Some(dir) if path_arg == Path::new(".") && !dir.is_empty() => PathBuf::from(dir),
+        _ => path_arg,
     }
+}
 
-    hook_root_for_path(cwd)
+/// The project path from the hook command or editor environment, or `None`
+/// for the `.` default. A path that no longer exists (stale install, moved
+/// project, unexpanded variable) is ignored so resolution falls back to cwd.
+fn hook_explicit_path(cwd: &Path, path_arg: &Path) -> Option<PathBuf> {
+    if path_arg == Path::new(".") {
+        return None;
+    }
+    let path = if path_arg.is_absolute() {
+        path_arg.to_path_buf()
+    } else {
+        cwd.join(path_arg)
+    };
+    path.exists().then_some(path)
+}
+
+/// Whether `root` is `ancestor` itself or a repository nested inside it.
+/// Both paths come from `hook_project_root_for_path`, so they are canonical.
+fn is_same_or_nested_root(root: &Path, ancestor: &Path) -> bool {
+    root.starts_with(ancestor)
+}
+
+/// A repository nested inside the hook's project (worktree, submodule, nested
+/// clone) without a `shk.toml` of its own is governed by the project policy.
+fn inherits_project_policy(cwd_root: &Path, project_root: &Path) -> bool {
+    is_same_or_nested_root(cwd_root, project_root) && !cwd_root.join("shk.toml").is_file()
 }
 
 fn resolve_hook_content_cwd(cwd: &Path, repo_root: &Path) -> PathBuf {
@@ -395,6 +417,8 @@ fn run_hook_mode(
     }
 
     let hook_event = hook_event_from_stdin(stdin_trim, post);
+    let path_arg =
+        hook_path_arg_or_project_dir(path_arg, tool.project_dir_env().and_then(std::env::var_os));
     let repo_root = resolve_hook_repo_root(cwd, path_arg.as_path());
     // File candidates are resolved from installer/process-controlled context.
     // Payload cwd fields are model-controlled and may add stricter action-guard
@@ -929,6 +953,116 @@ mod tests {
         assert_eq!(
             resolve_hook_repo_root(checkout.path(), old_checkout.path()),
             fs_canonical_or_same(checkout.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn hook_repo_root_prefers_explicit_project_over_a_nested_cwd_repo() {
+        let project = tempfile::tempdir().unwrap();
+        init_test_repo(project.path());
+        let worktree = project.path().join(".claude/worktrees/wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        init_test_repo(&worktree);
+
+        assert_eq!(
+            resolve_hook_repo_root(&worktree, project.path()),
+            fs_canonical_or_same(project.path().to_path_buf())
+        );
+        assert_eq!(
+            resolve_hook_content_cwd(&worktree, project.path()),
+            fs_canonical_or_same(worktree)
+        );
+    }
+
+    #[test]
+    fn hook_repo_root_keeps_a_nested_repo_with_its_own_policy() {
+        let project = tempfile::tempdir().unwrap();
+        init_test_repo(project.path());
+        let worktree = project.path().join(".claude/worktrees/wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        init_test_repo(&worktree);
+        std::fs::write(worktree.join("shk.toml"), "").unwrap();
+
+        assert_eq!(
+            resolve_hook_repo_root(&worktree, project.path()),
+            fs_canonical_or_same(worktree)
+        );
+    }
+
+    #[test]
+    fn hook_repo_root_does_not_treat_a_prefix_sibling_as_nested() {
+        let parent = tempfile::tempdir().unwrap();
+        let project = parent.path().join("proj");
+        let sibling = parent.path().join("proj-2");
+        for repo in [&project, &sibling] {
+            std::fs::create_dir(repo).unwrap();
+            init_test_repo(repo);
+        }
+
+        assert_eq!(
+            resolve_hook_repo_root(&sibling, &project),
+            fs_canonical_or_same(sibling)
+        );
+    }
+
+    #[test]
+    fn hook_repo_root_ignores_a_missing_explicit_path_outside_a_project() {
+        let process_cwd = tempfile::tempdir().unwrap();
+        let missing = process_cwd.path().join("../missing-project");
+
+        assert_eq!(
+            resolve_hook_repo_root(process_cwd.path(), &missing),
+            fs_canonical_or_same(process_cwd.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn hook_path_arg_uses_project_dir_only_without_an_explicit_path() {
+        assert_eq!(
+            hook_path_arg_or_project_dir(PathBuf::from("."), Some("/work/project".into())),
+            PathBuf::from("/work/project")
+        );
+        assert_eq!(
+            hook_path_arg_or_project_dir(PathBuf::from("."), Some(OsString::new())),
+            PathBuf::from(".")
+        );
+        assert_eq!(
+            hook_path_arg_or_project_dir(PathBuf::from("."), None),
+            PathBuf::from(".")
+        );
+        assert_eq!(
+            hook_path_arg_or_project_dir(PathBuf::from("/embedded"), Some("/work/project".into())),
+            PathBuf::from("/embedded")
+        );
+    }
+
+    #[test]
+    fn action_guard_keeps_explicit_project_policy_from_a_nested_cwd_repo() {
+        let project = tempfile::tempdir().unwrap();
+        init_test_repo(project.path());
+        std::fs::write(
+            project.path().join("shk.toml"),
+            "[action_guard]\ndeny = [\"Bash(curl:*)\"]\n",
+        )
+        .unwrap();
+        let worktree = project.path().join(".claude/worktrees/wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        init_test_repo(&worktree);
+        let stdin = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "curl https://example.com" }
+        })
+        .to_string();
+        let project_root = fs_canonical_or_same(project.path().to_path_buf());
+        let worktree_root = fs_canonical_or_same(worktree.clone());
+
+        assert_eq!(
+            hook_action_guard_policy_roots(&worktree, project.path(), &stdin),
+            vec![project_root.clone(), worktree_root.clone()]
+        );
+        assert_eq!(
+            hook_action_guard_trusted_policy_roots(&worktree, project.path()),
+            HashSet::from([project_root, worktree_root])
         );
     }
 
