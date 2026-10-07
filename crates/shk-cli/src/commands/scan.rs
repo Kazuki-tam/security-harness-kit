@@ -212,8 +212,8 @@ fn push_unique_guard_root(roots: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>,
 /// Policy root of the hook command or editor-provided project path, trusted
 /// only when the process cwd is outside any project or within that project.
 /// A process root nested inside it (worktree, submodule, nested clone) keeps
-/// the outer project's guard policy alongside its own; an unrelated process
-/// root means the path is stale.
+/// the outer project's guard policy, alongside its own when it has one; an
+/// unrelated process root means the path is stale.
 fn trusted_explicit_guard_root(
     cwd: &Path,
     path_arg: &Path,
@@ -233,17 +233,20 @@ fn hook_action_guard_trusted_policy_roots(cwd: &Path, path_arg: &Path) -> HashSe
 
 /// Collect every policy root that may apply to a hook payload. Action guard
 /// evaluates all of them so a model-controlled `cwd` cannot disable stricter
-/// policies from the process cwd or concrete target paths.
+/// policies from the process cwd or concrete target paths. Repositories nested
+/// in the trusted project without a `shk.toml` resolve to the project policy,
+/// like plain subdirectories, so it is the floor inside the project.
 fn hook_action_guard_policy_roots(cwd: &Path, path_arg: &Path, stdin: &str) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     let mut seen = HashSet::new();
     let process_root = hook_action_guard_policy_root(cwd);
     let mut has_trusted_root = process_root.is_some();
+    let explicit_root = trusted_explicit_guard_root(cwd, path_arg, process_root.as_deref());
 
-    if let Some(root) = trusted_explicit_guard_root(cwd, path_arg, process_root.as_deref()) {
+    if let Some(root) = &explicit_root {
         has_trusted_root = true;
         if seen.insert(root.clone()) {
-            roots.push(root);
+            roots.push(root.clone());
         }
     }
 
@@ -282,6 +285,14 @@ fn hook_action_guard_policy_roots(cwd: &Path, path_arg: &Path, stdin: &str) -> V
         if seen.insert(fallback.clone()) {
             roots.push(fallback);
         }
+    }
+
+    // Repositories without their own policy inherit the trusted project policy.
+    // Do this after collecting hints so payload cwd/target paths cannot re-add
+    // a default guard that overrides the project's allow/disable settings.
+    // Never derive this inheritance anchor from model-controlled payload fields.
+    if let Some(project_root) = explicit_root {
+        roots.retain(|root| root == &project_root || !inherits_project_policy(root, &project_root));
     }
 
     roots
@@ -1058,12 +1069,52 @@ mod tests {
 
         assert_eq!(
             hook_action_guard_policy_roots(&worktree, project.path(), &stdin),
+            vec![project_root.clone()]
+        );
+        // An explicit nested policy still contributes its own restrictions.
+        std::fs::write(worktree.join("shk.toml"), "").unwrap();
+        assert_eq!(
+            hook_action_guard_policy_roots(&worktree, project.path(), &stdin),
             vec![project_root.clone(), worktree_root.clone()]
         );
         assert_eq!(
             hook_action_guard_trusted_policy_roots(&worktree, project.path()),
             HashSet::from([project_root, worktree_root])
         );
+    }
+
+    #[test]
+    fn hook_guard_inheritance_filters_payload_hints_only_inside_the_trusted_project() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        init_test_repo(project.path());
+        init_test_repo(outside.path());
+        let nested = project.path().join("nested");
+        let configured = project.path().join("configured");
+        for repo in [&nested, &configured] {
+            std::fs::create_dir(repo).unwrap();
+            init_test_repo(repo);
+        }
+        std::fs::write(
+            project.path().join("shk.toml"),
+            "[action_guard]\nenabled = false\n",
+        )
+        .unwrap();
+        std::fs::write(configured.join("shk.toml"), "").unwrap();
+        for target in [&nested, &configured, outside.path()] {
+            let stdin = serde_json::json!({
+                "cwd": nested,
+                "tool_name": "Read",
+                "tool_input": { "file_path": target.join("file.txt") }
+            })
+            .to_string();
+            let roots = hook_action_guard_policy_roots(project.path(), project.path(), &stdin);
+            let mut expected = vec![fs_canonical_or_same(project.path().to_path_buf())];
+            if target != nested {
+                expected.push(fs_canonical_or_same(target.to_path_buf()));
+            }
+            assert_eq!(roots, expected);
+        }
     }
 
     #[test]

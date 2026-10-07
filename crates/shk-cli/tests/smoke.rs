@@ -3677,6 +3677,7 @@ fn run_nested_claude_hook(
     use std::io::Write;
     let stdin = serde_json::to_string(&serde_json::json!({
         "hook_event_name": "PreToolUse",
+        "cwd": worktree,
         "tool_name": "Bash",
         "tool_input": { "command": command }
     }))
@@ -3745,6 +3746,51 @@ fn hook_mode_log_blocked_uses_project_policy_from_a_nested_repo() {
     let log = std::fs::read_to_string(project.join(".shk/audit.log")).unwrap();
     assert_eq!(log.lines().count(), 2, "{log}");
     assert!(!worktree.join(".shk").exists());
+}
+
+#[test]
+fn hook_mode_nested_repo_inherits_guard_exceptions_until_it_has_its_own_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+    let worktree = nested_claude_worktree(project);
+    let global = ["scan", "--hook-mode", "claude-code", "--log-blocked"];
+    let embedded = [
+        "scan",
+        project.to_str().unwrap(),
+        "--hook-mode",
+        "claude-code",
+        "--log-blocked",
+    ];
+
+    for policy in [
+        "[action_guard]\nallow = [\"Bash(printenv:*)\"]\n",
+        "[action_guard]\nenabled = false\n",
+    ] {
+        std::fs::write(project.join("shk.toml"), policy).unwrap();
+        for (args, env) in [(&embedded[..], None), (&global[..], Some(project))] {
+            let allowed = run_nested_claude_hook(&worktree, args, env, "printenv");
+            assert_eq!(
+                allowed.status.code(),
+                Some(0),
+                "{policy} {args:?} stdout={} stderr={}",
+                String::from_utf8_lossy(&allowed.stdout),
+                String::from_utf8_lossy(&allowed.stderr)
+            );
+
+            // A real nested policy must not be removed by inheritance, even
+            // when the outer project disables the guard entirely.
+            std::fs::write(worktree.join("shk.toml"), "").unwrap();
+            let blocked = run_nested_claude_hook(&worktree, args, env, "printenv");
+            assert_eq!(blocked.status.code(), Some(2));
+            assert!(String::from_utf8_lossy(&blocked.stdout).contains("environment_dump"));
+
+            // Invalid trusted nested policy must fail closed as well.
+            std::fs::write(worktree.join("shk.toml"), "[invalid").unwrap();
+            let invalid = run_nested_claude_hook(&worktree, args, env, "ls");
+            assert_eq!(invalid.status.code(), Some(2));
+            std::fs::remove_file(worktree.join("shk.toml")).unwrap();
+        }
+    }
 }
 
 #[test]
