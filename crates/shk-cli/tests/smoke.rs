@@ -5956,6 +5956,68 @@ fn doctor_strict_json_emits_report_before_exit_one() {
 }
 
 #[test]
+fn doctor_warns_when_managed_claude_pre_tool_matcher_is_outdated() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let path_dir = tempfile::tempdir().unwrap();
+    let out = Command::new(shk_bin())
+        .args(["hooks", "install-ai", "--tool", "claude-code"])
+        .current_dir(dir.path())
+        .output()
+        .expect("install-ai claude-code");
+    assert!(out.status.success(), "{out:?}");
+    let doctor_json = || {
+        let out = Command::new(shk_bin())
+            .args(["doctor", "--json"])
+            .env("PATH", path_dir.path())
+            .current_dir(dir.path())
+            .output()
+            .expect("doctor --json");
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).expect("doctor json")
+    };
+
+    let fresh = doctor_json();
+    assert_eq!(
+        fresh["claudePermissions"]["pre_tool_matcher_ok"], true,
+        "{fresh}"
+    );
+
+    // Rewrite the managed block to the matcher written before Edit coverage.
+    let settings_path = dir.path().join(".claude/settings.json");
+    let mut settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    settings["hooks"]["PreToolUse"][0]["matcher"] = "Read|Write|Bash|WebFetch|mcp__.*".into();
+    std::fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+
+    let stale = doctor_json();
+    assert_eq!(
+        stale["claudePermissions"]["pre_tool_matcher_ok"], false,
+        "{stale}"
+    );
+    assert_eq!(
+        stale["warningCount"].as_u64().unwrap(),
+        fresh["warningCount"].as_u64().unwrap() + 1,
+        "{stale}"
+    );
+
+    let out = Command::new(shk_bin())
+        .arg("doctor")
+        .env("PATH", path_dir.path())
+        .current_dir(dir.path())
+        .output()
+        .expect("doctor");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("rerun `shk hooks install-ai --tool claude-code`"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn doctor_json_emits_structured_configuration_error() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shk.toml"), "[scan").unwrap();

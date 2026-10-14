@@ -558,6 +558,7 @@ export const ja: Messages = {
         ai_hooks: "AI 管理フック（スキャン）",
         ai_claude_deny: "Claude Code permissions.deny",
         ai_claude_sandbox: "Claude Code sandbox",
+        ai_claude_hook_matcher: "Claude Code 管理フックを更新",
         ai_codex_sandbox: "Codex サンドボックス設定",
         workflows: "GitHub Actions checkout の堅牢化",
         npm_hardening: "npm サプライチェーン対策",

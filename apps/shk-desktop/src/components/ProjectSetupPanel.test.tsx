@@ -21,6 +21,7 @@ function status(overrides: Partial<ProjectStatus> = {}): ProjectStatus {
       missingIgnorePatterns: [],
       claudeDenyOk: false,
       claudeSandboxOk: false,
+      claudeHookMatcherOk: true,
       codexConfigOk: false,
       envApplicable: true,
       envOk: false,

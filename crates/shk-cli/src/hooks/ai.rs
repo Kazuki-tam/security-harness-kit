@@ -21,6 +21,11 @@ const CODEX_GIT_ROOT_ARG: &str = r#""$(git rev-parse --show-toplevel)""#;
 // project root from the hook process cwd.
 const CLAUDE_PROJECT_DIR_ARG: &str = r#""${CLAUDE_PROJECT_DIR:-.}""#;
 const CURSOR_PROJECT_DIR_ARG: &str = r#""${CURSOR_PROJECT_DIR:-.}""#;
+/// Tool matcher of the managed Claude Code `PreToolUse` block. Existing installs
+/// keep the matcher they were written with, so `shk doctor` warns when a managed
+/// block's matcher differs from this one.
+pub(crate) const CLAUDE_PRE_TOOL_USE_MATCHER: &str =
+    "Read|Write|Edit|MultiEdit|NotebookEdit|Bash|WebFetch|mcp__.*";
 
 #[derive(Clone, Copy, Debug)]
 pub struct InstallAiOptions {
@@ -441,7 +446,7 @@ fn load_json(path: &Path) -> Result<Value> {
     serde_json::from_str(&s).with_context(|| format!("parse JSON {}", path.display()))
 }
 
-fn is_managed_claude_block(block: &Value) -> bool {
+pub(crate) fn is_managed_claude_block(block: &Value) -> bool {
     block.get("_shk_managed") == Some(&json!(true))
 }
 
@@ -638,7 +643,7 @@ fn apply_claude(
 
     let pre_block = json!({
         "_shk_managed": true,
-        "matcher": "Read|Write|Edit|MultiEdit|NotebookEdit|Bash|WebFetch|mcp__.*",
+        "matcher": CLAUDE_PRE_TOOL_USE_MATCHER,
         "hooks": [{ "type": "command", "command": commands.pre }]
     });
     let post_block = json!({

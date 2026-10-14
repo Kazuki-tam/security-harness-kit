@@ -559,6 +559,7 @@ export const en: Messages = {
         ai_hooks: "AI managed scan hooks",
         ai_claude_deny: "Claude Code permissions.deny",
         ai_claude_sandbox: "Claude Code sandbox",
+        ai_claude_hook_matcher: "Refresh Claude Code managed hooks",
         ai_codex_sandbox: "Codex sandbox hardening",
         workflows: "GitHub Actions checkout hardening",
         npm_hardening: "npm supply-chain hardening",
