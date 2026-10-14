@@ -406,11 +406,13 @@ pub fn discover_repo_root(start: &Path) -> Option<PathBuf> {
 /// repository that contains `path`, or `None` when `path` belongs to
 /// `main_root` itself or to any other repository (submodule, nested clone).
 ///
-/// The link is verified in both directions without running git: the
-/// worktree's `.git` file names an admin dir whose `commondir` resolves to
-/// `main_root/.git`, and that admin dir's `gitdir` points back at the
-/// worktree's `.git`. A hand-written `.git` file naming another worktree's
-/// admin dir therefore does not qualify.
+/// The link is verified without running git: the worktree's `.git` file names
+/// an admin dir registered at `main_root/.git/worktrees/<name>`, whose
+/// `commondir` resolves to `main_root/.git` and whose `gitdir` points back at
+/// the worktree's `.git`. Hand-written `.git` files therefore qualify neither
+/// by naming another worktree's admin dir nor by naming an admin dir outside
+/// `.git/`. Returns `None` when `main_root/.git` is not a directory
+/// (`--separate-git-dir`, submodules).
 pub fn linked_worktree_root(main_root: &Path, path: &Path) -> Option<PathBuf> {
     let main_git = std::fs::canonicalize(main_root.join(".git")).ok()?;
     if !main_git.is_dir() {
@@ -422,6 +424,12 @@ pub fn linked_worktree_root(main_root: &Path, path: &Path) -> Option<PathBuf> {
         return None;
     }
     let admin = read_git_pointer(&dot_git, "gitdir: ")?;
+    // Git registers every linked worktree at `<common>/worktrees/<name>`.
+    // Requiring that location means a fake link needs writes inside `.git/`,
+    // not just ordinary files next to the work tree.
+    if admin.parent()? != main_git.join("worktrees") {
+        return None;
+    }
     let common = std::fs::read_to_string(admin.join("commondir")).ok()?;
     if std::fs::canonicalize(admin.join(common.trim())).ok()? != main_git {
         return None;
@@ -679,5 +687,23 @@ mod tests {
         std::fs::write(spoof.join(".git"), admin).unwrap();
         assert_eq!(linked_worktree_root(main.path(), &spoof), None);
         assert!(linked_worktree_root(main.path(), &wt).is_some());
+
+        // A self-consistent fake made only of ordinary files: the admin dir
+        // has a valid commondir and back-link but lives outside `.git/`.
+        let fake = main.path().join("services/api");
+        let fake_admin = fake.join("adm");
+        std::fs::create_dir_all(&fake_admin).unwrap();
+        std::fs::write(fake.join(".git"), "gitdir: adm\n").unwrap();
+        std::fs::write(
+            fake_admin.join("commondir"),
+            main.path().join(".git").to_str().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            fake_admin.join("gitdir"),
+            fake.join(".git").to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(linked_worktree_root(main.path(), &fake), None);
     }
 }
