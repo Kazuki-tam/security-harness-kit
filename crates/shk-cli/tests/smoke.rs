@@ -24,6 +24,32 @@ fn canonical_path_text(path: &Path) -> String {
         .into_owned()
 }
 
+/// Runs `cmd` with `stdin` piped in, the way editors invoke hook commands.
+fn output_with_stdin(cmd: &mut Command, stdin: &str) -> std::process::Output {
+    let mut child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn command");
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(stdin.as_bytes())
+        .expect("write stdin");
+    child.wait_with_output().expect("wait for command")
+}
+
+/// `stdout=… stderr=…` for assertion messages.
+fn output_log(out: &std::process::Output) -> String {
+    format!(
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
 fn synthetic_openai_key(seed: char) -> String {
     format!("sk-proj-{seed}bcdefghijklmnopqrstuvwxyz0123456789")
 }
@@ -3483,8 +3509,6 @@ fn hook_mode_payload_cwd_cannot_redirect_relative_file_scan() {
 
 #[test]
 fn hook_mode_claude_edit_scans_the_edited_file() {
-    use std::io::Write;
-
     let repo = tempfile::tempdir().unwrap();
     init_git_repo(repo.path());
     std::fs::write(repo.path().join("shk.toml"), "").unwrap();
@@ -3504,26 +3528,13 @@ fn hook_mode_claude_edit_scans_the_edited_file() {
             }
         })
         .to_string();
-        let out = Command::new(shk_bin())
-            .args(["scan", ".", "--hook-mode", "claude-code"])
-            .current_dir(repo.path())
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                child.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
-                child.wait_with_output()
-            })
-            .expect("hook scan");
-        (
-            out.status.code(),
-            format!(
-                "stdout={} stderr={}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            ),
-        )
+        let out = output_with_stdin(
+            Command::new(shk_bin())
+                .args(["scan", ".", "--hook-mode", "claude-code"])
+                .current_dir(repo.path()),
+            &stdin,
+        );
+        (out.status.code(), output_log(&out))
     };
 
     // Inserting a key into a clean existing file is denied.
