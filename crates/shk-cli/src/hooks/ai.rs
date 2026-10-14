@@ -638,7 +638,7 @@ fn apply_claude(
 
     let pre_block = json!({
         "_shk_managed": true,
-        "matcher": "Read|Write|Bash|WebFetch|mcp__.*",
+        "matcher": "Read|Write|Edit|MultiEdit|NotebookEdit|Bash|WebFetch|mcp__.*",
         "hooks": [{ "type": "command", "command": commands.pre }]
     });
     let post_block = json!({

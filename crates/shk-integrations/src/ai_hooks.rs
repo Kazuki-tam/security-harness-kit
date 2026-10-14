@@ -258,7 +258,8 @@ pub fn extract_user_prompt(stdin: &str) -> Option<Cow<'_, str>> {
 /// Text extracted from a hook payload for scanning.
 #[derive(Debug)]
 pub struct HookBody {
-    /// Display path for findings: the first referenced file, or the tool label.
+    /// Display path for findings: the referenced file when the payload names
+    /// exactly one, otherwise the tool's virtual label.
     pub display: String,
     pub body: String,
     /// Payload strings were left unscanned because the text budget ran out.
@@ -397,7 +398,8 @@ impl<'a> HookTexts<'a> {
 
 /// Files referenced by a hook payload, read from disk.
 struct ReferencedFiles {
-    /// Repo-relative path of the first file.
+    /// Repo-relative path of the file, or the tool's virtual label when the
+    /// payload names several files.
     display: String,
     /// Every file with a `// ---- <path>` header, ready to scan.
     body: String,
@@ -525,7 +527,7 @@ fn read_files_from_candidates(
 ) -> Result<Option<ReferencedFiles>> {
     let mut texts: Vec<String> = Vec::new();
     let mut contents: Vec<String> = Vec::new();
-    let mut first_rel: Option<String> = None;
+    let mut label: Option<String> = None;
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let repo_root = fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
     let targets: Vec<Option<PathBuf>> = edits
@@ -556,8 +558,15 @@ fn read_files_from_candidates(
             let mut t = String::from_utf8_lossy(&bytes).into_owned();
             apply_text_edits(&mut t, &abs, edits, &targets);
             let rel = rel_from_repo(&repo_root, &abs);
-            if first_rel.is_none() {
-                first_rel = Some(rel.clone());
+            // The label drives path-scoped policy (allowlist rows, rule path
+            // filters) for the whole body, so only a single-file body may use
+            // the file's path. Several files get the tool's virtual label.
+            match &label {
+                None => label = Some(rel.clone()),
+                Some(first) if *first != rel => {
+                    label = Some(tool.virtual_path_label().to_string());
+                }
+                Some(_) => {}
             }
             texts.push(format!("// ---- {rel}\n{t}"));
             contents.push(t);
@@ -568,7 +577,7 @@ fn read_files_from_candidates(
         None
     } else {
         Some(ReferencedFiles {
-            display: first_rel.unwrap_or_else(|| "<file>".into()),
+            display: label.unwrap_or_else(|| "<file>".into()),
             body: texts.join("\n"),
             contents,
         })
@@ -2123,6 +2132,49 @@ mod tests {
 
         assert_eq!(display, "<copilot-hook>");
         assert!(!body.contains("post-file-body"), "{body}");
+    }
+
+    #[test]
+    fn several_referenced_files_use_the_virtual_label() {
+        let repo = tempdir().expect("temp repo");
+        std::fs::create_dir_all(repo.path().join("fixtures")).expect("create fixtures");
+        std::fs::write(repo.path().join("fixtures/demo.txt"), "fixture body").expect("write");
+        std::fs::write(repo.path().join("app.txt"), "app body").expect("write");
+        let stdin = serde_json::json!({
+            "tool_input": { "source_path": "app.txt", "destination_path": "fixtures/demo.txt" }
+        })
+        .to_string();
+
+        let (display, body) = stdin_to_hook_body(
+            AiHookTool::ClaudeCode,
+            false,
+            &stdin,
+            repo.path(),
+            repo.path(),
+        )
+        .unwrap();
+
+        // A path allowlist for `fixtures/**` must not cover `app.txt`.
+        assert_eq!(display, "<claude-hook>");
+        assert!(
+            body.contains("app body") && body.contains("fixture body"),
+            "{body}"
+        );
+
+        // The same file named twice is still one file.
+        let stdin = serde_json::json!({
+            "tool_input": { "file_path": "app.txt", "target_path": "./app.txt" }
+        })
+        .to_string();
+        let (display, _body) = stdin_to_hook_body(
+            AiHookTool::ClaudeCode,
+            false,
+            &stdin,
+            repo.path(),
+            repo.path(),
+        )
+        .unwrap();
+        assert_eq!(display, "app.txt");
     }
 
     #[test]
