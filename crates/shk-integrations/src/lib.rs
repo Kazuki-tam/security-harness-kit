@@ -15,8 +15,8 @@ pub use action_guard::{
     payload_path_hints, payload_repository_context_hints,
 };
 pub use ai_hooks::{
-    AiHookTool, HookBody, USER_PROMPT_HOOK_FAIL_ON, extract_user_prompt, hook_body_from_stdin,
-    stdin_to_hook_body,
+    AiHookTool, HookBody, HookSegment, USER_PROMPT_HOOK_FAIL_ON, extract_user_prompt,
+    hook_body_from_stdin, stdin_to_hook_body,
 };
 pub use codex::{
     CONFIG_REL_PATH, HOOKS_FEATURE_KEY, LEGACY_HOOKS_FEATURE_KEY, RECOMMENDED_APPROVAL_POLICY,

@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use shk_core::policy::{ColorMode, Policy, Severity};
 use shk_core::scanner::{
     GitHistoryPreview, ScanOptions, ScanResult, preview_git_history, scan_path, scan_string,
+    scan_strings,
 };
 use shk_integrations::ActionGuardMatch;
 use std::collections::HashSet;
@@ -372,7 +373,8 @@ fn inherits_project_policy(cwd_root: &Path, project_root: &Path) -> bool {
 /// of the same repository, so the project's path rules describe it at the same
 /// relative paths. The policy itself still comes from `repo_root`, the trusted
 /// launch context; submodules and nested clones keep the project-relative path.
-/// The audit log keeps `disp`, so entries still say which checkout was read.
+/// The audit log keeps the project-relative label, so entries still say
+/// which checkout was read.
 fn hook_policy_path(repo_root: &Path, disp: &str) -> String {
     let abs = repo_root.join(disp);
     if !abs.is_file() {
@@ -523,7 +525,7 @@ fn run_hook_mode(
 
     let shk_integrations::HookBody {
         display: disp,
-        body,
+        segments,
         truncated,
     } = shk_integrations::hook_body_from_stdin(
         tool.integration_tool(),
@@ -532,10 +534,37 @@ fn run_hook_mode(
         &content_cwd,
         &repo_root,
     )?;
-    let policy_path = hook_policy_path(&repo_root, &disp);
     let opts = hook_scan_options(fail_on, matches!(tool, AiTool::Cursor) && !post);
 
-    let res = scan_string(&repo_root, &policy_path, &body, opts).context("hook scan failed")?;
+    // Files are matched against path-based policy at their policy path (see
+    // `hook_policy_path`); the audit log keeps the project-relative label.
+    let policy_labels: Vec<String> = segments
+        .iter()
+        .map(|segment| {
+            if segment.file {
+                hook_policy_path(&repo_root, &segment.label)
+            } else {
+                segment.label.clone()
+            }
+        })
+        .collect();
+    let parts: Vec<(&str, &str)> = policy_labels
+        .iter()
+        .zip(&segments)
+        .map(|(label, segment)| (label.as_str(), segment.text.as_str()))
+        .collect();
+    let res = scan_strings(&repo_root, &parts, opts).context("hook scan failed")?;
+    let labels: Vec<(&str, &str)> = policy_labels
+        .iter()
+        .zip(&segments)
+        .map(|(policy, segment)| (policy.as_str(), segment.label.as_str()))
+        .collect();
+    let disp = hook_log_path(
+        &res,
+        &labels,
+        &disp,
+        tool.integration_tool().virtual_path_label(),
+    );
 
     if audit {
         if post {
@@ -593,6 +622,57 @@ fn run_hook_mode(
         hook_output::allow_stdout_for_event(tool, hook_event, None)
     );
     Ok(())
+}
+
+/// Path the audit log records for a hook scan: the label of the segment that
+/// holds every finding at or above the threshold (or, below it, every
+/// finding), or the tool's virtual label when they span segments, so a block
+/// caused by payload text never names an unrelated file. `segments` pairs each
+/// scan label (the policy path findings carry) with the label to log. Policy
+/// warnings (`policy.*` rules) do not count. Without findings it is `disp`.
+fn hook_log_path(
+    res: &ScanResult,
+    segments: &[(&str, &str)],
+    disp: &str,
+    virtual_label: &str,
+) -> String {
+    // Two segments can share a policy path (the same relative path in two
+    // checkouts); their findings cannot be told apart, so log the virtual
+    // label for them.
+    let log_label = |file: &str| {
+        let mut matches = segments
+            .iter()
+            .filter(|(scan_label, _)| *scan_label == file)
+            .map(|(_, log_label)| *log_label);
+        let first = matches.next()?;
+        Some(if matches.all(|label| label == first) {
+            first
+        } else {
+            virtual_label
+        })
+    };
+    let in_payload: Vec<(&str, bool)> = res
+        .findings
+        .iter()
+        .filter(|finding| !finding.rule_id.starts_with("policy."))
+        .filter_map(|finding| {
+            let blocking = Severity::parse(&finding.severity)
+                .map(|severity| severity.meets_threshold(res.exit_threshold))
+                .unwrap_or(false);
+            Some((log_label(&finding.file)?, blocking))
+        })
+        .collect();
+    let any_blocking = in_payload.iter().any(|(_, blocking)| *blocking);
+    let files: Vec<&str> = in_payload
+        .iter()
+        .filter(|(_, blocking)| *blocking || !any_blocking)
+        .map(|(label, _)| *label)
+        .collect();
+    match files.first() {
+        None => disp.to_string(),
+        Some(first) if files.iter().all(|label| label == first) => first.to_string(),
+        Some(_) => virtual_label.to_string(),
+    }
 }
 
 fn append_post_audit_hook(
@@ -1476,6 +1556,48 @@ mod tests {
         let many: Vec<_> = (1..=7).map(|i| finding("pii.email", i)).collect();
         let reason = user_prompt_deny_reason(&many);
         assert!(reason.contains("and 2 more finding(s)"), "{reason}");
+    }
+
+    #[test]
+    fn hook_log_path_names_the_segment_behind_the_findings() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+        let leak = format!("API_KEY=sk-proj-{}\n", "a1b2c3d4".repeat(6));
+        // Scan labels are policy paths; the log keeps the payload's own.
+        let labels = [
+            ("app.txt", ".claude/worktrees/wt/app.txt"),
+            ("<claude-hook>", "<claude-hook>"),
+        ];
+        let log_path = |file: &str, payload: &str| {
+            let res = scan_strings(
+                dir.path(),
+                &[("app.txt", file), ("<claude-hook>", payload)],
+                ScanOptions::default(),
+            )
+            .unwrap();
+            hook_log_path(&res, &labels, "app.txt", "<claude-hook>")
+        };
+
+        assert_eq!(log_path("clean\n", &leak), "<claude-hook>");
+        assert_eq!(log_path(&leak, "clean"), ".claude/worktrees/wt/app.txt");
+        assert_eq!(log_path(&leak, &leak), "<claude-hook>");
+        assert_eq!(log_path("clean\n", "clean"), "app.txt");
+
+        // Two checkouts of the same path share a policy path.
+        let res = scan_strings(
+            dir.path(),
+            &[("app.txt", &leak), ("app.txt", "clean")],
+            ScanOptions::default(),
+        )
+        .unwrap();
+        let shared = [
+            ("app.txt", "app.txt"),
+            ("app.txt", ".claude/worktrees/wt/app.txt"),
+        ];
+        assert_eq!(
+            hook_log_path(&res, &shared, "<claude-hook>", "<claude-hook>"),
+            "<claude-hook>"
+        );
     }
 
     #[test]

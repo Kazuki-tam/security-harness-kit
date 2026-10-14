@@ -1,11 +1,11 @@
 //! Parse AI tool stdin JSON payloads (MVP heuristic; spec §7.9).
 
-use crate::hook_payload::decode_encoded_arguments;
+use crate::hook_payload::{ARGUMENT_ENVELOPE_KEYS, decode_encoded_arguments};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -32,8 +32,10 @@ const ANTIGRAVITY_PATH_KEYS: &[&str] = &[
 // known metadata keys out of file reads so hook logs/transcripts are not scanned
 // as if they were the current tool input.
 const METADATA_PATH_KEYS: &[&str] = &[
+    "agent_transcript_path",
     "artifactDirectoryPath",
     "transcriptPath",
+    "transcript_path",
     "workspacePath",
     "workspacePaths",
 ];
@@ -44,30 +46,47 @@ const MAX_EDIT_WORK_BYTES: usize = 64 * MAX_HOOK_TEXT_BYTES;
 const PRE_TEXT_KEYS: &[&str] = &[
     "prompt", "text", "content", "command", "stdin", "args", "url",
 ];
-// Replace-style edit arguments as (old, new) key pairs. Pre hooks apply each
-// edit to the target file body read via PATH_KEYS and scan the edited body, so
-// inserted text keeps the file's inline `shk-ignore` context and removed text
-// no longer blocks. When the target is not read (outside the repo, binary, or
-// missing) or `old` is not found, only the new text is scanned. Edits inherit
-// the nearest enclosing path key, so nested lists work.
-// - Claude Code Edit, MultiEdit `edits[]`; Windsurf `edits[]`: old_string, new_string
+// Replace-style edit arguments as (old, new) key pairs. For local write tools
+// (see `writes_local_file`), pre hooks apply each edit to the target file body read
+// via PATH_KEYS and scan the edited body, so inserted text keeps the file's
+// inline `shk-ignore` context and removed text no longer blocks. When the
+// target is not read (outside the repo, binary, or missing) or `old` is not
+// found, only the new text is scanned; any other tool's edits are scanned as
+// payload text, old text included. Edits inherit the nearest enclosing path
+// key, so nested lists work.
+// - Claude Code Edit, MultiEdit `edits[]`; Windsurf `edits[]`; Grok Build
+//   search_replace: old_string, new_string
 // - Copilot CLI edit: old_str, new_str
 // - Copilot in VS Code replaceString, multiReplaceString `replacements[]`;
-//   OpenCode edit (`replaceAll`): oldString, newString
+//   OpenCode edit (`replaceAll`), multiedit `edits[]`: oldString, newString
 // - Filesystem MCP server edit_file `edits[]`: oldText, newText
+// - Antigravity replace_file_content, multi_replace_file_content
+//   `ReplacementChunks[]` (`AllowMultiple`): TargetContent, ReplacementContent
 const EDIT_PAIR_KEYS: &[(&str, &str)] = &[
     ("old_string", "new_string"),
     ("old_str", "new_str"),
     ("oldString", "newString"),
     ("oldText", "newText"),
+    ("TargetContent", "ReplacementContent"),
 ];
-// Inserted text without an `old` counterpart. The target file body is read via
-// PATH_KEYS, which suppresses the large-string fallback, so these must be named.
+// Whole text a local write tool (see `writes_local_file`) sends to the file
+// named by the nearest path argument. It is scanned with that file (under its
+// path) when the file is read.
+// - Claude Code Write, OpenCode write, filesystem MCP write_file: content
+// - Cursor beforeReadFile: content (the file body being read)
 // - Claude Code NotebookEdit: new_source
 // - Copilot CLI create: file_text
-// - Copilot in VS Code editNotebook: newCode
+// - Copilot in VS Code editNotebook: newCode; insertEdit: code
+// - Antigravity write_to_file: CodeContent
 // Codex `apply_patch` sends the patch as `command`, already in PRE_TEXT_KEYS.
-const PRE_EDIT_TEXT_KEYS: &[&str] = &["new_source", "file_text", "newCode"];
+const FILE_TEXT_KEYS: &[&str] = &[
+    "content",
+    "new_source",
+    "file_text",
+    "newCode",
+    "code",
+    "CodeContent",
+];
 const CODEX_POST_TEXT_KEYS: &[&str] = &[
     "stdout",
     "stderr",
@@ -100,8 +119,6 @@ const CURSOR_POST_TEXT_KEYS: &[&str] = &[
 const ANTIGRAVITY_PRE_EXTRA_TEXT_KEYS: &[&str] = &[
     "CommandLine",
     "CodeContent",
-    "TargetContent",
-    "ReplacementContent",
     "Url",
     "Prompt",
     "Query",
@@ -159,10 +176,10 @@ const WINDSURF_POST_TEXT_KEYS: &[&str] = &[
     "content",
     "text",
 ];
-// Scan every argument value, including arbitrary MCP schemas. Keep this
-// scoped to the input envelope so session metadata is not treated as input.
-const GROK_PRE_EXTRA_TEXT_KEYS: &[&str] = &["toolInput", "tool_input"];
-// PostToolUse output is `toolResult` (not Claude's `tool_response`).
+// Grok pre payloads carry every argument, including arbitrary MCP schemas,
+// under the `toolInput` envelope (see ARGUMENT_ENVELOPE_KEYS).
+//
+// Grok PostToolUse output is `toolResult` (not Claude's `tool_response`).
 const GROK_POST_TEXT_KEYS: &[&str] = &[
     "toolResult",
     "tool_result",
@@ -176,11 +193,9 @@ const GROK_POST_TEXT_KEYS: &[&str] = &[
     "command",
 ];
 
-// OpenCode's managed plugin normalizes tool arguments under `tool_input`,
-// scanned as an argument envelope so every argument is covered, including
-// arbitrary MCP arguments. Edit's `oldString`/`newString` pair is applied to
-// the file named by `filePath` (resolved through PATH_KEYS) instead.
-const OPENCODE_PRE_ENVELOPE_KEYS: &[&str] = &["tool_input"];
+// OpenCode's managed plugin normalizes tool arguments under the `tool_input`
+// envelope (see ARGUMENT_ENVELOPE_KEYS); edit's `oldString`/`newString` pair is
+// applied to the file named by `filePath` (resolved through PATH_KEYS).
 // The post payload carries `{ title, output }` under `tool_output`.
 const OPENCODE_POST_TEXT_KEYS: &[&str] = &["tool_output", "output", "title"];
 
@@ -255,16 +270,51 @@ pub fn extract_user_prompt(stdin: &str) -> Option<Cow<'_, str>> {
         .or_else(|| payload.tool_info.and_then(|info| info.user_prompt))
 }
 
-/// Text extracted from a hook payload for scanning.
+/// Text extracted from a hook payload for scanning, split by the path label
+/// each part is scanned under.
 #[derive(Debug)]
 pub struct HookBody {
-    /// Display path for findings: the referenced file when the payload names
-    /// exactly one, otherwise the tool's virtual label.
+    /// The referenced file when the payload names exactly one, otherwise the
+    /// tool's virtual label. The CLI logs it when no finding names a segment.
     pub display: String,
-    pub body: String,
+    /// Each referenced file (with a local write tool's edits applied and the
+    /// text it writes to the file) under its repo-relative path, then the
+    /// remaining payload text under the tool's virtual label. Path-scoped
+    /// policy therefore only covers text that belongs to that path. Never
+    /// empty.
+    pub segments: Vec<HookSegment>,
     /// Payload strings were left unscanned because the text budget ran out.
     /// Blocking hooks must not allow such a payload.
     pub truncated: bool,
+}
+
+/// Text scanned under one path label.
+#[derive(Debug)]
+pub struct HookSegment {
+    pub label: String,
+    /// A file segment starts with the file body, so finding line numbers are
+    /// the file's own.
+    pub text: String,
+    /// Whether `label` is a referenced file rather than the virtual label.
+    pub file: bool,
+}
+
+impl HookBody {
+    /// Every segment joined into one text (for masking, which rewrites the
+    /// payload as a whole).
+    pub fn joined_text(&self) -> String {
+        self.segments
+            .iter()
+            .map(|segment| {
+                if segment.file {
+                    format!("// ---- {}\n{}", segment.label, segment.text)
+                } else {
+                    segment.text.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n---\n")
+    }
 }
 
 /// Returns display path (posix-ish relative to repo) + body content to scan.
@@ -275,7 +325,10 @@ pub fn stdin_to_hook_body(
     cwd: &Path,
     repo_root: &Path,
 ) -> Result<(String, String)> {
-    hook_body_from_stdin(tool, post, stdin, cwd, repo_root).map(|hook| (hook.display, hook.body))
+    hook_body_from_stdin(tool, post, stdin, cwd, repo_root).map(|hook| {
+        let body = hook.joined_text();
+        (hook.display, body)
+    })
 }
 
 pub fn hook_body_from_stdin(
@@ -285,126 +338,204 @@ pub fn hook_body_from_stdin(
     cwd: &Path,
     repo_root: &Path,
 ) -> Result<HookBody> {
-    let raw: Value = serde_json::from_str(stdin).context("hook stdin must be valid JSON")?;
+    let mut v: Value = serde_json::from_str(stdin).context("hook stdin must be valid JSON")?;
     // Pre hooks look inside JSON-encoded argument envelopes (Copilot CLI
     // `toolArgs`) so paths, edits, and text keys there are found. Post hooks
-    // keep the raw payload.
-    let mut envelope_keys = Vec::new();
-    let decoded = (!post).then(|| {
-        let mut decoded = raw.clone();
-        envelope_keys = decode_encoded_arguments(&mut decoded);
-        decoded
-    });
-    let v = decoded.as_ref().unwrap_or(&raw);
+    // keep the payload as sent.
     if !post {
-        for key in pre_envelope_keys(tool) {
-            if !envelope_keys.contains(key) {
-                envelope_keys.push(key);
+        decode_encoded_arguments(&mut v);
+    }
+    let v = &v;
+
+    // Post payloads describe writes that already ran; the file body is current.
+    let mut writes = FileWrites::default();
+    if !post {
+        collect_file_writes(tool, v, None, &mut writes);
+    }
+    let local_write = writes_local_file(tool, v);
+
+    // Referenced files are scanned whole (with pre-hook edits applied) and do
+    // not spend the payload budget.
+    let candidates = read_candidate_files(tool, v, cwd, repo_root)?;
+    let file_target = |path: Option<&str>| {
+        local_write
+            .then(|| target_index(&candidates.files, path?, cwd))
+            .flatten()
+    };
+    let edit_targets: Vec<_> = writes.edits.iter().map(|e| file_target(e.path)).collect();
+    let text_targets: Vec<_> = writes.texts.iter().map(|t| file_target(t.path)).collect();
+    let mut files = candidates.files;
+    for (index, file) in files.iter_mut().enumerate() {
+        apply_text_edits(&mut file.text, index, &mut writes.edits, &edit_targets);
+    }
+
+    let mut texts = HookTexts {
+        // A post payload reports the output of the call that read the file
+        // (e.g. Read's result), so with one file read it is scanned under that
+        // file's path, like the file. Pre payload text goes to the virtual
+        // label.
+        payload_file: (post && files.len() == 1).then_some(0),
+        ..HookTexts::default()
+    };
+    for (index, file) in files.iter().enumerate() {
+        // The file body is scanned already; a string equal to it under the
+        // same label (e.g. Cursor's `content`) adds nothing.
+        texts.cover(Some(index), &file.text);
+    }
+    // Text written to a file that was read is scanned under that file's path,
+    // like the file itself.
+    for (text, target) in writes.texts.iter().zip(&text_targets) {
+        texts.push_bound(*target, text.text);
+    }
+    for (edit, target) in writes.edits.iter().zip(&edit_targets) {
+        if edit.applied {
+            texts.bind(edit.new);
+        } else {
+            texts.push_bound(*target, edit.new);
+            // Any edit but a local file edit (a remote document, an MCP API)
+            // sends its old text to the tool too.
+            if !(local_write && edit.file_edit) {
+                texts.push(edit.old);
+            }
+        }
+    }
+    text_priority_chunks(v, post, tool, &candidates.read_paths, &mut texts);
+    // An envelope is the tool's whole argument list. Scan every value in it,
+    // so one matching key (or a file read) cannot hide the rest the way it
+    // disables the fallback below.
+    if !post {
+        for key in ARGUMENT_ENVELOPE_KEYS {
+            if let Some(envelope) = v.get(*key) {
+                push_envelope_strings(tool, envelope, &candidates.read_paths, &mut texts);
             }
         }
     }
 
-    // Post payloads describe edits that already ran; the file body is current.
-    let mut edits = Vec::new();
-    if !post {
-        collect_text_edits(tool, v, None, &mut edits);
+    if texts.blobs.is_empty() && files.is_empty() {
+        collect_large_strings(v, &mut texts, 96);
     }
 
-    // Referenced files are scanned whole (with pre-hook edits applied) and do
-    // not spend the payload budget.
-    let files = read_files_from_candidates(tool, v, cwd, repo_root, &mut edits)?;
-
-    let mut texts = HookTexts::default();
-    if let Some(files) = &files {
-        // A payload string equal to a file body (e.g. Cursor's `content`)
-        // is already covered by the file scan.
-        texts.seen.extend(files.contents.iter().map(String::as_str));
-    }
-    text_priority_chunks(v, post, tool, &mut texts);
-    for edit in edits.iter().filter(|edit| !edit.applied) {
-        texts.push(edit.new);
-    }
-    // An envelope is the tool's whole argument list. Scan every value in it,
-    // so one matching key (or a file read) cannot hide the rest the way it
-    // disables the fallback below.
-    for key in &envelope_keys {
-        if let Some(envelope) = v.get(*key) {
-            push_envelope_strings(envelope, &mut texts);
-        }
-    }
-
-    // The fallback reads the raw payload: an encoded envelope is one long
-    // string that keeps its key names, so it clears the size cut more often
-    // than any of its decoded values.
-    if texts.blobs.is_empty() && files.is_none() {
-        collect_large_strings(&raw, &mut texts, 96);
-    }
-
-    let parts: Vec<&str> = files
-        .as_ref()
-        .map(|files| files.body.as_str())
-        .into_iter()
-        .chain(texts.blobs.iter().copied())
+    let mut segments: Vec<HookSegment> = files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| {
+            let mut text = file.text.clone();
+            for blob in texts.blobs_for(Some(index)) {
+                text.push_str("\n---\n");
+                text.push_str(blob);
+            }
+            HookSegment {
+                label: file.rel.clone(),
+                text,
+                file: true,
+            }
+        })
         .collect();
-    let body = if parts.is_empty() {
-        "{}".into()
-    } else {
-        parts.join("\n---\n")
-    };
-    let truncated = texts.truncated;
+    let payload_text: Vec<&str> = texts.blobs_for(None).collect();
+    if !payload_text.is_empty() || segments.is_empty() {
+        segments.push(HookSegment {
+            label: tool.virtual_path_label().to_string(),
+            file: false,
+            text: if payload_text.is_empty() {
+                "{}".to_string()
+            } else {
+                payload_text.join("\n---\n")
+            },
+        });
+    }
 
     Ok(HookBody {
-        display: files.map_or_else(|| tool.virtual_path_label().to_string(), |f| f.display),
-        body,
-        truncated,
+        display: match files.as_slice() {
+            [only] => only.rel.clone(),
+            _ => tool.virtual_path_label().to_string(),
+        },
+        segments,
+        truncated: texts.truncated,
     })
 }
 
-/// Argument envelopes that are scanned in full in pre hooks even when sent as
-/// an object (stringified envelopes are found by `decode_encoded_arguments`).
-fn pre_envelope_keys(tool: AiHookTool) -> &'static [&'static str] {
-    match tool {
-        AiHookTool::Opencode => OPENCODE_PRE_ENVELOPE_KEYS,
-        _ => &[],
-    }
-}
-
-/// Payload strings collected for scanning. Each distinct string is charged
-/// once against `MAX_HOOK_TEXT_BYTES` (the same string is often reachable
-/// through several keys).
+/// Payload strings collected for scanning, each with the file it is scanned
+/// with (`None`: the payload segment under the tool's virtual label).
+/// `payload_file` is where `push` places payload text.
+/// Each distinct string is charged once against `MAX_HOOK_TEXT_BYTES` (the
+/// same string is often reachable through several keys).
 #[derive(Default)]
 struct HookTexts<'a> {
-    blobs: Vec<&'a str>,
-    seen: HashSet<&'a str>,
+    blobs: Vec<(Option<usize>, &'a str)>,
+    placed: HashSet<(Option<usize>, &'a str)>,
+    charged: HashSet<&'a str>,
+    /// Payload strings (by address) already placed with a file; key scans
+    /// that reach the same JSON value again skip it. An equal string under
+    /// another key is a different value and is still scanned.
+    bound: HashSet<usize>,
+    payload_file: Option<usize>,
     used: usize,
     truncated: bool,
 }
 
 impl<'a> HookTexts<'a> {
+    /// Text from the payload, scanned under the tool's virtual label (or the
+    /// one file a post payload read).
     fn push(&mut self, s: &'a str) {
-        if s.trim().is_empty() || !self.seen.insert(s) {
+        if !self.bound.contains(&(s.as_ptr() as usize)) {
+            self.place(self.payload_file, s);
+        }
+    }
+
+    /// Text written to `file` (or, with no file read, to the payload segment).
+    fn push_bound(&mut self, file: Option<usize>, s: &'a str) {
+        self.bind(s);
+        self.place(file, s);
+    }
+
+    /// Marks a payload value as handled elsewhere (e.g. applied edit text).
+    fn bind(&mut self, s: &'a str) {
+        self.bound.insert(s.as_ptr() as usize);
+    }
+
+    /// Text the scan already covers with `file`, free of charge.
+    fn cover(&mut self, file: Option<usize>, s: &'a str) {
+        self.placed.insert((file, s));
+        self.charged.insert(s);
+    }
+
+    fn place(&mut self, file: Option<usize>, s: &'a str) {
+        if s.trim().is_empty() || self.placed.contains(&(file, s)) {
             return;
         }
         // Whether a payload overflows depends only on the total size of its
         // distinct strings, never on the order the keys are visited in.
-        if self.used + s.len() > MAX_HOOK_TEXT_BYTES {
-            self.truncated = true;
-            return;
+        if !self.charged.contains(s) {
+            if self.used + s.len() > MAX_HOOK_TEXT_BYTES {
+                self.truncated = true;
+                return;
+            }
+            self.used += s.len();
+            self.charged.insert(s);
         }
-        self.used += s.len();
-        self.blobs.push(s);
+        self.placed.insert((file, s));
+        self.blobs.push((file, s));
+    }
+
+    fn blobs_for(&self, file: Option<usize>) -> impl Iterator<Item = &'a str> + '_ {
+        self.blobs
+            .iter()
+            .filter(move |(target, _)| *target == file)
+            .map(|(_, s)| *s)
     }
 }
 
-/// Files referenced by a hook payload, read from disk.
-struct ReferencedFiles {
-    /// Repo-relative path of the file, or the tool's virtual label when the
-    /// payload names several files.
-    display: String,
-    /// Every file with a `// ---- <path>` header, ready to scan.
-    body: String,
-    /// The decoded file contents, to recognize payload strings that repeat them.
-    contents: Vec<String>,
+/// A text file inside the repository named by a payload path argument.
+struct CandidateFile {
+    abs: PathBuf,
+    rel: String,
+    text: String,
+}
+
+/// Files read for a payload, and the payload path strings that named them.
+struct CandidateFiles {
+    files: Vec<CandidateFile>,
+    read_paths: HashSet<String>,
 }
 
 fn rel_from_repo(repo_root: &Path, abs: &Path) -> String {
@@ -413,26 +544,56 @@ fn rel_from_repo(repo_root: &Path, abs: &Path) -> String {
         .unwrap_or_else(|_| abs.to_string_lossy().replace('\\', "/"))
 }
 
+/// Writes a pre-hook payload makes to files: replace-style edits and whole
+/// new text, each with the nearest enclosing file-path argument.
+#[derive(Default)]
+struct FileWrites<'a> {
+    edits: Vec<TextEdit<'a>>,
+    texts: Vec<FileText<'a>>,
+}
+
 /// A replace-style edit found in a pre-hook payload.
 struct TextEdit<'a> {
     /// Nearest enclosing file-path argument, as written in the payload.
     path: Option<&'a str>,
+    /// The edit or an ancestor names a file path, even an ambiguous one: it
+    /// edits a local file rather than a remote document.
+    file_edit: bool,
     old: &'a str,
     new: &'a str,
     replace_all: bool,
     applied: bool,
 }
 
-/// Collects replace-style edits in payload order (arrays keep their order, so
-/// MultiEdit `edits[]` apply sequentially). Each edit targets the file-body
-/// path key on its own object or the nearest ancestor. An object with several
-/// distinct path values is ambiguous: its edits target no file, so their new
-/// text is scanned on its own instead of under another file's suppressions.
-fn collect_text_edits<'a>(
+/// Whole text a pre-hook payload writes to a file (FILE_TEXT_KEYS).
+struct FileText<'a> {
+    path: Option<&'a str>,
+    text: &'a str,
+}
+
+/// The complete replace-style edit pairs on one payload object, as
+/// `(old_key, new_key, old, new)`. Only a pair of strings is an edit; a lone
+/// or non-string `new_str` is ordinary argument text.
+fn edit_pairs(
+    map: &serde_json::Map<String, Value>,
+) -> impl Iterator<Item = (&'static str, &'static str, &str, &str)> {
+    EDIT_PAIR_KEYS.iter().filter_map(|(old_key, new_key)| {
+        let old = map.get(*old_key)?.as_str()?;
+        let new = map.get(*new_key)?.as_str()?;
+        Some((*old_key, *new_key, old, new))
+    })
+}
+
+/// Collects edits and written text in payload order (arrays keep their order,
+/// so MultiEdit `edits[]` apply sequentially). Each targets the file-body path
+/// key on its own object or the nearest ancestor. An object with several
+/// distinct path values is ambiguous: its writes target no file, so their text
+/// is scanned on its own instead of under another file's suppressions.
+fn collect_file_writes<'a>(
     tool: AiHookTool,
     v: &'a Value,
-    inherited_path: Option<&'a str>,
-    out: &mut Vec<TextEdit<'a>>,
+    inherited: Option<Option<&'a str>>,
+    out: &mut FileWrites<'a>,
 ) {
     match v {
         Value::Object(map) => {
@@ -441,58 +602,141 @@ fn collect_text_edits<'a>(
                 .filter(|(key, _)| is_file_body_path_key(tool, key))
                 .filter_map(|(_, val)| val.as_str())
                 .collect();
-            let path = match own_paths.len() {
-                0 => inherited_path,
-                1 => own_paths.into_iter().next(),
-                _ => None,
+            // `Some(None)`: a path is named but ambiguous. An inner path that
+            // differs from an enclosing one is ambiguous too: tools such as
+            // OpenCode `multiedit` write the top-level `filePath` whatever an
+            // item says, so binding to the inner path could apply a write to
+            // an allowlisted file it never touches.
+            let own = (own_paths.len() == 1)
+                .then(|| own_paths.iter().next().copied())
+                .flatten();
+            let named = match (inherited, own_paths.len()) {
+                (inherited, 0) => inherited,
+                (None, 1) => Some(own),
+                (Some(Some(outer)), 1) if Some(outer) == own => Some(own),
+                _ => Some(None),
             };
-            for (old_key, new_key) in EDIT_PAIR_KEYS {
-                if let (Some(old), Some(new)) = (
-                    map.get(*old_key).and_then(Value::as_str),
-                    map.get(*new_key).and_then(Value::as_str),
-                ) {
-                    out.push(TextEdit {
-                        path,
-                        old,
-                        new,
-                        replace_all: ["replace_all", "replaceAll"]
-                            .iter()
-                            .any(|key| map.get(*key).and_then(Value::as_bool) == Some(true)),
-                        applied: false,
-                    });
+            let path = named.flatten();
+            let replace_all = ["replace_all", "replaceAll", "AllowMultiple"]
+                .iter()
+                .any(|key| map.get(*key).and_then(Value::as_bool) == Some(true));
+            for (_, _, old, new) in edit_pairs(map) {
+                out.edits.push(TextEdit {
+                    path,
+                    file_edit: named.is_some(),
+                    old,
+                    new,
+                    replace_all,
+                    applied: false,
+                });
+            }
+            if path.is_some() {
+                for key in FILE_TEXT_KEYS {
+                    if let Some(text) = map.get(*key).and_then(Value::as_str) {
+                        out.texts.push(FileText { path, text });
+                    }
                 }
             }
             for val in map.values() {
-                collect_text_edits(tool, val, path, out);
+                collect_file_writes(tool, val, named, out);
             }
         }
         Value::Array(items) => {
             for item in items {
-                collect_text_edits(tool, item, inherited_path, out);
+                collect_file_writes(tool, item, inherited, out);
             }
         }
         _ => {}
     }
 }
 
-/// Applies the edits that target `abs` in order, marking each one applied.
-/// An edit whose `old` text is empty or missing is left for standalone scanning,
-/// as is one that would grow the body past `original_len + MAX_HOOK_TEXT_BYTES`
-/// (a `replace_all` of a short `old` can otherwise multiply the body until
-/// the hook times out, and a timed-out hook does not block). For the same
-/// reason, edits stop being applied once searching and rewriting the body has
-/// touched `MAX_EDIT_WORK_BYTES`: each edit costs a pass over the whole body, so
-/// a long edit list on a large file would otherwise run past the hook timeout.
+/// Index into `files` of the file `path` names, if it was read.
+fn target_index(files: &[CandidateFile], path: &str, cwd: &Path) -> Option<usize> {
+    let abs = fs::canonicalize(resolve_path(path, cwd)).ok()?;
+    files.iter().position(|file| file.abs == abs)
+}
+
+/// Whether the payload comes from a tool that writes the local file its own
+/// path argument names. Only such tools have their edits applied and their
+/// written text scanned under the file's path; any other tool, such as an MCP
+/// tool that sends a `path` and `content` to a remote service, keeps its text
+/// under the virtual label, so a path allowlist cannot cover it. Names are
+/// matched per editor because MCP tools can carry bare names (Cursor's
+/// `beforeMCPExecution` sends the server's own tool name).
+fn writes_local_file(tool: AiHookTool, v: &Value) -> bool {
+    let field = |key: &str| v.get(key).and_then(Value::as_str);
+    let is_one_of = |name: Option<&str>, names: &[&str]| name.is_some_and(|n| names.contains(&n));
+    match tool {
+        // Grok Build runs Claude Code and Cursor hook entries with its own
+        // payload shape (`toolName`).
+        AiHookTool::ClaudeCode | AiHookTool::Cursor
+            if field("toolName") == Some("search_replace") =>
+        {
+            true
+        }
+        AiHookTool::ClaudeCode => is_one_of(
+            field("tool_name"),
+            &[
+                "Write",
+                "Edit",
+                "MultiEdit",
+                "NotebookEdit",
+                "mcp__filesystem__edit_file",
+                "mcp__filesystem__write_file",
+            ],
+        ),
+        AiHookTool::Copilot => {
+            let names = [
+                // Copilot CLI
+                "create",
+                "edit",
+                // Copilot in VS Code
+                "create_file",
+                "replace_string_in_file",
+                "multi_replace_string_in_file",
+                "insert_edit_into_file",
+                "edit_notebook_file",
+            ];
+            is_one_of(field("toolName"), &names) || is_one_of(field("tool_name"), &names)
+        }
+        AiHookTool::Grok => field("toolName") == Some("search_replace"),
+        AiHookTool::Opencode => is_one_of(field("tool_name"), &["write", "edit", "multiedit"]),
+        AiHookTool::Antigravity => is_one_of(
+            v.pointer("/toolCall/name").and_then(Value::as_str),
+            &[
+                "write_to_file",
+                "replace_file_content",
+                "multi_replace_file_content",
+            ],
+        ),
+        AiHookTool::Windsurf => field("agent_action_name") == Some("pre_write_code"),
+        // `beforeReadFile` is a read: binding ties its `content` (the file
+        // body) to the file. MCP calls never count.
+        AiHookTool::Cursor => field("hook_event_name") == Some("beforeReadFile"),
+        // Codex edits go through `apply_patch`, whose patch is a `command`.
+        AiHookTool::Codex => false,
+    }
+}
+
+/// Applies the edits that target file `index` to its body in order, marking
+/// each one applied. An edit whose `old` text is empty or missing is left for
+/// standalone scanning, as is one that would grow the body past
+/// `original_len + MAX_HOOK_TEXT_BYTES` (a `replace_all` of a short `old` can
+/// otherwise multiply the body until the hook times out, and a timed-out hook
+/// does not block). For the same reason, edits stop being applied once
+/// searching and rewriting the body has touched `MAX_EDIT_WORK_BYTES`: each
+/// edit costs a pass over the whole body, so a long edit list on a large file
+/// would otherwise run past the hook timeout.
 fn apply_text_edits(
     text: &mut String,
-    abs: &Path,
+    index: usize,
     edits: &mut [TextEdit<'_>],
-    targets: &[Option<PathBuf>],
+    targets: &[Option<usize>],
 ) {
     let max_len = text.len().saturating_add(MAX_HOOK_TEXT_BYTES);
     let mut work = 0usize;
     for (edit, target) in edits.iter_mut().zip(targets) {
-        if target.as_deref() != Some(abs) || edit.old.is_empty() {
+        if *target != Some(index) || edit.old.is_empty() {
             continue;
         }
         // One pass to search, one more to rewrite.
@@ -500,43 +744,51 @@ fn apply_text_edits(
         if work > MAX_EDIT_WORK_BYTES {
             break;
         }
-        let count = if edit.replace_all {
-            text.matches(edit.old).count()
-        } else {
-            usize::from(text.contains(edit.old))
-        };
-        let growth = edit.new.len().saturating_sub(edit.old.len());
+        let (mut old, mut new) = (Cow::Borrowed(edit.old), Cow::Borrowed(edit.new));
+        let mut count = match_count(text, &old, edit.replace_all);
+        if count == 0 && old.contains('\n') && !old.contains('\r') && text.contains("\r\n") {
+            // Editors match `old` with line endings normalised; on a CRLF file
+            // the edit lands with CRLF line endings.
+            work = work.saturating_add(text.len());
+            old = Cow::Owned(edit.old.replace('\n', "\r\n"));
+            new = Cow::Owned(edit.new.replace('\n', "\r\n"));
+            count = match_count(text, &old, edit.replace_all);
+        }
+        let growth = new.len().saturating_sub(old.len());
         if count == 0 || text.len().saturating_add(count.saturating_mul(growth)) > max_len {
             continue;
         }
         *text = if edit.replace_all {
-            text.replace(edit.old, edit.new)
+            text.replace(old.as_ref(), &new)
         } else {
-            text.replacen(edit.old, edit.new, 1)
+            text.replacen(old.as_ref(), &new, 1)
         };
         edit.applied = true;
     }
 }
 
-fn read_files_from_candidates(
+/// Occurrences `old` would replace: all of them, or at most the first.
+fn match_count(text: &str, old: &str, replace_all: bool) -> usize {
+    if replace_all {
+        text.matches(old).count()
+    } else {
+        usize::from(text.contains(old))
+    }
+}
+
+/// Reads every distinct text file inside the repository that a payload path
+/// argument names.
+fn read_candidate_files(
     tool: AiHookTool,
     v: &Value,
     cwd: &Path,
     repo_root: &Path,
-    edits: &mut [TextEdit<'_>],
-) -> Result<Option<ReferencedFiles>> {
-    let mut texts: Vec<String> = Vec::new();
-    let mut contents: Vec<String> = Vec::new();
-    let mut label: Option<String> = None;
-    let mut seen: HashSet<PathBuf> = HashSet::new();
+) -> Result<CandidateFiles> {
+    let mut files = Vec::new();
+    let mut read_paths = HashSet::new();
+    // Whether each file seen so far was read (binary files are skipped).
+    let mut seen: HashMap<PathBuf, bool> = HashMap::new();
     let repo_root = fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
-    let targets: Vec<Option<PathBuf>> = edits
-        .iter()
-        .map(|edit| {
-            edit.path
-                .and_then(|path| fs::canonicalize(resolve_path(path, cwd)).ok())
-        })
-        .collect();
 
     for cand in candidate_path_strings(tool, v) {
         let p = resolve_path(&cand, cwd);
@@ -544,8 +796,14 @@ fn read_files_from_candidates(
         if let Some(abs) = p
             && abs.is_file()
             && abs.starts_with(&repo_root)
-            && seen.insert(abs.clone())
         {
+            if let Some(read) = seen.get(&abs) {
+                if *read {
+                    read_paths.insert(cand);
+                }
+                continue;
+            }
+            seen.insert(abs.clone(), false);
             let bytes =
                 fs::read(&abs).with_context(|| format!("read scanned file {}", abs.display()))?;
             // Match the ordinary scanner's default NUL-in-head heuristic.
@@ -555,33 +813,16 @@ fn read_files_from_candidates(
             if bytes.iter().take(8192).any(|byte| *byte == 0) {
                 continue;
             }
-            let mut t = String::from_utf8_lossy(&bytes).into_owned();
-            apply_text_edits(&mut t, &abs, edits, &targets);
-            let rel = rel_from_repo(&repo_root, &abs);
-            // The label drives path-scoped policy (allowlist rows, rule path
-            // filters) for the whole body, so only a single-file body may use
-            // the file's path. Several files get the tool's virtual label.
-            match &label {
-                None => label = Some(rel.clone()),
-                Some(first) if *first != rel => {
-                    label = Some(tool.virtual_path_label().to_string());
-                }
-                Some(_) => {}
-            }
-            texts.push(format!("// ---- {rel}\n{t}"));
-            contents.push(t);
+            seen.insert(abs.clone(), true);
+            read_paths.insert(cand);
+            files.push(CandidateFile {
+                rel: rel_from_repo(&repo_root, &abs),
+                text: String::from_utf8_lossy(&bytes).into_owned(),
+                abs,
+            });
         }
     }
-
-    Ok(if texts.is_empty() {
-        None
-    } else {
-        Some(ReferencedFiles {
-            display: label.unwrap_or_else(|| "<file>".into()),
-            body: texts.join("\n"),
-            contents,
-        })
-    })
+    Ok(CandidateFiles { files, read_paths })
 }
 
 fn resolve_path(s: &str, cwd: &Path) -> PathBuf {
@@ -635,9 +876,25 @@ fn is_file_body_path_key(tool: AiHookTool, key: &str) -> bool {
         && (PATH_KEYS.iter().any(|pk| pk == &key) || key.to_ascii_lowercase().ends_with("path"))
 }
 
-fn text_priority_chunks<'a>(v: &'a Value, post: bool, tool: AiHookTool, texts: &mut HookTexts<'a>) {
+/// Pushes the strings under each tool's text keys. Pre hooks skip what the
+/// envelope scan skips (edit pairs and read path values, handled elsewhere),
+/// so a generic key such as `args` cannot rescan an edit's old text.
+fn text_priority_chunks<'a>(
+    v: &'a Value,
+    post: bool,
+    tool: AiHookTool,
+    read_paths: &HashSet<String>,
+    texts: &mut HookTexts<'a>,
+) {
+    let mut push = |val: &'a Value, texts: &mut HookTexts<'a>| {
+        if post {
+            push_strings_from_value(val, texts);
+        } else {
+            push_envelope_strings(tool, val, read_paths, texts);
+        }
+    };
     for keys in priority_text_key_sets(post, tool) {
-        grab_strings_for_keys_deep(v, keys, texts);
+        grab_strings_for_keys_deep(v, keys, &mut push, texts);
     }
 }
 
@@ -645,13 +902,13 @@ fn priority_text_key_sets(post: bool, tool: AiHookTool) -> &'static [&'static [&
     if !post {
         return match tool {
             AiHookTool::Antigravity => &[PRE_TEXT_KEYS, ANTIGRAVITY_PRE_EXTRA_TEXT_KEYS],
-            AiHookTool::Grok => &[PRE_TEXT_KEYS, GROK_PRE_EXTRA_TEXT_KEYS],
             AiHookTool::Windsurf => &[PRE_TEXT_KEYS, WINDSURF_PRE_EXTRA_TEXT_KEYS],
             AiHookTool::ClaudeCode
             | AiHookTool::Codex
             | AiHookTool::Copilot
             | AiHookTool::Cursor
-            | AiHookTool::Opencode => &[PRE_TEXT_KEYS, PRE_EDIT_TEXT_KEYS],
+            | AiHookTool::Grok
+            | AiHookTool::Opencode => &[PRE_TEXT_KEYS],
         };
     }
 
@@ -667,19 +924,24 @@ fn priority_text_key_sets(post: bool, tool: AiHookTool) -> &'static [&'static [&
     }
 }
 
-fn grab_strings_for_keys_deep<'a>(v: &'a Value, keys: &[&str], acc: &mut HookTexts<'a>) {
+fn grab_strings_for_keys_deep<'a>(
+    v: &'a Value,
+    keys: &[&str],
+    push: &mut impl FnMut(&'a Value, &mut HookTexts<'a>),
+    acc: &mut HookTexts<'a>,
+) {
     match v {
         Value::Object(map) => {
             for (k, val) in map {
                 if keys.iter().any(|x| x == &k.as_str()) {
-                    push_strings_from_value(val, acc);
+                    push(val, acc);
                 }
-                grab_strings_for_keys_deep(val, keys, acc);
+                grab_strings_for_keys_deep(val, keys, push, acc);
             }
         }
         Value::Array(a) => {
             for i in a {
-                grab_strings_for_keys_deep(i, keys, acc);
+                grab_strings_for_keys_deep(i, keys, push, acc);
             }
         }
         _ => {}
@@ -703,33 +965,35 @@ fn push_strings_from_value<'a>(v: &'a Value, acc: &mut HookTexts<'a>) {
     }
 }
 
-/// Pushes every string in an argument envelope except edit-pair text:
-/// applied edits are already in the edited file body (keeping its inline
-/// suppressions), and unapplied ones push their new text separately.
-fn push_envelope_strings<'a>(v: &'a Value, acc: &mut HookTexts<'a>) {
+/// Pushes every string in an argument envelope except values handled
+/// elsewhere: path arguments that named a file read for the scan, and
+/// edit-pair text (applied edits are in the edited file body, keeping its
+/// inline suppressions; unapplied ones push their text separately).
+fn push_envelope_strings<'a>(
+    tool: AiHookTool,
+    v: &'a Value,
+    read_paths: &HashSet<String>,
+    acc: &mut HookTexts<'a>,
+) {
     match v {
-        Value::String(s) => acc.push(s),
-        Value::Array(items) => {
-            for item in items {
-                push_envelope_strings(item, acc);
-            }
-        }
         Value::Object(map) => {
-            // Only a complete string pair is an edit (see collect_text_edits);
-            // a lone or non-string `new_str` is ordinary argument text.
-            let is_edit_pair = |old: &str, new: &str| {
-                map.get(old).is_some_and(Value::is_string)
-                    && map.get(new).is_some_and(Value::is_string)
-            };
+            let pair_keys: Vec<&str> = edit_pairs(map)
+                .flat_map(|(old_key, new_key, _, _)| [old_key, new_key])
+                .collect();
             for (key, val) in map {
-                let edit_text = EDIT_PAIR_KEYS
-                    .iter()
-                    .any(|(old, new)| (key == old || key == new) && is_edit_pair(old, new));
-                if !edit_text {
-                    push_envelope_strings(val, acc);
+                let read_path = is_file_body_path_key(tool, key)
+                    && val.as_str().is_some_and(|path| read_paths.contains(path));
+                if !read_path && !pair_keys.contains(&key.as_str()) {
+                    push_envelope_strings(tool, val, read_paths, acc);
                 }
             }
         }
+        Value::Array(items) => {
+            for item in items {
+                push_envelope_strings(tool, item, read_paths, acc);
+            }
+        }
+        Value::String(s) => acc.push(s),
         _ => {}
     }
 }
@@ -871,7 +1135,7 @@ mod tests {
             hook_body_from_stdin(AiHookTool::Opencode, false, &stdin, dir.path(), dir.path())
                 .unwrap();
         assert!(hook.truncated);
-        assert!(!hook.body.contains(&big));
+        assert!(!hook.joined_text().contains(&big));
 
         // One oversized string overflows on its own, whatever follows it, so
         // the same write is judged alike for every tool.
@@ -908,7 +1172,7 @@ mod tests {
             hook_body_from_stdin(AiHookTool::Opencode, false, &stdin, dir.path(), dir.path())
                 .unwrap();
         assert!(!hook.truncated);
-        assert!(hook.body.contains("dedup-tail-marker"));
+        assert!(hook.joined_text().contains("dedup-tail-marker"));
     }
 
     #[test]
@@ -925,16 +1189,16 @@ mod tests {
             hook_body_from_stdin(AiHookTool::Opencode, false, &stdin, dir.path(), dir.path())
                 .unwrap();
         assert!(!hook.truncated);
-        assert!(hook.body.contains("edit-arg-marker"));
+        assert!(hook.joined_text().contains("edit-arg-marker"));
 
         // A payload that repeats the file body (Cursor `beforeReadFile`
         // sends it as `content`) is covered by the file scan.
         let body = std::fs::read_to_string(&file).unwrap();
-        let stdin = serde_json::json!({ "file_path": file, "content": body }).to_string();
+        let stdin = serde_json::json!({ "hook_event_name": "beforeReadFile", "file_path": file, "content": body }).to_string();
         let hook = hook_body_from_stdin(AiHookTool::Cursor, false, &stdin, dir.path(), dir.path())
             .unwrap();
         assert!(!hook.truncated);
-        assert_eq!(hook.body.matches(&body).count(), 1);
+        assert_eq!(hook.joined_text().matches(&body).count(), 1);
     }
 
     #[test]
@@ -1670,6 +1934,7 @@ mod tests {
         let repo = repo_with_file(&format!("{directive}\nTOKEN=placeholder\n"));
         let token = synthetic_github_token();
         let stdin = serde_json::json!({
+            "tool_name": "Edit",
             "tool_input": {
                 "file_path": "app.txt",
                 "old_string": "placeholder",
@@ -1689,9 +1954,11 @@ mod tests {
     fn pre_edit_replace_all_and_first_match_semantics() {
         let repo = repo_with_file("x x\n");
         let first = serde_json::json!({
+            "tool_name": "Edit",
             "tool_input": { "file_path": "app.txt", "old_string": "x", "new_string": "y" }
         });
         let all = serde_json::json!({
+            "tool_name": "Edit",
             "tool_input": {
                 "file_path": "app.txt",
                 "old_string": "x",
@@ -1732,6 +1999,7 @@ mod tests {
         let repo = repo_with_file("clean body\n");
         let token = synthetic_github_token();
         let stdin = serde_json::json!({
+            "tool_name": "Edit",
             "tool_input": {
                 "file_path": "app.txt",
                 "old_string": "not-in-file",
@@ -1753,6 +2021,7 @@ mod tests {
         std::fs::write(outside.path().join("app.txt"), "old-edit-marker\n").expect("write");
         let token = synthetic_github_token();
         let stdin = serde_json::json!({
+            "tool_name": "Edit",
             "tool_input": {
                 "file_path": outside.path().join("app.txt"),
                 "old_string": "old-edit-marker",
@@ -1763,7 +2032,8 @@ mod tests {
         let (display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
 
         assert_eq!(display, "<claude-hook>");
-        assert_eq!(body, token);
+        assert!(body.starts_with(&format!("{token}\n---\n")), "{body}");
+        assert!(!body.contains("old-edit-marker"), "{body}");
     }
 
     #[test]
@@ -1798,6 +2068,7 @@ mod tests {
         // 10k matches x ~1 KiB growth is far past the MAX_HOOK_TEXT_BYTES cap.
         let new = format!("{}{token}", "b".repeat(1024));
         let stdin = serde_json::json!({
+            "tool_name": "Edit",
             "tool_input": {
                 "file_path": "app.txt",
                 "old_string": "a",
@@ -1852,6 +2123,7 @@ mod tests {
         std::fs::write(repo.path().join("decoy.txt"), "placeholder\n").expect("write decoy");
         let token = synthetic_github_token();
         let stdin = serde_json::json!({
+            "tool_name": "Edit",
             "tool_input": {
                 "file_path": "app.txt",
                 "backup_path": "decoy.txt",
@@ -1950,6 +2222,7 @@ mod tests {
         std::fs::write(repo.path().join("a.txt"), "shared\n").expect("write a");
         std::fs::write(repo.path().join("b.txt"), "shared\n").expect("write b");
         let stdin = serde_json::json!({
+            "tool_name": "multi_replace_string_in_file",
             "tool_input": {
                 "replacements": [
                     { "filePath": "a.txt", "oldString": "shared", "newString": "a-marker" },
@@ -2135,6 +2408,500 @@ mod tests {
     }
 
     #[test]
+    fn object_argument_envelopes_are_scanned_next_to_a_file_read() {
+        // Reading `app.txt` disables the large-string fallback, so every other
+        // argument must come from the envelope scan.
+        let repo = repo_with_file("clean body\n");
+        let token = synthetic_github_token();
+        let payloads = [
+            (
+                AiHookTool::ClaudeCode,
+                serde_json::json!({
+                    "tool_name": "mcp__notes__append",
+                    "tool_input": { "path": "app.txt", "body": token }
+                }),
+            ),
+            (
+                AiHookTool::Copilot,
+                serde_json::json!({
+                    "tool_name": "insert_edit_into_file",
+                    "tool_input": { "filePath": "app.txt", "code": token, "explanation": "x" }
+                }),
+            ),
+            (
+                AiHookTool::Grok,
+                serde_json::json!({
+                    "toolName": "custom",
+                    "toolInput": { "file_path": "app.txt", "payload": { "nested": token } }
+                }),
+            ),
+        ];
+
+        for (tool, stdin) in &payloads {
+            let (display, body) = pre_body(*tool, repo.path(), stdin);
+            assert_eq!(display, "app.txt", "{tool:?}");
+            assert!(body.contains(&token), "{tool:?}: {body}");
+            assert!(
+                !body.contains("---\napp.txt"),
+                "paths are not scanned as text: {body}"
+            );
+        }
+    }
+
+    /// Text of the segment scanned under `label`.
+    fn segment<'h>(hook: &'h HookBody, label: &str) -> &'h str {
+        hook.segments
+            .iter()
+            .find(|segment| segment.label == label)
+            .map(|segment| segment.text.as_str())
+            .unwrap_or_else(|| panic!("no {label} segment in {hook:?}"))
+    }
+
+    fn pre_hook(tool: AiHookTool, repo: &Path, stdin: &serde_json::Value) -> HookBody {
+        hook_body_from_stdin(tool, false, &stdin.to_string(), repo, repo).unwrap()
+    }
+
+    #[test]
+    fn only_text_written_to_a_file_is_scanned_under_its_path() {
+        let repo = repo_with_file("clean body\n");
+        let token = synthetic_github_token();
+
+        // An argument sent elsewhere is payload text, even next to a file read,
+        // so a path allowlist for that file cannot cover it.
+        let mcp = pre_hook(
+            AiHookTool::ClaudeCode,
+            repo.path(),
+            &serde_json::json!({
+                "tool_name": "mcp__notes__append",
+                "tool_input": { "path": "app.txt", "body": token }
+            }),
+        );
+        assert!(!segment(&mcp, "app.txt").contains(&token), "{mcp:?}");
+        assert!(segment(&mcp, "<claude-hook>").contains(&token), "{mcp:?}");
+
+        // Text written to the file is scanned with it, under its path.
+        let write = pre_hook(
+            AiHookTool::ClaudeCode,
+            repo.path(),
+            &serde_json::json!({
+                "tool_name": "Write",
+                "tool_input": { "file_path": "app.txt", "content": token, "note": token }
+            }),
+        );
+        assert!(segment(&write, "app.txt").contains(&token), "{write:?}");
+        // An equal string under another key is still payload text.
+        assert!(
+            segment(&write, "<claude-hook>").contains(&token),
+            "{write:?}"
+        );
+
+        // Unread path values are ordinary argument text.
+        let get = pre_hook(
+            AiHookTool::ClaudeCode,
+            repo.path(),
+            &serde_json::json!({
+                "tool_name": "mcp__http__get",
+                "tool_input": { "method": "GET", "path": format!("/items?token={token}") }
+            }),
+        );
+        assert!(segment(&get, "<claude-hook>").contains(&token), "{get:?}");
+    }
+
+    #[test]
+    fn each_file_is_scanned_under_its_own_path() {
+        let repo = tempdir().expect("temp repo");
+        std::fs::write(repo.path().join("a.txt"), "shared\n").expect("write a");
+        std::fs::write(repo.path().join("b.txt"), "shared\n").expect("write b");
+        let hook = pre_hook(
+            AiHookTool::Copilot,
+            repo.path(),
+            &serde_json::json!({
+                "tool_name": "multi_replace_string_in_file",
+                "tool_input": {
+                    "replacements": [
+                        { "filePath": "a.txt", "oldString": "shared", "newString": "a-marker" },
+                        { "filePath": "b.txt", "oldString": "shared", "newString": "b-marker" }
+                    ]
+                }
+            }),
+        );
+
+        assert_eq!(hook.display, "<copilot-hook>");
+        assert_eq!(hook.segments.len(), 2, "{hook:?}");
+        assert!(segment(&hook, "a.txt").contains("a-marker"), "{hook:?}");
+        assert!(segment(&hook, "b.txt").contains("b-marker"), "{hook:?}");
+    }
+
+    #[test]
+    fn only_local_write_tools_scan_their_text_under_the_file_path() {
+        let repo = repo_with_file("API=placeholder\n");
+        let token = synthetic_github_token();
+
+        // An MCP tool naming a local path still sends its text elsewhere: no
+        // edit is applied and nothing is scanned under the file's path.
+        for tool_input in [
+            serde_json::json!({ "owner": "o", "repo": "r", "path": "app.txt", "content": token }),
+            serde_json::json!({ "attachment_path": "app.txt", "messages": [{ "content": token }] }),
+            serde_json::json!({ "path": "app.txt", "old_string": "placeholder", "new_string": token }),
+        ] {
+            let hook = pre_hook(
+                AiHookTool::ClaudeCode,
+                repo.path(),
+                &serde_json::json!({
+                    "tool_name": "mcp__github__create_or_update_file",
+                    "tool_input": tool_input
+                }),
+            );
+            assert!(!segment(&hook, "app.txt").contains(&token), "{hook:?}");
+            assert!(segment(&hook, "<claude-hook>").contains(&token), "{hook:?}");
+        }
+
+        // Local write tools of other editors keep their text with the file.
+        let writes = [
+            (
+                AiHookTool::Copilot,
+                serde_json::json!({
+                    "tool_name": "insert_edit_into_file",
+                    "tool_input": { "filePath": "app.txt", "code": token, "explanation": "x" }
+                }),
+            ),
+            (
+                AiHookTool::Antigravity,
+                serde_json::json!({
+                    "toolCall": {
+                        "name": "write_to_file",
+                        "args": { "TargetFile": "app.txt", "CodeContent": token }
+                    }
+                }),
+            ),
+            (
+                AiHookTool::Antigravity,
+                serde_json::json!({
+                    "toolCall": {
+                        "name": "replace_file_content",
+                        "args": {
+                            "TargetFile": "app.txt",
+                            "ReplacementChunks": [
+                                { "TargetContent": "placeholder", "ReplacementContent": token }
+                            ]
+                        }
+                    }
+                }),
+            ),
+        ];
+        for (tool, stdin) in &writes {
+            let hook = pre_hook(*tool, repo.path(), stdin);
+            assert!(segment(&hook, "app.txt").contains(&token), "{hook:?}");
+            assert!(
+                !hook
+                    .segments
+                    .iter()
+                    .any(|s| !s.file && s.text.contains(&token)),
+                "{hook:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_write_tools_are_matched_per_editor() {
+        let repo = repo_with_file("API=placeholder\n");
+        let token = synthetic_github_token();
+        let in_file = |tool: AiHookTool, stdin: serde_json::Value| {
+            let hook = pre_hook(tool, repo.path(), &stdin);
+            segment(&hook, "app.txt").contains(&token)
+        };
+
+        // Local writes keep their text with the file.
+        assert!(in_file(
+            AiHookTool::Grok,
+            serde_json::json!({
+                "toolName": "search_replace",
+                "toolInput": { "file_path": "app.txt", "old_string": "placeholder", "new_string": token }
+            })
+        ));
+        assert!(in_file(
+            AiHookTool::ClaudeCode,
+            serde_json::json!({
+                "tool_name": "mcp__filesystem__write_file",
+                "tool_input": { "path": "app.txt", "content": token }
+            })
+        ));
+        assert!(in_file(
+            AiHookTool::Opencode,
+            serde_json::json!({
+                "tool_name": "multiedit",
+                "tool_input": {
+                    "filePath": "app.txt",
+                    "edits": [{ "oldString": "placeholder", "newString": token }]
+                }
+            })
+        ));
+
+        // A bare MCP tool name from Cursor or another server is not a local
+        // write, whatever it is called.
+        assert!(!in_file(
+            AiHookTool::Cursor,
+            serde_json::json!({
+                "hook_event_name": "beforeMCPExecution",
+                "tool_name": "write",
+                "tool_input": { "path": "app.txt", "content": token }
+            })
+        ));
+        assert!(!in_file(
+            AiHookTool::ClaudeCode,
+            serde_json::json!({
+                "tool_name": "mcp__sandbox__edit_file",
+                "tool_input": {
+                    "path": "app.txt",
+                    "edits": [{ "oldText": "placeholder", "newText": token }]
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn an_inner_path_that_differs_from_the_outer_one_targets_no_file() {
+        let repo = repo_with_file("API=placeholder\n");
+        std::fs::write(repo.path().join("plain.txt"), "other\n").expect("write plain");
+        let token = synthetic_github_token();
+        let hook = pre_hook(
+            AiHookTool::Opencode,
+            repo.path(),
+            &serde_json::json!({
+                "tool_name": "multiedit",
+                "tool_input": {
+                    "filePath": "plain.txt",
+                    "edits": [
+                        { "filePath": "app.txt", "oldString": "placeholder", "newString": token }
+                    ]
+                }
+            }),
+        );
+
+        assert_eq!(segment(&hook, "app.txt"), "API=placeholder\n");
+        assert!(
+            segment(&hook, "<opencode-hook>").contains(&token),
+            "{hook:?}"
+        );
+    }
+
+    #[test]
+    fn windsurf_and_copilot_vscode_writes_apply_to_the_file() {
+        let token = synthetic_github_token();
+        let cases = [
+            (
+                AiHookTool::Windsurf,
+                serde_json::json!({
+                    "agent_action_name": "pre_write_code",
+                    "tool_info": {
+                        "file_path": "app.txt",
+                        "edits": [{ "old_string": "placeholder", "new_string": token }]
+                    }
+                }),
+            ),
+            (
+                AiHookTool::Copilot,
+                serde_json::json!({
+                    "tool_name": "replace_string_in_file",
+                    "tool_input": { "filePath": "app.txt", "oldString": "placeholder", "newString": token }
+                }),
+            ),
+        ];
+        for (tool, stdin) in &cases {
+            let repo = repo_with_file("API=placeholder\n");
+            let hook = pre_hook(*tool, repo.path(), stdin);
+            assert_eq!(
+                segment(&hook, "app.txt"),
+                format!("API={token}\n"),
+                "{tool:?}: {hook:?}"
+            );
+            assert_eq!(hook.segments.len(), 1, "{tool:?}: {hook:?}");
+        }
+    }
+
+    #[test]
+    fn post_output_of_a_single_file_read_is_scanned_under_its_path() {
+        let repo = repo_with_file("API=placeholder\n");
+        let hook = hook_body_from_stdin(
+            AiHookTool::ClaudeCode,
+            true,
+            &serde_json::json!({
+                "tool_name": "Read",
+                "tool_input": { "file_path": "app.txt" },
+                "tool_response": { "content": "1\tAPI=placeholder" }
+            })
+            .to_string(),
+            repo.path(),
+            repo.path(),
+        )
+        .unwrap();
+
+        assert_eq!(hook.segments.len(), 1, "{hook:?}");
+        assert!(
+            segment(&hook, "app.txt").contains("1\tAPI=placeholder"),
+            "{hook:?}"
+        );
+    }
+
+    #[test]
+    fn grok_edits_through_claude_compatible_hooks_are_local() {
+        let token = synthetic_github_token();
+        let repo = repo_with_file("API=placeholder\n");
+        let hook = pre_hook(
+            AiHookTool::ClaudeCode,
+            repo.path(),
+            &serde_json::json!({
+                "toolName": "search_replace",
+                "toolInput": { "file_path": "app.txt", "old_string": "placeholder", "new_string": token }
+            }),
+        );
+        assert_eq!(
+            segment(&hook, "app.txt"),
+            format!("API={token}\n"),
+            "{hook:?}"
+        );
+    }
+
+    #[test]
+    fn antigravity_replacements_are_applied_to_the_file() {
+        let token = synthetic_github_token();
+        let repo = repo_with_file(&format!("A={token}\nB=placeholder\n"));
+        let hook = pre_hook(
+            AiHookTool::Antigravity,
+            repo.path(),
+            &serde_json::json!({
+                "toolCall": {
+                    "name": "multi_replace_file_content",
+                    "args": {
+                        "TargetFile": "app.txt",
+                        "ReplacementChunks": [
+                            { "TargetContent": format!("A={token}"), "ReplacementContent": "A=${A}" }
+                        ]
+                    }
+                }
+            }),
+        );
+
+        // Removing the value scans the edited file, not the replaced text.
+        assert!(!hook.joined_text().contains(&token), "{hook:?}");
+        assert!(
+            segment(&hook, "app.txt").starts_with("A=${A}\n"),
+            "{hook:?}"
+        );
+    }
+
+    #[test]
+    fn file_segments_start_with_the_file_body() {
+        let repo = repo_with_file("line one\nline two\n");
+        let hook = pre_hook(
+            AiHookTool::ClaudeCode,
+            repo.path(),
+            &serde_json::json!({ "tool_name": "Read", "tool_input": { "file_path": "app.txt" } }),
+        );
+        assert_eq!(segment(&hook, "app.txt"), "line one\nline two\n");
+        assert!(hook.joined_text().starts_with("// ---- app.txt\nline one"));
+    }
+
+    #[test]
+    fn a_remote_edit_scans_its_old_text_but_a_file_edit_does_not() {
+        let token = synthetic_github_token();
+        let repo = tempdir().expect("temp repo");
+        let remote = pre_hook(
+            AiHookTool::ClaudeCode,
+            repo.path(),
+            &serde_json::json!({
+                "tool_name": "mcp__docs__replace",
+                "tool_input": { "doc_id": "d1", "old_str": token, "new_str": "x" }
+            }),
+        );
+        assert!(remote.joined_text().contains(&token), "{remote:?}");
+
+        let outside = tempdir().expect("outside dir");
+        let local = pre_hook(
+            AiHookTool::ClaudeCode,
+            repo.path(),
+            &serde_json::json!({
+                "tool_name": "Edit",
+                "tool_input": {
+                    "file_path": outside.path().join("missing.txt"),
+                    "old_string": token,
+                    "new_string": "x"
+                }
+            }),
+        );
+        assert!(!local.joined_text().contains(&token), "{local:?}");
+    }
+
+    #[test]
+    fn grok_edit_that_removes_a_finding_scans_the_edited_file_only() {
+        let token = synthetic_github_token();
+        let repo = repo_with_file(&format!("A={token}\n"));
+        let stdin = serde_json::json!({
+            "toolName": "search_replace",
+            "toolInput": { "file_path": "app.txt", "old_string": token, "new_string": "${A}" }
+        });
+
+        let (_display, body) = pre_body(AiHookTool::Grok, repo.path(), &stdin);
+
+        assert!(!body.contains(&token), "{body}");
+    }
+
+    #[test]
+    fn envelope_text_past_the_budget_marks_the_body_truncated() {
+        let token = synthetic_github_token();
+        let stdin = copilot_cli_payload(
+            "bash",
+            serde_json::json!({
+                "command": "a".repeat(MAX_HOOK_TEXT_BYTES),
+                "description": token
+            }),
+        );
+
+        let hook = hook_body_from_stdin(
+            AiHookTool::Copilot,
+            false,
+            &stdin.to_string(),
+            Path::new("."),
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert!(hook.truncated);
+    }
+
+    #[test]
+    fn multi_line_edits_apply_to_crlf_files() {
+        let token = synthetic_github_token();
+        let repo = repo_with_file("A=1\r\nB=placeholder\r\n");
+        let stdin = serde_json::json!({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": "app.txt",
+                "old_string": "A=1\nB=placeholder",
+                "new_string": format!("A=1\nB={token}")
+            }
+        });
+
+        let (_display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
+
+        assert!(body.contains(&format!("A=1\r\nB={token}\r\n")), "{body:?}");
+        assert_eq!(body.matches(&token).count(), 1, "{body:?}");
+
+        // Removing a value across lines scans the edited file, not the old text.
+        let repo = repo_with_file(&format!("A=1\r\nB={token}\r\n"));
+        let stdin = serde_json::json!({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": "app.txt",
+                "old_string": format!("A=1\nB={token}"),
+                "new_string": "A=1\nB=${B}"
+            }
+        });
+        let (_display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
+        assert!(!body.contains(&token), "{body:?}");
+    }
+
+    #[test]
     fn several_referenced_files_use_the_virtual_label() {
         let repo = tempdir().expect("temp repo");
         std::fs::create_dir_all(repo.path().join("fixtures")).expect("create fixtures");
@@ -2201,6 +2968,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(display, "<claude-hook>");
-        assert_eq!(body, "fallback prompt");
+        assert!(!body.contains("outside body"), "{body}");
+        // The unread path is ordinary argument text.
+        assert!(body.starts_with("fallback prompt\n---\n"), "{body}");
     }
 }
