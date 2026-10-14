@@ -20,10 +20,12 @@ pub(crate) fn parse_hook_payload(stdin: &str) -> serde_json::Result<Value> {
 }
 
 /// Replaces each top-level envelope string that holds a JSON object or array
-/// with the decoded value. Other strings (plain text, scalars) are left as is.
-pub(crate) fn decode_encoded_arguments(v: &mut Value) {
+/// with the decoded value and returns the keys that were decoded. Other
+/// strings (plain text, scalars) are left as is.
+pub(crate) fn decode_encoded_arguments(v: &mut Value) -> Vec<&'static str> {
+    let mut decoded_keys = Vec::new();
     let Some(map) = v.as_object_mut() else {
-        return;
+        return decoded_keys;
     };
     for key in ENCODED_ARGUMENT_KEYS {
         let Some(slot) = map.get_mut(*key) else {
@@ -34,8 +36,10 @@ pub(crate) fn decode_encoded_arguments(v: &mut Value) {
         };
         if let Ok(decoded @ (Value::Object(_) | Value::Array(_))) = serde_json::from_str(raw) {
             *slot = decoded;
+            decoded_keys.push(*key);
         }
     }
+    decoded_keys
 }
 
 #[cfg(test)]

@@ -253,9 +253,10 @@ pub fn stdin_to_hook_body(
     // Pre hooks look inside JSON-encoded argument envelopes (Copilot CLI
     // `toolArgs`) so paths, edits, and text keys there are found. Post hooks
     // keep the raw payload.
+    let mut decoded_keys = Vec::new();
     let decoded = (!post).then(|| {
         let mut decoded = raw.clone();
-        decode_encoded_arguments(&mut decoded);
+        decoded_keys = decode_encoded_arguments(&mut decoded);
         decoded
     });
     let v = decoded.as_ref().unwrap_or(&raw);
@@ -274,6 +275,12 @@ pub fn stdin_to_hook_body(
     text_priority_chunks(v, post, tool, &mut text_blobs);
     for edit in edits.iter().filter(|edit| !edit.applied) {
         push_hook_text(edit.new, &mut text_blobs, MAX_HOOK_TEXT_BYTES);
+    }
+    // A decoded envelope is the tool's whole argument list. Scan every value in
+    // it, so one matching key (or a file read) cannot hide the rest the way it
+    // disables the fallback below.
+    for key in &decoded_keys {
+        push_envelope_strings(&v[*key], &mut text_blobs);
     }
 
     // The fallback reads the raw payload: an encoded envelope is one long
@@ -576,6 +583,31 @@ fn push_strings_from_value(v: &Value, acc: &mut Vec<String>) {
         Value::Object(map) => {
             for val in map.values() {
                 push_strings_from_value(val, acc);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Pushes every string in a decoded argument envelope except edit-pair text:
+/// applied edits are already in the edited file body (keeping its inline
+/// suppressions), and unapplied ones push their new text separately.
+fn push_envelope_strings(v: &Value, acc: &mut Vec<String>) {
+    match v {
+        Value::String(s) => push_hook_text(s, acc, MAX_HOOK_TEXT_BYTES),
+        Value::Array(items) => {
+            for item in items {
+                push_envelope_strings(item, acc);
+            }
+        }
+        Value::Object(map) => {
+            for (key, val) in map {
+                let edit_text = EDIT_PAIR_KEYS
+                    .iter()
+                    .any(|(old, new)| key == old || key == new);
+                if !edit_text {
+                    push_envelope_strings(val, acc);
+                }
             }
         }
         _ => {}
@@ -1694,22 +1726,51 @@ mod tests {
 
         let (_display, body) = pre_body(AiHookTool::Copilot, Path::new("."), &stdin);
 
-        assert_eq!(body, token);
+        assert!(body.contains(&token), "{body}");
     }
 
     #[test]
-    fn long_stringified_envelope_still_reaches_the_raw_fallback() {
-        // No key inside matches a text key, so the raw envelope (with its key
-        // names) is scanned by the large-string fallback.
+    fn every_value_in_a_decoded_envelope_is_scanned() {
+        // A matching text key (`url`) or a file read (`path`) disables the
+        // large-string fallback, so the remaining values must still be scanned.
+        let repo = repo_with_file("clean body\n");
         let token = synthetic_github_token();
-        let stdin = copilot_cli_payload(
+        let fetch = copilot_cli_payload(
+            "web_fetch",
+            serde_json::json!({
+                "url": "https://example.com",
+                "headers": { "Authorization": format!("Bearer {token}") }
+            }),
+        );
+        let mcp = copilot_cli_payload(
             "mcp_tool",
-            serde_json::json!({ "api_token": token, "note": "n".repeat(60) }),
+            serde_json::json!({ "path": "app.txt", "message": token }),
         );
 
-        let (_display, body) = pre_body(AiHookTool::Copilot, Path::new("."), &stdin);
+        for stdin in [&fetch, &mcp] {
+            let (_display, body) = pre_body(AiHookTool::Copilot, repo.path(), stdin);
+            assert!(body.contains(&token), "{stdin}: {body}");
+        }
+    }
 
-        assert_eq!(body, stdin["toolArgs"].as_str().unwrap());
+    #[test]
+    fn decoded_envelope_scan_leaves_edit_text_to_the_edited_body() {
+        let directive = "# shk-ignore-next-line secret.github_token";
+        let repo = repo_with_file(&format!("{directive}\nTOKEN=placeholder\n"));
+        let token = synthetic_github_token();
+        let stdin = copilot_cli_payload(
+            "edit",
+            serde_json::json!({ "path": "app.txt", "old_str": "placeholder", "new_str": token }),
+        );
+
+        let (_display, body) = pre_body(AiHookTool::Copilot, repo.path(), &stdin);
+
+        // Only inside the edited body, under the file's suppression comment.
+        assert_eq!(body.matches(&token).count(), 1, "{body}");
+        assert!(
+            body.contains(&format!("{directive}\nTOKEN={token}\n")),
+            "{body}"
+        );
     }
 
     #[test]
