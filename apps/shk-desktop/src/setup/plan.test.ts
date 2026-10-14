@@ -50,6 +50,7 @@ function status(overrides: Partial<ProjectStatus> = {}): ProjectStatus {
       missingIgnorePatterns: [".env"],
       claudeDenyOk: false,
       claudeSandboxOk: false,
+      claudeHookMatcherOk: true,
       codexConfigOk: false,
       envApplicable: false,
       envOk: true,
@@ -177,6 +178,7 @@ describe("buildQuickSetupSteps", () => {
         ignoreOk: true,
         claudeDenyOk: true,
         claudeSandboxOk: true,
+        claudeHookMatcherOk: true,
         codexConfigOk: true,
       },
       npmHardening: {
@@ -237,9 +239,40 @@ describe("buildQuickSetupSteps", () => {
         ...status().doctor,
         claudeDenyOk: true,
         claudeSandboxOk: true,
+        claudeHookMatcherOk: true,
         codexConfigOk: true,
       },
       recommendedFixes: [fix("ai_hooks", { requiresPolicy: true })],
+    });
+
+    expect(aiSafetyReady(current)).toBe(false);
+    expect(buildQuickSetupSteps(current).find((step) => step.id === "ai")).toEqual({
+      id: "ai",
+      done: false,
+      pending: true,
+    });
+  });
+
+  it("keeps the AI step pending while the Claude Code hook matcher is outdated", () => {
+    const current = status({
+      hooks: {
+        preCommit: { installed: true, isGitRepo: true },
+        aiTools: [
+          {
+            tool: "claude-code",
+            configPath: "/workspace/demo/.claude/settings.json",
+            installed: true,
+          },
+        ],
+      },
+      doctor: {
+        ...status().doctor,
+        claudeDenyOk: true,
+        claudeSandboxOk: true,
+        claudeHookMatcherOk: false,
+        codexConfigOk: true,
+      },
+      recommendedFixes: [fix("ai_claude_hook_matcher", { requiresPolicy: true })],
     });
 
     expect(aiSafetyReady(current)).toBe(false);

@@ -126,6 +126,7 @@ pub struct DoctorStatus {
     pub missing_ignore_patterns: Vec<String>,
     pub claude_deny_ok: bool,
     pub claude_sandbox_ok: bool,
+    pub claude_hook_matcher_ok: bool,
     pub codex_config_ok: bool,
     pub env_applicable: bool,
     pub env_ok: bool,
@@ -1769,6 +1770,11 @@ fn validate_recommended_fixes(
                     anyhow::bail!("Claude sandbox fix requires shk.toml");
                 }
             }
+            "ai_claude_hook_matcher" => {
+                if !policy_exists {
+                    anyhow::bail!("Claude hook refresh requires shk.toml");
+                }
+            }
             "ai_codex_sandbox" => {
                 if !policy_exists {
                     anyhow::bail!("Codex sandbox fix requires shk.toml");
@@ -1842,6 +1848,20 @@ fn apply_recommended_fix(
             let mut ai_options = current_ai_hook_settings_options(root);
             ai_options.claude_sandbox = true;
             apply_ai_hook_settings(&root.display().to_string(), ai_options)
+        }
+        "ai_claude_hook_matcher" => {
+            if !policy_exists {
+                anyhow::bail!("Claude hook refresh requires shk.toml");
+            }
+            // Re-install only the Claude Code hooks; deny and sandbox settings
+            // are left as they are.
+            install_ai_hooks(
+                &root.display().to_string(),
+                InstallAiHooksOptions {
+                    tool: Some("claude-code".into()),
+                    ..desktop_default_install_ai_hooks_options()
+                },
+            )
         }
         "ai_codex_sandbox" => {
             if !policy_exists {
@@ -2457,6 +2477,15 @@ fn build_recommended_fixes(
             default_selected: true,
         });
     }
+    if policy_exists && !checks.claude.pre_tool_matcher_ok {
+        fixes.push(RecommendedFixDto {
+            id: "ai_claude_hook_matcher".into(),
+            severity: "warn".into(),
+            message: "Refresh outdated Claude Code managed hooks".into(),
+            requires_policy: true,
+            default_selected: true,
+        });
+    }
     if policy_exists
         && checks.codex.config_exists
         && (!checks.codex.sandbox_ok || !checks.codex.approval_ok)
@@ -2555,11 +2584,12 @@ fn build_doctor_status_from(checks: &ProjectCheckStatus) -> DoctorStatus {
             message: "Claude Code sandbox settings are incomplete".into(),
         });
     }
-    if checks.claude.settings_exists && !checks.claude.pre_tool_matcher_ok {
+    if !checks.claude.pre_tool_matcher_ok {
         issues.push(DoctorIssue {
             id: "ai_claude_hook_matcher".into(),
             severity: "warn".into(),
-            message: "Claude Code managed PreToolUse matcher is outdated — reinstall Claude Code hooks via Setup".into(),
+            message: "Claude Code managed PreToolUse matcher is outdated — refresh it via Setup"
+                .into(),
         });
     }
     if checks.codex.config_exists && !codex_config_ok {
@@ -2622,6 +2652,7 @@ fn build_doctor_status_from(checks: &ProjectCheckStatus) -> DoctorStatus {
         missing_ignore_patterns: checks.ignore.missing_patterns.clone(),
         claude_deny_ok: !checks.claude.settings_exists || checks.claude.deny_ok,
         claude_sandbox_ok: !checks.claude.settings_exists || checks.claude.sandbox_ok,
+        claude_hook_matcher_ok: checks.claude.pre_tool_matcher_ok,
         codex_config_ok,
         env_applicable: !checks.env_files.is_empty(),
         env_ok: env_encrypt_targets(&checks.env_files).is_empty(),
@@ -3548,34 +3579,69 @@ mod tests {
     }
 
     #[test]
-    fn doctor_status_reports_outdated_claude_pre_tool_matcher() {
+    fn desktop_outdated_claude_hook_matcher_is_reported_and_refreshed() {
         let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "").unwrap();
         fs::create_dir(dir.path().join(".claude")).unwrap();
-        let settings_path = dir.path().join(".claude/settings.json");
-        let settings = |matcher: &str| {
-            serde_json::json!({
-                "hooks": { "PreToolUse": [{ "_shk_managed": true, "matcher": matcher, "hooks": [] }] }
-            })
-            .to_string()
-        };
-        let has_issue = |status: &DoctorStatus| {
-            status
-                .issues
-                .iter()
-                .any(|issue| issue.id == "ai_claude_hook_matcher")
-        };
-
-        fs::write(&settings_path, settings("Read|Write|Bash|WebFetch|mcp__.*")).unwrap();
-        let status = build_doctor_status_from(&collect_project_check_status(dir.path()));
-        assert!(has_issue(&status), "{:?}", status.issues);
-
+        // Managed blocks as written before Edit coverage, plus a user deny
+        // entry the refresh must keep.
         fs::write(
-            &settings_path,
-            settings(crate::hooks::CLAUDE_PRE_TOOL_USE_MATCHER),
+            dir.path().join(".claude/settings.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "permissions": { "deny": ["Bash(custom:*)"] },
+                "hooks": { "PreToolUse": [{
+                    "_shk_managed": true,
+                    "matcher": "Read|Write|Bash|WebFetch|mcp__.*",
+                    "hooks": []
+                }] }
+            }))
+            .unwrap(),
         )
         .unwrap();
-        let status = build_doctor_status_from(&collect_project_check_status(dir.path()));
-        assert!(!has_issue(&status), "{:?}", status.issues);
+
+        let before = build_project_status(dir.path());
+        assert!(!before.doctor.claude_hook_matcher_ok, "{before:?}");
+        assert!(
+            before
+                .doctor
+                .issues
+                .iter()
+                .any(|issue| issue.id == "ai_claude_hook_matcher"),
+            "{:?}",
+            before.doctor.issues
+        );
+        assert!(
+            before
+                .recommended_fixes
+                .iter()
+                .any(|fix| fix.id == "ai_claude_hook_matcher"),
+            "{:?}",
+            before.recommended_fixes
+        );
+
+        let result = apply_recommended_fixes(
+            dir.path().to_str().unwrap(),
+            ApplyRecommendedFixesOptions {
+                fix_ids: vec!["ai_claude_hook_matcher".into()],
+                ignore_targets: Vec::new(),
+                env_targets: None,
+            },
+        )
+        .unwrap();
+        assert!(result.success, "{result:?}");
+
+        let after = build_project_status(dir.path());
+        assert!(after.doctor.claude_hook_matcher_ok, "{after:?}");
+        assert!(
+            !after
+                .recommended_fixes
+                .iter()
+                .any(|fix| fix.id == "ai_claude_hook_matcher"),
+            "{:?}",
+            after.recommended_fixes
+        );
+        let settings = fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
+        assert!(settings.contains("Bash(custom:*)"), "{settings}");
     }
 
     #[test]

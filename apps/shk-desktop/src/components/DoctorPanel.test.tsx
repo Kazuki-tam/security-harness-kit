@@ -13,6 +13,7 @@ function doctor(overrides: Partial<DoctorStatus> = {}): DoctorStatus {
     missingIgnorePatterns: [],
     claudeDenyOk: true,
     claudeSandboxOk: true,
+    claudeHookMatcherOk: true,
     codexConfigOk: true,
     envApplicable: true,
     envOk: false,

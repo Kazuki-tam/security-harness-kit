@@ -38,6 +38,7 @@ export function aiSafetyReady(status: ProjectStatus): boolean {
     hasManagedAiHooks(status) &&
     status.doctor.claudeDenyOk &&
     status.doctor.claudeSandboxOk &&
+    status.doctor.claudeHookMatcherOk &&
     status.doctor.codexConfigOk
   );
 }
@@ -125,6 +126,7 @@ export function buildQuickSetupSteps(status: ProjectStatus): QuickSetupStep[] {
         fixes.has("ai_hooks") ||
         fixes.has("ai_claude_deny") ||
         fixes.has("ai_claude_sandbox") ||
+        fixes.has("ai_claude_hook_matcher") ||
         fixes.has("ai_codex_sandbox"),
     },
     {

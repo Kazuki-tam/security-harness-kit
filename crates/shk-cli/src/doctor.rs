@@ -517,7 +517,7 @@ fn claude_pre_tool_matcher_ok(value: &Value) -> bool {
 }
 
 /// Advisory text for an outdated managed Claude Code `PreToolUse` matcher.
-const CLAUDE_PRE_TOOL_MATCHER_WARNING: &str = ".claude/settings.json has a shk-managed PreToolUse matcher that differs from the current one (older install or hand edit), so some tools may go unscanned; rerun `shk hooks install-ai --tool claude-code`";
+const CLAUDE_PRE_TOOL_MATCHER_WARNING: &str = ".claude/settings.json has a shk-managed PreToolUse matcher that differs from the current one (older install or hand edit), so some tools may go unscanned; rerun `shk hooks install-ai --tool claude-code` (with `--audit` or `--log-blocked` if the hooks were installed that way)";
 
 fn run_claude_permissions_check(root: &Path) {
     let status = collect_claude_permissions_status(root);
@@ -1787,6 +1787,9 @@ mod tests {
         .unwrap();
     }
 
+    /// Managed `PreToolUse` matcher written before Edit/MultiEdit/NotebookEdit coverage.
+    const LEGACY_CLAUDE_PRE_TOOL_MATCHER: &str = "Read|Write|Bash|WebFetch|mcp__.*";
+
     fn claude_pre_tool_settings(blocks: serde_json::Value) -> serde_json::Value {
         serde_json::json!({ "hooks": { "PreToolUse": blocks } })
     }
@@ -1818,7 +1821,7 @@ mod tests {
         for block in [
             serde_json::json!({
                 "_shk_managed": true,
-                "matcher": "Read|Write|Bash|WebFetch|mcp__.*",
+                "matcher": LEGACY_CLAUDE_PRE_TOOL_MATCHER,
                 "hooks": []
             }),
             serde_json::json!({ "_shk_managed": true, "hooks": [] }),
@@ -1856,7 +1859,7 @@ mod tests {
         let outdated = tempdir().unwrap();
         for (dir, matcher) in [
             (&current, crate::hooks::CLAUDE_PRE_TOOL_USE_MATCHER),
-            (&outdated, "Read|Write|Bash|WebFetch|mcp__.*"),
+            (&outdated, LEGACY_CLAUDE_PRE_TOOL_MATCHER),
         ] {
             write_claude_settings(
                 dir.path(),

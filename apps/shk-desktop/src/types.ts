@@ -55,6 +55,7 @@ export type DoctorStatus = {
   missingIgnorePatterns: string[];
   claudeDenyOk: boolean;
   claudeSandboxOk: boolean;
+  claudeHookMatcherOk: boolean;
   codexConfigOk: boolean;
   envApplicable: boolean;
   envOk: boolean;
