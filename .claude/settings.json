@@ -21,7 +21,7 @@
             "type": "command"
           }
         ],
-        "matcher": "Read|Write|Bash|WebFetch|mcp__.*"
+        "matcher": "Read|Write|Edit|MultiEdit|NotebookEdit|Bash|WebFetch|mcp__.*"
       }
     ],
     "UserPromptSubmit": [
