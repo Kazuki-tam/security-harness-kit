@@ -297,15 +297,31 @@ pub fn configure_ai_with_summaries(cwd: &Path, opts: ConfigureAiOptions) -> Resu
         AiTool::Windsurf,
     ] {
         let path = resolve_ai_config_path(tool, &cwd, opts.global)?;
+        // As in an all-tools install, OpenCode conflicts are reported and
+        // skipped rather than aborting halfway through the other tools.
+        let skip_conflicts = tool == AiTool::Opencode;
         if !opts.dry_run {
             let base = if opts.global {
                 dirs::home_dir().context("home directory not found")?
             } else {
                 cwd.clone()
             };
-            safety::ensure_write_path_within(&base, &path)?;
+            if let Err(err) = safety::ensure_write_path_within(&base, &path) {
+                if !skip_conflicts {
+                    return Err(err);
+                }
+                summaries.push(format!("{}: skipped OpenCode: {err:#}", path.display()));
+                continue;
+            }
         }
         if scan_hooks_enabled_for(&opts, tool) {
+            if skip_conflicts && is_unmanaged_opencode_plugin(&path)? {
+                summaries.push(format!(
+                    "{}: skipped OpenCode: not an shk-managed plugin (move it aside and rerun)",
+                    path.display()
+                ));
+                continue;
+            }
             let project_root = (!opts.global).then_some(cwd.as_path());
             let summary = apply_tool(&path, tool, install_opts, project_root)?;
             summaries.push(format!("{}: {}", path.display(), summary.trim()));
@@ -1337,6 +1353,13 @@ pub(crate) fn is_managed_opencode_plugin(content: &str) -> bool {
     content.starts_with(OPENCODE_MANAGED_HEADER)
 }
 
+/// True when `content` is exactly what this shk release installs. Git
+/// checkouts with `core.autocrlf` rewrite line endings; that alone is not a
+/// difference.
+pub(crate) fn is_current_opencode_plugin(content: &str) -> bool {
+    opencode_plugin_renderings().contains(&content.replace("\r\n", "\n"))
+}
+
 fn opencode_template_version() -> &'static str {
     OPENCODE_PLUGIN_TEMPLATE
         .lines()
@@ -1363,16 +1386,19 @@ fn apply_opencode(path: &Path, audit: bool, log_blocked: bool, dry_run: bool) ->
             path.display()
         );
     }
-    if !dry_run {
+    let rendered = render_opencode_plugin(audit, log_blocked);
+    let unchanged = fs::read(path).is_ok_and(|existing| existing == rendered.as_bytes());
+    if !dry_run && !unchanged {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
-        let rendered = render_opencode_plugin(audit, log_blocked);
         crate::fs_atomic::write_atomic(path, rendered.as_bytes())?;
     }
     Ok(format!(
         "{}managed OpenCode plugin (template={}, audit={audit}, logBlocked={})",
-        if dry_run {
+        if unchanged {
+            "unchanged "
+        } else if dry_run {
             "dry-run: would write "
         } else {
             "wrote "
@@ -1407,15 +1433,14 @@ fn remove_opencode_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
 /// worth surfacing even though the hook logic itself lives in shk.
 pub fn opencode_plugin_drift(root: &Path) -> Option<String> {
     let bytes = fs::read(root.join(OPENCODE_PLUGIN_REL_PATH)).ok()?;
-    // Git checkouts with `core.autocrlf` rewrite line endings; that alone is
-    // not drift. Invalid UTF-8 is, and the lossy decode never matches.
-    let content = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
+    // Invalid UTF-8 is drift: the lossy decode never matches.
+    let content = String::from_utf8_lossy(&bytes);
     if !is_managed_opencode_plugin(&content) {
         return Some(format!(
             "{OPENCODE_PLUGIN_REL_PATH} exists but is not shk-managed; `shk hooks install-ai --tool opencode` will not overwrite it"
         ));
     }
-    (!opencode_plugin_renderings().contains(&content)).then(|| {
+    (!is_current_opencode_plugin(&content)).then(|| {
         format!(
             "{OPENCODE_PLUGIN_REL_PATH} differs from the shk template (modified or stale); rerun `shk hooks install-ai --tool opencode`"
         )
@@ -1905,10 +1930,13 @@ mod tests {
     fn opencode_plugin_renders_without_placeholders_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".opencode/plugins/shk-security.js");
-        for _ in 0..2 {
-            apply_opencode(&path, false, true, false).unwrap();
-        }
+        let first = apply_opencode(&path, false, true, false).unwrap();
+        assert!(first.starts_with("wrote "), "{first}");
+        let second = apply_opencode(&path, false, true, false).unwrap();
+        assert!(second.starts_with("unchanged "), "{second}");
         let body = fs::read_to_string(&path).unwrap();
+        assert!(is_current_opencode_plugin(&body.replace('\n', "\r\n")));
+        assert!(!is_current_opencode_plugin(&format!("{body}// edited\n")));
         assert!(body.starts_with(OPENCODE_MANAGED_HEADER), "{body}");
         assert!(!body.contains("__SHK_"), "{body}");
         assert!(body.contains("--hook-mode opencode"), "{body}");
@@ -2514,6 +2542,51 @@ sandbox_mode = "danger-full-access"
         assert_eq!(root["hooks"]["PostToolUse"].as_array().unwrap().len(), 1);
         assert_eq!(root["permissions"]["deny"][0], "Bash(rm -rf *)");
         assert_eq!(root["sandbox"]["enabled"], true);
+    }
+
+    #[test]
+    fn configure_ai_skips_an_unmanaged_opencode_plugin_and_configures_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = dir.path().join(OPENCODE_PLUGIN_REL_PATH);
+        fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        fs::write(&plugin, "export default { id: \"mine\" }\n").unwrap();
+
+        let summaries = configure_ai_with_summaries(
+            dir.path(),
+            ConfigureAiOptions {
+                audit: false,
+                log_blocked: false,
+                dry_run: false,
+                global: false,
+                fail_closed: false,
+                scan_hooks_claude_code: false,
+                scan_hooks_cursor: false,
+                scan_hooks_codex: false,
+                scan_hooks_copilot: false,
+                scan_hooks_antigravity: false,
+                scan_hooks_grok: false,
+                scan_hooks_opencode: true,
+                scan_hooks_windsurf: true,
+                claude_deny: false,
+                claude_sandbox: false,
+                codex_sandbox: false,
+            },
+        )
+        .unwrap();
+
+        assert!(
+            summaries
+                .iter()
+                .any(|line| line.contains("skipped OpenCode")),
+            "{summaries:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&plugin).unwrap(),
+            "export default { id: \"mine\" }\n"
+        );
+        // Windsurf comes after OpenCode and is still configured.
+        let windsurf = fs::read_to_string(dir.path().join(".windsurf/hooks.json")).unwrap();
+        assert!(windsurf.contains("--hook-mode windsurf"), "{windsurf}");
     }
 
     #[test]

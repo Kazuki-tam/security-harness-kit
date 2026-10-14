@@ -9,7 +9,7 @@ const { default: plugin } = await import(
 // Test generated helpers without adding public exports to the installed plugin.
 const source = readFileSync(join(DIR, ".opencode", "plugins", "shk-security.js"), "utf8");
 const helpers = join(DIR, "contract-helpers.mjs");
-writeFileSync(helpers, source + "\nexport { verdict, guard, runShk, searchDirs, CONFIG };\n");
+writeFileSync(helpers, source + "\nexport { verdict, guard, runShk, searchDirs, resolveBin, missingReason, CONFIG };\n");
 const internals = await import(pathToFileURL(helpers).href);
 const SECRET_FILE = join(DIR, "secret.txt");
 const CLEAN_FILE = join(DIR, "clean.txt");
@@ -66,6 +66,8 @@ const call = (input) => ({
 });
 await rejects(() => hooks["tool.execute.before"](call({ filePath: SECRET_FILE })), blockPattern);
 if (!missing) await hooks["tool.execute.before"](call({ filePath: CLEAN_FILE }));
+// A lone surrogate must not turn the payload into JSON that shk rejects.
+if (!missing) await hooks["tool.execute.before"](call({ filePath: CLEAN_FILE, note: "\uD800" }));
 // Content past the old 512 KiB plugin-side cut must still be scanned.
 const bigWrite = {
   ...call({ filePath: join(DIR, "out.txt"), content: "a".repeat(600 * 1024) + "\n" + SECRET }),
@@ -245,10 +247,29 @@ assert.equal(
   (await internals.runShk(join(DIR, "missing-directory"), "pre", "{}")).kind,
   "no-directory",
 );
+writeFileSync(
+  join(DIR, "scan"),
+  'process.stdin.resume(); process.stdout.write("x".repeat(2 * 1024 * 1024));',
+);
+const noisy = await internals.runShk(DIR, "pre", "{}");
+assert.equal(noisy.kind, "too-much-output");
+assert.equal(internals.verdict(noisy, true).block, true);
+// A clean blocking allow ignores stderr notices; post allows keep them.
+const allowWithNotice = { kind: "exit", code: 0, stdout: '{"decision":"allow"}', stderr: "notice" };
+internals.CONFIG.audit = false;
+assert.deepEqual(internals.verdict(allowWithNotice, true), { block: false, clean: true });
+assert.equal(internals.verdict(allowWithNotice, false).reason, "notice");
 writeFileSync(join(DIR, "scan"), "process.stdin.resume(); setInterval(() => {}, 1000);");
 internals.CONFIG.timeoutMs = 100;
 assert.equal((await internals.runShk(DIR, "pre", "{}")).kind, "timeout");
 process.env.CARGO_HOME = "relative-cargo-home";
 assert(!internals.searchDirs().some((dir) => dir.startsWith("relative-cargo-home")));
+if (process.platform === "win32")
+  assert(!internals.searchDirs().some((dir) => dir.startsWith("/")), "no Unix prefixes on Windows");
+// A relative SHK_BIN would resolve inside the project: treat it as missing.
+process.env.SHK_BIN = "shk";
+const fresh = await import(pathToFileURL(helpers).href + "?relative-shk-bin");
+assert.equal(fresh.resolveBin(), undefined);
+assert.match(fresh.missingReason(), /absolute path/);
 console.error = originalConsoleError;
 console.log("ok");

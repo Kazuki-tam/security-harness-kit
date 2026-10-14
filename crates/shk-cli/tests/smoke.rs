@@ -6959,7 +6959,10 @@ fn hooks_install_ai_opencode_writes_managed_plugin_and_is_idempotent() {
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
     let plugin = dir.path().join(".opencode/plugins/shk-security.js");
 
-    for _ in 0..2 {
+    for expected in [
+        "wrote managed OpenCode plugin",
+        "unchanged managed OpenCode plugin",
+    ] {
         let out = Command::new(shk_bin())
             .args(["hooks", "install-ai", "--tool", "opencode", "--log-blocked"])
             .current_dir(dir.path())
@@ -6972,7 +6975,7 @@ fn hooks_install_ai_opencode_writes_managed_plugin_and_is_idempotent() {
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(
-            String::from_utf8_lossy(&out.stdout).contains("wrote managed OpenCode plugin"),
+            String::from_utf8_lossy(&out.stdout).contains(expected),
             "{}",
             String::from_utf8_lossy(&out.stdout)
         );

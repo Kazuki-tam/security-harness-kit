@@ -2378,7 +2378,9 @@ fn ai_tool_statuses(root: &Path, global: bool) -> Vec<AiHookToolStatus> {
 
 fn has_managed_hook_marker(tool: AiTool, content: &str) -> bool {
     if tool == AiTool::Opencode {
-        return crate::hooks::is_managed_opencode_plugin(content);
+        // The plugin is executable code: a hand-edited or stale copy is not
+        // shk's hook, so the desktop offers to reinstall it.
+        return crate::hooks::is_current_opencode_plugin(content);
     }
     content.contains(MANAGED_MARKER_JSON)
         || content.contains(MANAGED_MARKER_SH)
