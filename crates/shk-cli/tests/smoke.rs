@@ -7032,8 +7032,40 @@ fn hooks_install_ai_opencode_writes_managed_plugin_and_is_idempotent() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{out:?}");
     assert!(stdout.contains("skipped OpenCode"), "{stdout}");
-    assert!(dir.path().join(".windsurf/hooks.json").is_file(), "{stdout}");
+    assert!(
+        dir.path().join(".windsurf/hooks.json").is_file(),
+        "{stdout}"
+    );
     assert_eq!(std::fs::read_to_string(&plugin).unwrap(), unmanaged);
+}
+
+#[test]
+#[cfg(unix)]
+fn opencode_install_rejects_symlinked_plugin_and_parent() {
+    for link_parent in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+        let original = "// shk-managed: test sentinel\n";
+        let target = outside.path().join("shk-security.js");
+        std::fs::write(&target, original).unwrap();
+        let plugins = dir.path().join(".opencode/plugins");
+        if link_parent {
+            std::fs::create_dir_all(plugins.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(outside.path(), &plugins).unwrap();
+        } else {
+            std::fs::create_dir_all(&plugins).unwrap();
+            std::os::unix::fs::symlink(&target, plugins.join("shk-security.js")).unwrap();
+        }
+        let out = Command::new(shk_bin())
+            .args(["hooks", "install-ai", "--tool", "opencode"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{out:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("symbolic link"));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), original);
+    }
 }
 
 #[test]
@@ -7153,6 +7185,28 @@ fn hook_mode_opencode_denies_pre_tool_use_and_blocks_user_prompt() {
     let prompt_stdout: serde_json::Value =
         serde_json::from_slice(&prompt.stdout).expect("prompt stdout json");
     assert_eq!(prompt_stdout["decision"], "block");
+
+    // Text past the scan budget is never allowed through unscanned.
+    let oversized = run(
+        serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "mcp_tool",
+            "tool_input": { "aaa": "a".repeat(3 * 1024 * 1024), "zzz": secret },
+            "cwd": root
+        })
+        .to_string(),
+        &[],
+    );
+    assert_eq!(oversized.status.code(), Some(2), "{oversized:?}");
+    let oversized_stdout: serde_json::Value =
+        serde_json::from_slice(&oversized.stdout).expect("oversized stdout json");
+    assert_eq!(oversized_stdout["decision"], "deny");
+    assert!(
+        oversized_stdout["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("too large to scan")),
+        "{oversized_stdout}"
+    );
 }
 
 /// Runs the generated OpenCode plugin under Node with fake V2 (`setup`) and
@@ -7192,77 +7246,7 @@ fn opencode_plugin_contract_under_node() {
         .unwrap_or(&project_text)
         .to_string();
     let harness = dir.path().join("harness.mjs");
-    std::fs::write(
-        &harness,
-        r#"
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
-const DIR = process.env.SHK_CONTRACT_DIR;
-const { default: plugin } = await import(pathToFileURL(join(DIR, ".opencode", "plugins", "shk-security.js")).href);
-const SECRET_FILE = join(DIR, "secret.txt");
-const CLEAN_FILE = join(DIR, "clean.txt");
-const SECRET = process.env.SHK_CONTRACT_SECRET;
-const missing = process.env.SHK_CONTRACT_MISSING === "1";
-const blockPattern = missing ? /not found/ : /shk security/;
-// Prompt hooks fail closed too: the notice names the real reason.
-const noticePattern = missing ? /^\[shk\] prompt blocked: .*not found/ : /^\[shk\] prompt blocked: .*sensitive content/;
-const fail = (msg) => { console.error("FAIL: " + msg); process.exit(1); };
-const rejects = async (fn, pattern) => {
-  try { await fn(); } catch (error) {
-    if (!pattern.test(String(error?.message))) fail(`unexpected error: ${error?.message}`);
-    return;
-  }
-  fail("expected rejection");
-};
-
-// --- V2 host ---
-const hooks = {};
-const ctx = {
-  location: { directory: DIR },
-  tool: { hook: async (name, cb) => { hooks["tool." + name] = cb; } },
-  session: { hook: async (name, cb) => { hooks["session." + name] = cb; } },
-};
-await plugin.setup(ctx);
-for (const key of ["tool.execute.before", "tool.execute.after", "session.prompt"]) {
-  if (typeof hooks[key] !== "function") fail(`V2 hook ${key} not registered`);
-}
-const call = (input) => ({ tool: "read", sessionID: "s", agent: "build", messageID: "m", id: "c", input });
-await rejects(() => hooks["tool.execute.before"](call({ filePath: SECRET_FILE })), blockPattern);
-if (!missing) await hooks["tool.execute.before"](call({ filePath: CLEAN_FILE }));
-// Content past the old 512 KiB plugin-side cut must still be scanned.
-const bigWrite = { ...call({ filePath: join(DIR, "out.txt"), content: "a".repeat(600 * 1024) + "\n" + SECRET }), tool: "write" };
-await rejects(() => hooks["tool.execute.before"](bigWrite), blockPattern);
-// An unrecognized payload shape fails closed instead of scanning an empty body.
-await rejects(() => hooks["tool.execute.before"]({ tool: "write", sessionID: "s", id: "c" }), /unsupported OpenCode hook payload/);
-await hooks["session.prompt"]({ sessionID: "s" });
-await hooks["tool.execute.after"]({ ...call({ command: "cat secret.txt" }), tool: "bash", status: "completed",
-  result: { output: SECRET, content: [] } });
-const prompt = { sessionID: "s", messageID: "m", prompt: { text: "use " + SECRET } };
-await hooks["session.prompt"](prompt);
-if (!noticePattern.test(prompt.prompt.text)) fail(`V2 prompt not rewritten as expected: ${prompt.prompt.text}`);
-if (prompt.prompt.text.includes(SECRET)) fail("V2 notice leaked the prompt text");
-const cleanPrompt = { sessionID: "s", messageID: "m", prompt: { text: "hello" } };
-await hooks["session.prompt"](cleanPrompt);
-// Without a decision the clean prompt is blocked too (fail closed); with shk present it passes untouched.
-if (!missing && cleanPrompt.prompt.text !== "hello") fail("clean V2 prompt was modified");
-if (missing && !noticePattern.test(cleanPrompt.prompt.text)) fail("clean V2 prompt was admitted without a decision");
-
-// --- V1 host ---
-const logs = [];
-const v1 = await plugin.server({ directory: DIR, worktree: DIR, client: { app: { log: async (entry) => { logs.push(entry); } } } });
-await rejects(() => v1["tool.execute.before"]({ tool: "read", sessionID: "s", callID: "c" }, { args: { filePath: SECRET_FILE } }), blockPattern);
-if (!missing) await v1["tool.execute.before"]({ tool: "read", sessionID: "s", callID: "c" }, { args: { filePath: CLEAN_FILE } });
-await v1["tool.execute.after"]({ tool: "bash", sessionID: "s", callID: "c", args: {} }, { title: "cat", output: SECRET, metadata: {} });
-await rejects(() => v1["tool.execute.before"]({ tool: "read", sessionID: "s", callID: "c" }, {}), /unsupported OpenCode hook payload/);
-await rejects(() => v1["chat.message"]({ sessionID: "s" }, {}), /unsupported OpenCode hook payload/);
-const parts = [{ type: "text", text: "use " + SECRET }];
-await rejects(() => v1["chat.message"]({ sessionID: "s" }, { message: {}, parts }), /prompt blocked/);
-if (!noticePattern.test(parts[0].text) || parts[0].text.includes(SECRET)) fail(`V1 prompt parts not scrubbed: ${parts[0].text}`);
-if (missing && !logs.some((entry) => /not found/.test(entry?.body?.message ?? ""))) fail("V1 host was not warned about the missing binary");
-console.log("ok");
-"#,
-    )
-    .unwrap();
+    std::fs::write(&harness, include_str!("fixtures/opencode-contract.mjs")).unwrap();
 
     for missing in [false, true] {
         let mut cmd = Command::new(&node);

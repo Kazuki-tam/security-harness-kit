@@ -233,6 +233,17 @@ pub fn extract_user_prompt(stdin: &str) -> Option<Cow<'_, str>> {
 }
 
 /// Returns display path (posix-ish relative to repo) + body content to scan.
+/// Text extracted from a hook payload for scanning.
+#[derive(Debug)]
+pub struct HookBody {
+    /// Display path for findings: the first referenced file, or the tool label.
+    pub display: String,
+    pub body: String,
+    /// Payload strings were left unscanned because the text budget ran out.
+    /// Blocking hooks must not allow such a payload.
+    pub truncated: bool,
+}
+
 pub fn stdin_to_hook_body(
     tool: AiHookTool,
     post: bool,
@@ -240,36 +251,70 @@ pub fn stdin_to_hook_body(
     cwd: &Path,
     repo_root: &Path,
 ) -> Result<(String, String)> {
+    hook_body_from_stdin(tool, post, stdin, cwd, repo_root).map(|hook| (hook.display, hook.body))
+}
+
+pub fn hook_body_from_stdin(
+    tool: AiHookTool,
+    post: bool,
+    stdin: &str,
+    cwd: &Path,
+    repo_root: &Path,
+) -> Result<HookBody> {
     let v: Value = serde_json::from_str(stdin).context("hook stdin must be valid JSON")?;
-    let mut blobs: Vec<String> = Vec::new();
+    let mut texts = HookTexts::default();
     let mut display: Option<String> = None;
 
-    if let Some((rel, txt)) = read_files_from_candidates(tool, &v, cwd, repo_root)? {
+    // Referenced files are scanned whole and do not spend the payload budget.
+    let file_text = read_files_from_candidates(tool, &v, cwd, repo_root)?.map(|(rel, txt)| {
         display = Some(rel);
-        blobs.push(txt);
+        txt
+    });
+
+    text_priority_chunks(&v, post, tool, &mut texts);
+
+    if texts.blobs.is_empty() && file_text.is_none() {
+        collect_large_strings(&v, &mut texts, 96);
     }
 
-    text_priority_chunks(&v, post, tool, &mut blobs);
-
-    if blobs.is_empty() {
-        collect_large_strings(&v, &mut blobs, 96, MAX_HOOK_TEXT_BYTES);
-    }
-    dedup_blobs(&mut blobs);
-
+    let blobs: Vec<String> = file_text.into_iter().chain(texts.blobs).collect();
     let body = if blobs.is_empty() {
         "{}".into()
     } else {
         blobs.join("\n---\n")
     };
 
-    let disp = display.unwrap_or_else(|| tool.virtual_path_label().to_string());
-
-    Ok((disp, body))
+    Ok(HookBody {
+        display: display.unwrap_or_else(|| tool.virtual_path_label().to_string()),
+        body,
+        truncated: texts.truncated,
+    })
 }
 
-fn dedup_blobs(blobs: &mut Vec<String>) {
-    let mut seen = HashSet::new();
-    blobs.retain(|s| seen.insert(s.clone()));
+/// Payload strings collected for scanning, deduplicated before they are
+/// charged against `MAX_HOOK_TEXT_BYTES` (the same string is often reachable
+/// through several keys).
+#[derive(Default)]
+struct HookTexts {
+    blobs: Vec<String>,
+    seen: HashSet<String>,
+    used: usize,
+    truncated: bool,
+}
+
+impl HookTexts {
+    fn push(&mut self, s: &str) {
+        if s.trim().is_empty() || self.seen.contains(s) {
+            return;
+        }
+        if self.used >= MAX_HOOK_TEXT_BYTES {
+            self.truncated = true;
+            return;
+        }
+        self.used += s.len();
+        self.seen.insert(s.to_owned());
+        self.blobs.push(s.to_owned());
+    }
 }
 
 fn rel_from_repo(repo_root: &Path, abs: &Path) -> String {
@@ -374,9 +419,9 @@ fn is_file_body_path_key(tool: AiHookTool, key: &str) -> bool {
         && (PATH_KEYS.iter().any(|pk| pk == &key) || key.to_ascii_lowercase().ends_with("path"))
 }
 
-fn text_priority_chunks(v: &Value, post: bool, tool: AiHookTool, blobs: &mut Vec<String>) {
+fn text_priority_chunks(v: &Value, post: bool, tool: AiHookTool, texts: &mut HookTexts) {
     for keys in priority_text_key_sets(post, tool) {
-        grab_strings_for_keys_deep(v, keys, blobs);
+        grab_strings_for_keys_deep(v, keys, texts);
     }
 }
 
@@ -403,7 +448,7 @@ fn priority_text_key_sets(post: bool, tool: AiHookTool) -> &'static [&'static [&
     }
 }
 
-fn grab_strings_for_keys_deep(v: &Value, keys: &[&str], acc: &mut Vec<String>) {
+fn grab_strings_for_keys_deep(v: &Value, keys: &[&str], acc: &mut HookTexts) {
     match v {
         Value::Object(map) => {
             for (k, val) in map {
@@ -422,9 +467,9 @@ fn grab_strings_for_keys_deep(v: &Value, keys: &[&str], acc: &mut Vec<String>) {
     }
 }
 
-fn push_strings_from_value(v: &Value, acc: &mut Vec<String>) {
+fn push_strings_from_value(v: &Value, acc: &mut HookTexts) {
     match v {
-        Value::String(s) => push_hook_text(s, acc, MAX_HOOK_TEXT_BYTES),
+        Value::String(s) => acc.push(s),
         Value::Array(items) => {
             for x in items {
                 push_strings_from_value(x, acc);
@@ -439,33 +484,21 @@ fn push_strings_from_value(v: &Value, acc: &mut Vec<String>) {
     }
 }
 
-fn push_hook_text(s: &str, acc: &mut Vec<String>, max_total_bytes: usize) {
-    if !s.trim().is_empty() && acc_chars_len(acc) < max_total_bytes {
-        acc.push(s.to_string());
-    }
-}
-
-fn collect_large_strings(v: &Value, acc: &mut Vec<String>, min_len: usize, max_total_bytes: usize) {
+fn collect_large_strings(v: &Value, acc: &mut HookTexts, min_len: usize) {
     match v {
-        Value::String(s) if s.len() >= min_len && acc_chars_len(acc) < max_total_bytes => {
-            push_hook_text(s, acc, max_total_bytes);
-        }
+        Value::String(s) if s.len() >= min_len => acc.push(s),
         Value::Object(map) => {
-            for (_k, val) in map {
-                collect_large_strings(val, acc, min_len, max_total_bytes);
+            for val in map.values() {
+                collect_large_strings(val, acc, min_len);
             }
         }
         Value::Array(a) => {
             for i in a {
-                collect_large_strings(i, acc, min_len, max_total_bytes);
+                collect_large_strings(i, acc, min_len);
             }
         }
         _ => {}
     }
-}
-
-fn acc_chars_len(acc: &[String]) -> usize {
-    acc.iter().map(|s| s.len()).sum()
 }
 
 #[cfg(test)]
@@ -535,6 +568,53 @@ mod tests {
         let (_disp, body) =
             stdin_to_hook_body(AiHookTool::Opencode, false, &mcp, dir.path(), dir.path()).unwrap();
         assert!(body.contains("opencode-mcp-marker"), "{body}");
+    }
+
+    #[test]
+    fn hook_body_reports_strings_left_out_by_the_text_budget() {
+        let dir = tempdir().unwrap();
+        let big = "a".repeat(MAX_HOOK_TEXT_BYTES + 1);
+        // Keys sort alphabetically, so `zzz` is visited after the big field.
+        let stdin = serde_json::json!({
+            "tool_name": "mcp_tool",
+            "tool_input": { "aaa": big, "zzz": "budget-tail-marker" }
+        })
+        .to_string();
+        let hook =
+            hook_body_from_stdin(AiHookTool::Opencode, false, &stdin, dir.path(), dir.path())
+                .unwrap();
+        assert!(hook.truncated);
+        assert!(!hook.body.contains("budget-tail-marker"));
+
+        // The same string reachable through two keys is charged once.
+        let half = "b".repeat(MAX_HOOK_TEXT_BYTES / 2 + 1);
+        let stdin = serde_json::json!({
+            "tool_name": "write",
+            "tool_input": { "content": half, "zzz": "dedup-tail-marker" }
+        })
+        .to_string();
+        let hook =
+            hook_body_from_stdin(AiHookTool::Opencode, false, &stdin, dir.path(), dir.path())
+                .unwrap();
+        assert!(!hook.truncated);
+        assert!(hook.body.contains("dedup-tail-marker"));
+    }
+
+    #[test]
+    fn referenced_file_does_not_spend_the_payload_budget() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("large.txt");
+        std::fs::write(&file, "c".repeat(MAX_HOOK_TEXT_BYTES + 1)).unwrap();
+        let stdin = serde_json::json!({
+            "tool_name": "edit",
+            "tool_input": { "filePath": file, "oldString": "c", "newString": "edit-arg-marker" }
+        })
+        .to_string();
+        let hook =
+            hook_body_from_stdin(AiHookTool::Opencode, false, &stdin, dir.path(), dir.path())
+                .unwrap();
+        assert!(!hook.truncated);
+        assert!(hook.body.contains("edit-arg-marker"));
     }
 
     #[test]

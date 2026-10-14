@@ -239,28 +239,35 @@ pub fn install_ai_with_summaries(
 
     for t in tools {
         let path = resolve_ai_config_path(t, &cwd, opts.global)?;
-        let installed = (|| {
-            if !opts.dry_run {
-                let base = if opts.global {
-                    dirs::home_dir().context("home directory not found")?
-                } else {
-                    cwd.clone()
-                };
-                safety::ensure_write_path_within(&base, &path)?;
+        // In an all-tools install, OpenCode conflicts the user has to resolve
+        // by hand are reported and skipped so the other tools still get
+        // installed: their own plugin at the managed path, or a path the write
+        // guard refuses (e.g. XDG_CONFIG_HOME outside the home directory).
+        // Any other error still aborts.
+        let skip_conflicts = maybe_tool.is_none() && t == AiTool::Opencode;
+        if !opts.dry_run {
+            let base = if opts.global {
+                dirs::home_dir().context("home directory not found")?
+            } else {
+                cwd.clone()
+            };
+            if let Err(err) = safety::ensure_write_path_within(&base, &path) {
+                if !skip_conflicts {
+                    return Err(err);
+                }
+                summaries.push(format!("{}: skipped OpenCode: {err:#}", path.display()));
+                continue;
             }
-            let project_root = (!opts.global).then_some(cwd.as_path());
-            apply_tool(&path, t, opts, project_root)
-        })();
-        let summary = match installed {
-            Ok(summary) => summary,
-            // The OpenCode plugin path may hold the user's own plugin, and its
-            // global path follows XDG_CONFIG_HOME, which can sit outside the
-            // home directory. Neither should stop an all-tools install halfway.
-            Err(err) if maybe_tool.is_none() && t == AiTool::Opencode => {
-                format!("skipped OpenCode: {err:#}")
-            }
-            Err(err) => return Err(err),
-        };
+        }
+        if skip_conflicts && is_unmanaged_opencode_plugin(&path)? {
+            summaries.push(format!(
+                "{}: skipped OpenCode: not an shk-managed plugin (move it aside and rerun)",
+                path.display()
+            ));
+            continue;
+        }
+        let project_root = (!opts.global).then_some(cwd.as_path());
+        let summary = apply_tool(&path, t, opts, project_root)?;
         summaries.push(format!("{}: {}", path.display(), summary.trim()));
     }
     Ok(summaries)
@@ -1338,16 +1345,23 @@ fn opencode_template_version() -> &'static str {
         .unwrap_or("?")
 }
 
+/// A file at the managed path without the managed header belongs to the user.
+fn is_unmanaged_opencode_plugin(path: &Path) -> Result<bool> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let existing = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    Ok(!is_managed_opencode_plugin(&String::from_utf8_lossy(
+        &existing,
+    )))
+}
+
 fn apply_opencode(path: &Path, audit: bool, log_blocked: bool, dry_run: bool) -> Result<String> {
-    if path.is_file() {
-        let existing =
-            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        if !is_managed_opencode_plugin(&existing) {
-            bail!(
-                "refusing to overwrite {}: it is not an shk-managed OpenCode plugin (move it aside and rerun)",
-                path.display()
-            );
-        }
+    if is_unmanaged_opencode_plugin(path)? {
+        bail!(
+            "refusing to overwrite {}: it is not an shk-managed OpenCode plugin (move it aside and rerun)",
+            path.display()
+        );
     }
     if !dry_run {
         if let Some(parent) = path.parent() {
@@ -1374,8 +1388,7 @@ fn remove_opencode_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
     if !path.is_file() {
         return Ok("no OpenCode plugin file".to_string());
     }
-    let existing = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    if !is_managed_opencode_plugin(&existing) {
+    if is_unmanaged_opencode_plugin(path)? {
         return Ok("left unmanaged OpenCode plugin untouched".to_string());
     }
     if !dry_run {
