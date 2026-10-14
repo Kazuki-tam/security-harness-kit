@@ -50,10 +50,12 @@ const PRE_TEXT_KEYS: &[&str] = &[
 // - Copilot CLI edit: old_str, new_str
 // - Copilot in VS Code replaceString, multiReplaceString `replacements[]`:
 //   oldString, newString
+// - Filesystem MCP server edit_file `edits[]`: oldText, newText
 const EDIT_PAIR_KEYS: &[(&str, &str)] = &[
     ("old_string", "new_string"),
     ("old_str", "new_str"),
     ("oldString", "newString"),
+    ("oldText", "newText"),
 ];
 // Inserted text without an `old` counterpart. The target file body is read via
 // PATH_KEYS, which suppresses the large-string fallback, so these must be named.
@@ -307,8 +309,10 @@ struct TextEdit<'a> {
 }
 
 /// Collects replace-style edits in payload order (arrays keep their order, so
-/// MultiEdit `edits[]` apply sequentially). Each edit targets the first
-/// file-body path key on its own object or the nearest ancestor.
+/// MultiEdit `edits[]` apply sequentially). Each edit targets the file-body
+/// path key on its own object or the nearest ancestor. An object with several
+/// distinct path values is ambiguous: its edits target no file, so their new
+/// text is scanned on its own instead of under another file's suppressions.
 fn collect_text_edits<'a>(
     tool: AiHookTool,
     v: &'a Value,
@@ -317,11 +321,16 @@ fn collect_text_edits<'a>(
 ) {
     match v {
         Value::Object(map) => {
-            let path = map
+            let own_paths: HashSet<&str> = map
                 .iter()
                 .filter(|(key, _)| is_file_body_path_key(tool, key))
-                .find_map(|(_, val)| val.as_str())
-                .or(inherited_path);
+                .filter_map(|(_, val)| val.as_str())
+                .collect();
+            let path = match own_paths.len() {
+                0 => inherited_path,
+                1 => own_paths.into_iter().next(),
+                _ => None,
+            };
             for (old_key, new_key) in EDIT_PAIR_KEYS {
                 if let (Some(old), Some(new)) = (
                     map.get(*old_key).and_then(Value::as_str),
@@ -353,15 +362,28 @@ fn collect_text_edits<'a>(
 }
 
 /// Applies the edits that target `abs` in order, marking each one applied.
-/// An edit whose `old` text is empty or missing is left for standalone scanning.
+/// An edit whose `old` text is empty or missing is left for standalone scanning,
+/// as is one that would grow the body past `original_len + MAX_HOOK_TEXT_BYTES`
+/// (a `replace_all` of a short `old` can otherwise multiply the body until
+/// the hook times out, and a timed-out hook does not block).
 fn apply_text_edits(
     text: &mut String,
     abs: &Path,
     edits: &mut [TextEdit<'_>],
     targets: &[Option<PathBuf>],
 ) {
+    let max_len = text.len().saturating_add(MAX_HOOK_TEXT_BYTES);
     for (edit, target) in edits.iter_mut().zip(targets) {
-        if target.as_deref() != Some(abs) || edit.old.is_empty() || !text.contains(edit.old) {
+        if target.as_deref() != Some(abs) || edit.old.is_empty() {
+            continue;
+        }
+        let count = if edit.replace_all {
+            text.matches(edit.old).count()
+        } else {
+            usize::from(text.contains(edit.old))
+        };
+        let growth = edit.new.len().saturating_sub(edit.old.len());
+        if count == 0 || text.len().saturating_add(count.saturating_mul(growth)) > max_len {
             continue;
         }
         *text = if edit.replace_all {
@@ -1416,6 +1438,66 @@ mod tests {
 
         assert!(body.contains("already-edited"), "{body}");
         assert!(!body.contains("post-edit-marker"), "{body}");
+    }
+
+    #[test]
+    fn replace_all_that_would_explode_the_body_scans_new_text_alone() {
+        let file = "a".repeat(10_000);
+        let repo = repo_with_file(&file);
+        let token = synthetic_github_token();
+        // 10k matches x ~1 KiB growth is far past the MAX_HOOK_TEXT_BYTES cap.
+        let new = format!("{}{token}", "b".repeat(1024));
+        let stdin = serde_json::json!({
+            "tool_input": {
+                "file_path": "app.txt",
+                "old_string": "a",
+                "new_string": new,
+                "replace_all": true
+            }
+        });
+
+        let (_display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
+
+        assert_eq!(body, format!("// ---- app.txt\n{file}\n---\n{new}"));
+    }
+
+    #[test]
+    fn edits_on_an_object_with_several_paths_target_no_file() {
+        let repo = repo_with_file("placeholder\n");
+        std::fs::write(repo.path().join("decoy.txt"), "placeholder\n").expect("write decoy");
+        let token = synthetic_github_token();
+        let stdin = serde_json::json!({
+            "tool_input": {
+                "file_path": "app.txt",
+                "backup_path": "decoy.txt",
+                "old_string": "placeholder",
+                "new_string": token
+            }
+        });
+
+        let (_display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
+
+        assert_eq!(body.matches("placeholder").count(), 2, "{body}");
+        assert!(body.ends_with(&format!("\n---\n{token}")), "{body}");
+    }
+
+    #[test]
+    fn filesystem_mcp_edit_file_edits_are_applied() {
+        let repo = repo_with_file("API=placeholder\n");
+        let token = synthetic_github_token();
+        let stdin = serde_json::json!({
+            "tool_name": "mcp__filesystem__edit_file",
+            "tool_input": {
+                "path": "app.txt",
+                "edits": [{ "oldText": "placeholder", "newText": token }],
+                "dryRun": false
+            }
+        });
+
+        let (display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
+
+        assert_eq!(display, "app.txt");
+        assert!(body.contains(&format!("API={token}\n")), "{body}");
     }
 
     #[test]
