@@ -1,5 +1,6 @@
 //! Pre-tool action guard for AI hook payloads.
 
+use crate::hook_payload::parse_hook_payload;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -407,7 +408,7 @@ const REPOSITORY_CONTEXT_KEYS: &[&str] = &[
 /// priority (not alphabetically). Callers can use these as repository hints
 /// when the hook process starts outside the repository.
 pub fn payload_path_hints(stdin: &str) -> Vec<String> {
-    let Ok(v) = serde_json::from_str::<Value>(stdin) else {
+    let Ok(v) = parse_hook_payload(stdin) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -422,7 +423,7 @@ pub fn payload_path_hints(stdin: &str) -> Vec<String> {
 /// Working-directory metadata that may be used as a fallback policy root, but
 /// must never be treated as a concrete file-access target.
 pub fn payload_repository_context_hints(stdin: &str) -> Vec<String> {
-    let Ok(v) = serde_json::from_str::<Value>(stdin) else {
+    let Ok(v) = parse_hook_payload(stdin) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -434,7 +435,7 @@ pub fn payload_repository_context_hints(stdin: &str) -> Vec<String> {
 
 /// Shell-command candidates carried by a hook payload.
 pub fn payload_command_hints(stdin: &str) -> Vec<String> {
-    let Ok(v) = serde_json::from_str::<Value>(stdin) else {
+    let Ok(v) = parse_hook_payload(stdin) else {
         return Vec::new();
     };
     candidate_commands(&v)
@@ -448,7 +449,7 @@ pub fn detect_dangerous_action_with_config(
         return Ok(None);
     }
 
-    let v: Value = serde_json::from_str(stdin).context("hook stdin must be valid JSON")?;
+    let v = parse_hook_payload(stdin).context("hook stdin must be valid JSON")?;
     let profile = ActionGuardProfile::parse(&config.profile);
 
     for path in candidate_paths(&v) {
@@ -1774,6 +1775,43 @@ mod tests {
 
         let select = bash_payload("psql -c \"SELECT 1\"");
         assert!(detect_dangerous_action(&select).unwrap().is_none());
+    }
+
+    /// Copilot CLI camelCase payload: `toolArgs` is a JSON-encoded string.
+    fn copilot_cli_payload(tool: &str, args: serde_json::Value) -> String {
+        serde_json::json!({
+            "timestamp": 1704614400000_u64,
+            "cwd": "/work/repo",
+            "toolName": tool,
+            "toolArgs": args.to_string()
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn guards_commands_and_paths_inside_stringified_copilot_tool_args() {
+        let drop = copilot_cli_payload(
+            "bash",
+            serde_json::json!({ "command": "psql -c \"DROP TABLE users\"" }),
+        );
+        assert_eq!(
+            detect_dangerous_action(&drop).unwrap().unwrap().category,
+            "direct_db_mutation"
+        );
+        assert_eq!(
+            payload_command_hints(&drop),
+            vec!["psql -c \"DROP TABLE users\"".to_string()]
+        );
+
+        let view = copilot_cli_payload("view", serde_json::json!({ "path": ".env" }));
+        assert_eq!(
+            detect_dangerous_action(&view).unwrap().unwrap().category,
+            "secret_file_access"
+        );
+        assert_eq!(payload_path_hints(&view), vec![".env".to_string()]);
+
+        let safe = copilot_cli_payload("bash", serde_json::json!({ "command": "ls" }));
+        assert!(detect_dangerous_action(&safe).unwrap().is_none());
     }
 
     #[test]
