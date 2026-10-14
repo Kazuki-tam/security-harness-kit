@@ -806,10 +806,12 @@ fn emit_blocking_reason_to_stderr(tool: AiTool, event: hook_output::HookEvent, r
     // Cascade (Windsurf) surfaces the stderr message of a
     // blocking pre-hook (exit 2) to the agent; stdout is ignored.
     // Grok surfaces stderr on exit 2, and uses it as the deny reason when
-    // stdout JSON carries none.
+    // stdout JSON carries none. The OpenCode plugin falls back to stderr when
+    // stdout is not parseable.
     if tool == AiTool::Codex
         || tool == AiTool::Windsurf
         || tool == AiTool::Grok
+        || tool == AiTool::Opencode
         || copilot_user_prompt
     {
         eprintln!("{reason}");

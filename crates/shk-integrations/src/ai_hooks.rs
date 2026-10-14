@@ -152,6 +152,15 @@ const GROK_POST_TEXT_KEYS: &[&str] = &[
     "command",
 ];
 
+// OpenCode's managed plugin normalizes tool arguments under `tool_input`
+// (scanned deeply so arbitrary MCP arguments are covered). Built-in tools use
+// camelCase argument names: `filePath` (read/write/edit, via PATH_KEYS),
+// `command` (bash), `content` (write), `oldString`/`newString` (edit),
+// `url` (webfetch), `prompt` (task).
+const OPENCODE_PRE_EXTRA_TEXT_KEYS: &[&str] = &["tool_input", "oldString", "newString"];
+// The post payload carries `{ title, output }` under `tool_output`.
+const OPENCODE_POST_TEXT_KEYS: &[&str] = &["tool_output", "output", "title"];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AiHookTool {
     Antigravity,
@@ -160,6 +169,7 @@ pub enum AiHookTool {
     Copilot,
     Cursor,
     Grok,
+    Opencode,
     Windsurf,
 }
 
@@ -172,6 +182,7 @@ impl AiHookTool {
             Self::Copilot => "copilot",
             Self::Cursor => "cursor",
             Self::Grok => "grok",
+            Self::Opencode => "opencode",
             Self::Windsurf => "windsurf",
         }
     }
@@ -184,6 +195,7 @@ impl AiHookTool {
             Self::Copilot => "<copilot-hook>",
             Self::Cursor => "<cursor-hook>",
             Self::Grok => "<grok-hook>",
+            Self::Opencode => "<opencode-hook>",
             Self::Windsurf => "<windsurf-hook>",
         }
     }
@@ -373,6 +385,7 @@ fn priority_text_key_sets(post: bool, tool: AiHookTool) -> &'static [&'static [&
         return match tool {
             AiHookTool::Antigravity => &[PRE_TEXT_KEYS, ANTIGRAVITY_PRE_EXTRA_TEXT_KEYS],
             AiHookTool::Grok => &[PRE_TEXT_KEYS, GROK_PRE_EXTRA_TEXT_KEYS],
+            AiHookTool::Opencode => &[PRE_TEXT_KEYS, OPENCODE_PRE_EXTRA_TEXT_KEYS],
             AiHookTool::Windsurf => &[PRE_TEXT_KEYS, WINDSURF_PRE_EXTRA_TEXT_KEYS],
             _ => &[PRE_TEXT_KEYS],
         };
@@ -385,6 +398,7 @@ fn priority_text_key_sets(post: bool, tool: AiHookTool) -> &'static [&'static [&
         AiHookTool::Copilot => &[COPILOT_POST_TEXT_KEYS],
         AiHookTool::Cursor => &[CURSOR_POST_TEXT_KEYS],
         AiHookTool::Grok => &[GROK_POST_TEXT_KEYS],
+        AiHookTool::Opencode => &[OPENCODE_POST_TEXT_KEYS],
         AiHookTool::Windsurf => &[WINDSURF_POST_TEXT_KEYS],
     }
 }
@@ -479,6 +493,85 @@ mod tests {
         assert_eq!(AiHookTool::Grok.virtual_path_label(), "<grok-hook>");
         assert_eq!(AiHookTool::Windsurf.kebab_str(), "windsurf");
         assert_eq!(AiHookTool::Windsurf.virtual_path_label(), "<windsurf-hook>");
+        assert_eq!(AiHookTool::Opencode.kebab_str(), "opencode");
+        assert_eq!(AiHookTool::Opencode.virtual_path_label(), "<opencode-hook>");
+    }
+
+    #[test]
+    fn opencode_pre_extracts_bash_edit_and_mcp_arguments() {
+        let dir = tempdir().unwrap();
+        let bash = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "bash",
+            "tool_input": { "command": "echo opencode-command-marker", "timeout": 1000 },
+            "cwd": dir.path()
+        })
+        .to_string();
+        let (_disp, body) =
+            stdin_to_hook_body(AiHookTool::Opencode, false, &bash, dir.path(), dir.path()).unwrap();
+        assert!(body.contains("opencode-command-marker"), "{body}");
+
+        let edit = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "edit",
+            "tool_input": {
+                "filePath": "/nonexistent/file.txt",
+                "oldString": "opencode-old-marker",
+                "newString": "opencode-new-marker"
+            }
+        })
+        .to_string();
+        let (_disp, body) =
+            stdin_to_hook_body(AiHookTool::Opencode, false, &edit, dir.path(), dir.path()).unwrap();
+        assert!(body.contains("opencode-old-marker"), "{body}");
+        assert!(body.contains("opencode-new-marker"), "{body}");
+
+        let mcp = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "github_create_issue",
+            "tool_input": { "fields": { "nested": { "body": "opencode-mcp-marker" } } }
+        })
+        .to_string();
+        let (_disp, body) =
+            stdin_to_hook_body(AiHookTool::Opencode, false, &mcp, dir.path(), dir.path()).unwrap();
+        assert!(body.contains("opencode-mcp-marker"), "{body}");
+    }
+
+    #[test]
+    fn opencode_pre_reads_file_body_for_read_tool() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "opencode-file-body-marker\n").unwrap();
+        let stdin = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "read",
+            "tool_input": { "filePath": file, "offset": 0, "limit": 10 }
+        })
+        .to_string();
+        let (disp, body) =
+            stdin_to_hook_body(AiHookTool::Opencode, false, &stdin, dir.path(), dir.path())
+                .unwrap();
+        assert_eq!(disp, "notes.txt");
+        assert!(body.contains("opencode-file-body-marker"), "{body}");
+    }
+
+    #[test]
+    fn opencode_post_extracts_tool_output() {
+        let dir = tempdir().unwrap();
+        let stdin = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "bash",
+            "tool_input": { "command": "cat secrets" },
+            "tool_output": { "title": "Shell", "output": "opencode-output-marker" }
+        })
+        .to_string();
+        let (_disp, body) =
+            stdin_to_hook_body(AiHookTool::Opencode, true, &stdin, dir.path(), dir.path()).unwrap();
+        assert!(body.contains("opencode-output-marker"), "{body}");
+        assert!(
+            !body.contains("cat secrets"),
+            "post scans output only: {body}"
+        );
     }
 
     #[test]

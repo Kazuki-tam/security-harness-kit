@@ -6946,3 +6946,330 @@ fn mcp_audit_scans_grok_and_codex_authentication_headers() {
     }
     assert!(!String::from_utf8_lossy(&out.stdout).contains(&secret));
 }
+
+/// Synthetic OpenAI-style key for OpenCode hook fixtures, assembled at runtime
+/// so the literal never appears in source or in hook-scanned command text.
+fn opencode_fixture_secret() -> String {
+    ["sk", "proj", "abcdefghijklmnopqrstuvwxyz0123456789"].join("-")
+}
+
+#[test]
+fn hooks_install_ai_opencode_writes_managed_plugin_and_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let plugin = dir.path().join(".opencode/plugins/shk-security.js");
+
+    for _ in 0..2 {
+        let out = Command::new(shk_bin())
+            .args(["hooks", "install-ai", "--tool", "opencode", "--log-blocked"])
+            .current_dir(dir.path())
+            .output()
+            .expect("install-ai opencode");
+        assert!(
+            out.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("wrote managed OpenCode plugin"),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+    let body = std::fs::read_to_string(&plugin).unwrap();
+    assert!(body.starts_with("// shk-managed:"), "{body}");
+    assert!(body.contains("--hook-mode opencode"), "{body}");
+    assert!(body.contains("logBlocked: true,"), "{body}");
+    assert!(!body.contains("__SHK_"), "{body}");
+    // The committed file must stay portable: no machine-local path.
+    assert!(!body.contains(&canonical_path_text(dir.path())), "{body}");
+
+    // doctor is clean right after install and flags hand edits.
+    let doctor = Command::new(shk_bin())
+        .args(["doctor", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("doctor");
+    let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).expect("doctor json");
+    assert!(report["opencodePluginDrift"].is_null(), "{report}");
+    std::fs::write(&plugin, format!("{body}\nconsole.log('edited');\n")).unwrap();
+    let doctor = Command::new(shk_bin())
+        .args(["doctor", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("doctor");
+    let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).expect("doctor json");
+    assert!(
+        report["opencodePluginDrift"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("differs")),
+        "{report}"
+    );
+
+    // An unmanaged file at the managed path is never overwritten.
+    let unmanaged = "export default { id: \"mine\", setup() {} }\n";
+    std::fs::write(&plugin, unmanaged).unwrap();
+    let out = Command::new(shk_bin())
+        .args(["hooks", "install-ai", "--tool", "opencode"])
+        .current_dir(dir.path())
+        .output()
+        .expect("install-ai opencode");
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not an shk-managed"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&plugin).unwrap(), unmanaged);
+}
+
+#[test]
+fn hook_mode_opencode_denies_pre_tool_use_and_blocks_user_prompt() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir_in(&root).unwrap();
+    let secret = opencode_fixture_secret();
+    let fixture = dir.path().join("hook-fixture.txt");
+    std::fs::write(&fixture, format!("{secret}\n")).unwrap();
+    let fixture = std::fs::canonicalize(fixture).unwrap();
+
+    let run = |payload: String, extra: &[&str]| {
+        let mut args = vec!["scan", ".", "--hook-mode", "opencode"];
+        args.extend_from_slice(extra);
+        Command::new(shk_bin())
+            .args(&args)
+            .current_dir(&root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                child
+                    .stdin
+                    .as_mut()
+                    .unwrap()
+                    .write_all(payload.as_bytes())?;
+                child.wait_with_output()
+            })
+            .expect("opencode hook")
+    };
+
+    let pre = run(
+        serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "read",
+            "tool_input": { "filePath": fixture, "offset": 0, "limit": 2000 },
+            "cwd": root
+        })
+        .to_string(),
+        &[],
+    );
+    assert_eq!(pre.status.code(), Some(2), "{pre:?}");
+    let pre_stdout: serde_json::Value =
+        serde_json::from_slice(&pre.stdout).expect("pre stdout json");
+    assert_eq!(pre_stdout["decision"], "deny");
+    assert!(
+        String::from_utf8_lossy(&pre.stderr).contains("sensitive content detected"),
+        "stderr={}",
+        String::from_utf8_lossy(&pre.stderr)
+    );
+
+    let guard = run(
+        serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "bash",
+            "tool_input": { "command": "cat .env" },
+            "cwd": root
+        })
+        .to_string(),
+        &[],
+    );
+    assert_eq!(guard.status.code(), Some(2), "{guard:?}");
+    let guard_stdout: serde_json::Value =
+        serde_json::from_slice(&guard.stdout).expect("guard stdout json");
+    assert_eq!(guard_stdout["decision"], "deny");
+    assert!(
+        guard_stdout["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("action guard")),
+        "{guard_stdout}"
+    );
+
+    let clean = run(
+        serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "bash",
+            "tool_input": { "command": "echo hello" },
+            "cwd": root
+        })
+        .to_string(),
+        &[],
+    );
+    assert_eq!(clean.status.code(), Some(0), "{clean:?}");
+    let clean_stdout: serde_json::Value =
+        serde_json::from_slice(&clean.stdout).expect("clean stdout json");
+    assert_eq!(clean_stdout["decision"], "allow");
+
+    let post = run(
+        serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "bash",
+            "tool_input": { "command": "cat hook-fixture.txt" },
+            "tool_output": { "title": "cat", "output": secret }
+        })
+        .to_string(),
+        &["--post"],
+    );
+    assert_eq!(
+        post.status.code(),
+        Some(0),
+        "post hooks never block: {post:?}"
+    );
+    let post_stdout: serde_json::Value =
+        serde_json::from_slice(&post.stdout).expect("post stdout json");
+    assert_eq!(post_stdout["decision"], "allow");
+
+    let prompt = run(
+        serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": format!("please use {secret}")
+        })
+        .to_string(),
+        &["--fail-on", USER_PROMPT_HOOK_FAIL_ON],
+    );
+    assert_eq!(prompt.status.code(), Some(2), "{prompt:?}");
+    let prompt_stdout: serde_json::Value =
+        serde_json::from_slice(&prompt.stdout).expect("prompt stdout json");
+    assert_eq!(prompt_stdout["decision"], "block");
+}
+
+/// Runs the generated OpenCode plugin under Node with fake V2 (`setup`) and
+/// V1 (`server`) hosts, once with shk resolvable and once with it missing
+/// (pre hooks must fail closed, post and prompt hooks must not throw). This is
+/// the only automated coverage of the JS half. Skipped when `node` is not on
+/// PATH (CI provisions it for the desktop jobs).
+#[test]
+fn opencode_plugin_contract_under_node() {
+    let Some(node) = which_node() else {
+        eprintln!("skipping: node not found on PATH");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("shk.toml"), "").unwrap();
+    let secret = opencode_fixture_secret();
+    std::fs::write(project.join("secret.txt"), format!("{secret}\n")).unwrap();
+    std::fs::write(project.join("clean.txt"), "nothing to see\n").unwrap();
+    let out = Command::new(shk_bin())
+        .args(["hooks", "install-ai", "--tool", "opencode"])
+        .current_dir(&project)
+        .output()
+        .expect("install-ai opencode");
+    assert!(out.status.success(), "{out:?}");
+
+    let plugin_url = file_url_for(&project.join(".opencode/plugins/shk-security.js"));
+    let project_text = canonical_path_text(&project).replace('\\', "/");
+    let harness = dir.path().join("harness.mjs");
+    std::fs::write(
+        &harness,
+        format!(
+            r#"
+import plugin from "{plugin_url}";
+const DIR = "{project_text}";
+const SECRET_FILE = DIR + "/secret.txt";
+const CLEAN_FILE = DIR + "/clean.txt";
+const SECRET = process.env.SHK_CONTRACT_SECRET;
+const missing = process.env.SHK_CONTRACT_MISSING === "1";
+const blockPattern = missing ? /not found/ : /shk security/;
+// Prompt hooks fail closed too: the notice names the real reason.
+const noticePattern = missing ? /^\[shk\] prompt blocked: .*not found/ : /^\[shk\] prompt blocked: .*sensitive content/;
+const fail = (msg) => {{ console.error("FAIL: " + msg); process.exit(1); }};
+const rejects = async (fn, pattern) => {{
+  try {{ await fn(); }} catch (error) {{
+    if (!pattern.test(String(error?.message))) fail(`unexpected error: ${{error?.message}}`);
+    return;
+  }}
+  fail("expected rejection");
+}};
+
+// --- V2 host ---
+const hooks = {{}};
+const ctx = {{
+  location: {{ directory: DIR }},
+  tool: {{ hook: async (name, cb) => {{ hooks["tool." + name] = cb; }} }},
+  session: {{ hook: async (name, cb) => {{ hooks["session." + name] = cb; }} }},
+}};
+await plugin.setup(ctx);
+for (const key of ["tool.execute.before", "tool.execute.after", "session.prompt"]) {{
+  if (typeof hooks[key] !== "function") fail(`V2 hook ${{key}} not registered`);
+}}
+const call = (input) => ({{ tool: "read", sessionID: "s", agent: "build", messageID: "m", id: "c", input }});
+await rejects(() => hooks["tool.execute.before"](call({{ filePath: SECRET_FILE }})), blockPattern);
+if (!missing) await hooks["tool.execute.before"](call({{ filePath: CLEAN_FILE }}));
+await hooks["tool.execute.after"]({{ ...call({{ command: "cat secret.txt" }}), tool: "bash", status: "completed",
+  result: {{ output: SECRET, content: [] }} }});
+const prompt = {{ sessionID: "s", messageID: "m", prompt: {{ text: "use " + SECRET }} }};
+await hooks["session.prompt"](prompt);
+if (!noticePattern.test(prompt.prompt.text)) fail(`V2 prompt not rewritten as expected: ${{prompt.prompt.text}}`);
+if (prompt.prompt.text.includes(SECRET)) fail("V2 notice leaked the prompt text");
+const cleanPrompt = {{ sessionID: "s", messageID: "m", prompt: {{ text: "hello" }} }};
+await hooks["session.prompt"](cleanPrompt);
+// Without a decision the clean prompt is blocked too (fail closed); with shk present it passes untouched.
+if (!missing && cleanPrompt.prompt.text !== "hello") fail("clean V2 prompt was modified");
+if (missing && !noticePattern.test(cleanPrompt.prompt.text)) fail("clean V2 prompt was admitted without a decision");
+
+// --- V1 host ---
+const logs = [];
+const v1 = await plugin.server({{ directory: DIR, worktree: DIR, client: {{ app: {{ log: async (entry) => {{ logs.push(entry); }} }} }} }});
+await rejects(() => v1["tool.execute.before"]({{ tool: "read", sessionID: "s", callID: "c" }}, {{ args: {{ filePath: SECRET_FILE }} }}), blockPattern);
+if (!missing) await v1["tool.execute.before"]({{ tool: "read", sessionID: "s", callID: "c" }}, {{ args: {{ filePath: CLEAN_FILE }} }});
+await v1["tool.execute.after"]({{ tool: "bash", sessionID: "s", callID: "c", args: {{}} }}, {{ title: "cat", output: SECRET, metadata: {{}} }});
+const parts = [{{ type: "text", text: "use " + SECRET }}];
+await rejects(() => v1["chat.message"]({{ sessionID: "s" }}, {{ message: {{}}, parts }}), /prompt blocked/);
+if (!noticePattern.test(parts[0].text) || parts[0].text.includes(SECRET)) fail(`V1 prompt parts not scrubbed: ${{parts[0].text}}`);
+if (missing && !logs.some((entry) => /not found/.test(entry?.body?.message ?? ""))) fail("V1 host was not warned about the missing binary");
+console.log("ok");
+"#
+        ),
+    )
+    .unwrap();
+
+    for missing in [false, true] {
+        let mut cmd = Command::new(&node);
+        cmd.arg(&harness)
+            .current_dir(dir.path())
+            .env("SHK_CONTRACT_SECRET", &secret);
+        if missing {
+            cmd.env("SHK_BIN", dir.path().join("nonexistent-shk"))
+                .env("SHK_CONTRACT_MISSING", "1");
+        } else {
+            cmd.env("SHK_BIN", shk_bin());
+        }
+        let out = cmd.output().expect("node harness");
+        assert!(
+            out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "ok",
+            "missing={missing} stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+fn which_node() -> Option<PathBuf> {
+    let name = if cfg!(windows) { "node.exe" } else { "node" };
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+fn file_url_for(path: &Path) -> String {
+    let text = canonical_path_text(path).replace('\\', "/");
+    if text.starts_with('/') {
+        format!("file://{text}")
+    } else {
+        format!("file:///{text}")
+    }
+}

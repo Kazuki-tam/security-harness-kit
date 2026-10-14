@@ -126,8 +126,9 @@ cargo run -p shk-cli --bin shk -- hooks install-ai --tool copilot --dry-run # .g
 cargo run -p shk-cli --bin shk -- hooks install-ai --tool antigravity --dry-run # .agents/hooks.json (global: ~/.gemini/config/hooks.json)
 cargo run -p shk-cli --bin shk -- hooks install-ai --tool windsurf --dry-run # Windsurf Cascade: .windsurf/hooks.json (global: ~/.codeium/windsurf/hooks.json)
 cargo run -p shk-cli --bin shk -- hooks install-ai --tool grok --dry-run # Grok Build: .grok/hooks/shk-security.json (global: ~/.grok/hooks/shk-security.json)
+cargo run -p shk-cli --bin shk -- hooks install-ai --tool opencode --dry-run # OpenCode: .opencode/plugins/shk-security.js (global: ~/.config/opencode/plugins/shk-security.js)
 
-# Skills (deploy embedded Claude Code / Codex / Cursor / Copilot / Antigravity / Grok Build / Windsurf skill to project)
+# Skills (deploy embedded Claude Code / Codex / Cursor / Copilot / Antigravity / Grok Build / OpenCode / Windsurf skill to project)
 cargo run -p shk-cli --bin shk -- skills install --dry-run
 cargo run -p shk-cli --bin shk -- skills install                   # .claude/skills/ + .agents/skills/ + .github/skills/
 cargo run -p shk-cli --bin shk -- skills install --tool claude-code

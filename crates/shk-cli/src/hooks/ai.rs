@@ -1,6 +1,6 @@
 use crate::args::AiTool;
 use crate::safety;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde_json::{Value, json};
 use shk_integrations::{
@@ -46,6 +46,7 @@ pub struct ConfigureAiOptions {
     pub scan_hooks_copilot: bool,
     pub scan_hooks_antigravity: bool,
     pub scan_hooks_grok: bool,
+    pub scan_hooks_opencode: bool,
     pub scan_hooks_windsurf: bool,
     pub claude_deny: bool,
     pub claude_sandbox: bool,
@@ -60,6 +61,7 @@ fn scan_hooks_enabled_for(opts: &ConfigureAiOptions, tool: AiTool) -> bool {
         AiTool::Copilot => opts.scan_hooks_copilot,
         AiTool::Antigravity => opts.scan_hooks_antigravity,
         AiTool::Grok => opts.scan_hooks_grok,
+        AiTool::Opencode => opts.scan_hooks_opencode,
         AiTool::Windsurf => opts.scan_hooks_windsurf,
     }
 }
@@ -76,6 +78,7 @@ fn ai_config_relative_path(tool: AiTool) -> &'static str {
         AiTool::Copilot => ".github/hooks/shk-security.json",
         AiTool::Antigravity => ".agents/hooks.json",
         AiTool::Grok => ".grok/hooks/shk-security.json",
+        AiTool::Opencode => OPENCODE_PLUGIN_REL_PATH,
         AiTool::Windsurf => ".windsurf/hooks.json",
     }
 }
@@ -83,11 +86,13 @@ fn ai_config_relative_path(tool: AiTool) -> &'static str {
 /// Home-relative config path for `--global` installs. Antigravity's
 /// user-level customization directory is `~/.gemini/config/`, not a
 /// dot-directory mirroring the project layout. Windsurf reads
-/// user-level hooks from `~/.codeium/windsurf/hooks.json`.
+/// user-level hooks from `~/.codeium/windsurf/hooks.json`. OpenCode loads
+/// global plugins from `~/.config/opencode/plugins/`.
 fn ai_config_global_relative_path(tool: AiTool) -> &'static str {
     match tool {
         AiTool::Antigravity => ".gemini/config/hooks.json",
         AiTool::Copilot => ".copilot/hooks/shk-security.json",
+        AiTool::Opencode => ".config/opencode/plugins/shk-security.js",
         AiTool::Windsurf => ".codeium/windsurf/hooks.json",
         _ => ai_config_relative_path(tool),
     }
@@ -121,7 +126,12 @@ fn project_hook_root_arg(tool: AiTool) -> Option<&'static str> {
         // Codex embeds CODEX_GIT_ROOT_ARG via codex_hook_command instead.
         // Grok sets `CLAUDE_PROJECT_DIR` on every hook process.
         AiTool::Grok => Some(CLAUDE_PROJECT_DIR_ARG),
-        AiTool::Codex | AiTool::Copilot | AiTool::Antigravity | AiTool::Windsurf => None,
+        // The OpenCode plugin passes its runtime project directory itself.
+        AiTool::Codex
+        | AiTool::Copilot
+        | AiTool::Antigravity
+        | AiTool::Opencode
+        | AiTool::Windsurf => None,
     }
 }
 
@@ -213,6 +223,7 @@ pub fn install_ai_with_summaries(
             AiTool::Copilot,
             AiTool::Antigravity,
             AiTool::Grok,
+            AiTool::Opencode,
             AiTool::Windsurf,
         ]
     };
@@ -261,6 +272,7 @@ pub fn configure_ai_with_summaries(cwd: &Path, opts: ConfigureAiOptions) -> Resu
         AiTool::Copilot,
         AiTool::Antigravity,
         AiTool::Grok,
+        AiTool::Opencode,
         AiTool::Windsurf,
     ] {
         let path = resolve_ai_config_path(tool, &cwd, opts.global)?;
@@ -355,6 +367,7 @@ fn apply_tool(
             root_arg,
         ),
         AiTool::Grok => apply_grok(path, opts.audit, opts.log_blocked, opts.dry_run, root_arg),
+        AiTool::Opencode => apply_opencode(path, opts.audit, opts.log_blocked, opts.dry_run),
         AiTool::Windsurf => {
             apply_windsurf(path, opts.audit, opts.log_blocked, opts.dry_run, root_arg)
         }
@@ -369,6 +382,7 @@ fn remove_scan_hooks_for_tool(path: &Path, tool: AiTool, dry_run: bool) -> Resul
         AiTool::Copilot => remove_copilot_scan_hooks(path, dry_run),
         AiTool::Antigravity => remove_antigravity_scan_hooks(path, dry_run),
         AiTool::Grok => remove_grok_scan_hooks(path, dry_run),
+        AiTool::Opencode => remove_opencode_scan_hooks(path, dry_run),
         AiTool::Windsurf => remove_windsurf_scan_hooks(path, dry_run),
     }
 }
@@ -1253,6 +1267,140 @@ fn remove_grok_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
     })
 }
 
+/// OpenCode auto-discovers `.js` files under `.opencode/plugins/` (project)
+/// and `~/.config/opencode/plugins/` (global); no `opencode.json` edit is
+/// needed. The whole file is owned by shk, like the Copilot and Grok hook
+/// files: install writes it, re-install overwrites it, remove deletes it.
+/// A file at this path without the managed header is never touched.
+const OPENCODE_PLUGIN_REL_PATH: &str = ".opencode/plugins/shk-security.js";
+const OPENCODE_PLUGIN_TEMPLATE: &str = include_str!("opencode_plugin.js");
+const OPENCODE_MANAGED_HEADER: &str = "// shk-managed:";
+const OPENCODE_AUDIT_PLACEHOLDER: &str = "__SHK_AUDIT__";
+const OPENCODE_LOG_BLOCKED_PLACEHOLDER: &str = "__SHK_LOG_BLOCKED__";
+
+fn render_opencode_plugin(audit: bool, log_blocked: bool) -> String {
+    OPENCODE_PLUGIN_TEMPLATE
+        .replace(
+            OPENCODE_AUDIT_PLACEHOLDER,
+            if audit { "true" } else { "false" },
+        )
+        .replace(
+            OPENCODE_LOG_BLOCKED_PLACEHOLDER,
+            if log_blocked && !audit {
+                "true"
+            } else {
+                "false"
+            },
+        )
+}
+
+fn is_managed_opencode_plugin(content: &str) -> bool {
+    content.starts_with(OPENCODE_MANAGED_HEADER)
+}
+
+/// Reads the `audit` / `logBlocked` values a managed plugin was rendered with,
+/// so `shk doctor` can re-render the expected file and detect drift.
+fn opencode_plugin_config(content: &str) -> Option<(bool, bool)> {
+    fn flag(content: &str, key: &str) -> Option<bool> {
+        let start = content.find(key)? + key.len();
+        let rest = content[start..].trim_start();
+        if rest.starts_with("true,") {
+            Some(true)
+        } else if rest.starts_with("false,") {
+            Some(false)
+        } else {
+            None
+        }
+    }
+    Some((flag(content, "audit:")?, flag(content, "logBlocked:")?))
+}
+
+fn apply_opencode(path: &Path, audit: bool, log_blocked: bool, dry_run: bool) -> Result<String> {
+    if path.is_file() {
+        let existing =
+            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        if !is_managed_opencode_plugin(&existing) {
+            bail!(
+                "refusing to overwrite {}: it is not an shk-managed OpenCode plugin (move it aside and rerun)",
+                path.display()
+            );
+        }
+    }
+    let rendered = render_opencode_plugin(audit, log_blocked);
+    if !dry_run {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        }
+        crate::fs_atomic::write_atomic(path, rendered.as_bytes())?;
+    }
+    Ok(if dry_run {
+        format!(
+            "dry-run: would write managed OpenCode plugin (template={}, audit={audit}, logBlocked={})",
+            opencode_template_version(),
+            log_blocked && !audit
+        )
+    } else {
+        format!(
+            "wrote managed OpenCode plugin (template={}, audit={audit}, logBlocked={})",
+            opencode_template_version(),
+            log_blocked && !audit
+        )
+    })
+}
+
+fn opencode_template_version() -> &'static str {
+    OPENCODE_PLUGIN_TEMPLATE
+        .lines()
+        .find_map(|line| line.strip_prefix("// shk-template: "))
+        .map(str::trim)
+        .unwrap_or("?")
+}
+
+fn remove_opencode_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
+    if !path.is_file() {
+        return Ok("no OpenCode plugin file".to_string());
+    }
+    let existing = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    if !is_managed_opencode_plugin(&existing) {
+        bail!(
+            "refusing to remove {}: it is not an shk-managed OpenCode plugin",
+            path.display()
+        );
+    }
+    if !dry_run {
+        fs::remove_file(path).with_context(|| format!("remove {}", path.display()))?;
+    }
+    Ok(if dry_run {
+        "dry-run: would remove managed OpenCode plugin".to_string()
+    } else {
+        "removed managed OpenCode plugin".to_string()
+    })
+}
+
+/// Returns a warning when the project's managed OpenCode plugin differs from
+/// the embedded template (hand edits, tampering, or an older shk release).
+/// The plugin is executable code committed to the repository, so drift is
+/// worth surfacing even though the hook logic itself lives in shk.
+pub fn opencode_plugin_drift(root: &Path) -> Option<String> {
+    let path = root.join(OPENCODE_PLUGIN_REL_PATH);
+    let content = fs::read_to_string(&path).ok()?;
+    if !is_managed_opencode_plugin(&content) {
+        return Some(format!(
+            "{OPENCODE_PLUGIN_REL_PATH} exists but is not shk-managed; `shk hooks install-ai --tool opencode` will not overwrite it"
+        ));
+    }
+    let Some((audit, log_blocked)) = opencode_plugin_config(&content) else {
+        return Some(format!(
+            "{OPENCODE_PLUGIN_REL_PATH} has an unreadable config block; rerun `shk hooks install-ai --tool opencode`"
+        ));
+    };
+    (content != render_opencode_plugin(audit, log_blocked)).then(|| {
+        format!(
+            "{OPENCODE_PLUGIN_REL_PATH} differs from the shk template (modified or stale); rerun `shk hooks install-ai --tool opencode`"
+        )
+    })
+}
+
 fn codex_root_arg(use_git_root_path: bool) -> Option<&'static str> {
     use_git_root_path.then_some(CODEX_GIT_ROOT_ARG)
 }
@@ -1732,6 +1880,61 @@ mod tests {
     }
 
     #[test]
+    fn opencode_plugin_renders_without_placeholders_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".opencode/plugins/shk-security.js");
+        for _ in 0..2 {
+            apply_opencode(&path, false, true, false).unwrap();
+        }
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.starts_with(OPENCODE_MANAGED_HEADER), "{body}");
+        assert!(!body.contains("__SHK_"), "{body}");
+        assert!(body.contains("--hook-mode opencode"), "{body}");
+        assert!(body.contains("audit: false,"), "{body}");
+        assert!(body.contains("logBlocked: true,"), "{body}");
+        assert_eq!(opencode_plugin_config(&body), Some((false, true)));
+        assert_eq!(opencode_plugin_drift(dir.path()), None);
+
+        // Audit mode never logs blocked events.
+        apply_opencode(&path, true, true, false).unwrap();
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains("audit: true,"), "{body}");
+        assert!(body.contains("logBlocked: false,"), "{body}");
+        assert_eq!(opencode_plugin_drift(dir.path()), None);
+    }
+
+    #[test]
+    fn opencode_plugin_refuses_unmanaged_file_and_reports_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".opencode/plugins/shk-security.js");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "export default { id: \"mine\" }\n").unwrap();
+
+        let err = apply_opencode(&path, false, true, false).unwrap_err();
+        assert!(err.to_string().contains("not an shk-managed"), "{err}");
+        let err = remove_opencode_scan_hooks(&path, false).unwrap_err();
+        assert!(err.to_string().contains("not an shk-managed"), "{err}");
+        assert!(path.is_file());
+        assert!(
+            opencode_plugin_drift(dir.path()).is_some_and(|msg| msg.contains("not shk-managed")),
+        );
+
+        fs::remove_file(&path).unwrap();
+        apply_opencode(&path, false, true, false).unwrap();
+        let mut body = fs::read_to_string(&path).unwrap();
+        body.push_str("console.log('edited');\n");
+        fs::write(&path, body).unwrap();
+        assert!(opencode_plugin_drift(dir.path()).is_some_and(|msg| msg.contains("differs")),);
+
+        assert_eq!(
+            remove_opencode_scan_hooks(&path, false).unwrap(),
+            "removed managed OpenCode plugin"
+        );
+        assert!(!path.exists());
+        assert_eq!(opencode_plugin_drift(dir.path()), None);
+    }
+
+    #[test]
     fn project_installs_stay_portable_for_every_tool() {
         let project = tempfile::tempdir().unwrap();
         let opts = InstallAiOptions {
@@ -1752,6 +1955,7 @@ mod tests {
             AiTool::Copilot,
             AiTool::Antigravity,
             AiTool::Grok,
+            AiTool::Opencode,
             AiTool::Windsurf,
         ] {
             let config_path = project.path().join(ai_config_relative_path(tool));
@@ -1772,6 +1976,9 @@ mod tests {
                 }
                 AiTool::Codex => {
                     assert!(body.contains(CODEX_GIT_ROOT_ARG), "{tool:?}: {body}");
+                }
+                AiTool::Opencode => {
+                    assert!(body.contains("--hook-mode opencode"), "{tool:?}: {body}");
                 }
                 AiTool::Copilot | AiTool::Antigravity | AiTool::Windsurf => {
                     let config: Value = serde_json::from_str(&body).unwrap();
@@ -2249,6 +2456,7 @@ sandbox_mode = "danger-full-access"
                 scan_hooks_copilot: false,
                 scan_hooks_antigravity: false,
                 scan_hooks_grok: false,
+                scan_hooks_opencode: false,
                 scan_hooks_windsurf: false,
                 claude_deny: false,
                 claude_sandbox: true,
@@ -2330,6 +2538,7 @@ sandbox_mode = "danger-full-access"
                 scan_hooks_copilot: false,
                 scan_hooks_antigravity: false,
                 scan_hooks_grok: false,
+                scan_hooks_opencode: false,
                 scan_hooks_windsurf: false,
                 claude_deny: false,
                 claude_sandbox: false,

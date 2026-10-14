@@ -401,6 +401,8 @@ pub enum AiTool {
     Cursor,
     /// Grok Build (`.grok/hooks/*.json` + `~/.grok/hooks/*.json`).
     Grok,
+    /// OpenCode (managed plugin; `.opencode/plugins/` + `~/.config/opencode/plugins/`).
+    Opencode,
     /// Windsurf (Cascade hooks; `.windsurf/` + `~/.codeium/windsurf/`).
     Windsurf,
 }
@@ -414,6 +416,7 @@ impl AiTool {
             Self::Copilot => "copilot",
             Self::Cursor => "cursor",
             Self::Grok => "grok",
+            Self::Opencode => "opencode",
             Self::Windsurf => "windsurf",
         }
     }
@@ -425,7 +428,10 @@ impl AiTool {
             // Grok sets `CLAUDE_PROJECT_DIR` on every hook process.
             Self::ClaudeCode | Self::Grok => Some("CLAUDE_PROJECT_DIR"),
             Self::Cursor => Some("CURSOR_PROJECT_DIR"),
-            Self::Antigravity | Self::Codex | Self::Copilot | Self::Windsurf => None,
+            // The OpenCode plugin passes the project directory as the scan path.
+            Self::Antigravity | Self::Codex | Self::Copilot | Self::Opencode | Self::Windsurf => {
+                None
+            }
         }
     }
 
@@ -437,6 +443,7 @@ impl AiTool {
             Self::Copilot => shk_integrations::AiHookTool::Copilot,
             Self::Cursor => shk_integrations::AiHookTool::Cursor,
             Self::Grok => shk_integrations::AiHookTool::Grok,
+            Self::Opencode => shk_integrations::AiHookTool::Opencode,
             Self::Windsurf => shk_integrations::AiHookTool::Windsurf,
         }
     }
@@ -1293,6 +1300,7 @@ pub enum SkillToolArg {
     Copilot,
     Cursor,
     Grok,
+    Opencode,
     Windsurf,
     All,
 }

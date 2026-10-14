@@ -406,6 +406,7 @@ export const ja: Messages = {
       antigravity: "Antigravity",
       windsurf: "Windsurf",
       grok: "Grok Build",
+      opencode: "OpenCode",
     },
     actionCategories: {
       secret_file_access: "機密ファイルの読み取り",
@@ -565,7 +566,7 @@ export const ja: Messages = {
     aiHooks: {
       title: "AI エディターの安全設定",
       description:
-        "Cursor / Claude Code / Codex / Copilot / Antigravity / Windsurf / Grok Build 向けに、スキャンフックと危険操作の制限を設定します。",
+        "Cursor / Claude Code / Codex / Copilot / Antigravity / Windsurf / Grok Build / OpenCode 向けに、スキャンフックと危険操作の制限を設定します。",
       install: "スキャンフックを設定",
       applySelected: "チェックした設定を適用",
       syncSelected: "変更を反映",
@@ -590,6 +591,7 @@ export const ja: Messages = {
         antigravity: "Antigravity",
         windsurf: "Windsurf",
         grok: "Grok Build",
+        opencode: "OpenCode",
       },
       installClaudeDeny: "deny を適用",
       installCodexSandbox: "sandbox を適用",
@@ -629,7 +631,7 @@ export const ja: Messages = {
     skills: {
       title: "エージェントスキル",
       description:
-        "Claude Code / Codex / Cursor / Copilot / Antigravity / Windsurf 向けの shk スキルを配置します。",
+        "Claude Code / Codex / Cursor / Copilot / Antigravity / OpenCode / Windsurf 向けの shk スキルを配置します。",
       install: "スキルをインストール",
     },
     doctor: {

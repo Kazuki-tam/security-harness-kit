@@ -8,8 +8,15 @@ wording check.
 
 Design review of the initial proposal, verified against OpenCode sources
 (`anomalyco/opencode`, tag `v1.19.0` released 2026-10-11, and branch `dev`).
-Nothing is implemented yet. Section 9 lists the PoC gates that must pass
-before the implementation PR.
+
+Phase 1 (section 6) is implemented on branch `feat/opencode-hooks`:
+`AiTool::Opencode`, the managed plugin template
+(`crates/shk-cli/src/hooks/opencode_plugin.js`), install/remove, `doctor`
+drift check, desktop toggle, skill alias, docs, and tests (unit, smoke, and
+the Node contract test that drives both the `setup()` and `server()` halves
+with shk present and with shk missing). The template was also exercised
+under Bun 1.x with a fake host. Section 9's gates against a live OpenCode
+install are still to be run before release.
 
 ## 1. Facts established from OpenCode sources
 

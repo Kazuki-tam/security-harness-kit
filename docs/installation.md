@@ -375,10 +375,11 @@ Source build: run `cargo clean` in the cloned repository to remove build output,
 | `shk hooks install-ai` (Copilot) | `.github/hooks/shk-security.json` | Remove entries whose command contains `shk scan --hook-mode copilot`. |
 | `shk hooks install-ai` (Antigravity) | `.agents/hooks.json` | Remove the top-level `shk-security` entry (its hook entries are tagged with `"_shk_managed": true`). Delete the file if it has no remaining entries. |
 | `shk hooks install-ai` (Grok Build) | `.grok/hooks/shk-security.json` | Remove handlers whose command contains `shk scan --hook-mode grok`, and any matcher groups left empty. Delete the file if it has no remaining entries. |
+| `shk hooks install-ai` (OpenCode) | `.opencode/plugins/shk-security.js` | Managed plugin file (starts with `// shk-managed:`). Delete the file; OpenCode discovers plugins by directory, so nothing else references it. OpenCode itself may have created `.opencode/package.json`, `.opencode/node_modules/`, and `.opencode/.gitignore` for its plugin SDK; those are not shk's. |
 | `shk hooks install-ai` (Windsurf) | `.windsurf/hooks.json` | Remove entries whose command contains `shk scan --hook-mode windsurf`. Delete the file if it has no remaining entries. |
 | `shk skills install` (Claude Code) | `.claude/skills/shk/SKILL.md` | Bundled skill file. Installs from 0.3.17 or earlier used `.claude/skills/shk.md`; remove that file too if present. |
 | `shk skills install` (Copilot) | `.github/skills/shk/SKILL.md` | Bundled skill file. |
-| `shk skills install` (Codex / Cursor / Antigravity) | `.agents/skills/shk/SKILL.md` | Bundled skill file. |
+| `shk skills install` (Codex / Cursor / Antigravity / OpenCode) | `.agents/skills/shk/SKILL.md` | Bundled skill file. |
 | `shk skills install` (Grok Build) | `.grok/skills/shk/SKILL.md` | Bundled skill file. |
 | `shk skills install` (Windsurf) | `.windsurf/skills/shk/SKILL.md` | Bundled skill file. |
 | `shk ci init github` | `.github/workflows/shk.yml` by default | Generated GitHub Actions workflow. If you passed `--output`, remove that custom path instead. |
@@ -397,15 +398,16 @@ For commands that support it, re-running with `--dry-run` is a safe way to confi
 | `shk hooks install-ai --global --tool copilot` | `~/.copilot/hooks/shk-security.json` (managed entries) |
 | `shk hooks install-ai --global --tool antigravity` | `~/.gemini/config/hooks.json` (managed `shk-security` entry) |
 | `shk hooks install-ai --global --tool grok` | `~/.grok/hooks/shk-security.json` (managed entries identified by `--hook-mode grok`) |
+| `shk hooks install-ai --global --tool opencode` | `~/.config/opencode/plugins/shk-security.js` (managed plugin file) |
 | `shk hooks install-ai --global --tool windsurf` | `~/.codeium/windsurf/hooks.json` (managed entries identified by `--hook-mode windsurf`) |
 | `shk skills install --global --tool claude-code` | `~/.claude/skills/shk/SKILL.md` (or the legacy `~/.claude/skills/shk.md` from 0.3.17 or earlier) |
-| `shk skills install --global --tool codex` / `--tool cursor` | `~/.agents/skills/shk/SKILL.md` |
+| `shk skills install --global --tool codex` / `--tool cursor` / `--tool opencode` | `~/.agents/skills/shk/SKILL.md` |
 | `shk skills install --global --tool copilot` | `~/.copilot/skills/shk/SKILL.md` |
 | `shk skills install --global --tool antigravity` | `~/.gemini/config/skills/shk/SKILL.md` |
 | `shk skills install --global --tool grok` | `~/.grok/skills/shk/SKILL.md` |
 | `shk skills install --global --tool windsurf` | `~/.codeium/windsurf/skills/shk/SKILL.md` |
 
-Managed entries use the same markers as project installs (`"_shk_managed": true` for JSON files, `# shk-managed-start` / `# shk-managed-end` for shell and TOML files). Copilot, Grok Build, and Windsurf keep schema-clean JSON and are identified by their `--hook-mode <tool>` command strings. Settings merged by `--apply-deny` and `--apply-sandbox` are not individually tagged; review them before removing so you do not discard unrelated user configuration.
+Managed entries use the same markers as project installs (`"_shk_managed": true` for JSON files, `# shk-managed-start` / `# shk-managed-end` for shell and TOML files). Copilot, Grok Build, and Windsurf keep schema-clean JSON and are identified by their `--hook-mode <tool>` command strings; the OpenCode plugin file starts with a `// shk-managed:` header. Settings merged by `--apply-deny` and `--apply-sandbox` are not individually tagged; review them before removing so you do not discard unrelated user configuration.
 
 ### 4. Remove Stored Env Keys
 
