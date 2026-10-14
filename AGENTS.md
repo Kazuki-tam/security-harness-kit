@@ -13,8 +13,8 @@ This repository is a **local-first security harness CLI for AI coding agents** (
     - **`src/main.rs`** — thin wrapper calling `shk_cli::run()`.
     - **`src/args.rs`** — `clap` CLI definitions.
     - **`src/commands/`** — `scan`, `mask`, `audit`, etc. (move `doctor` / others here if this layer grows).
-    - Other modules: `color`, `doctor`, `hooks`, `hook_payload`, `hook_output`, `hook_audit_log`, `audit_log`, `output`, `policy_cmd`, `workflow_hardening` (GitHub Actions `persist-credentials` checks).
-  - `crates/shk-integrations` — markers/constants for managed AI hooks; parsers may move here over time.
+    - Other modules: `color`, `doctor`, `hooks`, `hook_output`, `hook_audit_log`, `audit_log`, `output`, `policy_cmd`, `workflow_hardening` (GitHub Actions `persist-credentials` checks).
+  - `crates/shk-integrations` — managed AI hook markers and hook payload parsing (`ai_hooks` body extraction, `hook_payload` argument decoding, `action_guard`).
   - `xtask` — development-only generator tasks, including gitleaks rule import.
 
 ## Setup

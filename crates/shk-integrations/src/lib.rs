@@ -6,6 +6,7 @@ pub const MANAGED_MARKER_SH: &str = "# shk-managed-start";
 pub mod action_guard;
 pub mod ai_hooks;
 pub mod codex;
+mod hook_payload;
 
 pub use action_guard::{
     ActionGuardConfig, ActionGuardMatch, antigravity_recommended_deny_entries,
