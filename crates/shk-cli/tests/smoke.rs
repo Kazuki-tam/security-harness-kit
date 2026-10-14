@@ -3713,6 +3713,91 @@ fn nested_claude_worktree(project: &Path) -> PathBuf {
 }
 
 #[test]
+fn hook_mode_matches_project_path_allowlist_inside_a_linked_worktree() {
+    use std::io::Write;
+
+    let project = tempfile::tempdir().unwrap();
+    init_git_repo(project.path());
+    std::fs::write(
+        project.path().join("shk.toml"),
+        "[[allowlist]]\npath = \"fixtures/**\"\nreason = \"synthetic test values\"\n",
+    )
+    .unwrap();
+    git_commit_all(project.path(), "policy");
+    let worktree = project.path().join(".claude/worktrees/wt");
+    let add = Command::new("git")
+        .args(["worktree", "add", "-q", "--detach"])
+        .arg(&worktree)
+        .current_dir(project.path())
+        .output()
+        .expect("git worktree add");
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    // Same relative path in a nested clone, which is not a linked worktree.
+    let clone = project.path().join("vendor/clone");
+    std::fs::create_dir_all(&clone).unwrap();
+    init_git_repo(&clone);
+
+    let key_file = |dir: &Path, rel: &str| {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("API_KEY={}\n", synthetic_openai_key('w'))).unwrap();
+        path
+    };
+    // The editor runs the hook from the parent checkout, as in a desktop
+    // worktree session.
+    let read = |target: &Path| {
+        let stdin = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "cwd": worktree,
+            "tool_name": "Read",
+            "tool_input": { "file_path": target }
+        })
+        .to_string();
+        Command::new(shk_bin())
+            .args(["scan", ".", "--hook-mode", "claude-code"])
+            .current_dir(project.path())
+            .env("CLAUDE_PROJECT_DIR", project.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                child.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+                child.wait_with_output()
+            })
+            .expect("hook scan")
+    };
+
+    let allowed = read(&key_file(&worktree, "fixtures/demo.txt"));
+    assert_eq!(
+        allowed.status.code(),
+        Some(0),
+        "allowlisted path in a linked worktree: stdout={} stderr={}",
+        String::from_utf8_lossy(&allowed.stdout),
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+
+    for target in [
+        key_file(&worktree, "src/config.txt"),
+        key_file(&clone, "fixtures/demo.txt"),
+    ] {
+        let denied = read(&target);
+        assert_eq!(
+            denied.status.code(),
+            Some(2),
+            "{}: stdout={} stderr={}",
+            target.display(),
+            String::from_utf8_lossy(&denied.stdout),
+            String::from_utf8_lossy(&denied.stderr)
+        );
+    }
+}
+
+#[test]
 fn hook_mode_log_blocked_uses_project_policy_from_a_nested_repo() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path();

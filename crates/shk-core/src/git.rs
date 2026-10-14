@@ -402,6 +402,44 @@ pub fn discover_repo_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Root of the linked worktree (`git worktree add`) of `main_root`'s
+/// repository that contains `path`, or `None` when `path` belongs to
+/// `main_root` itself or to any other repository (submodule, nested clone).
+///
+/// The link is verified in both directions without running git: the
+/// worktree's `.git` file names an admin dir whose `commondir` resolves to
+/// `main_root/.git`, and that admin dir's `gitdir` points back at the
+/// worktree's `.git`. A hand-written `.git` file naming another worktree's
+/// admin dir therefore does not qualify.
+pub fn linked_worktree_root(main_root: &Path, path: &Path) -> Option<PathBuf> {
+    let main_git = std::fs::canonicalize(main_root.join(".git")).ok()?;
+    if !main_git.is_dir() {
+        return None;
+    }
+    let root = discover_repo_root(path)?;
+    let dot_git = root.join(".git");
+    if !dot_git.is_file() {
+        return None;
+    }
+    let admin = read_git_pointer(&dot_git, "gitdir: ")?;
+    let common = std::fs::read_to_string(admin.join("commondir")).ok()?;
+    if std::fs::canonicalize(admin.join(common.trim())).ok()? != main_git {
+        return None;
+    }
+    let back_link = std::fs::read_to_string(admin.join("gitdir")).ok()?;
+    let back_link = std::fs::canonicalize(admin.join(back_link.trim())).ok()?;
+    (back_link == std::fs::canonicalize(&dot_git).ok()?).then_some(root)
+}
+
+/// Resolves a `<prefix><path>` pointer file (relative paths are relative to
+/// the file's directory) to a canonical directory.
+fn read_git_pointer(file: &Path, prefix: &str) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(file).ok()?;
+    let target = text.trim().strip_prefix(prefix)?;
+    let dir = std::fs::canonicalize(file.parent()?.join(target)).ok()?;
+    dir.is_dir().then_some(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,5 +593,91 @@ mod tests {
         assert_eq!(blobs.len(), 1);
         assert_eq!(blobs[0].path, Path::new("large.txt"));
         assert_eq!(blobs[0].size, 9);
+    }
+
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let email = format!("user.email=shk@{}", "example.invalid");
+        let out = Command::new("git")
+            .args(["-c", "user.name=shk test", "-c", &email])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Repository with one commit, so `git worktree add` has a HEAD.
+    fn committed_repo(dir: &Path) {
+        git_ok(dir, &["init", "-q"]);
+        git_ok(dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    }
+
+    #[test]
+    fn linked_worktree_root_finds_a_worktree_of_the_same_repository() {
+        let main = tempfile::tempdir().unwrap();
+        committed_repo(main.path());
+        let wt = main.path().join(".claude/worktrees/wt");
+        git_ok(
+            main.path(),
+            &["worktree", "add", "-q", "--detach", wt.to_str().unwrap()],
+        );
+        std::fs::create_dir_all(wt.join("src")).unwrap();
+        std::fs::write(wt.join("src/app.txt"), "x").unwrap();
+        std::fs::write(main.path().join("top.txt"), "x").unwrap();
+
+        assert_eq!(
+            linked_worktree_root(main.path(), &wt.join("src/app.txt")),
+            Some(std::fs::canonicalize(&wt).unwrap())
+        );
+        assert_eq!(
+            linked_worktree_root(main.path(), &main.path().join("top.txt")),
+            None
+        );
+    }
+
+    #[test]
+    fn linked_worktree_root_rejects_other_repositories_and_spoofed_links() {
+        let main = tempfile::tempdir().unwrap();
+        committed_repo(main.path());
+        let wt = main.path().join("wt");
+        git_ok(
+            main.path(),
+            &["worktree", "add", "-q", "--detach", wt.to_str().unwrap()],
+        );
+
+        // A nested clone has its own `.git` directory.
+        let nested = main.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        git_ok(&nested, &["init", "-q"]);
+        assert_eq!(linked_worktree_root(main.path(), &nested), None);
+
+        // A worktree of another repository placed inside `main`.
+        let other = tempfile::tempdir().unwrap();
+        committed_repo(other.path());
+        let foreign = main.path().join("foreign");
+        git_ok(
+            other.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                foreign.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(linked_worktree_root(main.path(), &foreign), None);
+
+        // A hand-written `.git` file naming the real worktree's admin dir: the
+        // admin dir's `gitdir` back-link points at `wt`, not here.
+        let admin = std::fs::read_to_string(wt.join(".git")).unwrap();
+        let spoof = main.path().join("spoof");
+        std::fs::create_dir_all(&spoof).unwrap();
+        std::fs::write(spoof.join(".git"), admin).unwrap();
+        assert_eq!(linked_worktree_root(main.path(), &spoof), None);
+        assert!(linked_worktree_root(main.path(), &wt).is_some());
     }
 }
