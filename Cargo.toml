@@ -46,7 +46,7 @@ libc = "0.2"
 zeroize = "1.8"
 dialoguer = "0.12"
 quick-xml = "0.42"
-zip = { version = "8.6", default-features = false, features = ["deflate"] }
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
 pdf-extract = "0.12.0"
 encoding_rs = "0.8"
 dotenvx = "0.2.2"
