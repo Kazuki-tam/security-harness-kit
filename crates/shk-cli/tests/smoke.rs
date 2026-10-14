@@ -2337,7 +2337,10 @@ fn hooks_install_ai_claude_apply_deny_merges_without_duplicates() {
         "prompt hook should use medium threshold: {prompt_hooks:?}"
     );
     let pre_hooks = settings["hooks"]["PreToolUse"].as_array().unwrap();
-    assert_eq!(pre_hooks[0]["matcher"], "Read|Write|Bash|WebFetch|mcp__.*");
+    assert_eq!(
+        pre_hooks[0]["matcher"],
+        "Read|Write|Edit|MultiEdit|NotebookEdit|Bash|WebFetch|mcp__.*"
+    );
     let post_hooks = settings["hooks"]["PostToolUse"].as_array().unwrap();
     assert_eq!(
         post_hooks[0]["matcher"],
