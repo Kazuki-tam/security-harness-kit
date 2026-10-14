@@ -2861,6 +2861,54 @@ fn hook_mode_copilot_pre_tool_deny_exits_zero_with_permission_decision() {
 }
 
 #[test]
+fn hook_mode_copilot_cli_stringified_tool_args_are_scanned_and_guarded() {
+    let repo = tempfile::tempdir().unwrap();
+    init_git_repo(repo.path());
+    std::fs::write(repo.path().join("shk.toml"), "").unwrap();
+
+    // Copilot CLI camelCase preToolUse: `toolArgs` is a JSON-encoded string.
+    let run = |args: serde_json::Value| {
+        let stdin = serde_json::json!({
+            "timestamp": 1704614400000_u64,
+            "cwd": repo.path(),
+            "toolName": "bash",
+            "toolArgs": args.to_string()
+        })
+        .to_string();
+        let out = output_with_stdin(
+            Command::new(shk_bin())
+                .args(["scan", ".", "--hook-mode", "copilot"])
+                .current_dir(repo.path()),
+            &stdin,
+        );
+        assert!(
+            out.status.success(),
+            "Copilot pre hooks answer on stdout with exit 0: {}",
+            output_log(&out)
+        );
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
+    };
+
+    let secret = run(serde_json::json!({
+        "command": format!("echo {}", synthetic_openai_key('c'))
+    }));
+    assert_eq!(secret["permissionDecision"], "deny", "{secret}");
+
+    let guarded = run(serde_json::json!({ "command": "psql -c \"DROP TABLE users\"" }));
+    assert_eq!(guarded["permissionDecision"], "deny", "{guarded}");
+    assert!(
+        guarded["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("action guard"),
+        "{guarded}"
+    );
+
+    let clean = run(serde_json::json!({ "command": "ls" }));
+    assert_ne!(clean["permissionDecision"], "deny", "{clean}");
+}
+
+#[test]
 fn hook_mode_codex_permission_request_uses_decision_shape() {
     use std::io::Write;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
