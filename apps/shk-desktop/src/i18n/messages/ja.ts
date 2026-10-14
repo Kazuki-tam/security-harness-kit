@@ -397,6 +397,7 @@ export const ja: Messages = {
     reasonLabels: {
       finding_threshold: "秘密値・個人情報の検出",
       action_guard: "危険な操作のブロック",
+      payload_too_large: "大きすぎるツール入力のブロック",
     },
     toolNames: {
       "claude-code": "Claude Code",

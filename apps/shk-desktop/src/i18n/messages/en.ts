@@ -402,6 +402,7 @@ export const en: Messages = {
     reasonLabels: {
       finding_threshold: "Secret/PII blocked",
       action_guard: "Risky action blocked",
+      payload_too_large: "Oversized tool input blocked",
     },
     toolNames: {
       "claude-code": "Claude Code",

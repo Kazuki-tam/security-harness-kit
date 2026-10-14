@@ -322,6 +322,7 @@ Important hook behavior:
 - `--log-blocked` keeps installed pre hooks blocking and writes metadata-only blocked-event entries to `.shk/audit.log`; post hooks stay non-blocking and write post audit entries. Inspect them with `shk audit`.
 - `--apply-sandbox` hardens supported tool sandbox settings. Cursor has no local sandbox setting in `hooks.json`, so this sets managed hooks fail-closed.
 - Pre-hook mode runs action guard before content scanning. Tune with `[action_guard]` in `shk.toml`.
+- A pre-tool call carrying more than 2 MiB of text in its arguments is denied as "too large to scan in full"; split the change into smaller steps (for example, several smaller writes).
 
 ## Git hook and CI integration
 

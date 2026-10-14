@@ -170,7 +170,7 @@ if (!missing)
     "V1 post findings must be reported",
   );
 const parts = [
-  { type: "text", text: "use " + SECRET },
+  { id: "p1", sessionID: "s", messageID: "m", type: "text", text: "use " + SECRET },
   { type: "file", url: "https://example.com/attachment" },
 ];
 await rejects(
@@ -180,6 +180,7 @@ await rejects(
 if (!noticePattern.test(parts[0].text) || parts[0].text.includes(SECRET))
   fail(`V1 prompt parts not scrubbed: ${parts[0].text}`);
 assert.equal(parts.length, 1, "denied V1 draft must discard attachment parts");
+assert.deepEqual([parts[0].id, parts[0].sessionID, parts[0].messageID], ["p1", "s", "m"]);
 if (missing && !logs.some((entry) => /not found/.test(entry?.body?.message ?? "")))
   fail("V1 host was not warned about the missing binary");
 // Scanner protocol failures deny pre/prompt but never block post/audit.
@@ -208,6 +209,14 @@ assert.equal(
   "findings",
 );
 internals.CONFIG.audit = true;
+// Audit mode annotates every allow; that alone must not produce a log line.
+assert.deepEqual(
+  internals.verdict(
+    { kind: "exit", code: 0, stdout: '{"decision":"allow","reason":"shk audit: non-blocking"}' },
+    false,
+  ),
+  { block: false, clean: true },
+);
 const auditLogs = [];
 const audit = await internals.guard(
   DIR,

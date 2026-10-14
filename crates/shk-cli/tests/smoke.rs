@@ -7186,12 +7186,13 @@ fn hook_mode_opencode_denies_pre_tool_use_and_blocks_user_prompt() {
         serde_json::from_slice(&prompt.stdout).expect("prompt stdout json");
     assert_eq!(prompt_stdout["decision"], "block");
 
-    // Text past the scan budget is never allowed through unscanned.
+    // Text past the scan budget is never allowed through unscanned, even
+    // when the part that fits is clean.
     let oversized = run(
         serde_json::json!({
             "hook_event_name": "PreToolUse",
             "tool_name": "mcp_tool",
-            "tool_input": { "aaa": "a".repeat(3 * 1024 * 1024), "zzz": secret },
+            "tool_input": { "aaa": "a".repeat(3 * 1024 * 1024), "zzz": "clean tail" },
             "cwd": root
         })
         .to_string(),

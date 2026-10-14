@@ -177,7 +177,9 @@ function verdict(result, blocking) {
     case "exit": {
       const decision = parseDecision(result.stdout);
       if (result.code === 0 && decision?.decision === "allow") {
-        const reason = decision.reason || firstLine(result.stderr);
+        // Audit mode records findings in .shk/audit.log and annotates every
+        // allow, so only non-audit notes (e.g. post findings) are worth a log line.
+        const reason = !CONFIG.audit && (decision.reason || firstLine(result.stderr));
         return reason ? { block: false, reason } : { block: false, clean: true };
       }
       if (result.code === 2 || (result.code === 0 && decision)) {
@@ -361,8 +363,10 @@ export default {
         if (!outcome.block) return;
         // Scrub the entire draft before rejecting, including attachment parts.
         const notice = promptNotice(outcome.reason);
-        if (Array.isArray(output?.parts))
-          output.parts.splice(0, output.parts.length, { type: "text", text: notice });
+        if (Array.isArray(output?.parts)) {
+          const { id, sessionID, messageID } = output.parts[0] ?? {};
+          output.parts.splice(0, output.parts.length, { id, sessionID, messageID, type: "text", text: notice });
+        }
         throw new Error(notice);
       },
     };

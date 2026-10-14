@@ -88,7 +88,7 @@ Options:
 | `--json` | Print the audit preview as JSON. |
 | `--since <duration>` | Limit entries to a relative duration such as `30m`, `24h`, `7d`, or `1w`. |
 | `--tool <tool>` | Limit entries to `claude-code`, `codex`, `cursor`, `copilot`, `antigravity`, `grok`, `opencode`, or `windsurf`. |
-| `--reason <reason>` | Limit entries to `blocked`, `finding-threshold`, or `action-guard`. |
+| `--reason <reason>` | Limit entries to `blocked` (every block, including invalid-policy and oversized-payload blocks), `finding-threshold`, or `action-guard`. |
 | `--limit <n>` | Limit the recent event rows. Defaults to `10`. |
 | `--no-paths` | Omit `display_path` from recent event rows. |
 
@@ -287,6 +287,7 @@ Hook mode notes:
 
 - Candidate file bodies use a NUL-byte check in the first 8 KiB to skip binary content. Other files are decoded lossily if needed, so an invalid UTF-8 byte does not fail the hook. File extensions do not bypass scanning. Tool arguments and action guards are still checked when a binary body is skipped. Hook file-body extraction does not perform OCR or document text extraction; use ordinary `shk scan` for supported documents.
 
+- Tool-argument text taken from a hook payload is limited to 2 MiB per event (prompts are scanned whole); each distinct string counts once, and files the payload references are read from disk without counting against it. A pre-tool or permission event over the limit is denied with "tool input too large to scan in full" even when the part that fits is clean, and `--log-blocked` records it with reason `payload_too_large`. Post and `--audit` scans never block on it.
 - `--hook-mode` cannot be combined with `--staged`, `--changed-since`, or `--git-history`.
 - `--audit` appends metadata-only JSON lines to `.shk/audit.log`, always exits `0`, and requires a project `shk.toml`.
 - `--log-blocked` keeps pre-hook blocking behavior, appends metadata-only blocked entries to `.shk/audit.log`, and requires a project `shk.toml`. Combined with `--post`, it writes non-blocking post audit entries.

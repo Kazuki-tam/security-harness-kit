@@ -232,7 +232,6 @@ pub fn extract_user_prompt(stdin: &str) -> Option<Cow<'_, str>> {
         .or_else(|| payload.tool_info.and_then(|info| info.user_prompt))
 }
 
-/// Returns display path (posix-ish relative to repo) + body content to scan.
 /// Text extracted from a hook payload for scanning.
 #[derive(Debug)]
 pub struct HookBody {
@@ -244,6 +243,7 @@ pub struct HookBody {
     pub truncated: bool,
 }
 
+/// Returns display path (posix-ish relative to repo) + body content to scan.
 pub fn stdin_to_hook_body(
     tool: AiHookTool,
     post: bool,
@@ -262,59 +262,75 @@ pub fn hook_body_from_stdin(
     repo_root: &Path,
 ) -> Result<HookBody> {
     let v: Value = serde_json::from_str(stdin).context("hook stdin must be valid JSON")?;
-    let mut texts = HookTexts::default();
-    let mut display: Option<String> = None;
-
     // Referenced files are scanned whole and do not spend the payload budget.
-    let file_text = read_files_from_candidates(tool, &v, cwd, repo_root)?.map(|(rel, txt)| {
-        display = Some(rel);
-        txt
-    });
+    let files = read_files_from_candidates(tool, &v, cwd, repo_root)?;
 
+    let mut texts = HookTexts::default();
+    if let Some(files) = &files {
+        // A payload string equal to a file body (e.g. Cursor's `content`)
+        // is already covered by the file scan.
+        texts.seen.extend(files.contents.iter().map(String::as_str));
+    }
     text_priority_chunks(&v, post, tool, &mut texts);
-
-    if texts.blobs.is_empty() && file_text.is_none() {
+    if texts.blobs.is_empty() && files.is_none() {
         collect_large_strings(&v, &mut texts, 96);
     }
 
-    let blobs: Vec<String> = file_text.into_iter().chain(texts.blobs).collect();
-    let body = if blobs.is_empty() {
+    let parts: Vec<&str> = files
+        .as_ref()
+        .map(|files| files.body.as_str())
+        .into_iter()
+        .chain(texts.blobs.iter().copied())
+        .collect();
+    let body = if parts.is_empty() {
         "{}".into()
     } else {
-        blobs.join("\n---\n")
+        parts.join("\n---\n")
     };
+    let truncated = texts.truncated;
 
     Ok(HookBody {
-        display: display.unwrap_or_else(|| tool.virtual_path_label().to_string()),
+        display: files.map_or_else(|| tool.virtual_path_label().to_string(), |f| f.display),
         body,
-        truncated: texts.truncated,
+        truncated,
     })
 }
 
-/// Payload strings collected for scanning, deduplicated before they are
-/// charged against `MAX_HOOK_TEXT_BYTES` (the same string is often reachable
+/// Payload strings collected for scanning. Each distinct string is charged
+/// once against `MAX_HOOK_TEXT_BYTES` (the same string is often reachable
 /// through several keys).
 #[derive(Default)]
-struct HookTexts {
-    blobs: Vec<String>,
-    seen: HashSet<String>,
+struct HookTexts<'a> {
+    blobs: Vec<&'a str>,
+    seen: HashSet<&'a str>,
     used: usize,
     truncated: bool,
 }
 
-impl HookTexts {
-    fn push(&mut self, s: &str) {
-        if s.trim().is_empty() || self.seen.contains(s) {
+impl<'a> HookTexts<'a> {
+    fn push(&mut self, s: &'a str) {
+        if s.trim().is_empty() || !self.seen.insert(s) {
             return;
         }
-        if self.used >= MAX_HOOK_TEXT_BYTES {
+        // Whether a payload overflows depends only on the total size of its
+        // distinct strings, never on the order the keys are visited in.
+        if self.used + s.len() > MAX_HOOK_TEXT_BYTES {
             self.truncated = true;
             return;
         }
         self.used += s.len();
-        self.seen.insert(s.to_owned());
-        self.blobs.push(s.to_owned());
+        self.blobs.push(s);
     }
+}
+
+/// Files referenced by a hook payload, read from disk.
+struct ReferencedFiles {
+    /// Repo-relative path of the first file.
+    display: String,
+    /// Every file with a `// ---- <path>` header, ready to scan.
+    body: String,
+    /// The decoded file contents, to recognize payload strings that repeat them.
+    contents: Vec<String>,
 }
 
 fn rel_from_repo(repo_root: &Path, abs: &Path) -> String {
@@ -328,8 +344,9 @@ fn read_files_from_candidates(
     v: &Value,
     cwd: &Path,
     repo_root: &Path,
-) -> Result<Option<(String, String)>> {
+) -> Result<Option<ReferencedFiles>> {
     let mut texts: Vec<String> = Vec::new();
+    let mut contents: Vec<String> = Vec::new();
     let mut first_rel: Option<String> = None;
     let repo_root = fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
 
@@ -355,16 +372,18 @@ fn read_files_from_candidates(
                 first_rel = Some(rel.clone());
             }
             texts.push(format!("// ---- {rel}\n{t}"));
+            contents.push(t.into_owned());
         }
     }
 
     Ok(if texts.is_empty() {
         None
     } else {
-        Some((
-            first_rel.unwrap_or_else(|| "<file>".into()),
-            texts.join("\n"),
-        ))
+        Some(ReferencedFiles {
+            display: first_rel.unwrap_or_else(|| "<file>".into()),
+            body: texts.join("\n"),
+            contents,
+        })
     })
 }
 
@@ -419,7 +438,7 @@ fn is_file_body_path_key(tool: AiHookTool, key: &str) -> bool {
         && (PATH_KEYS.iter().any(|pk| pk == &key) || key.to_ascii_lowercase().ends_with("path"))
 }
 
-fn text_priority_chunks(v: &Value, post: bool, tool: AiHookTool, texts: &mut HookTexts) {
+fn text_priority_chunks<'a>(v: &'a Value, post: bool, tool: AiHookTool, texts: &mut HookTexts<'a>) {
     for keys in priority_text_key_sets(post, tool) {
         grab_strings_for_keys_deep(v, keys, texts);
     }
@@ -448,7 +467,7 @@ fn priority_text_key_sets(post: bool, tool: AiHookTool) -> &'static [&'static [&
     }
 }
 
-fn grab_strings_for_keys_deep(v: &Value, keys: &[&str], acc: &mut HookTexts) {
+fn grab_strings_for_keys_deep<'a>(v: &'a Value, keys: &[&str], acc: &mut HookTexts<'a>) {
     match v {
         Value::Object(map) => {
             for (k, val) in map {
@@ -467,7 +486,7 @@ fn grab_strings_for_keys_deep(v: &Value, keys: &[&str], acc: &mut HookTexts) {
     }
 }
 
-fn push_strings_from_value(v: &Value, acc: &mut HookTexts) {
+fn push_strings_from_value<'a>(v: &'a Value, acc: &mut HookTexts<'a>) {
     match v {
         Value::String(s) => acc.push(s),
         Value::Array(items) => {
@@ -484,7 +503,7 @@ fn push_strings_from_value(v: &Value, acc: &mut HookTexts) {
     }
 }
 
-fn collect_large_strings(v: &Value, acc: &mut HookTexts, min_len: usize) {
+fn collect_large_strings<'a>(v: &'a Value, acc: &mut HookTexts<'a>, min_len: usize) {
     match v {
         Value::String(s) if s.len() >= min_len => acc.push(s),
         Value::Object(map) => {
@@ -584,7 +603,31 @@ mod tests {
             hook_body_from_stdin(AiHookTool::Opencode, false, &stdin, dir.path(), dir.path())
                 .unwrap();
         assert!(hook.truncated);
-        assert!(!hook.body.contains("budget-tail-marker"));
+        assert!(!hook.body.contains(&big));
+
+        // One oversized string overflows on its own, whatever follows it, so
+        // the same write is judged alike for every tool.
+        for (tool, stdin) in [
+            (
+                AiHookTool::ClaudeCode,
+                serde_json::json!({
+                    "tool_name": "Write",
+                    "tool_input": { "file_path": "/nonexistent/out.txt", "content": big }
+                }),
+            ),
+            (
+                AiHookTool::Opencode,
+                serde_json::json!({
+                    "tool_name": "write",
+                    "tool_input": { "filePath": "/nonexistent/out.txt", "content": big }
+                }),
+            ),
+        ] {
+            let hook =
+                hook_body_from_stdin(tool, false, &stdin.to_string(), dir.path(), dir.path())
+                    .unwrap();
+            assert!(hook.truncated, "{tool:?}");
+        }
 
         // The same string reachable through two keys is charged once.
         let half = "b".repeat(MAX_HOOK_TEXT_BYTES / 2 + 1);
@@ -615,6 +658,15 @@ mod tests {
                 .unwrap();
         assert!(!hook.truncated);
         assert!(hook.body.contains("edit-arg-marker"));
+
+        // A payload that repeats the file body (Cursor `beforeReadFile`
+        // sends it as `content`) is covered by the file scan.
+        let body = std::fs::read_to_string(&file).unwrap();
+        let stdin = serde_json::json!({ "file_path": file, "content": body }).to_string();
+        let hook = hook_body_from_stdin(AiHookTool::Cursor, false, &stdin, dir.path(), dir.path())
+            .unwrap();
+        assert!(!hook.truncated);
+        assert_eq!(hook.body.matches(&body).count(), 1);
     }
 
     #[test]
