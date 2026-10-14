@@ -15,6 +15,7 @@ pub const EVENT_BLOCKED: &str = "blocked";
 pub const REASON_FINDING_THRESHOLD: &str = "finding_threshold";
 pub const REASON_ACTION_GUARD: &str = "action_guard";
 pub const REASON_POLICY_ERROR: &str = "policy_error";
+pub const REASON_PAYLOAD_TOO_LARGE: &str = "payload_too_large";
 
 pub fn hook_phase_name(event: HookEvent) -> &'static str {
     match event {
@@ -108,11 +109,15 @@ pub fn blocked_action_guard_payload(
 }
 
 pub fn blocked_policy_error_payload(tool: AiTool, event: HookEvent) -> serde_json::Value {
+    blocked_reason_payload(tool, event, REASON_POLICY_ERROR)
+}
+
+fn blocked_reason_payload(tool: AiTool, event: HookEvent, reason: &str) -> serde_json::Value {
     serde_json::json!({
         "event": EVENT_BLOCKED,
         "tool": tool.kebab_str(),
         "hook": hook_phase_name(event),
-        "reason": REASON_POLICY_ERROR,
+        "reason": reason,
     })
 }
 
@@ -166,6 +171,19 @@ pub fn append_blocked_action_guard(
 pub fn append_blocked_policy_error(repo_root: &Path, tool: AiTool, event: HookEvent) -> Result<()> {
     audit_log::append_line(repo_root, blocked_policy_error_payload(tool, event))?;
     eprintln!("shk blocked: invalid policy (see .shk/audit.log)");
+    Ok(())
+}
+
+pub fn append_blocked_payload_too_large(
+    repo_root: &Path,
+    tool: AiTool,
+    event: HookEvent,
+) -> Result<()> {
+    audit_log::append_line(
+        repo_root,
+        blocked_reason_payload(tool, event, REASON_PAYLOAD_TOO_LARGE),
+    )?;
+    eprintln!("shk blocked: hook payload too large to scan (see .shk/audit.log)");
     Ok(())
 }
 

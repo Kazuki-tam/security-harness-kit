@@ -1054,12 +1054,14 @@ pub fn has_managed_ai_hooks(root: &Path) -> bool {
         root.join(".github/hooks/shk-security.json"),
         root.join(".windsurf/hooks.json"),
         root.join(".grok/hooks/shk-security.json"),
+        root.join(".opencode/plugins/shk-security.js"),
         root.join(CONFIG_REL_PATH),
     ];
     for p in paths {
         if let Ok(s) = fs::read_to_string(&p)
             && (s.contains(MANAGED_MARKER_JSON)
                 || s.contains(MANAGED_MARKER_SH)
+                || crate::hooks::is_managed_opencode_plugin(&s)
                 || (s.contains("shk scan")
                     && (s.contains("--hook-mode copilot")
                         || s.contains("--hook-mode windsurf")
@@ -1211,6 +1213,7 @@ struct DoctorReport {
     codex: CodexConfigSnapshot,
     env_files: Vec<EnvFileStatus>,
     secret_store: SecretStoreDoctorStatus,
+    opencode_plugin_drift: Option<String>,
     warning_count: usize,
 }
 
@@ -1226,6 +1229,7 @@ fn collect_doctor_report(root: &Path) -> Result<DoctorReport> {
     let codex = snapshot_codex_config(root);
     let env_files = collect_doctor_env_file_statuses(root);
     let secret_store = collect_secret_store_doctor_status(&policy);
+    let opencode_plugin_drift = crate::hooks::opencode_plugin_drift(root);
     let warning_count = doctor_warning_count(DoctorWarningInputs {
         hook_ok,
         ai_managed,
@@ -1237,6 +1241,7 @@ fn collect_doctor_report(root: &Path) -> Result<DoctorReport> {
         npm: &npm,
         env_files: &env_files,
         secret_store: &secret_store,
+        opencode_plugin_drift: opencode_plugin_drift.as_deref(),
     });
     Ok(DoctorReport {
         hook_ok,
@@ -1249,6 +1254,7 @@ fn collect_doctor_report(root: &Path) -> Result<DoctorReport> {
         codex,
         env_files,
         secret_store,
+        opencode_plugin_drift,
         warning_count,
     })
 }
@@ -1279,6 +1285,7 @@ pub fn run_all(root: &Path, json: bool, strict: bool) -> Result<()> {
             "warningCount": warning_count,
             "git_pre_commit_shk": report.hook_ok,
             "ai_managed_hooks": report.ai_managed,
+            "opencodePluginDrift": report.opencode_plugin_drift,
             "shkExecutable": report.executable,
             "ignore": report.ignore,
             "claudePermissions": report.claude,
@@ -1345,6 +1352,9 @@ pub fn run_all(root: &Path, json: bool, strict: bool) -> Result<()> {
             "not found — run `shk hooks install-ai`"
         }
     );
+    if let Some(drift) = &report.opencode_plugin_drift {
+        println!("  warning: {drift}");
+    }
     println!();
     print_shk_executable_status(&report.executable);
     println!();
@@ -1381,6 +1391,7 @@ struct DoctorWarningInputs<'a> {
     npm: &'a npm_hardening::NpmHardeningStatus,
     env_files: &'a [EnvFileStatus],
     secret_store: &'a SecretStoreDoctorStatus,
+    opencode_plugin_drift: Option<&'a str>,
 }
 
 fn doctor_warning_count(inputs: DoctorWarningInputs<'_>) -> usize {
@@ -1402,6 +1413,7 @@ fn doctor_warning_count(inputs: DoctorWarningInputs<'_>) -> usize {
     warnings += usize::from(!inputs.npm.ok());
     warnings += env_file_warning_count(inputs.env_files);
     warnings += inputs.secret_store.warning_count;
+    warnings += usize::from(inputs.opencode_plugin_drift.is_some());
     warnings
 }
 

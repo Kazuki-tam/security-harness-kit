@@ -13,6 +13,7 @@ pub enum SkillTool {
     Copilot,
     Antigravity,
     Grok,
+    Opencode,
     Windsurf,
     All,
 }
@@ -51,6 +52,7 @@ pub(crate) fn selected_tools(tool: SkillTool) -> Vec<SkillTool> {
         // directory (`.agents/skills/`) at project level; Antigravity is listed
         // separately because its global directory is `~/.gemini/config/skills/`.
         // Copilot reads `.github/skills/` at project level and `~/.copilot/skills/`.
+        // OpenCode reads `.agents/skills/` and `~/.agents/skills/` too.
         // Duplicate destinations are collapsed in `install_for`.
         SkillTool::All => vec![
             SkillTool::ClaudeCode,
@@ -59,6 +61,7 @@ pub(crate) fn selected_tools(tool: SkillTool) -> Vec<SkillTool> {
             SkillTool::Copilot,
             SkillTool::Antigravity,
             SkillTool::Grok,
+            SkillTool::Opencode,
             SkillTool::Windsurf,
         ],
         t => vec![t],
@@ -94,11 +97,11 @@ pub fn status_entries_for(root: &Path) -> Vec<SkillStatus> {
         ("claude-code (project)", SkillTool::ClaudeCode, false),
         ("claude-code (global)", SkillTool::ClaudeCode, true),
         (
-            "codex/cursor/antigravity (project)",
+            "codex/cursor/antigravity/opencode (project)",
             SkillTool::Codex,
             false,
         ),
-        ("codex/cursor (global)", SkillTool::Codex, true),
+        ("codex/cursor/opencode (global)", SkillTool::Codex, true),
         ("copilot (project)", SkillTool::Copilot, false),
         ("copilot (global)", SkillTool::Copilot, true),
         ("antigravity (global)", SkillTool::Antigravity, true),
@@ -239,7 +242,9 @@ fn dest_path_for(base: &Path, tool: SkillTool, global: bool) -> Result<PathBuf> 
             .join("skills")
             .join(SKILL_NAME)
             .join("SKILL.md"),
-        SkillTool::Codex | SkillTool::Cursor => base
+        // OpenCode reads `.agents/skills/` and `~/.agents/skills/` alongside
+        // its own `.opencode/skills/` directories, so it shares this destination.
+        SkillTool::Codex | SkillTool::Cursor | SkillTool::Opencode => base
             .join(".agents")
             .join("skills")
             .join(SKILL_NAME)
@@ -309,6 +314,7 @@ impl SkillTool {
             Self::Copilot => "copilot",
             Self::Antigravity => "antigravity",
             Self::Grok => "grok",
+            Self::Opencode => "opencode",
             Self::Windsurf => "windsurf",
             Self::All => "all",
         }
@@ -330,6 +336,7 @@ mod tests {
                 SkillTool::Copilot,
                 SkillTool::Antigravity,
                 SkillTool::Grok,
+                SkillTool::Opencode,
                 SkillTool::Windsurf,
             ]
         );
@@ -364,7 +371,7 @@ mod tests {
                 .filter(|line| line.contains(".agents/skills/shk/SKILL.md"))
                 .count(),
             1,
-            "Codex, Cursor, and Antigravity should share one project destination: {details:?}"
+            "Codex, Cursor, Antigravity, and OpenCode should share one project destination: {details:?}"
         );
     }
 

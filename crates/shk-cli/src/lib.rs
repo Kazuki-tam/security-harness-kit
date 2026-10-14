@@ -334,6 +334,7 @@ pub fn run() -> Result<()> {
                     SkillToolArg::Copilot => commands::skills::SkillTool::Copilot,
                     SkillToolArg::Cursor => commands::skills::SkillTool::Cursor,
                     SkillToolArg::Grok => commands::skills::SkillTool::Grok,
+                    SkillToolArg::Opencode => commands::skills::SkillTool::Opencode,
                     SkillToolArg::Windsurf => commands::skills::SkillTool::Windsurf,
                     SkillToolArg::All => commands::skills::SkillTool::All,
                 }),

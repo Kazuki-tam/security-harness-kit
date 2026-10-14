@@ -3,7 +3,7 @@ name: shk
 description: >
   Security scanning, PII detection, secret masking, and AI hook installation using the shk CLI.
   Use when the user asks to: scan for secrets/credentials/sensitive data, detect or mask PII,
-  set up security hooks for Claude Code/Cursor/Codex/Copilot/Antigravity/Grok Build/Windsurf, run security diagnostics (shk doctor),
+  set up security hooks for Claude Code/Cursor/Codex/Copilot/Antigravity/Grok Build/OpenCode/Windsurf, run security diagnostics (shk doctor),
   manage dotenvx private keys, push dotenv payloads to AWS/GCP secret managers,
   audit MCP server configuration files (shk mcp audit),
   or guard content flowing through MCP tools or external data connections.
@@ -41,7 +41,7 @@ shk init --yes --no-npm-hardening    # skip package-manager hardening
 shk completions zsh                  # generate shell completions
 shk status                           # concise project health summary
 shk hooks install                    # install Git pre-commit hook
-shk hooks install-ai                 # install hooks for Claude Code / Cursor / Codex / Copilot / Antigravity / Grok Build / Windsurf
+shk hooks install-ai                 # install hooks for Claude Code / Cursor / Codex / Copilot / Antigravity / Grok Build / OpenCode / Windsurf
 shk hooks install-ai --tool claude-code --global
 shk hooks install-ai --apply-sandbox # harden supported tool sandbox settings
 shk hooks install-ai --dry-run       # preview changes
@@ -66,7 +66,7 @@ shk env dotenvx run -- npm test       # inject stored keys only into child proce
 shk env dotenvx delete --all
 shk secrets push --profile prod       # push dotenv payload to AWS/GCP secret manager
 shk secrets push --profile prod --dry-run
-shk skills install                   # install this skill (claude-code + codex/cursor/antigravity + copilot + grok + windsurf)
+shk skills install                   # install this skill (claude-code + codex/cursor/antigravity/opencode + copilot + grok + windsurf)
 shk skills install --tool claude-code --global
 shk skills install --tool codex --global
 shk skills install --tool cursor --global
@@ -239,8 +239,10 @@ Safe operating rules:
 `.cursor/hooks.json`, `.codex/config.toml`, `.github/hooks/shk-security.json`,
 `.agents/hooks.json` (Antigravity; global installs use `~/.gemini/config/hooks.json`),
 `.windsurf/hooks.json` (Windsurf; global installs use
-`~/.codeium/windsurf/hooks.json`), and `.grok/hooks/shk-security.json`
-(Grok Build; global installs use `~/.grok/hooks/shk-security.json`).
+`~/.codeium/windsurf/hooks.json`), `.grok/hooks/shk-security.json`
+(Grok Build; global installs use `~/.grok/hooks/shk-security.json`), and
+`.opencode/plugins/shk-security.js` (OpenCode; a managed plugin file that
+OpenCode auto-discovers, global installs use `~/.config/opencode/plugins/shk-security.js`, or `$XDG_CONFIG_HOME/opencode/plugins/` when that is set).
 
 Each hook runs `shk scan --hook-mode <tool>` on the payload before AI tool execution.
 Pre-hooks and user-prompt hooks block on findings (exit 2); post-hooks warn only (exit 0).
@@ -255,8 +257,9 @@ Project hook commands stay portable so committed config files work across machin
 Claude Code and Grok Build scan `"${CLAUDE_PROJECT_DIR:-.}"` (Grok sets that variable on
 every hook), Cursor scans `"${CURSOR_PROJECT_DIR:-.}"` (both editor-expanded, still
 process-controlled so model-controlled payload paths cannot select the scan policy or
-audit-log destination), and Copilot/Antigravity/Windsurf resolve the
-project root from the hook process cwd. Codex project hooks resolve that
+audit-log destination), Copilot/Antigravity/Windsurf resolve the
+project root from the hook process cwd, and the OpenCode plugin passes the
+directory OpenCode loaded it for. Codex project hooks resolve that
 root dynamically with `$(git rev-parse --show-toplevel)` and also ensure `features.hooks = true`
 while installing `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, and `PostToolUse`.
 Global hooks have no embedded path: Claude Code, Grok Build, and Cursor read
@@ -289,6 +292,14 @@ Project hooks do not run until the folder is trusted with `/hooks-trust` or `gro
 Grok also runs hooks from `.claude/settings.json` and `.cursor/hooks.json`, so managed
 Claude Code or Cursor hooks scan Grok sessions too.
 
+OpenCode gets a managed plugin, `.opencode/plugins/shk-security.js`, that works with the
+2.x plugin API and 1.x from 1.18.29. It runs `shk scan --hook-mode opencode` before and
+after every tool call (MCP tools and subagents included) and on each prompt. Pre-tool
+and prompt hooks fail closed: a missing `shk`, a timeout (30 s), or an unrecognized hook
+payload blocks. A blocked prompt is replaced by a notice. GUI-launched OpenCode may not
+see the shell `PATH`; set `SHK_BIN` to the absolute path of the `shk` executable (on
+Windows, the `shk.exe` path when shk came from npm). `shk doctor` warns when the plugin differs from the template.
+
 ```bash
 shk hooks install-ai                             # all detected tools
 shk hooks install-ai --audit                     # non-blocking, writes .shk/audit.log
@@ -301,15 +312,17 @@ shk hooks install-ai --tool cursor --fail-closed
 shk hooks install-ai --tool copilot
 shk hooks install-ai --tool antigravity
 shk hooks install-ai --tool grok
+shk hooks install-ai --tool opencode
 shk hooks install-ai --tool windsurf
 ```
 
 Important hook behavior:
-- Without `--tool`, installs managed hooks for Claude Code, Codex, Cursor, Copilot, Antigravity, and Windsurf.
+- Without `--tool`, installs managed hooks for Claude Code, Codex, Cursor, Copilot, Antigravity, Grok Build, OpenCode, and Windsurf.
 - `--audit` makes installed hooks non-blocking and writes metadata-only entries to `.shk/audit.log`.
 - `--log-blocked` keeps installed pre hooks blocking and writes metadata-only blocked-event entries to `.shk/audit.log`; post hooks stay non-blocking and write post audit entries. Inspect them with `shk audit`.
 - `--apply-sandbox` hardens supported tool sandbox settings. Cursor has no local sandbox setting in `hooks.json`, so this sets managed hooks fail-closed.
 - Pre-hook mode runs action guard before content scanning. Tune with `[action_guard]` in `shk.toml`.
+- A pre-tool call carrying more than 2 MiB of text in its arguments is denied as "too large to scan in full"; split the change into smaller steps (for example, several smaller writes).
 
 ## Git hook and CI integration
 
@@ -556,13 +569,14 @@ For `shk secrets push`, profile keys are limited to supported fields such as `pr
 ```bash
 shk skills list                              # show available built-in skills
 shk skills status                            # check installation status
-shk skills install                           # install for all tools (claude-code + codex/cursor/antigravity + copilot + grok + windsurf)
+shk skills install                           # install for all tools (claude-code + codex/cursor/antigravity/opencode + copilot + grok + windsurf)
 shk skills install --tool claude-code        # .claude/skills/shk/SKILL.md
 shk skills install --tool codex             # .agents/skills/shk/SKILL.md
 shk skills install --tool cursor            # .agents/skills/shk/SKILL.md
 shk skills install --tool copilot           # .github/skills/shk/SKILL.md
 shk skills install --tool antigravity       # .agents/skills/shk/SKILL.md (shared)
 shk skills install --tool grok             # .grok/skills/shk/SKILL.md
+shk skills install --tool opencode          # .agents/skills/shk/SKILL.md (shared)
 shk skills install --tool windsurf          # .windsurf/skills/shk/SKILL.md
 shk skills install --tool all --global
 shk skills install --tool claude-code --global   # ~/.claude/skills/shk/SKILL.md
@@ -571,6 +585,7 @@ shk skills install --tool cursor --global   # ~/.agents/skills/shk/SKILL.md
 shk skills install --tool copilot --global  # ~/.copilot/skills/shk/SKILL.md
 shk skills install --tool antigravity --global   # ~/.gemini/config/skills/shk/SKILL.md
 shk skills install --tool grok --global     # ~/.grok/skills/shk/SKILL.md
+shk skills install --tool opencode --global # ~/.agents/skills/shk/SKILL.md
 shk skills install --tool windsurf --global # ~/.codeium/windsurf/skills/shk/SKILL.md
 shk skills install --force                  # overwrite existing
 shk skills install --dry-run                # preview without writing

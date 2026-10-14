@@ -64,3 +64,6 @@ out/
 
 # shk: appended required patterns
 *.mobileprovision
+
+# Internal design notes stay local
+design/

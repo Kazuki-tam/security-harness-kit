@@ -14,7 +14,10 @@ pub use action_guard::{
     detect_dangerous_action_with_config, normalize_claude_deny_entry, payload_command_hints,
     payload_path_hints, payload_repository_context_hints,
 };
-pub use ai_hooks::{AiHookTool, USER_PROMPT_HOOK_FAIL_ON, extract_user_prompt, stdin_to_hook_body};
+pub use ai_hooks::{
+    AiHookTool, HookBody, USER_PROMPT_HOOK_FAIL_ON, extract_user_prompt, hook_body_from_stdin,
+    stdin_to_hook_body,
+};
 pub use codex::{
     CONFIG_REL_PATH, HOOKS_FEATURE_KEY, LEGACY_HOOKS_FEATURE_KEY, RECOMMENDED_APPROVAL_POLICY,
     RECOMMENDED_SANDBOX_MODE, RISKY_APPROVAL_POLICY, RISKY_DEFAULT_PERMISSIONS, RISKY_SANDBOX_MODE,

@@ -138,7 +138,7 @@ export function shouldNotifyForEvent(
   if (!settings.enabled) return false;
   if (event.reason === "action_guard") return settings.actionGuard;
   if (event.reason === "finding_threshold") return settings.findingThreshold;
-  // Other block reasons (currently `policy_error`) follow the master toggle:
+  // Other block reasons (`policy_error`, `payload_too_large`) follow the master toggle:
   // they are still a hook refusing to let an action through.
   return true;
 }

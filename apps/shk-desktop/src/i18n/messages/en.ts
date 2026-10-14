@@ -402,6 +402,7 @@ export const en: Messages = {
     reasonLabels: {
       finding_threshold: "Secret/PII blocked",
       action_guard: "Risky action blocked",
+      payload_too_large: "Oversized tool input blocked",
     },
     toolNames: {
       "claude-code": "Claude Code",
@@ -411,6 +412,7 @@ export const en: Messages = {
       antigravity: "Antigravity",
       windsurf: "Windsurf",
       grok: "Grok Build",
+      opencode: "OpenCode",
     },
     actionCategories: {
       secret_file_access: "Sensitive file read",
@@ -572,7 +574,7 @@ export const en: Messages = {
     aiHooks: {
       title: "AI editor safety",
       description:
-        "Configure scan hooks and safety settings for Cursor, Claude Code, Codex, Copilot, Antigravity, Windsurf, and Grok Build.",
+        "Configure scan hooks and safety settings for Cursor, Claude Code, Codex, Copilot, Antigravity, Windsurf, Grok Build, and OpenCode.",
       install: "Install scan hooks",
       applySelected: "Apply checked settings",
       syncSelected: "Apply changes",
@@ -597,6 +599,7 @@ export const en: Messages = {
         antigravity: "Antigravity",
         windsurf: "Windsurf",
         grok: "Grok Build",
+        opencode: "OpenCode",
       },
       installClaudeDeny: "Apply deny",
       installCodexSandbox: "Apply sandbox",
@@ -636,7 +639,7 @@ export const en: Messages = {
     skills: {
       title: "Agent skills",
       description:
-        "Deploy the bundled shk skill for Claude Code, Codex, Cursor, Copilot, Antigravity, and Windsurf.",
+        "Deploy the bundled shk skill for Claude Code, Codex, Cursor, Copilot, Antigravity, OpenCode, and Windsurf.",
       install: "Install skills",
     },
     doctor: {

@@ -56,6 +56,7 @@ pub struct AiSafetyAppliedStatus {
     pub scan_hooks_antigravity: bool,
     pub scan_hooks_windsurf: bool,
     pub scan_hooks_grok: bool,
+    pub scan_hooks_opencode: bool,
     pub claude_deny: bool,
     pub claude_sandbox: bool,
     pub codex_sandbox: bool,
@@ -1413,6 +1414,9 @@ pub struct ApplyAiHookSettingsOptions {
     /// Defaults to false for payloads from older desktop frontends.
     #[serde(default)]
     pub scan_hooks_grok: bool,
+    /// Defaults to false for payloads from older desktop frontends.
+    #[serde(default)]
+    pub scan_hooks_opencode: bool,
     #[serde(default = "default_cursor_fail_closed")]
     pub cursor_fail_closed: bool,
     pub claude_deny: bool,
@@ -1471,6 +1475,7 @@ fn desktop_configure_ai_options(options: &ApplyAiHookSettingsOptions) -> Configu
         scan_hooks_antigravity: options.scan_hooks_antigravity,
         scan_hooks_windsurf: options.scan_hooks_windsurf,
         scan_hooks_grok: options.scan_hooks_grok,
+        scan_hooks_opencode: options.scan_hooks_opencode,
         claude_deny: options.claude_deny,
         claude_sandbox: options.claude_sandbox,
         codex_sandbox: options.codex_sandbox,
@@ -1504,6 +1509,7 @@ struct ProjectCheckStatus {
     scan_hooks_antigravity: bool,
     scan_hooks_windsurf: bool,
     scan_hooks_grok: bool,
+    scan_hooks_opencode: bool,
     ignore: IgnoreStatus,
     claude: ClaudePermissionsStatus,
     codex: CodexConfigStatus,
@@ -1625,7 +1631,12 @@ pub fn apply_ai_hook_settings(
     let before = ai_safety_applied_from(&collect_project_check_status(&root));
     let summaries = configure_ai_with_summaries(&root, desktop_configure_ai_options(&options))?;
     let after = ai_safety_applied_from(&collect_project_check_status(&root));
-    let message = if ai_safety_applied_matches(&before, &after) {
+    let skipped_opencode = summaries
+        .iter()
+        .any(|line| line.contains(crate::hooks::OPENCODE_SKIPPED));
+    let message = if skipped_opencode {
+        "OpenCode was skipped; see details. Other AI editor settings were applied".to_string()
+    } else if ai_safety_applied_matches(&before, &after) {
         "No AI editor safety changes were required".to_string()
     } else if ai_safety_fully_disabled(&after) && ai_safety_any_enabled(&before) {
         "AI editor safety settings removed".to_string()
@@ -1647,6 +1658,7 @@ fn ai_safety_applied_matches(a: &AiSafetyAppliedStatus, b: &AiSafetyAppliedStatu
         && a.scan_hooks_antigravity == b.scan_hooks_antigravity
         && a.scan_hooks_windsurf == b.scan_hooks_windsurf
         && a.scan_hooks_grok == b.scan_hooks_grok
+        && a.scan_hooks_opencode == b.scan_hooks_opencode
         && a.claude_deny == b.claude_deny
         && a.claude_sandbox == b.claude_sandbox
         && a.codex_sandbox == b.codex_sandbox
@@ -1660,6 +1672,7 @@ fn ai_safety_fully_disabled(status: &AiSafetyAppliedStatus) -> bool {
         && !status.scan_hooks_antigravity
         && !status.scan_hooks_windsurf
         && !status.scan_hooks_grok
+        && !status.scan_hooks_opencode
         && !status.claude_deny
         && !status.claude_sandbox
         && !status.codex_sandbox
@@ -1679,6 +1692,7 @@ fn current_ai_hook_settings_options(root: &Path) -> ApplyAiHookSettingsOptions {
         scan_hooks_antigravity: applied.scan_hooks_antigravity,
         scan_hooks_windsurf: applied.scan_hooks_windsurf,
         scan_hooks_grok: applied.scan_hooks_grok,
+        scan_hooks_opencode: applied.scan_hooks_opencode,
         cursor_fail_closed: true,
         claude_deny: applied.claude_deny,
         claude_sandbox: applied.claude_sandbox,
@@ -2303,6 +2317,7 @@ fn collect_project_check_status(root: &Path) -> ProjectCheckStatus {
         scan_hooks_antigravity: scan_hooks_for("antigravity"),
         scan_hooks_windsurf: scan_hooks_for("windsurf"),
         scan_hooks_grok: scan_hooks_for("grok"),
+        scan_hooks_opencode: scan_hooks_for("opencode"),
         ignore: collect_ignore_status(root),
         claude: collect_claude_permissions_status(root),
         codex: collect_codex_config_status(root),
@@ -2347,6 +2362,7 @@ fn ai_tool_statuses(root: &Path, global: bool) -> Vec<AiHookToolStatus> {
         AiTool::Copilot,
         AiTool::Antigravity,
         AiTool::Grok,
+        AiTool::Opencode,
         AiTool::Windsurf,
     ]
     .into_iter()
@@ -2366,6 +2382,12 @@ fn ai_tool_statuses(root: &Path, global: bool) -> Vec<AiHookToolStatus> {
 }
 
 fn has_managed_hook_marker(tool: AiTool, content: &str) -> bool {
+    if tool == AiTool::Opencode {
+        // A stale or hand-edited managed plugin still counts as installed, so
+        // applying other settings rewrites it rather than removing it;
+        // `shk doctor` reports the drift.
+        return crate::hooks::is_managed_opencode_plugin(content);
+    }
     content.contains(MANAGED_MARKER_JSON)
         || content.contains(MANAGED_MARKER_SH)
         || ((tool == AiTool::Copilot || tool == AiTool::Windsurf || tool == AiTool::Grok)
@@ -2411,7 +2433,7 @@ fn build_recommended_fixes(
         fixes.push(RecommendedFixDto {
             id: "ai_hooks".into(),
             severity: "warn".into(),
-            message: "Install managed AI scan hooks for Cursor, Claude Code, Codex, Copilot, Antigravity, Grok Build, and Windsurf"
+            message: "Install managed AI scan hooks for Cursor, Claude Code, Codex, Copilot, Antigravity, Grok Build, OpenCode, and Windsurf"
                 .into(),
             requires_policy: true,
             default_selected: true,
@@ -2612,6 +2634,7 @@ fn ai_safety_applied_from(checks: &ProjectCheckStatus) -> AiSafetyAppliedStatus 
         scan_hooks_antigravity: checks.scan_hooks_antigravity,
         scan_hooks_windsurf: checks.scan_hooks_windsurf,
         scan_hooks_grok: checks.scan_hooks_grok,
+        scan_hooks_opencode: checks.scan_hooks_opencode,
         claude_deny: checks.claude.settings_exists && checks.claude.deny_ok,
         claude_sandbox: checks.claude.settings_exists && checks.claude.sandbox_ok,
         codex_sandbox: checks.codex.config_exists
@@ -2712,6 +2735,7 @@ fn parse_ai_tool(value: &str) -> Result<AiTool> {
         "cursor" => Ok(AiTool::Cursor),
         "antigravity" => Ok(AiTool::Antigravity),
         "grok" => Ok(AiTool::Grok),
+        "opencode" => Ok(AiTool::Opencode),
         "windsurf" => Ok(AiTool::Windsurf),
         other => anyhow::bail!("unknown AI tool: {other}"),
     }
@@ -2734,6 +2758,7 @@ fn parse_skill_tool(value: &str) -> Result<SkillTool> {
         "cursor" => Ok(SkillTool::Cursor),
         "antigravity" => Ok(SkillTool::Antigravity),
         "grok" => Ok(SkillTool::Grok),
+        "opencode" => Ok(SkillTool::Opencode),
         "windsurf" => Ok(SkillTool::Windsurf),
         "all" => Ok(SkillTool::All),
         other => anyhow::bail!("unknown skill tool: {other}"),
@@ -4015,6 +4040,7 @@ mod tests {
                 scan_hooks_antigravity: false,
                 scan_hooks_windsurf: false,
                 scan_hooks_grok: false,
+                scan_hooks_opencode: false,
                 scan_hooks_codex: false,
                 scan_hooks_copilot: false,
                 cursor_fail_closed: true,
@@ -4033,6 +4059,49 @@ mod tests {
         );
         assert!(settings.contains("Bash(rm -rf *)"), "{settings}");
         assert!(!settings.contains("allowUnsandboxedCommands"), "{settings}");
+    }
+
+    #[test]
+    fn desktop_apply_reports_a_skipped_opencode_plugin_and_keeps_a_stale_one() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "").unwrap();
+        let plugin = dir.path().join(".opencode/plugins/shk-security.js");
+        fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        let options = |opencode| ApplyAiHookSettingsOptions {
+            scan_hooks_claude_code: false,
+            scan_hooks_cursor: false,
+            scan_hooks_antigravity: false,
+            scan_hooks_windsurf: false,
+            scan_hooks_grok: false,
+            scan_hooks_opencode: opencode,
+            scan_hooks_codex: false,
+            scan_hooks_copilot: false,
+            cursor_fail_closed: true,
+            claude_deny: false,
+            claude_sandbox: false,
+            codex_sandbox: false,
+        };
+
+        // A user's own plugin at the managed path is reported, not overwritten.
+        fs::write(&plugin, "export default { id: \"mine\" }\n").unwrap();
+        let result = apply_ai_hook_settings(dir.path().to_str().unwrap(), options(true)).unwrap();
+        assert!(
+            result.message.contains("OpenCode was skipped"),
+            "{result:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&plugin).unwrap(),
+            "export default { id: \"mine\" }\n"
+        );
+
+        // A stale managed plugin still counts as installed, so syncing the
+        // current state rewrites it instead of removing it.
+        fs::write(&plugin, "// shk-managed: older template\n").unwrap();
+        let status = collect_project_check_status(dir.path());
+        assert!(ai_safety_applied_from(&status).scan_hooks_opencode);
+        apply_ai_hook_settings(dir.path().to_str().unwrap(), options(true)).unwrap();
+        let body = fs::read_to_string(&plugin).unwrap();
+        assert!(body.contains("--hook-mode opencode"), "{body}");
     }
 
     #[cfg(unix)]
@@ -4063,6 +4132,7 @@ mod tests {
                 scan_hooks_antigravity: false,
                 scan_hooks_windsurf: false,
                 scan_hooks_grok: false,
+                scan_hooks_opencode: false,
                 scan_hooks_codex: false,
                 scan_hooks_copilot: false,
                 cursor_fail_closed: true,
@@ -4154,6 +4224,7 @@ mod tests {
                 scan_hooks_antigravity: false,
                 scan_hooks_windsurf: true,
                 scan_hooks_grok: false,
+                scan_hooks_opencode: false,
                 scan_hooks_codex: false,
                 scan_hooks_copilot: false,
                 cursor_fail_closed: true,
@@ -4211,6 +4282,7 @@ mod tests {
                 scan_hooks_antigravity: false,
                 scan_hooks_windsurf: false,
                 scan_hooks_grok: false,
+                scan_hooks_opencode: false,
                 scan_hooks_codex: false,
                 scan_hooks_copilot: false,
                 cursor_fail_closed: true,
@@ -4244,6 +4316,7 @@ mod tests {
             scan_hooks_antigravity: false,
             scan_hooks_windsurf: true,
             scan_hooks_grok: false,
+            scan_hooks_opencode: false,
             scan_hooks_codex: false,
             scan_hooks_copilot: false,
             cursor_fail_closed: true,
@@ -4265,6 +4338,7 @@ mod tests {
             scan_hooks_antigravity: false,
             scan_hooks_windsurf: false,
             scan_hooks_grok: false,
+            scan_hooks_opencode: false,
             scan_hooks_codex: false,
             scan_hooks_copilot: false,
             cursor_fail_closed: true,

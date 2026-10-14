@@ -52,8 +52,8 @@ const PRE_TEXT_KEYS: &[&str] = &[
 // the nearest enclosing path key, so nested lists work.
 // - Claude Code Edit, MultiEdit `edits[]`; Windsurf `edits[]`: old_string, new_string
 // - Copilot CLI edit: old_str, new_str
-// - Copilot in VS Code replaceString, multiReplaceString `replacements[]`:
-//   oldString, newString
+// - Copilot in VS Code replaceString, multiReplaceString `replacements[]`;
+//   OpenCode edit (`replaceAll`): oldString, newString
 // - Filesystem MCP server edit_file `edits[]`: oldText, newText
 const EDIT_PAIR_KEYS: &[(&str, &str)] = &[
     ("old_string", "new_string"),
@@ -176,6 +176,14 @@ const GROK_POST_TEXT_KEYS: &[&str] = &[
     "command",
 ];
 
+// OpenCode's managed plugin normalizes tool arguments under `tool_input`,
+// scanned as an argument envelope so every argument is covered, including
+// arbitrary MCP arguments. Edit's `oldString`/`newString` pair is applied to
+// the file named by `filePath` (resolved through PATH_KEYS) instead.
+const OPENCODE_PRE_ENVELOPE_KEYS: &[&str] = &["tool_input"];
+// The post payload carries `{ title, output }` under `tool_output`.
+const OPENCODE_POST_TEXT_KEYS: &[&str] = &["tool_output", "output", "title"];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AiHookTool {
     Antigravity,
@@ -184,6 +192,7 @@ pub enum AiHookTool {
     Copilot,
     Cursor,
     Grok,
+    Opencode,
     Windsurf,
 }
 
@@ -196,6 +205,7 @@ impl AiHookTool {
             Self::Copilot => "copilot",
             Self::Cursor => "cursor",
             Self::Grok => "grok",
+            Self::Opencode => "opencode",
             Self::Windsurf => "windsurf",
         }
     }
@@ -208,6 +218,7 @@ impl AiHookTool {
             Self::Copilot => "<copilot-hook>",
             Self::Cursor => "<cursor-hook>",
             Self::Grok => "<grok-hook>",
+            Self::Opencode => "<opencode-hook>",
             Self::Windsurf => "<windsurf-hook>",
         }
     }
@@ -244,6 +255,18 @@ pub fn extract_user_prompt(stdin: &str) -> Option<Cow<'_, str>> {
         .or_else(|| payload.tool_info.and_then(|info| info.user_prompt))
 }
 
+/// Text extracted from a hook payload for scanning.
+#[derive(Debug)]
+pub struct HookBody {
+    /// Display path for findings: the referenced file when the payload names
+    /// exactly one, otherwise the tool's virtual label.
+    pub display: String,
+    pub body: String,
+    /// Payload strings were left unscanned because the text budget ran out.
+    /// Blocking hooks must not allow such a payload.
+    pub truncated: bool,
+}
+
 /// Returns display path (posix-ish relative to repo) + body content to scan.
 pub fn stdin_to_hook_body(
     tool: AiHookTool,
@@ -252,17 +275,34 @@ pub fn stdin_to_hook_body(
     cwd: &Path,
     repo_root: &Path,
 ) -> Result<(String, String)> {
+    hook_body_from_stdin(tool, post, stdin, cwd, repo_root).map(|hook| (hook.display, hook.body))
+}
+
+pub fn hook_body_from_stdin(
+    tool: AiHookTool,
+    post: bool,
+    stdin: &str,
+    cwd: &Path,
+    repo_root: &Path,
+) -> Result<HookBody> {
     let raw: Value = serde_json::from_str(stdin).context("hook stdin must be valid JSON")?;
     // Pre hooks look inside JSON-encoded argument envelopes (Copilot CLI
     // `toolArgs`) so paths, edits, and text keys there are found. Post hooks
     // keep the raw payload.
-    let mut decoded_keys = Vec::new();
+    let mut envelope_keys = Vec::new();
     let decoded = (!post).then(|| {
         let mut decoded = raw.clone();
-        decoded_keys = decode_encoded_arguments(&mut decoded);
+        envelope_keys = decode_encoded_arguments(&mut decoded);
         decoded
     });
     let v = decoded.as_ref().unwrap_or(&raw);
+    if !post {
+        for key in pre_envelope_keys(tool) {
+            if !envelope_keys.contains(key) {
+                envelope_keys.push(key);
+            }
+        }
+    }
 
     // Post payloads describe edits that already ran; the file body is current.
     let mut edits = Vec::new();
@@ -270,50 +310,101 @@ pub fn stdin_to_hook_body(
         collect_text_edits(tool, v, None, &mut edits);
     }
 
+    // Referenced files are scanned whole (with pre-hook edits applied) and do
+    // not spend the payload budget.
     let files = read_files_from_candidates(tool, v, cwd, repo_root, &mut edits)?;
 
-    // Argument text gets its own MAX_HOOK_TEXT_BYTES budget so a large target
-    // file cannot crowd it out.
-    let mut text_blobs: Vec<String> = Vec::new();
-    text_priority_chunks(v, post, tool, &mut text_blobs);
-    for edit in edits.iter().filter(|edit| !edit.applied) {
-        push_hook_text(edit.new, &mut text_blobs, MAX_HOOK_TEXT_BYTES);
+    let mut texts = HookTexts::default();
+    if let Some(files) = &files {
+        // A payload string equal to a file body (e.g. Cursor's `content`)
+        // is already covered by the file scan.
+        texts.seen.extend(files.contents.iter().map(String::as_str));
     }
-    // A decoded envelope is the tool's whole argument list. Scan every value in
-    // it, so one matching key (or a file read) cannot hide the rest the way it
+    text_priority_chunks(v, post, tool, &mut texts);
+    for edit in edits.iter().filter(|edit| !edit.applied) {
+        texts.push(edit.new);
+    }
+    // An envelope is the tool's whole argument list. Scan every value in it,
+    // so one matching key (or a file read) cannot hide the rest the way it
     // disables the fallback below.
-    for key in &decoded_keys {
-        push_envelope_strings(&v[*key], &mut text_blobs);
+    for key in &envelope_keys {
+        if let Some(envelope) = v.get(*key) {
+            push_envelope_strings(envelope, &mut texts);
+        }
     }
 
     // The fallback reads the raw payload: an encoded envelope is one long
     // string that keeps its key names, so it clears the size cut more often
     // than any of its decoded values.
-    if files.is_none() && text_blobs.is_empty() {
-        collect_large_strings(&raw, &mut text_blobs, 96, MAX_HOOK_TEXT_BYTES);
+    if texts.blobs.is_empty() && files.is_none() {
+        collect_large_strings(&raw, &mut texts, 96);
     }
 
-    let (display, mut blobs) = match files {
-        Some((rel, txt)) => (Some(rel), vec![txt]),
-        None => (None, Vec::new()),
-    };
-    blobs.extend(text_blobs);
-    dedup_blobs(&mut blobs);
-
-    let body = if blobs.is_empty() {
+    let parts: Vec<&str> = files
+        .as_ref()
+        .map(|files| files.body.as_str())
+        .into_iter()
+        .chain(texts.blobs.iter().copied())
+        .collect();
+    let body = if parts.is_empty() {
         "{}".into()
     } else {
-        blobs.join("\n---\n")
+        parts.join("\n---\n")
     };
+    let truncated = texts.truncated;
 
-    let disp = display.unwrap_or_else(|| tool.virtual_path_label().to_string());
-
-    Ok((disp, body))
+    Ok(HookBody {
+        display: files.map_or_else(|| tool.virtual_path_label().to_string(), |f| f.display),
+        body,
+        truncated,
+    })
 }
 
-fn dedup_blobs(blobs: &mut Vec<String>) {
-    let mut seen = HashSet::new();
-    blobs.retain(|s| seen.insert(s.clone()));
+/// Argument envelopes that are scanned in full in pre hooks even when sent as
+/// an object (stringified envelopes are found by `decode_encoded_arguments`).
+fn pre_envelope_keys(tool: AiHookTool) -> &'static [&'static str] {
+    match tool {
+        AiHookTool::Opencode => OPENCODE_PRE_ENVELOPE_KEYS,
+        _ => &[],
+    }
+}
+
+/// Payload strings collected for scanning. Each distinct string is charged
+/// once against `MAX_HOOK_TEXT_BYTES` (the same string is often reachable
+/// through several keys).
+#[derive(Default)]
+struct HookTexts<'a> {
+    blobs: Vec<&'a str>,
+    seen: HashSet<&'a str>,
+    used: usize,
+    truncated: bool,
+}
+
+impl<'a> HookTexts<'a> {
+    fn push(&mut self, s: &'a str) {
+        if s.trim().is_empty() || !self.seen.insert(s) {
+            return;
+        }
+        // Whether a payload overflows depends only on the total size of its
+        // distinct strings, never on the order the keys are visited in.
+        if self.used + s.len() > MAX_HOOK_TEXT_BYTES {
+            self.truncated = true;
+            return;
+        }
+        self.used += s.len();
+        self.blobs.push(s);
+    }
+}
+
+/// Files referenced by a hook payload, read from disk.
+struct ReferencedFiles {
+    /// Repo-relative path of the file, or the tool's virtual label when the
+    /// payload names several files.
+    display: String,
+    /// Every file with a `// ---- <path>` header, ready to scan.
+    body: String,
+    /// The decoded file contents, to recognize payload strings that repeat them.
+    contents: Vec<String>,
 }
 
 fn rel_from_repo(repo_root: &Path, abs: &Path) -> String {
@@ -364,10 +455,9 @@ fn collect_text_edits<'a>(
                         path,
                         old,
                         new,
-                        replace_all: map
-                            .get("replace_all")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
+                        replace_all: ["replace_all", "replaceAll"]
+                            .iter()
+                            .any(|key| map.get(*key).and_then(Value::as_bool) == Some(true)),
                         applied: false,
                     });
                 }
@@ -434,8 +524,9 @@ fn read_files_from_candidates(
     cwd: &Path,
     repo_root: &Path,
     edits: &mut [TextEdit<'_>],
-) -> Result<Option<(String, String)>> {
+) -> Result<Option<ReferencedFiles>> {
     let mut texts: Vec<String> = Vec::new();
+    let mut contents: Vec<String> = Vec::new();
     let mut label: Option<String> = None;
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let repo_root = fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
@@ -478,13 +569,18 @@ fn read_files_from_candidates(
                 Some(_) => {}
             }
             texts.push(format!("// ---- {rel}\n{t}"));
+            contents.push(t);
         }
     }
 
     Ok(if texts.is_empty() {
         None
     } else {
-        Some((label.unwrap_or_else(|| "<file>".into()), texts.join("\n")))
+        Some(ReferencedFiles {
+            display: label.unwrap_or_else(|| "<file>".into()),
+            body: texts.join("\n"),
+            contents,
+        })
     })
 }
 
@@ -539,9 +635,9 @@ fn is_file_body_path_key(tool: AiHookTool, key: &str) -> bool {
         && (PATH_KEYS.iter().any(|pk| pk == &key) || key.to_ascii_lowercase().ends_with("path"))
 }
 
-fn text_priority_chunks(v: &Value, post: bool, tool: AiHookTool, blobs: &mut Vec<String>) {
+fn text_priority_chunks<'a>(v: &'a Value, post: bool, tool: AiHookTool, texts: &mut HookTexts<'a>) {
     for keys in priority_text_key_sets(post, tool) {
-        grab_strings_for_keys_deep(v, keys, blobs);
+        grab_strings_for_keys_deep(v, keys, texts);
     }
 }
 
@@ -554,7 +650,8 @@ fn priority_text_key_sets(post: bool, tool: AiHookTool) -> &'static [&'static [&
             AiHookTool::ClaudeCode
             | AiHookTool::Codex
             | AiHookTool::Copilot
-            | AiHookTool::Cursor => &[PRE_TEXT_KEYS, PRE_EDIT_TEXT_KEYS],
+            | AiHookTool::Cursor
+            | AiHookTool::Opencode => &[PRE_TEXT_KEYS, PRE_EDIT_TEXT_KEYS],
         };
     }
 
@@ -565,11 +662,12 @@ fn priority_text_key_sets(post: bool, tool: AiHookTool) -> &'static [&'static [&
         AiHookTool::Copilot => &[COPILOT_POST_TEXT_KEYS],
         AiHookTool::Cursor => &[CURSOR_POST_TEXT_KEYS],
         AiHookTool::Grok => &[GROK_POST_TEXT_KEYS],
+        AiHookTool::Opencode => &[OPENCODE_POST_TEXT_KEYS],
         AiHookTool::Windsurf => &[WINDSURF_POST_TEXT_KEYS],
     }
 }
 
-fn grab_strings_for_keys_deep(v: &Value, keys: &[&str], acc: &mut Vec<String>) {
+fn grab_strings_for_keys_deep<'a>(v: &'a Value, keys: &[&str], acc: &mut HookTexts<'a>) {
     match v {
         Value::Object(map) => {
             for (k, val) in map {
@@ -588,9 +686,9 @@ fn grab_strings_for_keys_deep(v: &Value, keys: &[&str], acc: &mut Vec<String>) {
     }
 }
 
-fn push_strings_from_value(v: &Value, acc: &mut Vec<String>) {
+fn push_strings_from_value<'a>(v: &'a Value, acc: &mut HookTexts<'a>) {
     match v {
-        Value::String(s) => push_hook_text(s, acc, MAX_HOOK_TEXT_BYTES),
+        Value::String(s) => acc.push(s),
         Value::Array(items) => {
             for x in items {
                 push_strings_from_value(x, acc);
@@ -605,12 +703,12 @@ fn push_strings_from_value(v: &Value, acc: &mut Vec<String>) {
     }
 }
 
-/// Pushes every string in a decoded argument envelope except edit-pair text:
+/// Pushes every string in an argument envelope except edit-pair text:
 /// applied edits are already in the edited file body (keeping its inline
 /// suppressions), and unapplied ones push their new text separately.
-fn push_envelope_strings(v: &Value, acc: &mut Vec<String>) {
+fn push_envelope_strings<'a>(v: &'a Value, acc: &mut HookTexts<'a>) {
     match v {
-        Value::String(s) => push_hook_text(s, acc, MAX_HOOK_TEXT_BYTES),
+        Value::String(s) => acc.push(s),
         Value::Array(items) => {
             for item in items {
                 push_envelope_strings(item, acc);
@@ -636,33 +734,21 @@ fn push_envelope_strings(v: &Value, acc: &mut Vec<String>) {
     }
 }
 
-fn push_hook_text(s: &str, acc: &mut Vec<String>, max_total_bytes: usize) {
-    if !s.trim().is_empty() && acc_chars_len(acc) < max_total_bytes {
-        acc.push(s.to_string());
-    }
-}
-
-fn collect_large_strings(v: &Value, acc: &mut Vec<String>, min_len: usize, max_total_bytes: usize) {
+fn collect_large_strings<'a>(v: &'a Value, acc: &mut HookTexts<'a>, min_len: usize) {
     match v {
-        Value::String(s) if s.len() >= min_len && acc_chars_len(acc) < max_total_bytes => {
-            push_hook_text(s, acc, max_total_bytes);
-        }
+        Value::String(s) if s.len() >= min_len => acc.push(s),
         Value::Object(map) => {
-            for (_k, val) in map {
-                collect_large_strings(val, acc, min_len, max_total_bytes);
+            for val in map.values() {
+                collect_large_strings(val, acc, min_len);
             }
         }
         Value::Array(a) => {
             for i in a {
-                collect_large_strings(i, acc, min_len, max_total_bytes);
+                collect_large_strings(i, acc, min_len);
             }
         }
         _ => {}
     }
-}
-
-fn acc_chars_len(acc: &[String]) -> usize {
-    acc.iter().map(|s| s.len()).sum()
 }
 
 #[cfg(test)]
@@ -691,6 +777,201 @@ mod tests {
         assert_eq!(AiHookTool::Grok.virtual_path_label(), "<grok-hook>");
         assert_eq!(AiHookTool::Windsurf.kebab_str(), "windsurf");
         assert_eq!(AiHookTool::Windsurf.virtual_path_label(), "<windsurf-hook>");
+        assert_eq!(AiHookTool::Opencode.kebab_str(), "opencode");
+        assert_eq!(AiHookTool::Opencode.virtual_path_label(), "<opencode-hook>");
+    }
+
+    #[test]
+    fn opencode_pre_extracts_bash_edit_and_mcp_arguments() {
+        let dir = tempdir().unwrap();
+        let bash = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "bash",
+            "tool_input": { "command": "echo opencode-command-marker", "timeout": 1000 },
+            "cwd": dir.path()
+        })
+        .to_string();
+        let (_disp, body) =
+            stdin_to_hook_body(AiHookTool::Opencode, false, &bash, dir.path(), dir.path()).unwrap();
+        assert!(body.contains("opencode-command-marker"), "{body}");
+
+        let edit = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "edit",
+            "tool_input": {
+                "filePath": "/nonexistent/file.txt",
+                "oldString": "opencode-old-marker",
+                "newString": "opencode-new-marker"
+            }
+        })
+        .to_string();
+        let (_disp, body) =
+            stdin_to_hook_body(AiHookTool::Opencode, false, &edit, dir.path(), dir.path()).unwrap();
+        // The target is missing, so only the inserted text is scanned.
+        assert!(!body.contains("opencode-old-marker"), "{body}");
+        assert!(body.contains("opencode-new-marker"), "{body}");
+
+        let mcp = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "github_create_issue",
+            "tool_input": { "fields": { "nested": { "body": "opencode-mcp-marker" } } }
+        })
+        .to_string();
+        let (_disp, body) =
+            stdin_to_hook_body(AiHookTool::Opencode, false, &mcp, dir.path(), dir.path()).unwrap();
+        assert!(body.contains("opencode-mcp-marker"), "{body}");
+    }
+
+    #[test]
+    fn opencode_pre_edit_applies_to_the_file_and_scans_other_arguments() {
+        let repo = repo_with_file("A=placeholder\nB=placeholder\n");
+        let token = synthetic_github_token();
+        let stdin = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "edit",
+            "tool_input": {
+                "filePath": "app.txt",
+                "oldString": "placeholder",
+                "newString": token,
+                "replaceAll": true,
+                "note": "opencode-extra-argument-marker"
+            }
+        });
+
+        let (display, body) = pre_body(AiHookTool::Opencode, repo.path(), &stdin);
+
+        assert_eq!(display, "app.txt");
+        assert!(body.contains(&format!("A={token}\nB={token}\n")), "{body}");
+        // Applied in place, not repeated by the envelope scan.
+        assert_eq!(body.matches(&token).count(), 2, "{body}");
+        assert!(!body.contains("placeholder"), "{body}");
+        assert!(body.contains("opencode-extra-argument-marker"), "{body}");
+
+        // Removing a value scans the edited file, not the removed text.
+        let repo = repo_with_file(&format!("A={token}\n"));
+        let stdin = serde_json::json!({
+            "tool_name": "edit",
+            "tool_input": { "filePath": "app.txt", "oldString": token, "newString": "${A}" }
+        });
+        let (_display, body) = pre_body(AiHookTool::Opencode, repo.path(), &stdin);
+        assert!(!body.contains(&token), "{body}");
+    }
+
+    #[test]
+    fn hook_body_reports_strings_left_out_by_the_text_budget() {
+        let dir = tempdir().unwrap();
+        let big = "a".repeat(MAX_HOOK_TEXT_BYTES + 1);
+        // Keys sort alphabetically, so `zzz` is visited after the big field.
+        let stdin = serde_json::json!({
+            "tool_name": "mcp_tool",
+            "tool_input": { "aaa": big, "zzz": "budget-tail-marker" }
+        })
+        .to_string();
+        let hook =
+            hook_body_from_stdin(AiHookTool::Opencode, false, &stdin, dir.path(), dir.path())
+                .unwrap();
+        assert!(hook.truncated);
+        assert!(!hook.body.contains(&big));
+
+        // One oversized string overflows on its own, whatever follows it, so
+        // the same write is judged alike for every tool.
+        for (tool, stdin) in [
+            (
+                AiHookTool::ClaudeCode,
+                serde_json::json!({
+                    "tool_name": "Write",
+                    "tool_input": { "file_path": "/nonexistent/out.txt", "content": big }
+                }),
+            ),
+            (
+                AiHookTool::Opencode,
+                serde_json::json!({
+                    "tool_name": "write",
+                    "tool_input": { "filePath": "/nonexistent/out.txt", "content": big }
+                }),
+            ),
+        ] {
+            let hook =
+                hook_body_from_stdin(tool, false, &stdin.to_string(), dir.path(), dir.path())
+                    .unwrap();
+            assert!(hook.truncated, "{tool:?}");
+        }
+
+        // The same string reachable through two keys is charged once.
+        let half = "b".repeat(MAX_HOOK_TEXT_BYTES / 2 + 1);
+        let stdin = serde_json::json!({
+            "tool_name": "write",
+            "tool_input": { "content": half, "zzz": "dedup-tail-marker" }
+        })
+        .to_string();
+        let hook =
+            hook_body_from_stdin(AiHookTool::Opencode, false, &stdin, dir.path(), dir.path())
+                .unwrap();
+        assert!(!hook.truncated);
+        assert!(hook.body.contains("dedup-tail-marker"));
+    }
+
+    #[test]
+    fn referenced_file_does_not_spend_the_payload_budget() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("large.txt");
+        std::fs::write(&file, "c".repeat(MAX_HOOK_TEXT_BYTES + 1)).unwrap();
+        let stdin = serde_json::json!({
+            "tool_name": "edit",
+            "tool_input": { "filePath": file, "oldString": "c", "newString": "edit-arg-marker" }
+        })
+        .to_string();
+        let hook =
+            hook_body_from_stdin(AiHookTool::Opencode, false, &stdin, dir.path(), dir.path())
+                .unwrap();
+        assert!(!hook.truncated);
+        assert!(hook.body.contains("edit-arg-marker"));
+
+        // A payload that repeats the file body (Cursor `beforeReadFile`
+        // sends it as `content`) is covered by the file scan.
+        let body = std::fs::read_to_string(&file).unwrap();
+        let stdin = serde_json::json!({ "file_path": file, "content": body }).to_string();
+        let hook = hook_body_from_stdin(AiHookTool::Cursor, false, &stdin, dir.path(), dir.path())
+            .unwrap();
+        assert!(!hook.truncated);
+        assert_eq!(hook.body.matches(&body).count(), 1);
+    }
+
+    #[test]
+    fn opencode_pre_reads_file_body_for_read_tool() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "opencode-file-body-marker\n").unwrap();
+        let stdin = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "read",
+            "tool_input": { "filePath": file, "offset": 0, "limit": 10 }
+        })
+        .to_string();
+        let (disp, body) =
+            stdin_to_hook_body(AiHookTool::Opencode, false, &stdin, dir.path(), dir.path())
+                .unwrap();
+        assert_eq!(disp, "notes.txt");
+        assert!(body.contains("opencode-file-body-marker"), "{body}");
+    }
+
+    #[test]
+    fn opencode_post_extracts_tool_output() {
+        let dir = tempdir().unwrap();
+        let stdin = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "bash",
+            "tool_input": { "command": "cat secrets" },
+            "tool_output": { "title": "Shell", "output": "opencode-output-marker" }
+        })
+        .to_string();
+        let (_disp, body) =
+            stdin_to_hook_body(AiHookTool::Opencode, true, &stdin, dir.path(), dir.path()).unwrap();
+        assert!(body.contains("opencode-output-marker"), "{body}");
+        assert!(
+            !body.contains("cat secrets"),
+            "post scans output only: {body}"
+        );
     }
 
     #[test]

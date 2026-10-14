@@ -275,7 +275,7 @@ Office masking streams non-text ZIP entries, applies the same bounded expansion 
 
 The active audit log is capped at 8 MiB and rotated through `audit.log.1` to `audit.log.3`. `shk audit` reads the bounded archives from oldest to newest and parses them line by line.
 
-`shk scan --hook-mode <tool> --log-blocked` keeps pre-hook blocking behavior and writes metadata-only `event = "blocked"` entries for blocked pre-hook and user-prompt events. With `--post`, it stays non-blocking and writes `event = "audit"` entries for post-hook scans. Finding-threshold block entries include rule IDs, finding kinds, counts, and maximum severity for findings at or above the active threshold. Action guard block entries include only the action category, not the command text, file path, prompt body, or guard reason.
+`shk scan --hook-mode <tool> --log-blocked` keeps pre-hook blocking behavior and writes metadata-only `event = "blocked"` entries for blocked pre-hook and user-prompt events. With `--post`, it stays non-blocking and writes `event = "audit"` entries for post-hook scans. Finding-threshold block entries include rule IDs, finding kinds, counts, and maximum severity for findings at or above the active threshold. Action guard block entries include only the action category, not the command text, file path, prompt body, or guard reason. Blocks caused by an invalid policy (`policy_error`) or by tool input over the 2 MiB hook scan limit (`payload_too_large`) record only the tool, hook phase, and reason.
 
 Use `shk audit` to preview `.shk/audit.log`:
 

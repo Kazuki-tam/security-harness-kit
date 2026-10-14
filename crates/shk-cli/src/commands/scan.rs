@@ -18,6 +18,8 @@ use crate::args::{AiTool, SeverityArg};
 
 const HOOK_DENY_REASON_DEFAULT: &str =
     "shk: sensitive content detected above threshold - run `shk scan` for details";
+const HOOK_DENY_REASON_PAYLOAD_TOO_LARGE: &str =
+    "shk: tool input too large to scan in full (over 2 MiB of text) - split it into smaller steps";
 
 /// Flat `clap` flags for [`run`], grouped for readability at the CLI boundary.
 #[derive(Clone, Debug)]
@@ -519,7 +521,11 @@ fn run_hook_mode(
         }
     }
 
-    let (disp, body) = shk_integrations::stdin_to_hook_body(
+    let shk_integrations::HookBody {
+        display: disp,
+        body,
+        truncated,
+    } = shk_integrations::hook_body_from_stdin(
         tool.integration_tool(),
         post,
         stdin_trim,
@@ -570,6 +576,18 @@ fn run_hook_mode(
         );
     }
 
+    // Part of the payload went unscanned, so a clean result proves nothing.
+    if truncated {
+        return deny_hook_with_log(
+            &repo_root,
+            log_blocked,
+            tool,
+            hook_event,
+            HOOK_DENY_REASON_PAYLOAD_TOO_LARGE,
+            BlockLog::PayloadTooLarge,
+        );
+    }
+
     println!(
         "{}",
         hook_output::allow_stdout_for_event(tool, hook_event, None)
@@ -608,6 +626,7 @@ enum BlockLog<'a> {
     },
     ActionGuard(&'a ActionGuardMatch),
     PolicyError,
+    PayloadTooLarge,
 }
 
 fn deny_hook_with_log(
@@ -642,6 +661,9 @@ fn deny_hook_with_log(
                     }
                     BlockLog::PolicyError => {
                         hook_audit_log::append_blocked_policy_error(repo_root, tool, event)
+                    }
+                    BlockLog::PayloadTooLarge => {
+                        hook_audit_log::append_blocked_payload_too_large(repo_root, tool, event)
                     }
                 };
                 if let Err(err) = append_result {
@@ -831,10 +853,12 @@ fn emit_blocking_reason_to_stderr(tool: AiTool, event: hook_output::HookEvent, r
     // Cascade (Windsurf) surfaces the stderr message of a
     // blocking pre-hook (exit 2) to the agent; stdout is ignored.
     // Grok surfaces stderr on exit 2, and uses it as the deny reason when
-    // stdout JSON carries none.
+    // stdout JSON carries none. The OpenCode plugin falls back to stderr when
+    // stdout is not parseable.
     if tool == AiTool::Codex
         || tool == AiTool::Windsurf
         || tool == AiTool::Grok
+        || tool == AiTool::Opencode
         || copilot_user_prompt
     {
         eprintln!("{reason}");
@@ -1455,15 +1479,19 @@ mod tests {
     }
 
     #[test]
-    fn windsurf_routes_block_reason_to_stderr_like_codex() {
-        // Smoke-level behavior is covered elsewhere; this guards the routing
-        // predicate so a future tool list change cannot silently drop Windsurf.
-        for event in [
-            HookEvent::PreToolUse,
-            HookEvent::PermissionRequest,
-            HookEvent::UserPromptSubmit,
-        ] {
-            assert_eq!(hook_deny_exit_code(AiTool::Windsurf, event), 2);
+    fn windsurf_and_opencode_block_with_exit_two_on_every_event() {
+        // Smoke-level behavior is covered elsewhere; this guards the exit code
+        // so a future tool list change cannot silently drop either tool. Both
+        // read the block from exit 2 (Windsurf via stderr, the OpenCode plugin
+        // via stdout JSON with stderr as fallback).
+        for tool in [AiTool::Windsurf, AiTool::Opencode] {
+            for event in [
+                HookEvent::PreToolUse,
+                HookEvent::PermissionRequest,
+                HookEvent::UserPromptSubmit,
+            ] {
+                assert_eq!(hook_deny_exit_code(tool, event), 2, "{tool:?}");
+            }
         }
     }
 }

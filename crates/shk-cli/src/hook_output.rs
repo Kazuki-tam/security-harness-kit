@@ -185,6 +185,13 @@ pub fn deny_stdout_for_event(tool: AiTool, event: HookEvent, reason: &str) -> St
             HookEvent::PostToolUse => "{}".to_string(),
             _ => decision_json("deny", Some(reason)),
         },
+        // OpenCode's managed plugin parses this JSON: `deny` fails the tool
+        // call, `block` rewrites the prompt. Post hooks never block.
+        AiTool::Opencode => match event {
+            HookEvent::UserPromptSubmit => decision_json("block", Some(reason)),
+            HookEvent::PostToolUse => decision_json("allow", None),
+            _ => decision_json("deny", Some(reason)),
+        },
         // Cascade (Windsurf) does not parse hook stdout for
         // decisions; a block travels via exit code 2 + the stderr message.
         AiTool::Windsurf => "{}".to_string(),
@@ -228,6 +235,8 @@ pub fn allow_stdout_for_event(tool: AiTool, event: HookEvent, info: Option<&str>
             None => "{}".to_string(),
         },
         AiTool::Grok => decision_json("allow", info),
+        // The plugin only reads `decision`; `reason` is informational.
+        AiTool::Opencode => decision_json("allow", info),
         // Cascade ignores hook stdout; exit 0 already lets the action proceed.
         AiTool::Windsurf => "{}".to_string(),
     }
@@ -267,6 +276,10 @@ pub fn mask_stdout(
         // Cascade has no schema for replacing tool payloads via hook stdout, so
         // masking is advisory only (the stderr hint reports the finding count).
         AiTool::Windsurf => "{}".to_string(),
+        // Output replacement for OpenCode is a later phase; post reports only.
+        // The plugin cannot rewrite tool arguments, so pre findings deny.
+        AiTool::Opencode if post || masked_content.is_none() => decision_json("allow", Some(&msg)),
+        AiTool::Opencode => decision_json("deny", Some(&msg)),
         // Copilot postToolUse replaces the result via `modifiedResult`; preToolUse
         // cannot rewrite tool args here, so it allows with an advisory note.
         AiTool::Copilot if post => {
@@ -710,6 +723,45 @@ mod tests {
         assert_eq!(
             allow_stdout_for_event(AiTool::Grok, HookEvent::PostToolUse, None),
             "{}"
+        );
+    }
+
+    #[test]
+    fn opencode_decisions_use_shared_decision_shape() {
+        let pre = parse_json(&deny_stdout_for_event(
+            AiTool::Opencode,
+            HookEvent::PreToolUse,
+            "blocked",
+        ));
+        assert_eq!(pre["decision"], "deny");
+        assert_eq!(pre["reason"], "blocked");
+        let prompt = parse_json(&deny_stdout_for_event(
+            AiTool::Opencode,
+            HookEvent::UserPromptSubmit,
+            "prompt blocked",
+        ));
+        assert_eq!(prompt["decision"], "block");
+        let post = parse_json(&deny_stdout_for_event(
+            AiTool::Opencode,
+            HookEvent::PostToolUse,
+            "ignored",
+        ));
+        assert_eq!(post["decision"], "allow");
+        assert_eq!(
+            parse_json(&allow_stdout_for_event(
+                AiTool::Opencode,
+                HookEvent::PreToolUse,
+                None
+            ))["decision"],
+            "allow"
+        );
+        assert_eq!(
+            parse_json(&mask_stdout(AiTool::Opencode, true, 1, Some("safe")))["decision"],
+            "allow"
+        );
+        assert_eq!(
+            parse_json(&mask_stdout(AiTool::Opencode, false, 1, Some("safe")))["decision"],
+            "deny"
         );
     }
 
