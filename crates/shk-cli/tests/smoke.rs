@@ -3502,6 +3502,51 @@ fn hook_mode_payload_cwd_cannot_redirect_relative_file_scan() {
 }
 
 #[test]
+fn hook_mode_path_allowlist_covers_only_text_bound_for_that_path() {
+    let repo = tempfile::tempdir().unwrap();
+    init_git_repo(repo.path());
+    std::fs::write(
+        repo.path().join("shk.toml"),
+        "[[allowlist]]\npath = \"fixtures/**\"\nreason = \"synthetic test values\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(repo.path().join("fixtures")).unwrap();
+    std::fs::write(repo.path().join("fixtures/sample.txt"), "placeholder\n").unwrap();
+    let key = synthetic_openai_key('s');
+    let run = |tool_name: &str, tool_input: serde_json::Value| {
+        let stdin = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool_name,
+            "tool_input": tool_input
+        })
+        .to_string();
+        output_with_stdin(
+            Command::new(shk_bin())
+                .args(["scan", ".", "--hook-mode", "claude-code", "--log-blocked"])
+                .current_dir(repo.path()),
+            &stdin,
+        )
+    };
+
+    // Writing a key into an allowlisted fixture is allowed.
+    let write = run(
+        "Write",
+        serde_json::json!({ "file_path": "fixtures/sample.txt", "content": key }),
+    );
+    assert_eq!(write.status.code(), Some(0), "{}", output_log(&write));
+
+    // Naming the fixture does not allowlist an argument sent elsewhere, and
+    // the audit log names the payload, not the fixture.
+    let send = run(
+        "mcp__notes__append",
+        serde_json::json!({ "path": "fixtures/sample.txt", "body": key }),
+    );
+    assert_eq!(send.status.code(), Some(2), "{}", output_log(&send));
+    let log = std::fs::read_to_string(repo.path().join(".shk/audit.log")).unwrap();
+    assert!(log.contains("\"display_path\":\"<claude-hook>\""), "{log}");
+}
+
+#[test]
 fn hook_mode_claude_edit_scans_the_edited_file() {
     let repo = tempfile::tempdir().unwrap();
     init_git_repo(repo.path());

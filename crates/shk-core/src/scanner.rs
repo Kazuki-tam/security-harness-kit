@@ -677,6 +677,13 @@ pub fn scan_string(
     content: &str,
     opts: ScanOptions,
 ) -> Result<ScanResult> {
+    scan_strings(root, &[(rel_display_path, content)], opts)
+}
+
+/// Scan several synthetic paths, each `(rel_display_path, content)`, with one
+/// policy load. AI hook payloads use this so path-scoped policy (allowlist
+/// rows, rule path filters) only applies to the text under its own path.
+pub fn scan_strings(root: &Path, parts: &[(&str, &str)], opts: ScanOptions) -> Result<ScanResult> {
     let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let (mut policy, policy_path) = Policy::load_from_dir(&root)?;
     apply_scan_flag_overrides(&mut policy, &opts);
@@ -691,18 +698,26 @@ pub fn scan_string(
 
     let expired = suppression::expired_allowlist_warnings(&policy.allowlist);
     let prepared = PreparedScan::new(&policy)?;
-    let chunk = scan_text_prepared(rel_display_path, content, &prepared, include_context)?;
-    let findings = prepend_policy_warnings(expired, chunk.findings);
+    let mut findings = Vec::new();
+    let mut suppressed = 0;
+    let mut deduplicated = 0;
+    for (rel_display_path, content) in parts {
+        let chunk = scan_text_prepared(rel_display_path, content, &prepared, include_context)?;
+        findings.extend(chunk.findings);
+        suppressed += chunk.suppressed;
+        deduplicated += chunk.deduplicated;
+    }
+    let findings = prepend_policy_warnings(expired, findings);
     drop(prepared);
 
     Ok(ScanResult {
         findings,
-        scanned_paths: vec![rel_display_path.to_string()],
+        scanned_paths: parts.iter().map(|(path, _)| path.to_string()).collect(),
         policy,
         policy_path,
         exit_threshold,
-        suppressed: chunk.suppressed,
-        deduplicated: chunk.deduplicated,
+        suppressed,
+        deduplicated,
     })
 }
 

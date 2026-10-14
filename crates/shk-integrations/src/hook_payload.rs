@@ -2,13 +2,19 @@
 
 use serde_json::Value;
 
-/// Top-level tool-argument envelopes that some tools send as a JSON-encoded
-/// string instead of an object:
+/// Top-level keys that hold a tool's whole argument list. Pre hooks scan every
+/// string in them except path arguments that named a file read for the scan
+/// and edit pairs (scanned in the edited file instead).
+/// - Claude Code, Codex, Cursor, Copilot (VS Code-compatible format), and the
+///   OpenCode plugin: `tool_input`
 /// - Copilot CLI camelCase `preToolUse` / `postToolUse`: `toolArgs`
-/// - Copilot VS Code-compatible format: `tool_input` (only parsed upstream
-///   "when possible")
-/// - Cursor `beforeMCPExecution` / `afterMCPExecution`: `tool_input`
-const ENCODED_ARGUMENT_KEYS: &[&str] = &["toolArgs", "tool_input"];
+/// - Grok Build: `toolInput`
+///
+/// Some tools send the envelope as a JSON-encoded string instead of an
+/// object: Copilot CLI `toolArgs`, Copilot's VS Code-compatible `tool_input`
+/// (only parsed upstream "when possible"), and Cursor
+/// `beforeMCPExecution` / `afterMCPExecution` `tool_input`.
+pub(crate) const ARGUMENT_ENVELOPE_KEYS: &[&str] = &["tool_input", "toolArgs", "toolInput"];
 
 /// Parses hook stdin and decodes stringified argument envelopes in place, so
 /// key-based lookups (file paths, shell commands, text keys) see the nested
@@ -20,14 +26,12 @@ pub(crate) fn parse_hook_payload(stdin: &str) -> serde_json::Result<Value> {
 }
 
 /// Replaces each top-level envelope string that holds a JSON object or array
-/// with the decoded value and returns the keys that were decoded. Other
-/// strings (plain text, scalars) are left as is.
-pub(crate) fn decode_encoded_arguments(v: &mut Value) -> Vec<&'static str> {
-    let mut decoded_keys = Vec::new();
+/// with the decoded value. Other strings (plain text, scalars) are left as is.
+pub(crate) fn decode_encoded_arguments(v: &mut Value) {
     let Some(map) = v.as_object_mut() else {
-        return decoded_keys;
+        return;
     };
-    for key in ENCODED_ARGUMENT_KEYS {
+    for key in ARGUMENT_ENVELOPE_KEYS {
         let Some(slot) = map.get_mut(*key) else {
             continue;
         };
@@ -36,10 +40,8 @@ pub(crate) fn decode_encoded_arguments(v: &mut Value) -> Vec<&'static str> {
         };
         if let Ok(decoded @ (Value::Object(_) | Value::Array(_))) = serde_json::from_str(raw) {
             *slot = decoded;
-            decoded_keys.push(*key);
         }
     }
-    decoded_keys
 }
 
 /// Copilot CLI camelCase `preToolUse` payload whose `toolArgs` is a
