@@ -2555,6 +2555,13 @@ fn build_doctor_status_from(checks: &ProjectCheckStatus) -> DoctorStatus {
             message: "Claude Code sandbox settings are incomplete".into(),
         });
     }
+    if checks.claude.settings_exists && !checks.claude.pre_tool_matcher_ok {
+        issues.push(DoctorIssue {
+            id: "ai_claude_hook_matcher".into(),
+            severity: "warn".into(),
+            message: "Claude Code managed PreToolUse matcher is outdated — reinstall Claude Code hooks via Setup".into(),
+        });
+    }
     if checks.codex.config_exists && !codex_config_ok {
         issues.push(DoctorIssue {
             id: "ai_codex_sandbox".into(),
@@ -3538,6 +3545,37 @@ mod tests {
             "{:?}",
             status.issues
         );
+    }
+
+    #[test]
+    fn doctor_status_reports_outdated_claude_pre_tool_matcher() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".claude")).unwrap();
+        let settings_path = dir.path().join(".claude/settings.json");
+        let settings = |matcher: &str| {
+            serde_json::json!({
+                "hooks": { "PreToolUse": [{ "_shk_managed": true, "matcher": matcher, "hooks": [] }] }
+            })
+            .to_string()
+        };
+        let has_issue = |status: &DoctorStatus| {
+            status
+                .issues
+                .iter()
+                .any(|issue| issue.id == "ai_claude_hook_matcher")
+        };
+
+        fs::write(&settings_path, settings("Read|Write|Bash|WebFetch|mcp__.*")).unwrap();
+        let status = build_doctor_status_from(&collect_project_check_status(dir.path()));
+        assert!(has_issue(&status), "{:?}", status.issues);
+
+        fs::write(
+            &settings_path,
+            settings(crate::hooks::CLAUDE_PRE_TOOL_USE_MATCHER),
+        )
+        .unwrap();
+        let status = build_doctor_status_from(&collect_project_check_status(dir.path()));
+        assert!(!has_issue(&status), "{:?}", status.issues);
     }
 
     #[test]

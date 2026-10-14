@@ -85,6 +85,9 @@ pub struct ClaudePermissionsStatus {
     pub deny_ok: bool,
     pub sandbox_ok: bool,
     pub missing_entries: Vec<String>,
+    /// `false` when a shk-managed `PreToolUse` block carries a matcher other
+    /// than the one `shk hooks install-ai` writes today (older install or hand edit).
+    pub pre_tool_matcher_ok: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -448,6 +451,7 @@ pub fn collect_claude_permissions_status(root: &Path) -> ClaudePermissionsStatus
             deny_ok: true,
             sandbox_ok: true,
             missing_entries: Vec::new(),
+            pre_tool_matcher_ok: true,
         };
     }
 
@@ -457,6 +461,7 @@ pub fn collect_claude_permissions_status(root: &Path) -> ClaudePermissionsStatus
             deny_ok: false,
             sandbox_ok: false,
             missing_entries: vec!["unable to read .claude/settings.json".into()],
+            pre_tool_matcher_ok: true,
         };
     };
     let Ok(value) = serde_json::from_str::<Value>(&text) else {
@@ -465,6 +470,7 @@ pub fn collect_claude_permissions_status(root: &Path) -> ClaudePermissionsStatus
             deny_ok: false,
             sandbox_ok: false,
             missing_entries: vec!["unable to parse .claude/settings.json".into()],
+            pre_tool_matcher_ok: true,
         };
     };
 
@@ -491,8 +497,27 @@ pub fn collect_claude_permissions_status(root: &Path) -> ClaudePermissionsStatus
         deny_ok: missing_entries.is_empty(),
         sandbox_ok: claude_sandbox_ok(&value),
         missing_entries,
+        pre_tool_matcher_ok: claude_pre_tool_matcher_ok(&value),
     }
 }
+
+/// Every shk-managed `PreToolUse` block must use the current matcher; settings
+/// without managed blocks pass (missing hooks are reported separately).
+fn claude_pre_tool_matcher_ok(value: &Value) -> bool {
+    value
+        .pointer("/hooks/PreToolUse")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|block| crate::hooks::is_managed_claude_block(block))
+        .all(|block| {
+            block.get("matcher").and_then(Value::as_str)
+                == Some(crate::hooks::CLAUDE_PRE_TOOL_USE_MATCHER)
+        })
+}
+
+/// Advisory text for an outdated managed Claude Code `PreToolUse` matcher.
+const CLAUDE_PRE_TOOL_MATCHER_WARNING: &str = ".claude/settings.json has a shk-managed PreToolUse matcher that differs from the current one (older install or hand edit), so some tools may go unscanned; rerun `shk hooks install-ai --tool claude-code`";
 
 fn run_claude_permissions_check(root: &Path) {
     let status = collect_claude_permissions_status(root);
@@ -1352,6 +1377,9 @@ pub fn run_all(root: &Path, json: bool, strict: bool) -> Result<()> {
             "not found — run `shk hooks install-ai`"
         }
     );
+    if !report.claude.pre_tool_matcher_ok {
+        println!("  warning: {CLAUDE_PRE_TOOL_MATCHER_WARNING}");
+    }
     if let Some(drift) = &report.opencode_plugin_drift {
         println!("  warning: {drift}");
     }
@@ -1403,6 +1431,7 @@ fn doctor_warning_count(inputs: DoctorWarningInputs<'_>) -> usize {
     if inputs.claude.settings_exists {
         warnings += usize::from(!inputs.claude.deny_ok);
         warnings += usize::from(!inputs.claude.sandbox_ok);
+        warnings += usize::from(!inputs.claude.pre_tool_matcher_ok);
     }
     if inputs.codex.config_exists {
         warnings += usize::from(!inputs.codex.hooks_enabled);
@@ -1747,6 +1776,102 @@ mod tests {
         assert!(!status.multiple_distinct);
         assert_eq!(status.candidates.len(), 1);
         assert!(!status.current_matches_path_candidate);
+    }
+
+    fn write_claude_settings(root: &Path, settings: &serde_json::Value) {
+        fs::create_dir_all(root.join(".claude")).unwrap();
+        fs::write(
+            root.join(".claude/settings.json"),
+            serde_json::to_string_pretty(settings).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn claude_pre_tool_settings(blocks: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "hooks": { "PreToolUse": blocks } })
+    }
+
+    #[test]
+    fn claude_pre_tool_matcher_accepts_current_managed_matcher() {
+        let dir = tempdir().unwrap();
+        write_claude_settings(
+            dir.path(),
+            &claude_pre_tool_settings(serde_json::json!([
+                {
+                    "_shk_managed": true,
+                    "matcher": crate::hooks::CLAUDE_PRE_TOOL_USE_MATCHER,
+                    "hooks": [{ "type": "command", "command": "shk scan . --hook-mode claude" }]
+                },
+                // Unmanaged blocks keep whatever matcher the user chose.
+                {
+                    "matcher": "Bash",
+                    "hooks": [{ "type": "command", "command": "./mine.sh" }]
+                }
+            ])),
+        );
+
+        assert!(collect_claude_permissions_status(dir.path()).pre_tool_matcher_ok);
+    }
+
+    #[test]
+    fn claude_pre_tool_matcher_flags_outdated_or_missing_managed_matcher() {
+        for block in [
+            serde_json::json!({
+                "_shk_managed": true,
+                "matcher": "Read|Write|Bash|WebFetch|mcp__.*",
+                "hooks": []
+            }),
+            serde_json::json!({ "_shk_managed": true, "hooks": [] }),
+        ] {
+            let dir = tempdir().unwrap();
+            write_claude_settings(
+                dir.path(),
+                &claude_pre_tool_settings(serde_json::json!([block])),
+            );
+
+            let status = collect_claude_permissions_status(dir.path());
+            assert!(!status.pre_tool_matcher_ok, "{block}");
+        }
+    }
+
+    #[test]
+    fn claude_pre_tool_matcher_passes_without_managed_hooks() {
+        let dir = tempdir().unwrap();
+        write_claude_settings(dir.path(), &serde_json::json!({ "permissions": {} }));
+        assert!(collect_claude_permissions_status(dir.path()).pre_tool_matcher_ok);
+
+        let missing = tempdir().unwrap();
+        assert!(collect_claude_permissions_status(missing.path()).pre_tool_matcher_ok);
+
+        // Unparseable settings are already reported through deny/sandbox.
+        let broken = tempdir().unwrap();
+        fs::create_dir_all(broken.path().join(".claude")).unwrap();
+        fs::write(broken.path().join(".claude/settings.json"), "{").unwrap();
+        assert!(collect_claude_permissions_status(broken.path()).pre_tool_matcher_ok);
+    }
+
+    #[test]
+    fn doctor_report_counts_outdated_claude_pre_tool_matcher() {
+        let current = tempdir().unwrap();
+        let outdated = tempdir().unwrap();
+        for (dir, matcher) in [
+            (&current, crate::hooks::CLAUDE_PRE_TOOL_USE_MATCHER),
+            (&outdated, "Read|Write|Bash|WebFetch|mcp__.*"),
+        ] {
+            write_claude_settings(
+                dir.path(),
+                &claude_pre_tool_settings(serde_json::json!([
+                    { "_shk_managed": true, "matcher": matcher, "hooks": [] }
+                ])),
+            );
+        }
+
+        let current = collect_doctor_report(current.path()).unwrap();
+        let outdated = collect_doctor_report(outdated.path()).unwrap();
+
+        assert!(current.claude.pre_tool_matcher_ok);
+        assert!(!outdated.claude.pre_tool_matcher_ok);
+        assert_eq!(outdated.warning_count, current.warning_count + 1);
     }
 
     #[test]
