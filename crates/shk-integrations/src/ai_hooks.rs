@@ -273,7 +273,7 @@ fn read_files_from_candidates(
     repo_root: &Path,
 ) -> Result<Option<(String, String)>> {
     let mut texts: Vec<String> = Vec::new();
-    let mut first_rel: Option<String> = None;
+    let mut label: Option<String> = None;
     let repo_root = fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
 
     for cand in candidate_path_strings(tool, v) {
@@ -294,8 +294,15 @@ fn read_files_from_candidates(
             }
             let t = String::from_utf8_lossy(&bytes);
             let rel = rel_from_repo(&repo_root, &abs);
-            if first_rel.is_none() {
-                first_rel = Some(rel.clone());
+            // The label drives path-scoped policy (allowlist rows, rule path
+            // filters) for the whole body, so only a single-file body may use
+            // the file's path. Several files get the tool's virtual label.
+            match &label {
+                None => label = Some(rel.clone()),
+                Some(first) if *first != rel => {
+                    label = Some(tool.virtual_path_label().to_string());
+                }
+                Some(_) => {}
             }
             texts.push(format!("// ---- {rel}\n{t}"));
         }
@@ -304,10 +311,7 @@ fn read_files_from_candidates(
     Ok(if texts.is_empty() {
         None
     } else {
-        Some((
-            first_rel.unwrap_or_else(|| "<file>".into()),
-            texts.join("\n"),
-        ))
+        Some((label.unwrap_or_else(|| "<file>".into()), texts.join("\n")))
     })
 }
 
@@ -1126,6 +1130,49 @@ mod tests {
         assert_eq!(display, "nested/secret.txt");
         assert!(body.contains("// ---- nested/secret.txt"), "{body}");
         assert!(body.contains("file body"), "{body}");
+    }
+
+    #[test]
+    fn several_referenced_files_use_the_virtual_label() {
+        let repo = tempdir().expect("temp repo");
+        std::fs::create_dir_all(repo.path().join("fixtures")).expect("create fixtures");
+        std::fs::write(repo.path().join("fixtures/demo.txt"), "fixture body").expect("write");
+        std::fs::write(repo.path().join("app.txt"), "app body").expect("write");
+        let stdin = serde_json::json!({
+            "tool_input": { "source_path": "app.txt", "destination_path": "fixtures/demo.txt" }
+        })
+        .to_string();
+
+        let (display, body) = stdin_to_hook_body(
+            AiHookTool::ClaudeCode,
+            false,
+            &stdin,
+            repo.path(),
+            repo.path(),
+        )
+        .unwrap();
+
+        // A path allowlist for `fixtures/**` must not cover `app.txt`.
+        assert_eq!(display, "<claude-hook>");
+        assert!(
+            body.contains("app body") && body.contains("fixture body"),
+            "{body}"
+        );
+
+        // The same file named twice is still one file.
+        let stdin = serde_json::json!({
+            "tool_input": { "file_path": "app.txt", "target_path": "./app.txt" }
+        })
+        .to_string();
+        let (display, _body) = stdin_to_hook_body(
+            AiHookTool::ClaudeCode,
+            false,
+            &stdin,
+            repo.path(),
+            repo.path(),
+        )
+        .unwrap();
+        assert_eq!(display, "app.txt");
     }
 
     #[test]

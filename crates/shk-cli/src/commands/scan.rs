@@ -363,18 +363,19 @@ fn inherits_project_policy(cwd_root: &Path, project_root: &Path) -> bool {
     is_same_or_nested_root(cwd_root, project_root) && !cwd_root.join("shk.toml").is_file()
 }
 
-/// Path label used for policy matching (path-scoped `[[allowlist]]` rows) and
-/// the audit log. A file inside a linked worktree of the hook's repository
-/// (e.g. `.claude/worktrees/<name>/`, where editors run hooks from the parent
-/// checkout) is labelled relative to that worktree: it is a checkout of the
-/// same repository, so the project's path rules describe it at the same
+/// Path the scan matches path-based policy against (`[[allowlist]]` path rows,
+/// rule path filters). A file inside a linked worktree of the hook's
+/// repository (e.g. `.claude/worktrees/<name>/`, where editors run hooks from
+/// the parent checkout) is matched relative to that worktree: it is a checkout
+/// of the same repository, so the project's path rules describe it at the same
 /// relative paths. The policy itself still comes from `repo_root`, the trusted
 /// launch context; submodules and nested clones keep the project-relative path.
-fn hook_policy_display_path(repo_root: &Path, disp: String) -> String {
-    let abs = repo_root.join(&disp);
+/// The audit log keeps `disp`, so entries still say which checkout was read.
+fn hook_policy_path(repo_root: &Path, disp: &str) -> String {
+    let abs = repo_root.join(disp);
     if !abs.is_file() {
         // Virtual labels such as `<claude-hook>`.
-        return disp;
+        return disp.to_string();
     }
     shk_core::git::linked_worktree_root(repo_root, &abs)
         .and_then(|worktree| {
@@ -383,7 +384,7 @@ fn hook_policy_display_path(repo_root: &Path, disp: String) -> String {
                 .ok()
                 .map(|rel| rel.to_string_lossy().replace('\\', "/"))
         })
-        .unwrap_or(disp)
+        .unwrap_or_else(|| disp.to_string())
 }
 
 fn resolve_hook_content_cwd(cwd: &Path, repo_root: &Path) -> PathBuf {
@@ -525,10 +526,10 @@ fn run_hook_mode(
         &content_cwd,
         &repo_root,
     )?;
-    let disp = hook_policy_display_path(&repo_root, disp);
+    let policy_path = hook_policy_path(&repo_root, &disp);
     let opts = hook_scan_options(fail_on, matches!(tool, AiTool::Cursor) && !post);
 
-    let res = scan_string(&repo_root, &disp, &body, opts).context("hook scan failed")?;
+    let res = scan_string(&repo_root, &policy_path, &body, opts).context("hook scan failed")?;
 
     if audit {
         if post {

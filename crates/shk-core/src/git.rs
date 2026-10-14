@@ -409,8 +409,9 @@ pub fn discover_repo_root(start: &Path) -> Option<PathBuf> {
 /// The link is verified without running git: the worktree's `.git` file names
 /// an admin dir registered at `main_root/.git/worktrees/<name>`, whose
 /// `commondir` resolves to `main_root/.git` and whose `gitdir` points back at
-/// the worktree's `.git`. Hand-written `.git` files therefore qualify neither
-/// by naming another worktree's admin dir nor by naming an admin dir outside
+/// the worktree's `.git`, which must be a regular file (not a symlink to a real
+/// worktree's `.git`). Hand-written `.git` files therefore qualify neither by
+/// naming another worktree's admin dir nor by naming an admin dir outside
 /// `.git/`. Returns `None` when `main_root/.git` is not a directory
 /// (`--separate-git-dir`, submodules).
 pub fn linked_worktree_root(main_root: &Path, path: &Path) -> Option<PathBuf> {
@@ -420,10 +421,16 @@ pub fn linked_worktree_root(main_root: &Path, path: &Path) -> Option<PathBuf> {
     }
     let root = discover_repo_root(path)?;
     let dot_git = root.join(".git");
-    if !dot_git.is_file() {
+    // `is_file` follows symlinks; a symlink to a real worktree's `.git` would
+    // otherwise pass the back-link check below.
+    if !std::fs::symlink_metadata(&dot_git)
+        .ok()?
+        .file_type()
+        .is_file()
+    {
         return None;
     }
-    let admin = read_git_pointer(&dot_git, "gitdir: ")?;
+    let admin = read_gitdir_pointer(&dot_git)?;
     // Git registers every linked worktree at `<common>/worktrees/<name>`.
     // Requiring that location means a fake link needs writes inside `.git/`,
     // not just ordinary files next to the work tree.
@@ -439,11 +446,11 @@ pub fn linked_worktree_root(main_root: &Path, path: &Path) -> Option<PathBuf> {
     (back_link == std::fs::canonicalize(&dot_git).ok()?).then_some(root)
 }
 
-/// Resolves a `<prefix><path>` pointer file (relative paths are relative to
-/// the file's directory) to a canonical directory.
-fn read_git_pointer(file: &Path, prefix: &str) -> Option<PathBuf> {
+/// Resolves a `gitdir: <path>` file (a relative path is relative to the
+/// file's directory) to a canonical directory.
+fn read_gitdir_pointer(file: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(file).ok()?;
-    let target = text.trim().strip_prefix(prefix)?;
+    let target = text.trim().strip_prefix("gitdir: ")?;
     let dir = std::fs::canonicalize(file.parent()?.join(target)).ok()?;
     dir.is_dir().then_some(dir)
 }
@@ -705,5 +712,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(linked_worktree_root(main.path(), &fake), None);
+
+        // A symlink to the real worktree's `.git`: every pointer resolves, but
+        // the link itself is an ordinary file write outside `.git/`.
+        #[cfg(unix)]
+        {
+            let linked = main.path().join("services/linked");
+            std::fs::create_dir_all(&linked).unwrap();
+            std::os::unix::fs::symlink(wt.join(".git"), linked.join(".git")).unwrap();
+            assert_eq!(linked_worktree_root(main.path(), &linked), None);
+        }
     }
 }
