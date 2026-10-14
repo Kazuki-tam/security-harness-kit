@@ -40,6 +40,26 @@ const MAX_HOOK_TEXT_BYTES: usize = 4096 * 512;
 const PRE_TEXT_KEYS: &[&str] = &[
     "prompt", "text", "content", "command", "stdin", "args", "url",
 ];
+// File-edit tool arguments. The target file body is read via PATH_KEYS, which
+// suppresses the large-string fallback, so the inserted text must be named here
+// or an edit to an existing file is never scanned. Nested lists (Claude
+// MultiEdit `edits[]`, Copilot `replacements[]`) are reached by the deep grab.
+// - Claude Code Edit / MultiEdit: old_string, new_string; NotebookEdit: new_source
+// - Copilot CLI edit / create: old_str, new_str, file_text
+// - Copilot in VS Code replace_string_in_file / edit_notebook_file: oldString,
+//   newString, newCode
+// Codex `apply_patch` sends the patch as `command`, already in PRE_TEXT_KEYS.
+const PRE_EDIT_TEXT_KEYS: &[&str] = &[
+    "old_string",
+    "new_string",
+    "new_source",
+    "old_str",
+    "new_str",
+    "file_text",
+    "oldString",
+    "newString",
+    "newCode",
+];
 const CODEX_POST_TEXT_KEYS: &[&str] = &[
     "stdout",
     "stderr",
@@ -374,7 +394,10 @@ fn priority_text_key_sets(post: bool, tool: AiHookTool) -> &'static [&'static [&
             AiHookTool::Antigravity => &[PRE_TEXT_KEYS, ANTIGRAVITY_PRE_EXTRA_TEXT_KEYS],
             AiHookTool::Grok => &[PRE_TEXT_KEYS, GROK_PRE_EXTRA_TEXT_KEYS],
             AiHookTool::Windsurf => &[PRE_TEXT_KEYS, WINDSURF_PRE_EXTRA_TEXT_KEYS],
-            _ => &[PRE_TEXT_KEYS],
+            AiHookTool::ClaudeCode
+            | AiHookTool::Codex
+            | AiHookTool::Copilot
+            | AiHookTool::Cursor => &[PRE_TEXT_KEYS, PRE_EDIT_TEXT_KEYS],
         };
     }
 
@@ -1126,6 +1149,148 @@ mod tests {
         assert_eq!(display, "nested/secret.txt");
         assert!(body.contains("// ---- nested/secret.txt"), "{body}");
         assert!(body.contains("file body"), "{body}");
+    }
+
+    /// Built at runtime so no token-shaped literal appears in source.
+    fn synthetic_github_token() -> String {
+        format!("{}_{}", "ghp", "a1B2c3D4".repeat(5))
+    }
+
+    /// Repo with an existing target file, so the file-body read suppresses
+    /// the large-string fallback and only priority keys can surface edits.
+    fn repo_with_existing_file() -> tempfile::TempDir {
+        let repo = tempdir().expect("temp repo");
+        std::fs::write(repo.path().join("app.txt"), "clean body\n").expect("write target");
+        repo
+    }
+
+    fn pre_body(tool: AiHookTool, repo: &Path, stdin: &serde_json::Value) -> (String, String) {
+        stdin_to_hook_body(tool, false, &stdin.to_string(), repo, repo).unwrap()
+    }
+
+    #[test]
+    fn claude_pre_edit_on_existing_file_scans_new_and_old_string() {
+        let repo = repo_with_existing_file();
+        let token = synthetic_github_token();
+        let stdin = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": "app.txt",
+                "old_string": "old-edit-marker",
+                "new_string": format!("token = {token}"),
+            }
+        });
+
+        let (display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
+
+        assert_eq!(display, "app.txt");
+        assert!(body.contains("clean body"), "{body}");
+        assert!(body.contains(&token), "{body}");
+        assert!(body.contains("old-edit-marker"), "{body}");
+    }
+
+    #[test]
+    fn claude_pre_multi_edit_scans_nested_edits() {
+        let repo = repo_with_existing_file();
+        let token = synthetic_github_token();
+        let stdin = serde_json::json!({
+            "tool_name": "MultiEdit",
+            "tool_input": {
+                "file_path": "app.txt",
+                "edits": [
+                    { "old_string": "a", "new_string": "first-edit-marker" },
+                    { "old_string": "b", "new_string": token, "replace_all": true }
+                ]
+            }
+        });
+
+        let (_display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
+
+        assert!(body.contains("first-edit-marker"), "{body}");
+        assert!(body.contains(&token), "{body}");
+    }
+
+    #[test]
+    fn claude_pre_notebook_edit_scans_new_source() {
+        let repo = tempdir().expect("temp repo");
+        std::fs::write(repo.path().join("nb.ipynb"), r#"{"cells":[]}"#).expect("write notebook");
+        let token = synthetic_github_token();
+        let stdin = serde_json::json!({
+            "tool_name": "NotebookEdit",
+            "tool_input": {
+                "notebook_path": "nb.ipynb",
+                "cell_id": "c1",
+                "new_source": format!("TOKEN = '{token}'"),
+                "edit_mode": "replace"
+            }
+        });
+
+        let (display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
+
+        assert_eq!(display, "nb.ipynb");
+        assert!(body.contains(&token), "{body}");
+    }
+
+    #[test]
+    fn copilot_pre_edit_scans_cli_and_vscode_argument_names() {
+        let repo = repo_with_existing_file();
+        let token = synthetic_github_token();
+        let payloads = [
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Edit",
+                "tool_input": { "path": "app.txt", "old_str": "x", "new_str": token }
+            }),
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Write",
+                "tool_input": { "path": "app.txt", "file_text": token }
+            }),
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "replace_string_in_file",
+                "tool_input": { "filePath": "app.txt", "oldString": "x", "newString": token }
+            }),
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "multi_replace_string_in_file",
+                "tool_input": {
+                    "replacements": [
+                        { "filePath": "app.txt", "oldString": "x", "newString": token }
+                    ]
+                }
+            }),
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "edit_notebook_file",
+                "tool_input": { "filePath": "app.txt", "newCode": token }
+            }),
+        ];
+
+        for stdin in &payloads {
+            let (display, body) = pre_body(AiHookTool::Copilot, repo.path(), stdin);
+            assert_eq!(display, "app.txt", "{stdin}");
+            assert!(body.contains(&token), "{stdin}: {body}");
+        }
+    }
+
+    #[test]
+    fn pre_edit_keys_apply_to_every_shared_pre_tool() {
+        let repo = repo_with_existing_file();
+        let stdin = serde_json::json!({
+            "tool_input": { "file_path": "app.txt", "new_string": "shared-edit-marker" }
+        });
+
+        for tool in [
+            AiHookTool::ClaudeCode,
+            AiHookTool::Codex,
+            AiHookTool::Copilot,
+            AiHookTool::Cursor,
+        ] {
+            let (_display, body) = pre_body(tool, repo.path(), &stdin);
+            assert!(body.contains("shared-edit-marker"), "{tool:?}: {body}");
+        }
     }
 
     #[test]

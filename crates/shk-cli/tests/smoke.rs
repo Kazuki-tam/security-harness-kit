@@ -3425,6 +3425,60 @@ fn hook_mode_payload_cwd_cannot_redirect_relative_file_scan() {
 }
 
 #[test]
+fn hook_mode_claude_edit_on_existing_file_scans_new_string() {
+    use std::io::Write;
+
+    let repo = tempfile::tempdir().unwrap();
+    init_git_repo(repo.path());
+    std::fs::write(repo.path().join("shk.toml"), "").unwrap();
+    std::fs::write(repo.path().join("config.txt"), "API_KEY=placeholder\n").unwrap();
+
+    let run_edit = |new_string: &str| {
+        let stdin = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": "config.txt",
+                "old_string": "placeholder",
+                "new_string": new_string
+            }
+        })
+        .to_string();
+        Command::new(shk_bin())
+            .args(["scan", ".", "--hook-mode", "claude-code"])
+            .current_dir(repo.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                child.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+                child.wait_with_output()
+            })
+            .expect("hook scan")
+    };
+
+    // The existing file body is clean, so only `new_string` can trigger a deny.
+    let out = run_edit(&synthetic_openai_key('e'));
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = run_edit("still-a-placeholder");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn hook_mode_ignores_file_paths_outside_repo_root() {
     use std::io::Write;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
