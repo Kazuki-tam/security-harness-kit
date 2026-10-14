@@ -768,7 +768,7 @@ Antigravity also has a unified permission engine (`Deny > Ask > Allow`, resource
 
 Managed entries are tagged with `"_shk_managed": true` or `# shk-managed-start` / `# shk-managed-end`. Copilot, Grok Build, and Windsurf instead keep a schema-clean config and identify managed entries by their `--hook-mode <tool>` command string. Re-running replaces managed entries and leaves non-managed entries in place.
 
-The Claude Code `PreToolUse` hook covers `Edit`, `MultiEdit`, and `NotebookEdit`: the inserted text (`new_string`, `edits[].new_string`, `new_source`) is scanned along with the target file. As with `Read` and `Write`, an edit to a file that already contains a blocking finding is denied; fix the file or add an allowlist entry. Projects installed before this coverage was added keep the narrower matcher until `shk hooks install-ai --tool claude-code` is re-run.
+The Claude Code `PreToolUse` hook covers `Edit`, `MultiEdit`, and `NotebookEdit`, and the target file is scanned as it will look after the edit (see the hook mode notes under `shk scan`). An edit is therefore denied when the edited file would contain a blocking finding, including one already in the file outside the edited text; an edit that removes the finding is allowed. Projects installed before this coverage was added keep the narrower matcher until `shk hooks install-ai --tool claude-code` is re-run.
 
 See [Uninstall](installation.md#uninstall) for removing managed hooks, skills, generated workflows, and stored dotenvx keys.
 
