@@ -24,6 +24,32 @@ fn canonical_path_text(path: &Path) -> String {
         .into_owned()
 }
 
+/// Runs `cmd` with `stdin` piped in, the way editors invoke hook commands.
+fn output_with_stdin(cmd: &mut Command, stdin: &str) -> std::process::Output {
+    let mut child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn command");
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(stdin.as_bytes())
+        .expect("write stdin");
+    child.wait_with_output().expect("wait for command")
+}
+
+/// `stdout=… stderr=…` for assertion messages.
+fn output_log(out: &std::process::Output) -> String {
+    format!(
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
 fn synthetic_openai_key(seed: char) -> String {
     format!("sk-proj-{seed}bcdefghijklmnopqrstuvwxyz0123456789")
 }
@@ -3425,6 +3451,55 @@ fn hook_mode_payload_cwd_cannot_redirect_relative_file_scan() {
 }
 
 #[test]
+fn hook_mode_claude_edit_scans_the_edited_file() {
+    let repo = tempfile::tempdir().unwrap();
+    init_git_repo(repo.path());
+    std::fs::write(repo.path().join("shk.toml"), "").unwrap();
+    let key = synthetic_openai_key('e');
+
+    // Writes `body` to an existing file, runs a Claude `Edit` pre hook that
+    // replaces `old` with `new`, and returns the hook exit code.
+    let run_edit = |body: &str, old: &str, new: &str| {
+        std::fs::write(repo.path().join("config.txt"), body).unwrap();
+        let stdin = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": "config.txt",
+                "old_string": old,
+                "new_string": new
+            }
+        })
+        .to_string();
+        let out = output_with_stdin(
+            Command::new(shk_bin())
+                .args(["scan", ".", "--hook-mode", "claude-code"])
+                .current_dir(repo.path()),
+            &stdin,
+        );
+        (out.status.code(), output_log(&out))
+    };
+
+    // Inserting a key into a clean existing file is denied.
+    let (code, log) = run_edit("API_KEY=placeholder\n", "placeholder", &key);
+    assert_eq!(code, Some(2), "insert key: {log}");
+
+    // A clean edit is allowed.
+    let (code, log) = run_edit("API_KEY=placeholder\n", "placeholder", "still-clean");
+    assert_eq!(code, Some(0), "clean edit: {log}");
+
+    // The file's inline suppression still covers the edited line.
+    let suppressed = "# shk-ignore-next-line secret.openai_api_key\nAPI_KEY=placeholder\n";
+    let (code, log) = run_edit(suppressed, "placeholder", &key);
+    assert_eq!(code, Some(0), "suppressed line: {log}");
+
+    // Removing a key from a file is allowed: the edited body is clean.
+    let leaked = format!("API_KEY={key}\n");
+    let (code, log) = run_edit(&leaked, &key, "${API_KEY}");
+    assert_eq!(code, Some(0), "remove key: {log}");
+}
+
+#[test]
 fn hook_mode_ignores_file_paths_outside_repo_root() {
     use std::io::Write;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -3714,8 +3789,6 @@ fn nested_claude_worktree(project: &Path) -> PathBuf {
 
 #[test]
 fn hook_mode_matches_project_path_allowlist_inside_a_linked_worktree() {
-    use std::io::Write;
-
     let project = tempfile::tempdir().unwrap();
     init_git_repo(project.path());
     std::fs::write(
@@ -3757,28 +3830,21 @@ fn hook_mode_matches_project_path_allowlist_inside_a_linked_worktree() {
             "tool_input": { "file_path": target }
         })
         .to_string();
-        Command::new(shk_bin())
-            .args(["scan", ".", "--hook-mode", "claude-code"])
-            .current_dir(project.path())
-            .env("CLAUDE_PROJECT_DIR", project.path())
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                child.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
-                child.wait_with_output()
-            })
-            .expect("hook scan")
+        output_with_stdin(
+            Command::new(shk_bin())
+                .args(["scan", ".", "--hook-mode", "claude-code", "--log-blocked"])
+                .current_dir(project.path())
+                .env("CLAUDE_PROJECT_DIR", project.path()),
+            &stdin,
+        )
     };
 
     let allowed = read(&key_file(&worktree, "fixtures/demo.txt"));
     assert_eq!(
         allowed.status.code(),
         Some(0),
-        "allowlisted path in a linked worktree: stdout={} stderr={}",
-        String::from_utf8_lossy(&allowed.stdout),
-        String::from_utf8_lossy(&allowed.stderr)
+        "allowlisted path in a linked worktree: {}",
+        output_log(&allowed)
     );
 
     for target in [
@@ -3789,12 +3855,19 @@ fn hook_mode_matches_project_path_allowlist_inside_a_linked_worktree() {
         assert_eq!(
             denied.status.code(),
             Some(2),
-            "{}: stdout={} stderr={}",
+            "{}: {}",
             target.display(),
-            String::from_utf8_lossy(&denied.stdout),
-            String::from_utf8_lossy(&denied.stderr)
+            output_log(&denied)
         );
     }
+
+    // The audit log keeps the project-relative path, so it still says which
+    // checkout was read.
+    let log = std::fs::read_to_string(project.path().join(".shk/audit.log")).unwrap();
+    assert!(
+        log.contains("\"display_path\":\".claude/worktrees/wt/src/config.txt\""),
+        "{log}"
+    );
 }
 
 #[test]
