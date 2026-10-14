@@ -15,8 +15,9 @@ const CONFIG = {
   logBlocked: __SHK_LOG_BLOCKED__,
   promptFailOn: __SHK_PROMPT_FAIL_ON__,
   timeoutMs: 30000,
-  // shk prints a short decision; more output than this is not a valid answer.
-  maxOutputBytes: 1024 * 1024,
+  // shk prints a short decision; more output than this (in UTF-16 code units)
+  // is not a valid answer.
+  maxOutputChars: 1024 * 1024,
   // Post payloads only. Pre-tool and prompt payloads are sent whole: shk applies
   // its own scan limits, and a cut here would let content past a blocking hook.
   maxPostStringBytes: 512 * 1024,
@@ -155,7 +156,7 @@ function runShk(directory, phase, payload) {
     child.stderr.setEncoding("utf8");
     const collect = (append) => (chunk) => {
       append(chunk);
-      if (stdout.length + stderr.length > CONFIG.maxOutputBytes) {
+      if (stdout.length + stderr.length > CONFIG.maxOutputChars) {
         child.kill("SIGKILL");
         finish({ kind: "too-much-output" });
       }

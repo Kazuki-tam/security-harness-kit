@@ -1631,7 +1631,12 @@ pub fn apply_ai_hook_settings(
     let before = ai_safety_applied_from(&collect_project_check_status(&root));
     let summaries = configure_ai_with_summaries(&root, desktop_configure_ai_options(&options))?;
     let after = ai_safety_applied_from(&collect_project_check_status(&root));
-    let message = if ai_safety_applied_matches(&before, &after) {
+    let skipped_opencode = summaries
+        .iter()
+        .any(|line| line.contains(crate::hooks::OPENCODE_SKIPPED));
+    let message = if skipped_opencode {
+        "OpenCode was skipped; see details. Other AI editor settings were applied".to_string()
+    } else if ai_safety_applied_matches(&before, &after) {
         "No AI editor safety changes were required".to_string()
     } else if ai_safety_fully_disabled(&after) && ai_safety_any_enabled(&before) {
         "AI editor safety settings removed".to_string()
@@ -2378,9 +2383,10 @@ fn ai_tool_statuses(root: &Path, global: bool) -> Vec<AiHookToolStatus> {
 
 fn has_managed_hook_marker(tool: AiTool, content: &str) -> bool {
     if tool == AiTool::Opencode {
-        // The plugin is executable code: a hand-edited or stale copy is not
-        // shk's hook, so the desktop offers to reinstall it.
-        return crate::hooks::is_current_opencode_plugin(content);
+        // A stale or hand-edited managed plugin still counts as installed, so
+        // applying other settings rewrites it rather than removing it;
+        // `shk doctor` reports the drift.
+        return crate::hooks::is_managed_opencode_plugin(content);
     }
     content.contains(MANAGED_MARKER_JSON)
         || content.contains(MANAGED_MARKER_SH)
@@ -4053,6 +4059,49 @@ mod tests {
         );
         assert!(settings.contains("Bash(rm -rf *)"), "{settings}");
         assert!(!settings.contains("allowUnsandboxedCommands"), "{settings}");
+    }
+
+    #[test]
+    fn desktop_apply_reports_a_skipped_opencode_plugin_and_keeps_a_stale_one() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "").unwrap();
+        let plugin = dir.path().join(".opencode/plugins/shk-security.js");
+        fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        let options = |opencode| ApplyAiHookSettingsOptions {
+            scan_hooks_claude_code: false,
+            scan_hooks_cursor: false,
+            scan_hooks_antigravity: false,
+            scan_hooks_windsurf: false,
+            scan_hooks_grok: false,
+            scan_hooks_opencode: opencode,
+            scan_hooks_codex: false,
+            scan_hooks_copilot: false,
+            cursor_fail_closed: true,
+            claude_deny: false,
+            claude_sandbox: false,
+            codex_sandbox: false,
+        };
+
+        // A user's own plugin at the managed path is reported, not overwritten.
+        fs::write(&plugin, "export default { id: \"mine\" }\n").unwrap();
+        let result = apply_ai_hook_settings(dir.path().to_str().unwrap(), options(true)).unwrap();
+        assert!(
+            result.message.contains("OpenCode was skipped"),
+            "{result:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&plugin).unwrap(),
+            "export default { id: \"mine\" }\n"
+        );
+
+        // A stale managed plugin still counts as installed, so syncing the
+        // current state rewrites it instead of removing it.
+        fs::write(&plugin, "// shk-managed: older template\n").unwrap();
+        let status = collect_project_check_status(dir.path());
+        assert!(ai_safety_applied_from(&status).scan_hooks_opencode);
+        apply_ai_hook_settings(dir.path().to_str().unwrap(), options(true)).unwrap();
+        let body = fs::read_to_string(&plugin).unwrap();
+        assert!(body.contains("--hook-mode opencode"), "{body}");
     }
 
     #[cfg(unix)]

@@ -255,13 +255,13 @@ pub fn install_ai_with_summaries(
                 if !skip_conflicts {
                     return Err(err);
                 }
-                summaries.push(format!("{}: skipped OpenCode: {err:#}", path.display()));
+                summaries.push(format!("{}: {OPENCODE_SKIPPED}: {err:#}", path.display()));
                 continue;
             }
         }
         if skip_conflicts && is_unmanaged_opencode_plugin(&path)? {
             summaries.push(format!(
-                "{}: skipped OpenCode: not an shk-managed plugin (move it aside and rerun)",
+                "{}: {OPENCODE_SKIPPED}: not an shk-managed plugin (move it aside and rerun)",
                 path.display()
             ));
             continue;
@@ -310,14 +310,14 @@ pub fn configure_ai_with_summaries(cwd: &Path, opts: ConfigureAiOptions) -> Resu
                 if !skip_conflicts {
                     return Err(err);
                 }
-                summaries.push(format!("{}: skipped OpenCode: {err:#}", path.display()));
+                summaries.push(format!("{}: {OPENCODE_SKIPPED}: {err:#}", path.display()));
                 continue;
             }
         }
         if scan_hooks_enabled_for(&opts, tool) {
             if skip_conflicts && is_unmanaged_opencode_plugin(&path)? {
                 summaries.push(format!(
-                    "{}: skipped OpenCode: not an shk-managed plugin (move it aside and rerun)",
+                    "{}: {OPENCODE_SKIPPED}: not an shk-managed plugin (move it aside and rerun)",
                     path.display()
                 ));
                 continue;
@@ -1313,6 +1313,9 @@ fn remove_grok_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
 const OPENCODE_PLUGIN_REL_PATH: &str = ".opencode/plugins/shk-security.js";
 const OPENCODE_PLUGIN_TEMPLATE: &str = include_str!("opencode_plugin.js");
 const OPENCODE_MANAGED_HEADER: &str = "// shk-managed:";
+/// Summary prefix for an OpenCode install skipped over a conflict the user has
+/// to resolve; the desktop surfaces it in its result message.
+pub(crate) const OPENCODE_SKIPPED: &str = "skipped OpenCode";
 
 /// OpenCode resolves its global config directory with `xdg-basedir`, so an
 /// absolute `XDG_CONFIG_HOME` moves it on every platform. Installing under
@@ -1356,7 +1359,7 @@ pub(crate) fn is_managed_opencode_plugin(content: &str) -> bool {
 /// True when `content` is exactly what this shk release installs. Git
 /// checkouts with `core.autocrlf` rewrite line endings; that alone is not a
 /// difference.
-pub(crate) fn is_current_opencode_plugin(content: &str) -> bool {
+fn is_current_opencode_plugin(content: &str) -> bool {
     opencode_plugin_renderings().contains(&content.replace("\r\n", "\n"))
 }
 
@@ -1396,7 +1399,9 @@ fn apply_opencode(path: &Path, audit: bool, log_blocked: bool, dry_run: bool) ->
     }
     Ok(format!(
         "{}managed OpenCode plugin (template={}, audit={audit}, logBlocked={})",
-        if unchanged {
+        if dry_run && unchanged {
+            "dry-run: unchanged "
+        } else if unchanged {
             "unchanged "
         } else if dry_run {
             "dry-run: would write "
