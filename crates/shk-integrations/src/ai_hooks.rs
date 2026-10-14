@@ -38,6 +38,9 @@ const METADATA_PATH_KEYS: &[&str] = &[
     "workspacePaths",
 ];
 const MAX_HOOK_TEXT_BYTES: usize = 4096 * 512;
+// Bytes of file body that applying pre-hook edits may search and rewrite.
+// Well under a second of work, far below the installed hook timeouts.
+const MAX_EDIT_WORK_BYTES: usize = 64 * MAX_HOOK_TEXT_BYTES;
 const PRE_TEXT_KEYS: &[&str] = &[
     "prompt", "text", "content", "command", "stdin", "args", "url",
 ];
@@ -386,7 +389,10 @@ fn collect_text_edits<'a>(
 /// An edit whose `old` text is empty or missing is left for standalone scanning,
 /// as is one that would grow the body past `original_len + MAX_HOOK_TEXT_BYTES`
 /// (a `replace_all` of a short `old` can otherwise multiply the body until
-/// the hook times out, and a timed-out hook does not block).
+/// the hook times out, and a timed-out hook does not block). For the same
+/// reason, edits stop being applied once searching and rewriting the body has
+/// touched `MAX_EDIT_WORK_BYTES`: each edit costs a pass over the whole body, so
+/// a long edit list on a large file would otherwise run past the hook timeout.
 fn apply_text_edits(
     text: &mut String,
     abs: &Path,
@@ -394,9 +400,15 @@ fn apply_text_edits(
     targets: &[Option<PathBuf>],
 ) {
     let max_len = text.len().saturating_add(MAX_HOOK_TEXT_BYTES);
+    let mut work = 0usize;
     for (edit, target) in edits.iter_mut().zip(targets) {
         if target.as_deref() != Some(abs) || edit.old.is_empty() {
             continue;
+        }
+        // One pass to search, one more to rewrite.
+        work = work.saturating_add(text.len().saturating_mul(2));
+        if work > MAX_EDIT_WORK_BYTES {
+            break;
         }
         let count = if edit.replace_all {
             text.matches(edit.old).count()
@@ -1512,6 +1524,41 @@ mod tests {
         let (_display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
 
         assert_eq!(body, format!("// ---- app.txt\n{file}\n---\n{new}"));
+    }
+
+    #[test]
+    fn edit_work_budget_leaves_later_edits_for_standalone_scanning() {
+        // Each edit costs two passes over a 2 MiB body, so the budget covers
+        // 32 edits; the rest are scanned as standalone new text.
+        let markers: Vec<String> = (0..40).map(|i| format!("edit-marker-{i:02}")).collect();
+        let file = format!(
+            "{}\n{}\n",
+            "a".repeat(MAX_HOOK_TEXT_BYTES),
+            markers.join("\n")
+        );
+        let repo = repo_with_file(&file);
+        let edits: Vec<_> = markers
+            .iter()
+            .map(|marker| serde_json::json!({ "old_string": marker, "new_string": format!("new-{marker}") }))
+            .collect();
+        let stdin = serde_json::json!({
+            "tool_name": "MultiEdit",
+            "tool_input": { "file_path": "app.txt", "edits": edits }
+        });
+
+        let (_display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
+
+        let (file_part, standalone) = body.split_once("\n---\n").expect("standalone texts");
+        assert!(
+            file_part.contains("\nnew-edit-marker-00\n"),
+            "first edit applied"
+        );
+        assert!(
+            file_part.contains("\nedit-marker-39\n"),
+            "last edit not applied"
+        );
+        assert!(standalone.contains("new-edit-marker-39"), "{standalone}");
+        assert!(!standalone.contains("new-edit-marker-00"), "{standalone}");
     }
 
     #[test]
