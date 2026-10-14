@@ -40,28 +40,28 @@ const MAX_HOOK_TEXT_BYTES: usize = 4096 * 512;
 const PRE_TEXT_KEYS: &[&str] = &[
     "prompt", "text", "content", "command", "stdin", "args", "url",
 ];
-// File-edit tool arguments. The target file body is read via PATH_KEYS, which
-// suppresses the large-string fallback, so the inserted text must be named here
-// or an edit to an existing file is never scanned. Nested lists (Claude
-// MultiEdit `edits[]`, Copilot `replacements[]`) are reached by the deep grab.
-// - Claude Code Edit / MultiEdit: old_string, new_string; NotebookEdit: new_source
-// - Copilot CLI edit / create: old_str, new_str, file_text
-// - Copilot in VS Code replaceString / multiReplaceString: oldString, newString;
-//   editNotebook: newCode; insertEdit: code; applyPatch: input
-// Codex `apply_patch` sends the patch as `command`, already in PRE_TEXT_KEYS.
-const PRE_EDIT_TEXT_KEYS: &[&str] = &[
-    "old_string",
-    "new_string",
-    "new_source",
-    "old_str",
-    "new_str",
-    "file_text",
-    "oldString",
-    "newString",
-    "newCode",
-    "code",
-    "input",
+// Replace-style edit arguments as (old, new) key pairs. Pre hooks apply each
+// edit to the target file body read via PATH_KEYS and scan the edited body, so
+// inserted text keeps the file's inline `shk-ignore` context and removed text
+// no longer blocks. When the target is not read (outside the repo, binary, or
+// missing) or `old` is not found, only the new text is scanned. Edits inherit
+// the nearest enclosing path key, so nested lists work.
+// - Claude Code Edit, MultiEdit `edits[]`; Windsurf `edits[]`: old_string, new_string
+// - Copilot CLI edit: old_str, new_str
+// - Copilot in VS Code replaceString, multiReplaceString `replacements[]`:
+//   oldString, newString
+const EDIT_PAIR_KEYS: &[(&str, &str)] = &[
+    ("old_string", "new_string"),
+    ("old_str", "new_str"),
+    ("oldString", "newString"),
 ];
+// Inserted text without an `old` counterpart. The target file body is read via
+// PATH_KEYS, which suppresses the large-string fallback, so these must be named.
+// - Claude Code NotebookEdit: new_source
+// - Copilot CLI create: file_text
+// - Copilot in VS Code editNotebook: newCode
+// Codex `apply_patch` sends the patch as `command`, already in PRE_TEXT_KEYS.
+const PRE_EDIT_TEXT_KEYS: &[&str] = &["new_source", "file_text", "newCode"];
 const CODEX_POST_TEXT_KEYS: &[&str] = &[
     "stdout",
     "stderr",
@@ -140,13 +140,9 @@ const COPILOT_POST_TEXT_KEYS: &[&str] = &[
 // - pre_mcp_tool_use: { mcp_server_name, mcp_tool_name, mcp_tool_arguments }
 // - pre_user_prompt: { user_prompt }
 // - pre_read_code / pre_write_code: { file_path, edits[] } (file body read via PATH_KEYS)
-const WINDSURF_PRE_EXTRA_TEXT_KEYS: &[&str] = &[
-    "command_line",
-    "user_prompt",
-    "mcp_tool_arguments",
-    "new_string",
-    "old_string",
-];
+// Write edits[] are covered by EDIT_PAIR_KEYS.
+const WINDSURF_PRE_EXTRA_TEXT_KEYS: &[&str] =
+    &["command_line", "user_prompt", "mcp_tool_arguments"];
 // post_mcp_tool_use carries the tool output under `mcp_result`; post_run_command
 // only carries `command_line` (Cascade omits stdout from the post payload).
 const WINDSURF_POST_TEXT_KEYS: &[&str] = &[
@@ -251,19 +247,31 @@ pub fn stdin_to_hook_body(
     repo_root: &Path,
 ) -> Result<(String, String)> {
     let v: Value = serde_json::from_str(stdin).context("hook stdin must be valid JSON")?;
-    let mut blobs: Vec<String> = Vec::new();
-    let mut display: Option<String> = None;
-
-    if let Some((rel, txt)) = read_files_from_candidates(tool, &v, cwd, repo_root)? {
-        display = Some(rel);
-        blobs.push(txt);
+    // Post payloads describe edits that already ran; the file body is current.
+    let mut edits = Vec::new();
+    if !post {
+        collect_text_edits(tool, &v, None, &mut edits);
     }
 
-    text_priority_chunks(&v, post, tool, &mut blobs);
+    let files = read_files_from_candidates(tool, &v, cwd, repo_root, &mut edits)?;
 
-    if blobs.is_empty() {
-        collect_large_strings(&v, &mut blobs, 96, MAX_HOOK_TEXT_BYTES);
+    // Argument text gets its own MAX_HOOK_TEXT_BYTES budget so a large target
+    // file cannot crowd it out.
+    let mut text_blobs: Vec<String> = Vec::new();
+    text_priority_chunks(&v, post, tool, &mut text_blobs);
+    for edit in edits.iter().filter(|edit| !edit.applied) {
+        push_hook_text(edit.new, &mut text_blobs, MAX_HOOK_TEXT_BYTES);
     }
+
+    if files.is_none() && text_blobs.is_empty() {
+        collect_large_strings(&v, &mut text_blobs, 96, MAX_HOOK_TEXT_BYTES);
+    }
+
+    let (display, mut blobs) = match files {
+        Some((rel, txt)) => (Some(rel), vec![txt]),
+        None => (None, Vec::new()),
+    };
+    blobs.extend(text_blobs);
     dedup_blobs(&mut blobs);
 
     let body = if blobs.is_empty() {
@@ -288,15 +296,101 @@ fn rel_from_repo(repo_root: &Path, abs: &Path) -> String {
         .unwrap_or_else(|_| abs.to_string_lossy().replace('\\', "/"))
 }
 
+/// A replace-style edit found in a pre-hook payload.
+struct TextEdit<'a> {
+    /// Nearest enclosing file-path argument, as written in the payload.
+    path: Option<&'a str>,
+    old: &'a str,
+    new: &'a str,
+    replace_all: bool,
+    applied: bool,
+}
+
+/// Collects replace-style edits in payload order (arrays keep their order, so
+/// MultiEdit `edits[]` apply sequentially). Each edit targets the first
+/// file-body path key on its own object or the nearest ancestor.
+fn collect_text_edits<'a>(
+    tool: AiHookTool,
+    v: &'a Value,
+    inherited_path: Option<&'a str>,
+    out: &mut Vec<TextEdit<'a>>,
+) {
+    match v {
+        Value::Object(map) => {
+            let path = map
+                .iter()
+                .filter(|(key, _)| is_file_body_path_key(tool, key))
+                .find_map(|(_, val)| val.as_str())
+                .or(inherited_path);
+            for (old_key, new_key) in EDIT_PAIR_KEYS {
+                if let (Some(old), Some(new)) = (
+                    map.get(*old_key).and_then(Value::as_str),
+                    map.get(*new_key).and_then(Value::as_str),
+                ) {
+                    out.push(TextEdit {
+                        path,
+                        old,
+                        new,
+                        replace_all: map
+                            .get("replace_all")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        applied: false,
+                    });
+                }
+            }
+            for val in map.values() {
+                collect_text_edits(tool, val, path, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_text_edits(tool, item, inherited_path, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Applies the edits that target `abs` in order, marking each one applied.
+/// An edit whose `old` text is empty or missing is left for standalone scanning.
+fn apply_text_edits(
+    text: &mut String,
+    abs: &Path,
+    edits: &mut [TextEdit<'_>],
+    targets: &[Option<PathBuf>],
+) {
+    for (edit, target) in edits.iter_mut().zip(targets) {
+        if target.as_deref() != Some(abs) || edit.old.is_empty() || !text.contains(edit.old) {
+            continue;
+        }
+        *text = if edit.replace_all {
+            text.replace(edit.old, edit.new)
+        } else {
+            text.replacen(edit.old, edit.new, 1)
+        };
+        edit.applied = true;
+    }
+}
+
 fn read_files_from_candidates(
     tool: AiHookTool,
     v: &Value,
     cwd: &Path,
     repo_root: &Path,
+    edits: &mut [TextEdit<'_>],
 ) -> Result<Option<(String, String)>> {
     let mut texts: Vec<String> = Vec::new();
     let mut first_rel: Option<String> = None;
+    let mut seen: HashSet<PathBuf> = HashSet::new();
     let repo_root = fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    let targets: Vec<Option<PathBuf>> = edits
+        .iter()
+        .map(|edit| {
+            edit.path
+                .and_then(|path| fs::canonicalize(resolve_path(path, cwd)).ok())
+        })
+        .collect();
 
     for cand in candidate_path_strings(tool, v) {
         let p = resolve_path(&cand, cwd);
@@ -304,6 +398,7 @@ fn read_files_from_candidates(
         if let Some(abs) = p
             && abs.is_file()
             && abs.starts_with(&repo_root)
+            && seen.insert(abs.clone())
         {
             let bytes =
                 fs::read(&abs).with_context(|| format!("read scanned file {}", abs.display()))?;
@@ -314,7 +409,8 @@ fn read_files_from_candidates(
             if bytes.iter().take(8192).any(|byte| *byte == 0) {
                 continue;
             }
-            let t = String::from_utf8_lossy(&bytes);
+            let mut t = String::from_utf8_lossy(&bytes).into_owned();
+            apply_text_edits(&mut t, &abs, edits, &targets);
             let rel = rel_from_repo(&repo_root, &abs);
             if first_rel.is_none() {
                 first_rel = Some(rel.clone());
@@ -1159,10 +1255,10 @@ mod tests {
     }
 
     /// Repo with an existing target file, so the file-body read suppresses
-    /// the large-string fallback and only priority keys can surface edits.
-    fn repo_with_existing_file() -> tempfile::TempDir {
+    /// the large-string fallback.
+    fn repo_with_file(body: &str) -> tempfile::TempDir {
         let repo = tempdir().expect("temp repo");
-        std::fs::write(repo.path().join("app.txt"), "clean body\n").expect("write target");
+        std::fs::write(repo.path().join("app.txt"), body).expect("write target");
         repo
     }
 
@@ -1171,8 +1267,8 @@ mod tests {
     }
 
     #[test]
-    fn claude_pre_edit_on_existing_file_scans_new_and_old_string() {
-        let repo = repo_with_existing_file();
+    fn claude_pre_edit_scans_the_edited_file_body() {
+        let repo = repo_with_file("keep-line\nold-edit-marker\n");
         let token = synthetic_github_token();
         let stdin = serde_json::json!({
             "hook_event_name": "PreToolUse",
@@ -1187,30 +1283,139 @@ mod tests {
         let (display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
 
         assert_eq!(display, "app.txt");
-        assert!(body.contains("clean body"), "{body}");
-        assert!(body.contains(&token), "{body}");
-        assert!(body.contains("old-edit-marker"), "{body}");
+        assert!(
+            body.contains(&format!("keep-line\ntoken = {token}\n")),
+            "{body}"
+        );
+        assert!(!body.contains("old-edit-marker"), "{body}");
+        // Applied in place, not repeated as a standalone blob.
+        assert_eq!(body.matches(&token).count(), 1, "{body}");
     }
 
     #[test]
-    fn claude_pre_multi_edit_scans_nested_edits() {
-        let repo = repo_with_existing_file();
+    fn pre_edit_keeps_inline_suppression_context_from_the_file() {
+        let directive = "# shk-ignore-next-line secret.github_token";
+        let repo = repo_with_file(&format!("{directive}\nTOKEN=placeholder\n"));
+        let token = synthetic_github_token();
+        let stdin = serde_json::json!({
+            "tool_input": {
+                "file_path": "app.txt",
+                "old_string": "placeholder",
+                "new_string": token
+            }
+        });
+
+        let (_display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
+
+        assert!(
+            body.contains(&format!("{directive}\nTOKEN={token}\n")),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn pre_edit_replace_all_and_first_match_semantics() {
+        let repo = repo_with_file("x x\n");
+        let first = serde_json::json!({
+            "tool_input": { "file_path": "app.txt", "old_string": "x", "new_string": "y" }
+        });
+        let all = serde_json::json!({
+            "tool_input": {
+                "file_path": "app.txt",
+                "old_string": "x",
+                "new_string": "z",
+                "replace_all": true
+            }
+        });
+
+        let (_display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &first);
+        assert!(body.ends_with("y x\n"), "{body}");
+        let (_display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &all);
+        assert!(body.ends_with("z z\n"), "{body}");
+    }
+
+    #[test]
+    fn claude_pre_multi_edit_applies_edits_in_order() {
+        let repo = repo_with_file("alpha\n");
         let token = synthetic_github_token();
         let stdin = serde_json::json!({
             "tool_name": "MultiEdit",
             "tool_input": {
                 "file_path": "app.txt",
                 "edits": [
-                    { "old_string": "a", "new_string": "first-edit-marker" },
-                    { "old_string": "b", "new_string": token, "replace_all": true }
+                    { "old_string": "alpha", "new_string": "beta" },
+                    { "old_string": "beta", "new_string": token }
                 ]
             }
         });
 
         let (_display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
 
-        assert!(body.contains("first-edit-marker"), "{body}");
+        assert!(body.ends_with(&format!("{token}\n")), "{body}");
+        assert!(!body.contains("alpha") && !body.contains("beta"), "{body}");
+    }
+
+    #[test]
+    fn pre_edit_falls_back_to_new_text_when_old_text_is_missing() {
+        let repo = repo_with_file("clean body\n");
+        let token = synthetic_github_token();
+        let stdin = serde_json::json!({
+            "tool_input": {
+                "file_path": "app.txt",
+                "old_string": "not-in-file",
+                "new_string": token
+            }
+        });
+
+        let (_display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
+
+        assert!(body.contains("clean body"), "{body}");
         assert!(body.contains(&token), "{body}");
+        assert!(!body.contains("not-in-file"), "{body}");
+    }
+
+    #[test]
+    fn pre_edit_outside_repo_scans_new_text_only() {
+        let repo = tempdir().expect("temp repo");
+        let outside = tempdir().expect("outside dir");
+        std::fs::write(outside.path().join("app.txt"), "old-edit-marker\n").expect("write");
+        let token = synthetic_github_token();
+        let stdin = serde_json::json!({
+            "tool_input": {
+                "file_path": outside.path().join("app.txt"),
+                "old_string": "old-edit-marker",
+                "new_string": token
+            }
+        });
+
+        let (display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
+
+        assert_eq!(display, "<claude-hook>");
+        assert_eq!(body, token);
+    }
+
+    #[test]
+    fn post_hooks_do_not_apply_edits() {
+        let repo = repo_with_file("already-edited\n");
+        let stdin = serde_json::json!({
+            "tool_input": {
+                "file_path": "app.txt",
+                "old_string": "already-edited",
+                "new_string": "post-edit-marker"
+            }
+        });
+
+        let (_display, body) = stdin_to_hook_body(
+            AiHookTool::ClaudeCode,
+            true,
+            &stdin.to_string(),
+            repo.path(),
+            repo.path(),
+        )
+        .unwrap();
+
+        assert!(body.contains("already-edited"), "{body}");
+        assert!(!body.contains("post-edit-marker"), "{body}");
     }
 
     #[test]
@@ -1235,27 +1440,23 @@ mod tests {
     }
 
     #[test]
-    fn copilot_pre_edit_scans_cli_and_vscode_argument_names() {
-        let repo = repo_with_existing_file();
+    fn copilot_pre_edit_covers_cli_and_vscode_argument_names() {
+        let repo = repo_with_file("x\n");
         let token = synthetic_github_token();
         let payloads = [
             serde_json::json!({
-                "hook_event_name": "PreToolUse",
                 "tool_name": "Edit",
                 "tool_input": { "path": "app.txt", "old_str": "x", "new_str": token }
             }),
             serde_json::json!({
-                "hook_event_name": "PreToolUse",
                 "tool_name": "Write",
                 "tool_input": { "path": "app.txt", "file_text": token }
             }),
             serde_json::json!({
-                "hook_event_name": "PreToolUse",
                 "tool_name": "replace_string_in_file",
                 "tool_input": { "filePath": "app.txt", "oldString": "x", "newString": token }
             }),
             serde_json::json!({
-                "hook_event_name": "PreToolUse",
                 "tool_name": "multi_replace_string_in_file",
                 "tool_input": {
                     "replacements": [
@@ -1264,14 +1465,8 @@ mod tests {
                 }
             }),
             serde_json::json!({
-                "hook_event_name": "PreToolUse",
                 "tool_name": "edit_notebook_file",
                 "tool_input": { "filePath": "app.txt", "newCode": token }
-            }),
-            serde_json::json!({
-                "hook_event_name": "PreToolUse",
-                "tool_name": "insert_edit_into_file",
-                "tool_input": { "filePath": "app.txt", "code": token, "explanation": "x" }
             }),
         ];
 
@@ -1283,25 +1478,35 @@ mod tests {
     }
 
     #[test]
-    fn copilot_pre_apply_patch_scans_short_patch_input() {
-        // Below the 96-byte large-string fallback, so only the key match finds it.
-        let token = synthetic_github_token();
+    fn multi_file_replacements_apply_to_their_own_files() {
+        let repo = tempdir().expect("temp repo");
+        std::fs::write(repo.path().join("a.txt"), "shared\n").expect("write a");
+        std::fs::write(repo.path().join("b.txt"), "shared\n").expect("write b");
         let stdin = serde_json::json!({
-            "hook_event_name": "PreToolUse",
-            "tool_name": "apply_patch",
-            "tool_input": { "input": format!("+k={token}") }
+            "tool_input": {
+                "replacements": [
+                    { "filePath": "a.txt", "oldString": "shared", "newString": "a-marker" },
+                    { "filePath": "b.txt", "oldString": "shared", "newString": "b-marker" }
+                ]
+            }
         });
 
-        let (_display, body) = pre_body(AiHookTool::Copilot, Path::new("."), &stdin);
+        let (_display, body) = pre_body(AiHookTool::Copilot, repo.path(), &stdin);
 
-        assert!(body.contains(&token), "{body}");
+        assert!(body.contains("// ---- a.txt\na-marker\n"), "{body}");
+        assert!(body.contains("// ---- b.txt\nb-marker\n"), "{body}");
+        assert!(!body.contains("shared"), "{body}");
     }
 
     #[test]
-    fn pre_edit_keys_apply_to_every_shared_pre_tool() {
-        let repo = repo_with_existing_file();
+    fn edit_scanning_applies_to_every_tool_with_a_file_read() {
+        let repo = repo_with_file("placeholder\n");
         let stdin = serde_json::json!({
-            "tool_input": { "file_path": "app.txt", "new_string": "shared-edit-marker" }
+            "tool_input": {
+                "file_path": "app.txt",
+                "old_string": "placeholder",
+                "new_string": "shared-edit-marker"
+            }
         });
 
         for tool in [
@@ -1309,10 +1514,37 @@ mod tests {
             AiHookTool::Codex,
             AiHookTool::Copilot,
             AiHookTool::Cursor,
+            AiHookTool::Windsurf,
         ] {
             let (_display, body) = pre_body(tool, repo.path(), &stdin);
             assert!(body.contains("shared-edit-marker"), "{tool:?}: {body}");
         }
+    }
+
+    #[test]
+    fn generic_argument_names_do_not_disable_the_large_string_fallback() {
+        let token = synthetic_github_token();
+        let notes = format!("{} {token}", "n".repeat(100));
+        let stdin = serde_json::json!({
+            "tool_name": "mcp__s__run",
+            "tool_input": { "code": "1+1", "input": "x", "notes": notes }
+        });
+
+        let (_display, body) = pre_body(AiHookTool::ClaudeCode, Path::new("."), &stdin);
+
+        assert!(body.contains(&token), "{body}");
+    }
+
+    #[test]
+    fn argument_text_has_its_own_budget_next_to_a_large_file() {
+        let repo = repo_with_file(&"a".repeat(MAX_HOOK_TEXT_BYTES + 1));
+        let stdin = serde_json::json!({
+            "tool_input": { "file_path": "app.txt", "content": "write-content-marker" }
+        });
+
+        let (_display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
+
+        assert!(body.contains("write-content-marker"), "{body:.80}");
     }
 
     #[test]

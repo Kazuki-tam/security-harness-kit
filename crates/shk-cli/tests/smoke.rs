@@ -3425,26 +3425,29 @@ fn hook_mode_payload_cwd_cannot_redirect_relative_file_scan() {
 }
 
 #[test]
-fn hook_mode_claude_edit_on_existing_file_scans_new_string() {
+fn hook_mode_claude_edit_scans_the_edited_file() {
     use std::io::Write;
 
     let repo = tempfile::tempdir().unwrap();
     init_git_repo(repo.path());
     std::fs::write(repo.path().join("shk.toml"), "").unwrap();
-    std::fs::write(repo.path().join("config.txt"), "API_KEY=placeholder\n").unwrap();
+    let key = synthetic_openai_key('e');
 
-    let run_edit = |new_string: &str| {
+    // Writes `body` to an existing file, runs a Claude `Edit` pre hook that
+    // replaces `old` with `new`, and returns the hook exit code.
+    let run_edit = |body: &str, old: &str, new: &str| {
+        std::fs::write(repo.path().join("config.txt"), body).unwrap();
         let stdin = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "tool_name": "Edit",
             "tool_input": {
                 "file_path": "config.txt",
-                "old_string": "placeholder",
-                "new_string": new_string
+                "old_string": old,
+                "new_string": new
             }
         })
         .to_string();
-        Command::new(shk_bin())
+        let out = Command::new(shk_bin())
             .args(["scan", ".", "--hook-mode", "claude-code"])
             .current_dir(repo.path())
             .stdin(std::process::Stdio::piped())
@@ -3455,27 +3458,34 @@ fn hook_mode_claude_edit_on_existing_file_scans_new_string() {
                 child.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
                 child.wait_with_output()
             })
-            .expect("hook scan")
+            .expect("hook scan");
+        (
+            out.status.code(),
+            format!(
+                "stdout={} stderr={}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
     };
 
-    // The existing file body is clean, so only `new_string` can trigger a deny.
-    let out = run_edit(&synthetic_openai_key('e'));
-    assert_eq!(
-        out.status.code(),
-        Some(2),
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    // Inserting a key into a clean existing file is denied.
+    let (code, log) = run_edit("API_KEY=placeholder\n", "placeholder", &key);
+    assert_eq!(code, Some(2), "insert key: {log}");
 
-    let out = run_edit("still-a-placeholder");
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    // A clean edit is allowed.
+    let (code, log) = run_edit("API_KEY=placeholder\n", "placeholder", "still-clean");
+    assert_eq!(code, Some(0), "clean edit: {log}");
+
+    // The file's inline suppression still covers the edited line.
+    let suppressed = "# shk-ignore-next-line secret.openai_api_key\nAPI_KEY=placeholder\n";
+    let (code, log) = run_edit(suppressed, "placeholder", &key);
+    assert_eq!(code, Some(0), "suppressed line: {log}");
+
+    // Removing a key from a file is allowed: the edited body is clean.
+    let leaked = format!("API_KEY={key}\n");
+    let (code, log) = run_edit(&leaked, &key, "${API_KEY}");
+    assert_eq!(code, Some(0), "remove key: {log}");
 }
 
 #[test]
