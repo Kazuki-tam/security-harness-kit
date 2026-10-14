@@ -369,10 +369,17 @@ pub fn hook_body_from_stdin(
         apply_text_edits(&mut file.text, index, &mut writes.edits, &edit_targets);
     }
 
-    let mut texts = HookTexts::default();
+    let mut texts = HookTexts {
+        // A post payload reports the output of the call that read the file
+        // (e.g. Read's result), so with one file read it is scanned under that
+        // file's path, like the file. Pre payload text goes to the virtual
+        // label.
+        payload_file: (post && files.len() == 1).then_some(0),
+        ..HookTexts::default()
+    };
     for (index, file) in files.iter().enumerate() {
-        // A payload string equal to a file body (e.g. Cursor's `content`)
-        // is already covered by the file scan.
+        // The file body is scanned already; a string equal to it under the
+        // same label (e.g. Cursor's `content`) adds nothing.
         texts.cover(Some(index), &file.text);
     }
     // Text written to a file that was read is scanned under that file's path,
@@ -449,6 +456,7 @@ pub fn hook_body_from_stdin(
 
 /// Payload strings collected for scanning, each with the file it is scanned
 /// with (`None`: the payload segment under the tool's virtual label).
+/// `payload_file` is where `push` places payload text.
 /// Each distinct string is charged once against `MAX_HOOK_TEXT_BYTES` (the
 /// same string is often reachable through several keys).
 #[derive(Default)]
@@ -460,15 +468,17 @@ struct HookTexts<'a> {
     /// that reach the same JSON value again skip it. An equal string under
     /// another key is a different value and is still scanned.
     bound: HashSet<usize>,
+    payload_file: Option<usize>,
     used: usize,
     truncated: bool,
 }
 
 impl<'a> HookTexts<'a> {
-    /// Text from the payload, scanned under the tool's virtual label.
+    /// Text from the payload, scanned under the tool's virtual label (or the
+    /// one file a post payload read).
     fn push(&mut self, s: &'a str) {
         if !self.bound.contains(&(s.as_ptr() as usize)) {
-            self.place(None, s);
+            self.place(self.payload_file, s);
         }
     }
 
@@ -657,6 +667,13 @@ fn writes_local_file(tool: AiHookTool, v: &Value) -> bool {
     let field = |key: &str| v.get(key).and_then(Value::as_str);
     let is_one_of = |name: Option<&str>, names: &[&str]| name.is_some_and(|n| names.contains(&n));
     match tool {
+        // Grok Build runs Claude Code and Cursor hook entries with its own
+        // payload shape (`toolName`).
+        AiHookTool::ClaudeCode | AiHookTool::Cursor
+            if field("toolName") == Some("search_replace") =>
+        {
+            true
+        }
         AiHookTool::ClaudeCode => is_one_of(
             field("tool_name"),
             &[
@@ -2700,6 +2717,49 @@ mod tests {
             );
             assert_eq!(hook.segments.len(), 1, "{tool:?}: {hook:?}");
         }
+    }
+
+    #[test]
+    fn post_output_of_a_single_file_read_is_scanned_under_its_path() {
+        let repo = repo_with_file("API=placeholder\n");
+        let hook = hook_body_from_stdin(
+            AiHookTool::ClaudeCode,
+            true,
+            &serde_json::json!({
+                "tool_name": "Read",
+                "tool_input": { "file_path": "app.txt" },
+                "tool_response": { "content": "1\tAPI=placeholder" }
+            })
+            .to_string(),
+            repo.path(),
+            repo.path(),
+        )
+        .unwrap();
+
+        assert_eq!(hook.segments.len(), 1, "{hook:?}");
+        assert!(
+            segment(&hook, "app.txt").contains("1\tAPI=placeholder"),
+            "{hook:?}"
+        );
+    }
+
+    #[test]
+    fn grok_edits_through_claude_compatible_hooks_are_local() {
+        let token = synthetic_github_token();
+        let repo = repo_with_file("API=placeholder\n");
+        let hook = pre_hook(
+            AiHookTool::ClaudeCode,
+            repo.path(),
+            &serde_json::json!({
+                "toolName": "search_replace",
+                "toolInput": { "file_path": "app.txt", "old_string": "placeholder", "new_string": token }
+            }),
+        );
+        assert_eq!(
+            segment(&hook, "app.txt"),
+            format!("API={token}\n"),
+            "{hook:?}"
+        );
     }
 
     #[test]

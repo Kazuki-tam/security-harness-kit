@@ -636,11 +636,20 @@ fn hook_log_path(
     disp: &str,
     virtual_label: &str,
 ) -> String {
+    // Two segments can share a policy path (the same relative path in two
+    // checkouts); their findings cannot be told apart, so log the virtual
+    // label for them.
     let log_label = |file: &str| {
-        segments
+        let mut matches = segments
             .iter()
-            .find(|(scan_label, _)| *scan_label == file)
-            .map(|(_, log_label)| *log_label)
+            .filter(|(scan_label, _)| *scan_label == file)
+            .map(|(_, log_label)| *log_label);
+        let first = matches.next()?;
+        Some(if matches.all(|label| label == first) {
+            first
+        } else {
+            virtual_label
+        })
     };
     let in_payload: Vec<(&str, bool)> = res
         .findings
@@ -1554,7 +1563,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("shk.toml"), "").unwrap();
         let leak = format!("API_KEY=sk-proj-{}\n", "a1b2c3d4".repeat(6));
-        let labels = [("app.txt", "app.txt"), ("<claude-hook>", "<claude-hook>")];
+        // Scan labels are policy paths; the log keeps the payload's own.
+        let labels = [
+            ("app.txt", ".claude/worktrees/wt/app.txt"),
+            ("<claude-hook>", "<claude-hook>"),
+        ];
         let log_path = |file: &str, payload: &str| {
             let res = scan_strings(
                 dir.path(),
@@ -1566,9 +1579,25 @@ mod tests {
         };
 
         assert_eq!(log_path("clean\n", &leak), "<claude-hook>");
-        assert_eq!(log_path(&leak, "clean"), "app.txt");
+        assert_eq!(log_path(&leak, "clean"), ".claude/worktrees/wt/app.txt");
         assert_eq!(log_path(&leak, &leak), "<claude-hook>");
         assert_eq!(log_path("clean\n", "clean"), "app.txt");
+
+        // Two checkouts of the same path share a policy path.
+        let res = scan_strings(
+            dir.path(),
+            &[("app.txt", &leak), ("app.txt", "clean")],
+            ScanOptions::default(),
+        )
+        .unwrap();
+        let shared = [
+            ("app.txt", "app.txt"),
+            ("app.txt", ".claude/worktrees/wt/app.txt"),
+        ];
+        assert_eq!(
+            hook_log_path(&res, &shared, "<claude-hook>", "<claude-hook>"),
+            "<claude-hook>"
+        );
     }
 
     #[test]
