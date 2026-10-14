@@ -46,8 +46,8 @@ const PRE_TEXT_KEYS: &[&str] = &[
 // MultiEdit `edits[]`, Copilot `replacements[]`) are reached by the deep grab.
 // - Claude Code Edit / MultiEdit: old_string, new_string; NotebookEdit: new_source
 // - Copilot CLI edit / create: old_str, new_str, file_text
-// - Copilot in VS Code replace_string_in_file / edit_notebook_file: oldString,
-//   newString, newCode
+// - Copilot in VS Code replaceString / multiReplaceString: oldString, newString;
+//   editNotebook: newCode; insertEdit: code; applyPatch: input
 // Codex `apply_patch` sends the patch as `command`, already in PRE_TEXT_KEYS.
 const PRE_EDIT_TEXT_KEYS: &[&str] = &[
     "old_string",
@@ -59,6 +59,8 @@ const PRE_EDIT_TEXT_KEYS: &[&str] = &[
     "oldString",
     "newString",
     "newCode",
+    "code",
+    "input",
 ];
 const CODEX_POST_TEXT_KEYS: &[&str] = &[
     "stdout",
@@ -1266,6 +1268,11 @@ mod tests {
                 "tool_name": "edit_notebook_file",
                 "tool_input": { "filePath": "app.txt", "newCode": token }
             }),
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "insert_edit_into_file",
+                "tool_input": { "filePath": "app.txt", "code": token, "explanation": "x" }
+            }),
         ];
 
         for stdin in &payloads {
@@ -1273,6 +1280,21 @@ mod tests {
             assert_eq!(display, "app.txt", "{stdin}");
             assert!(body.contains(&token), "{stdin}: {body}");
         }
+    }
+
+    #[test]
+    fn copilot_pre_apply_patch_scans_short_patch_input() {
+        // Below the 96-byte large-string fallback, so only the key match finds it.
+        let token = synthetic_github_token();
+        let stdin = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "apply_patch",
+            "tool_input": { "input": format!("+k={token}") }
+        });
+
+        let (_display, body) = pre_body(AiHookTool::Copilot, Path::new("."), &stdin);
+
+        assert!(body.contains(&token), "{body}");
     }
 
     #[test]
