@@ -501,7 +501,7 @@ pub enum HooksCmd {
         dry_run: bool,
         #[arg(
             long,
-            help = "Write user-level configs (~/.cursor, ~/.codex, ~/.claude, ~/.grok, ~/.gemini/config, ~/.copilot, ~/.codeium/windsurf)."
+            help = "Write user-level configs (~/.cursor, ~/.codex, ~/.claude, ~/.grok, ~/.gemini/config, ~/.copilot, ~/.codeium/windsurf, ~/.config/opencode)."
         )]
         global: bool,
         #[arg(long, value_enum)]

@@ -1061,11 +1061,11 @@ pub fn has_managed_ai_hooks(root: &Path) -> bool {
         if let Ok(s) = fs::read_to_string(&p)
             && (s.contains(MANAGED_MARKER_JSON)
                 || s.contains(MANAGED_MARKER_SH)
+                || crate::hooks::is_managed_opencode_plugin(&s)
                 || (s.contains("shk scan")
                     && (s.contains("--hook-mode copilot")
                         || s.contains("--hook-mode windsurf")
-                        || s.contains("--hook-mode grok")
-                        || s.contains("--hook-mode opencode"))))
+                        || s.contains("--hook-mode grok"))))
         {
             return true;
         }

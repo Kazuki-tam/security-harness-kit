@@ -4,69 +4,98 @@
 //
 // Runs `shk scan <project> --hook-mode opencode [--audit|--log-blocked] [--post]` on every
 // OpenCode tool call and prompt. Decisions are made by shk; this file only relays them.
-// Supports the OpenCode 2.x plugin API (`setup`) and the 1.x API (`server`).
+// Supports the OpenCode 2.x plugin API (`setup`) and the 1.x API (`server`, 1.18.29+).
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, isAbsolute, join, resolve as resolvePath } from "node:path";
 
 const CONFIG = {
   audit: __SHK_AUDIT__,
   logBlocked: __SHK_LOG_BLOCKED__,
+  promptFailOn: __SHK_PROMPT_FAIL_ON__,
   timeoutMs: 30000,
-  maxStringBytes: 512 * 1024,
+  // Post payloads only. Pre-tool and prompt payloads are sent whole: shk applies
+  // its own scan limits, and a cut here would let content past a blocking hook.
+  maxPostStringBytes: 512 * 1024,
 };
-const PROMPT_FAIL_ON = "medium";
 
 // Replaces a blocked prompt. The reason comes from shk and carries rule ids and
 // line numbers only, never the prompt text itself.
 const promptNotice = (reason) => `[shk] prompt blocked: ${reason}`;
 
+const isWindows = process.platform === "win32";
 let resolvedBin;
+
+function searchDirs() {
+  const home = homedir();
+  // Relative PATH entries (e.g. `node_modules/.bin`) would resolve inside the
+  // project, letting a repository supply its own `shk`.
+  const dirs = (process.env.PATH ?? "").split(delimiter).filter((dir) => isAbsolute(dir));
+  // GUI-launched OpenCode (desktop app) does not inherit the shell PATH.
+  if (process.env.CARGO_HOME) dirs.push(join(process.env.CARGO_HOME, "bin"));
+  dirs.push(
+    join(home, ".cargo", "bin"),
+    join(home, ".local", "bin"),
+    "/opt/homebrew/bin",
+    "/home/linuxbrew/.linuxbrew/bin",
+    "/usr/local/bin",
+  );
+  return dirs;
+}
 
 function resolveBin() {
   if (resolvedBin && existsSync(resolvedBin)) return resolvedBin;
   resolvedBin = undefined;
-  const override = process.env.SHK_BIN;
-  if (override) {
+  if (process.env.SHK_BIN) {
+    // Resolved here because shk is spawned with the project as its cwd.
+    const override = resolvePath(process.env.SHK_BIN);
     if (existsSync(override)) resolvedBin = override;
     return resolvedBin;
   }
-  const name = process.platform === "win32" ? "shk.exe" : "shk";
-  const home = homedir();
-  const dirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
-  // GUI-launched OpenCode (desktop app) does not inherit the shell PATH.
-  dirs.push(join(home, ".local", "bin"), join(home, ".cargo", "bin"), "/opt/homebrew/bin", "/usr/local/bin");
-  for (const dir of dirs) {
-    const candidate = join(dir, name);
-    if (existsSync(candidate)) {
-      resolvedBin = candidate;
-      return resolvedBin;
-    }
-  }
-  return undefined;
+  const name = isWindows ? "shk.exe" : "shk";
+  resolvedBin = searchDirs()
+    .map((dir) => join(dir, name))
+    .find((candidate) => existsSync(candidate));
+  return resolvedBin;
 }
 
-function clampStrings(value, state) {
+function missingReason() {
+  // The npm package installs a `shk.cmd` shim on Windows, which cannot be
+  // spawned without a shell.
+  const shim = isWindows && searchDirs().some((dir) => existsSync(join(dir, "shk.cmd")));
+  return shim
+    ? "shk.exe not found (only the npm shk.cmd shim is on PATH); set SHK_BIN to the shk.exe path"
+    : "shk executable not found; install shk or set SHK_BIN for the OpenCode process";
+}
+
+function clampStrings(value) {
   if (typeof value === "string") {
-    if (Buffer.byteLength(value) <= CONFIG.maxStringBytes) return value;
-    state.truncated = true;
-    return value.slice(0, CONFIG.maxStringBytes);
+    if (Buffer.byteLength(value) <= CONFIG.maxPostStringBytes) return value;
+    // Cut by bytes, not UTF-16 units; a split character decodes to U+FFFD.
+    return Buffer.from(value).subarray(0, CONFIG.maxPostStringBytes).toString();
   }
-  if (Array.isArray(value)) return value.map((item) => clampStrings(item, state));
+  if (Array.isArray(value)) return value.map(clampStrings);
   if (value && typeof value === "object") {
-    const out = {};
-    for (const [key, item] of Object.entries(value)) out[key] = clampStrings(item, state);
-    return out;
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clampStrings(item)]));
   }
   return value;
 }
 
-function envelope(event, directory, fields) {
-  const state = { truncated: false };
-  const body = clampStrings({ hook_event_name: event, cwd: directory, ...fields }, state);
-  if (state.truncated) body.truncated = true;
-  return JSON.stringify(body);
+function envelope(phase, event, directory, fields) {
+  const body = { hook_event_name: event, cwd: directory, ...fields };
+  return JSON.stringify(phase === "post" ? clampStrings(body) : body);
+}
+
+// OpenCode ships plugin API changes often. A payload this file does not
+// recognize must not reach shk as an empty body, which would scan clean.
+function payloadProblem(directory, phase, fields) {
+  if (typeof directory !== "string" || directory === "") return "no project directory";
+  if (phase === "prompt") return typeof fields.prompt === "string" ? undefined : "no prompt text";
+  if (typeof fields.tool_name !== "string") return "no tool name";
+  const input = fields.tool_input;
+  if (phase === "pre" && (!input || typeof input !== "object" || Array.isArray(input))) return "no tool arguments";
+  return undefined;
 }
 
 function scanArgs(directory, phase) {
@@ -74,14 +103,16 @@ function scanArgs(directory, phase) {
   if (CONFIG.audit) args.push("--audit");
   else if (CONFIG.logBlocked) args.push("--log-blocked");
   if (phase === "post") args.push("--post");
-  if (phase === "prompt") args.push("--fail-on", PROMPT_FAIL_ON);
+  if (phase === "prompt") args.push("--fail-on", CONFIG.promptFailOn);
   return args;
 }
 
 function runShk(directory, phase, payload) {
-  return new Promise((resolve) => {
+  return new Promise((done) => {
     const bin = resolveBin();
-    if (!bin) return resolve({ kind: "missing" });
+    if (!bin) return done({ kind: "missing" });
+    // spawn reports a missing cwd as ENOENT, indistinguishable from a missing binary.
+    if (!existsSync(directory)) return done({ kind: "no-directory" });
     let child;
     try {
       child = spawn(bin, scanArgs(directory, phase), {
@@ -91,16 +122,16 @@ function runShk(directory, phase, payload) {
         windowsHide: true,
       });
     } catch (error) {
-      return resolve({ kind: "spawn-error", error });
+      return done({ kind: "spawn-error", error });
     }
     let stdout = "";
     let stderr = "";
-    let done = false;
+    let settled = false;
     const finish = (result) => {
-      if (done) return;
-      done = true;
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      resolve(result);
+      done(result);
     };
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
@@ -130,16 +161,16 @@ function parseDecision(stdout) {
   }
 }
 
-// Pre-tool and prompt hooks fail closed: any failure to obtain a decision blocks.
-// Post hooks and audit mode never block.
+// Pre-tool and prompt hooks fail closed: anything but an explicit allow blocks.
+// Post hooks and audit mode never block. `clean` marks an uneventful allow.
 function verdict(result, blocking) {
   switch (result.kind) {
     case "exit": {
       const decision = parseDecision(result.stdout);
-      if (result.code === 0 && decision) return { block: false };
-      if (result.code === 2) {
+      if (result.code === 0 && decision?.decision === "allow") return { block: false, clean: true };
+      if (result.code === 2 || (result.code === 0 && decision)) {
         const reason = decision?.reason ?? firstLine(result.stderr) ?? "sensitive content detected";
-        return { block: true, reason };
+        return { block: blocking, reason };
       }
       return {
         block: blocking,
@@ -147,7 +178,9 @@ function verdict(result, blocking) {
       };
     }
     case "missing":
-      return { block: blocking, reason: "shk executable not found; install shk or set SHK_BIN for the OpenCode process" };
+      return { block: blocking, reason: missingReason() };
+    case "no-directory":
+      return { block: blocking, reason: "the OpenCode project directory does not exist" };
     case "timeout":
       return { block: blocking, reason: `shk timed out after ${CONFIG.timeoutMs} ms` };
     default:
@@ -157,19 +190,22 @@ function verdict(result, blocking) {
 
 async function guard(directory, phase, event, fields, log) {
   const blocking = phase !== "post" && !CONFIG.audit;
-  const result = await runShk(directory, phase, envelope(event, directory, fields));
-  const outcome = verdict(result, blocking);
+  const problem = payloadProblem(directory, phase, fields);
+  const outcome = problem
+    ? { block: blocking, reason: `unsupported OpenCode hook payload (${problem}); update shk` }
+    : verdict(await runShk(directory, phase, envelope(phase, event, directory, fields)), blocking);
   if (outcome.block) log("warn", `${phase}: ${outcome.reason}`);
-  else if (result.kind !== "exit" || result.code !== 0) log("warn", `${phase}: ${outcome.reason} (not blocking)`);
+  else if (!outcome.clean) log("warn", `${phase}: ${outcome.reason} (not blocking)`);
   return outcome;
 }
 
 function warnIfMissing(log) {
-  if (!resolveBin()) log("warn", "shk executable not found; blocking hooks will deny every tool call until shk is installed or SHK_BIN is set");
+  if (!resolveBin()) log("warn", `${missingReason()}; blocking hooks will deny every tool call and prompt`);
 }
 
 function promptText(parts) {
-  return (parts ?? [])
+  if (!Array.isArray(parts)) return undefined;
+  return parts
     .filter((part) => part && part.type === "text" && typeof part.text === "string")
     .map((part) => part.text)
     .join("\n");
@@ -180,7 +216,7 @@ export default {
 
   // OpenCode 2.x plugin API.
   async setup(ctx) {
-    const directory = ctx.location?.directory ?? process.cwd();
+    const directory = ctx?.location?.directory;
     const log = (level, message) => console.error(`[shk ${level}] ${message}`);
     warnIfMissing(log);
 
@@ -189,7 +225,7 @@ export default {
         directory,
         "pre",
         "PreToolUse",
-        { tool_name: event.tool, tool_input: event.input, session_id: event.sessionID, call_id: event.id },
+        { tool_name: event?.tool, tool_input: event?.input, session_id: event?.sessionID, call_id: event?.id },
         log,
       );
       if (outcome.block) throw new Error(`shk security: ${outcome.reason}`);
@@ -213,19 +249,22 @@ export default {
       }
     });
 
+    // V2 exposes no prompt rejection API and a rejection here is a defect, so
+    // the rewritten text is what gets persisted and sent.
     await ctx.session.hook("prompt", async (event) => {
       try {
         const outcome = await guard(
           directory,
           "prompt",
           "UserPromptSubmit",
-          { prompt: event.prompt?.text ?? "", session_id: event.sessionID },
+          { prompt: event?.prompt?.text, session_id: event?.sessionID },
           log,
         );
-        // V2 exposes no prompt rejection API: the rewritten text is what gets persisted and sent.
-        if (outcome.block) event.prompt.text = promptNotice(outcome.reason);
+        if (!outcome.block) return;
+        if (event?.prompt && typeof event.prompt === "object") event.prompt.text = promptNotice(outcome.reason);
+        else log("error", "prompt could not be rewritten: unsupported OpenCode prompt event");
       } catch (error) {
-        log("warn", `prompt hook failed: ${error?.message ?? error}`);
+        log("error", `prompt hook failed: ${error?.message ?? error}`);
       }
     });
   },
@@ -246,7 +285,7 @@ export default {
           directory,
           "pre",
           "PreToolUse",
-          { tool_name: input.tool, tool_input: output.args, session_id: input.sessionID, call_id: input.callID },
+          { tool_name: input?.tool, tool_input: output?.args, session_id: input?.sessionID, call_id: input?.callID },
           log,
         );
         if (outcome.block) throw new Error(`shk security: ${outcome.reason}`);
@@ -275,13 +314,13 @@ export default {
           directory,
           "prompt",
           "UserPromptSubmit",
-          { prompt: promptText(output.parts), session_id: input.sessionID },
+          { prompt: promptText(output?.parts), session_id: input?.sessionID },
           log,
         );
         if (!outcome.block) return;
         // Scrub the text before rejecting so nothing sensitive is persisted either way.
         const notice = promptNotice(outcome.reason);
-        for (const part of output.parts ?? []) {
+        for (const part of Array.isArray(output?.parts) ? output.parts : []) {
           if (part && part.type === "text") part.text = notice;
         }
         throw new Error(notice);

@@ -2377,12 +2377,12 @@ fn ai_tool_statuses(root: &Path, global: bool) -> Vec<AiHookToolStatus> {
 }
 
 fn has_managed_hook_marker(tool: AiTool, content: &str) -> bool {
+    if tool == AiTool::Opencode {
+        return crate::hooks::is_managed_opencode_plugin(content);
+    }
     content.contains(MANAGED_MARKER_JSON)
         || content.contains(MANAGED_MARKER_SH)
-        || ((tool == AiTool::Copilot
-            || tool == AiTool::Windsurf
-            || tool == AiTool::Grok
-            || tool == AiTool::Opencode)
+        || ((tool == AiTool::Copilot || tool == AiTool::Windsurf || tool == AiTool::Grok)
             && content.contains("shk scan")
             && content.contains(&format!("--hook-mode {}", tool.kebab_str())))
 }

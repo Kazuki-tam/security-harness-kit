@@ -7022,6 +7022,18 @@ fn hooks_install_ai_opencode_writes_managed_plugin_and_is_idempotent() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(std::fs::read_to_string(&plugin).unwrap(), unmanaged);
+
+    // Installing every tool reports the conflict and still installs the rest.
+    let out = Command::new(shk_bin())
+        .args(["hooks", "install-ai"])
+        .current_dir(dir.path())
+        .output()
+        .expect("install-ai all tools");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{out:?}");
+    assert!(stdout.contains("skipped OpenCode"), "{stdout}");
+    assert!(dir.path().join(".windsurf/hooks.json").is_file(), "{stdout}");
+    assert_eq!(std::fs::read_to_string(&plugin).unwrap(), unmanaged);
 }
 
 #[test]
@@ -7147,10 +7159,14 @@ fn hook_mode_opencode_denies_pre_tool_use_and_blocks_user_prompt() {
 /// V1 (`server`) hosts, once with shk resolvable and once with it missing
 /// (pre hooks must fail closed, post and prompt hooks must not throw). This is
 /// the only automated coverage of the JS half. Skipped when `node` is not on
-/// PATH (CI provisions it for the desktop jobs).
+/// PATH locally; required on CI.
 #[test]
 fn opencode_plugin_contract_under_node() {
     let Some(node) = which_node() else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "node is required on CI to cover the OpenCode plugin"
+        );
         eprintln!("skipping: node not found on PATH");
         return;
     };
@@ -7168,52 +7184,64 @@ fn opencode_plugin_contract_under_node() {
         .expect("install-ai opencode");
     assert!(out.status.success(), "{out:?}");
 
-    let plugin_url = file_url_for(&project.join(".opencode/plugins/shk-security.js"));
-    let project_text = canonical_path_text(&project).replace('\\', "/");
+    // Paths travel through the environment and are joined in JS, so Windows
+    // separators and drive letters never need escaping or URL encoding.
+    let project_text = canonical_path_text(&project);
+    let project_text = project_text
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&project_text)
+        .to_string();
     let harness = dir.path().join("harness.mjs");
     std::fs::write(
         &harness,
-        format!(
-            r#"
-import plugin from "{plugin_url}";
-const DIR = "{project_text}";
-const SECRET_FILE = DIR + "/secret.txt";
-const CLEAN_FILE = DIR + "/clean.txt";
+        r#"
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+const DIR = process.env.SHK_CONTRACT_DIR;
+const { default: plugin } = await import(pathToFileURL(join(DIR, ".opencode", "plugins", "shk-security.js")).href);
+const SECRET_FILE = join(DIR, "secret.txt");
+const CLEAN_FILE = join(DIR, "clean.txt");
 const SECRET = process.env.SHK_CONTRACT_SECRET;
 const missing = process.env.SHK_CONTRACT_MISSING === "1";
 const blockPattern = missing ? /not found/ : /shk security/;
 // Prompt hooks fail closed too: the notice names the real reason.
 const noticePattern = missing ? /^\[shk\] prompt blocked: .*not found/ : /^\[shk\] prompt blocked: .*sensitive content/;
-const fail = (msg) => {{ console.error("FAIL: " + msg); process.exit(1); }};
-const rejects = async (fn, pattern) => {{
-  try {{ await fn(); }} catch (error) {{
-    if (!pattern.test(String(error?.message))) fail(`unexpected error: ${{error?.message}}`);
+const fail = (msg) => { console.error("FAIL: " + msg); process.exit(1); };
+const rejects = async (fn, pattern) => {
+  try { await fn(); } catch (error) {
+    if (!pattern.test(String(error?.message))) fail(`unexpected error: ${error?.message}`);
     return;
-  }}
+  }
   fail("expected rejection");
-}};
+};
 
 // --- V2 host ---
-const hooks = {{}};
-const ctx = {{
-  location: {{ directory: DIR }},
-  tool: {{ hook: async (name, cb) => {{ hooks["tool." + name] = cb; }} }},
-  session: {{ hook: async (name, cb) => {{ hooks["session." + name] = cb; }} }},
-}};
+const hooks = {};
+const ctx = {
+  location: { directory: DIR },
+  tool: { hook: async (name, cb) => { hooks["tool." + name] = cb; } },
+  session: { hook: async (name, cb) => { hooks["session." + name] = cb; } },
+};
 await plugin.setup(ctx);
-for (const key of ["tool.execute.before", "tool.execute.after", "session.prompt"]) {{
-  if (typeof hooks[key] !== "function") fail(`V2 hook ${{key}} not registered`);
-}}
-const call = (input) => ({{ tool: "read", sessionID: "s", agent: "build", messageID: "m", id: "c", input }});
-await rejects(() => hooks["tool.execute.before"](call({{ filePath: SECRET_FILE }})), blockPattern);
-if (!missing) await hooks["tool.execute.before"](call({{ filePath: CLEAN_FILE }}));
-await hooks["tool.execute.after"]({{ ...call({{ command: "cat secret.txt" }}), tool: "bash", status: "completed",
-  result: {{ output: SECRET, content: [] }} }});
-const prompt = {{ sessionID: "s", messageID: "m", prompt: {{ text: "use " + SECRET }} }};
+for (const key of ["tool.execute.before", "tool.execute.after", "session.prompt"]) {
+  if (typeof hooks[key] !== "function") fail(`V2 hook ${key} not registered`);
+}
+const call = (input) => ({ tool: "read", sessionID: "s", agent: "build", messageID: "m", id: "c", input });
+await rejects(() => hooks["tool.execute.before"](call({ filePath: SECRET_FILE })), blockPattern);
+if (!missing) await hooks["tool.execute.before"](call({ filePath: CLEAN_FILE }));
+// Content past the old 512 KiB plugin-side cut must still be scanned.
+const bigWrite = { ...call({ filePath: join(DIR, "out.txt"), content: "a".repeat(600 * 1024) + "\n" + SECRET }), tool: "write" };
+await rejects(() => hooks["tool.execute.before"](bigWrite), blockPattern);
+// An unrecognized payload shape fails closed instead of scanning an empty body.
+await rejects(() => hooks["tool.execute.before"]({ tool: "write", sessionID: "s", id: "c" }), /unsupported OpenCode hook payload/);
+await hooks["session.prompt"]({ sessionID: "s" });
+await hooks["tool.execute.after"]({ ...call({ command: "cat secret.txt" }), tool: "bash", status: "completed",
+  result: { output: SECRET, content: [] } });
+const prompt = { sessionID: "s", messageID: "m", prompt: { text: "use " + SECRET } };
 await hooks["session.prompt"](prompt);
-if (!noticePattern.test(prompt.prompt.text)) fail(`V2 prompt not rewritten as expected: ${{prompt.prompt.text}}`);
+if (!noticePattern.test(prompt.prompt.text)) fail(`V2 prompt not rewritten as expected: ${prompt.prompt.text}`);
 if (prompt.prompt.text.includes(SECRET)) fail("V2 notice leaked the prompt text");
-const cleanPrompt = {{ sessionID: "s", messageID: "m", prompt: {{ text: "hello" }} }};
+const cleanPrompt = { sessionID: "s", messageID: "m", prompt: { text: "hello" } };
 await hooks["session.prompt"](cleanPrompt);
 // Without a decision the clean prompt is blocked too (fail closed); with shk present it passes untouched.
 if (!missing && cleanPrompt.prompt.text !== "hello") fail("clean V2 prompt was modified");
@@ -7221,17 +7249,18 @@ if (missing && !noticePattern.test(cleanPrompt.prompt.text)) fail("clean V2 prom
 
 // --- V1 host ---
 const logs = [];
-const v1 = await plugin.server({{ directory: DIR, worktree: DIR, client: {{ app: {{ log: async (entry) => {{ logs.push(entry); }} }} }} }});
-await rejects(() => v1["tool.execute.before"]({{ tool: "read", sessionID: "s", callID: "c" }}, {{ args: {{ filePath: SECRET_FILE }} }}), blockPattern);
-if (!missing) await v1["tool.execute.before"]({{ tool: "read", sessionID: "s", callID: "c" }}, {{ args: {{ filePath: CLEAN_FILE }} }});
-await v1["tool.execute.after"]({{ tool: "bash", sessionID: "s", callID: "c", args: {{}} }}, {{ title: "cat", output: SECRET, metadata: {{}} }});
-const parts = [{{ type: "text", text: "use " + SECRET }}];
-await rejects(() => v1["chat.message"]({{ sessionID: "s" }}, {{ message: {{}}, parts }}), /prompt blocked/);
-if (!noticePattern.test(parts[0].text) || parts[0].text.includes(SECRET)) fail(`V1 prompt parts not scrubbed: ${{parts[0].text}}`);
+const v1 = await plugin.server({ directory: DIR, worktree: DIR, client: { app: { log: async (entry) => { logs.push(entry); } } } });
+await rejects(() => v1["tool.execute.before"]({ tool: "read", sessionID: "s", callID: "c" }, { args: { filePath: SECRET_FILE } }), blockPattern);
+if (!missing) await v1["tool.execute.before"]({ tool: "read", sessionID: "s", callID: "c" }, { args: { filePath: CLEAN_FILE } });
+await v1["tool.execute.after"]({ tool: "bash", sessionID: "s", callID: "c", args: {} }, { title: "cat", output: SECRET, metadata: {} });
+await rejects(() => v1["tool.execute.before"]({ tool: "read", sessionID: "s", callID: "c" }, {}), /unsupported OpenCode hook payload/);
+await rejects(() => v1["chat.message"]({ sessionID: "s" }, {}), /unsupported OpenCode hook payload/);
+const parts = [{ type: "text", text: "use " + SECRET }];
+await rejects(() => v1["chat.message"]({ sessionID: "s" }, { message: {}, parts }), /prompt blocked/);
+if (!noticePattern.test(parts[0].text) || parts[0].text.includes(SECRET)) fail(`V1 prompt parts not scrubbed: ${parts[0].text}`);
 if (missing && !logs.some((entry) => /not found/.test(entry?.body?.message ?? ""))) fail("V1 host was not warned about the missing binary");
 console.log("ok");
-"#
-        ),
+"#,
     )
     .unwrap();
 
@@ -7239,7 +7268,8 @@ console.log("ok");
         let mut cmd = Command::new(&node);
         cmd.arg(&harness)
             .current_dir(dir.path())
-            .env("SHK_CONTRACT_SECRET", &secret);
+            .env("SHK_CONTRACT_SECRET", &secret)
+            .env("SHK_CONTRACT_DIR", &project_text);
         if missing {
             cmd.env("SHK_BIN", dir.path().join("nonexistent-shk"))
                 .env("SHK_CONTRACT_MISSING", "1");
@@ -7263,13 +7293,4 @@ fn which_node() -> Option<PathBuf> {
         .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
         .map(|dir| dir.join(name))
         .find(|candidate| candidate.is_file())
-}
-
-fn file_url_for(path: &Path) -> String {
-    let text = canonical_path_text(path).replace('\\', "/");
-    if text.starts_with('/') {
-        format!("file://{text}")
-    } else {
-        format!("file:///{text}")
-    }
 }

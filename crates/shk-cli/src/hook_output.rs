@@ -276,8 +276,10 @@ pub fn mask_stdout(
         // Cascade has no schema for replacing tool payloads via hook stdout, so
         // masking is advisory only (the stderr hint reports the finding count).
         AiTool::Windsurf => "{}".to_string(),
-        // Output replacement for OpenCode is a later phase; report only.
-        AiTool::Opencode => decision_json("allow", Some(&msg)),
+        // Output replacement for OpenCode is a later phase; post reports only.
+        // The plugin cannot rewrite tool arguments, so pre findings deny.
+        AiTool::Opencode if post || masked_content.is_none() => decision_json("allow", Some(&msg)),
+        AiTool::Opencode => decision_json("deny", Some(&msg)),
         // Copilot postToolUse replaces the result via `modifiedResult`; preToolUse
         // cannot rewrite tool args here, so it allows with an advisory note.
         AiTool::Copilot if post => {
@@ -756,6 +758,10 @@ mod tests {
         assert_eq!(
             parse_json(&mask_stdout(AiTool::Opencode, true, 1, Some("safe")))["decision"],
             "allow"
+        );
+        assert_eq!(
+            parse_json(&mask_stdout(AiTool::Opencode, false, 1, Some("safe")))["decision"],
+            "deny"
         );
     }
 

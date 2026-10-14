@@ -398,7 +398,7 @@ For commands that support it, re-running with `--dry-run` is a safe way to confi
 | `shk hooks install-ai --global --tool copilot` | `~/.copilot/hooks/shk-security.json` (managed entries) |
 | `shk hooks install-ai --global --tool antigravity` | `~/.gemini/config/hooks.json` (managed `shk-security` entry) |
 | `shk hooks install-ai --global --tool grok` | `~/.grok/hooks/shk-security.json` (managed entries identified by `--hook-mode grok`) |
-| `shk hooks install-ai --global --tool opencode` | `~/.config/opencode/plugins/shk-security.js` (managed plugin file) |
+| `shk hooks install-ai --global --tool opencode` | `~/.config/opencode/plugins/shk-security.js` (managed plugin file; `$XDG_CONFIG_HOME/opencode/plugins/` when set) |
 | `shk hooks install-ai --global --tool windsurf` | `~/.codeium/windsurf/hooks.json` (managed entries identified by `--hook-mode windsurf`) |
 | `shk skills install --global --tool claude-code` | `~/.claude/skills/shk/SKILL.md` (or the legacy `~/.claude/skills/shk.md` from 0.3.17 or earlier) |
 | `shk skills install --global --tool codex` / `--tool cursor` / `--tool opencode` | `~/.agents/skills/shk/SKILL.md` |

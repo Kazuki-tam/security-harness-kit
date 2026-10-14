@@ -1432,15 +1432,19 @@ mod tests {
     }
 
     #[test]
-    fn windsurf_routes_block_reason_to_stderr_like_codex() {
-        // Smoke-level behavior is covered elsewhere; this guards the routing
-        // predicate so a future tool list change cannot silently drop Windsurf.
-        for event in [
-            HookEvent::PreToolUse,
-            HookEvent::PermissionRequest,
-            HookEvent::UserPromptSubmit,
-        ] {
-            assert_eq!(hook_deny_exit_code(AiTool::Windsurf, event), 2);
+    fn windsurf_and_opencode_block_with_exit_two_on_every_event() {
+        // Smoke-level behavior is covered elsewhere; this guards the exit code
+        // so a future tool list change cannot silently drop either tool. Both
+        // read the block from exit 2 (Windsurf via stderr, the OpenCode plugin
+        // via stdout JSON with stderr as fallback).
+        for tool in [AiTool::Windsurf, AiTool::Opencode] {
+            for event in [
+                HookEvent::PreToolUse,
+                HookEvent::PermissionRequest,
+                HookEvent::UserPromptSubmit,
+            ] {
+                assert_eq!(hook_deny_exit_code(tool, event), 2, "{tool:?}");
+            }
         }
     }
 }

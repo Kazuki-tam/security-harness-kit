@@ -152,12 +152,12 @@ const GROK_POST_TEXT_KEYS: &[&str] = &[
     "command",
 ];
 
-// OpenCode's managed plugin normalizes tool arguments under `tool_input`
-// (scanned deeply so arbitrary MCP arguments are covered). Built-in tools use
-// camelCase argument names: `filePath` (read/write/edit, via PATH_KEYS),
-// `command` (bash), `content` (write), `oldString`/`newString` (edit),
-// `url` (webfetch), `prompt` (task).
-const OPENCODE_PRE_EXTRA_TEXT_KEYS: &[&str] = &["tool_input", "oldString", "newString"];
+// OpenCode's managed plugin normalizes tool arguments under `tool_input`,
+// scanned deeply so every argument is covered, including edit's
+// `oldString`/`newString` and arbitrary MCP arguments. Listing those keys
+// again would spend the text budget twice. `filePath` (read/write/edit)
+// is resolved through PATH_KEYS.
+const OPENCODE_PRE_EXTRA_TEXT_KEYS: &[&str] = &["tool_input"];
 // The post payload carries `{ title, output }` under `tool_output`.
 const OPENCODE_POST_TEXT_KEYS: &[&str] = &["tool_output", "output", "title"];
 
