@@ -42,6 +42,18 @@ pub(crate) fn decode_encoded_arguments(v: &mut Value) -> Vec<&'static str> {
     decoded_keys
 }
 
+/// Copilot CLI camelCase `preToolUse` payload whose `toolArgs` is a
+/// JSON-encoded string, for tests across the crate.
+#[cfg(test)]
+pub(crate) fn copilot_cli_payload(tool: &str, args: Value) -> Value {
+    serde_json::json!({
+        "timestamp": 1704614400000_u64,
+        "cwd": "/work/repo",
+        "toolName": tool,
+        "toolArgs": args.to_string()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -49,11 +61,7 @@ mod tests {
 
     #[test]
     fn decodes_stringified_copilot_tool_args() {
-        let stdin = json!({
-            "toolName": "bash",
-            "toolArgs": json!({ "command": "ls" }).to_string()
-        })
-        .to_string();
+        let stdin = copilot_cli_payload("bash", json!({ "command": "ls" })).to_string();
 
         let v = parse_hook_payload(&stdin).unwrap();
 

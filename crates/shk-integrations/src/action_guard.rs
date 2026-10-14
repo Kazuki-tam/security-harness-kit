@@ -1777,19 +1777,10 @@ mod tests {
         assert!(detect_dangerous_action(&select).unwrap().is_none());
     }
 
-    /// Copilot CLI camelCase payload: `toolArgs` is a JSON-encoded string.
-    fn copilot_cli_payload(tool: &str, args: serde_json::Value) -> String {
-        serde_json::json!({
-            "timestamp": 1704614400000_u64,
-            "cwd": "/work/repo",
-            "toolName": tool,
-            "toolArgs": args.to_string()
-        })
-        .to_string()
-    }
-
     #[test]
     fn guards_commands_and_paths_inside_stringified_copilot_tool_args() {
+        let copilot_cli_payload =
+            |tool, args| crate::hook_payload::copilot_cli_payload(tool, args).to_string();
         let drop = copilot_cli_payload(
             "bash",
             serde_json::json!({ "command": "psql -c \"DROP TABLE users\"" }),

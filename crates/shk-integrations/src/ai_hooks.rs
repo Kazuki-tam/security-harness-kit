@@ -652,6 +652,7 @@ fn acc_chars_len(acc: &[String]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hook_payload::copilot_cli_payload;
     use tempfile::tempdir;
 
     #[test]
@@ -1679,16 +1680,6 @@ mod tests {
         let (_display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
 
         assert!(body.contains("write-content-marker"), "{body:.80}");
-    }
-
-    /// Copilot CLI camelCase payload: `toolArgs` is a JSON-encoded string.
-    fn copilot_cli_payload(tool: &str, args: serde_json::Value) -> serde_json::Value {
-        serde_json::json!({
-            "timestamp": 1704614400000_u64,
-            "cwd": "/work/repo",
-            "toolName": tool,
-            "toolArgs": args.to_string()
-        })
     }
 
     #[test]

@@ -2862,8 +2862,6 @@ fn hook_mode_copilot_pre_tool_deny_exits_zero_with_permission_decision() {
 
 #[test]
 fn hook_mode_copilot_cli_stringified_tool_args_are_scanned_and_guarded() {
-    use std::io::Write;
-
     let repo = tempfile::tempdir().unwrap();
     init_git_repo(repo.path());
     std::fs::write(repo.path().join("shk.toml"), "").unwrap();
@@ -2877,23 +2875,16 @@ fn hook_mode_copilot_cli_stringified_tool_args_are_scanned_and_guarded() {
             "toolArgs": args.to_string()
         })
         .to_string();
-        let out = Command::new(shk_bin())
-            .args(["scan", ".", "--hook-mode", "copilot"])
-            .current_dir(repo.path())
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                child.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
-                child.wait_with_output()
-            })
-            .expect("hook scan");
+        let out = output_with_stdin(
+            Command::new(shk_bin())
+                .args(["scan", ".", "--hook-mode", "copilot"])
+                .current_dir(repo.path()),
+            &stdin,
+        );
         assert!(
             out.status.success(),
-            "Copilot pre hooks answer on stdout with exit 0: stdout={} stderr={}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
+            "Copilot pre hooks answer on stdout with exit 0: {}",
+            output_log(&out)
         );
         serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
     };
