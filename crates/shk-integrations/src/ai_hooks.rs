@@ -601,10 +601,16 @@ fn push_envelope_strings(v: &Value, acc: &mut Vec<String>) {
             }
         }
         Value::Object(map) => {
+            // Only a complete string pair is an edit (see collect_text_edits);
+            // a lone or non-string `new_str` is ordinary argument text.
+            let is_edit_pair = |old: &str, new: &str| {
+                map.get(old).is_some_and(Value::is_string)
+                    && map.get(new).is_some_and(Value::is_string)
+            };
             for (key, val) in map {
                 let edit_text = EDIT_PAIR_KEYS
                     .iter()
-                    .any(|(old, new)| key == old || key == new);
+                    .any(|(old, new)| (key == old || key == new) && is_edit_pair(old, new));
                 if !edit_text {
                     push_envelope_strings(val, acc);
                 }
@@ -1751,6 +1757,20 @@ mod tests {
             let (_display, body) = pre_body(AiHookTool::Copilot, repo.path(), stdin);
             assert!(body.contains(&token), "{stdin}: {body}");
         }
+    }
+
+    #[test]
+    fn decoded_envelope_scans_a_lone_edit_key() {
+        let repo = repo_with_file("clean body\n");
+        let token = synthetic_github_token();
+        let stdin = copilot_cli_payload(
+            "custom_tool",
+            serde_json::json!({ "path": "app.txt", "new_str": token }),
+        );
+
+        let (_display, body) = pre_body(AiHookTool::Copilot, repo.path(), &stdin);
+
+        assert!(body.contains(&token), "{body}");
     }
 
     #[test]
