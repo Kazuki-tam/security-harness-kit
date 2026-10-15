@@ -11,7 +11,7 @@ use std::io::{Cursor, Read, Write};
 use std::path::Path;
 use tempfile::NamedTempFile;
 use zeroize::Zeroize;
-use zip::write::FileOptions;
+use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
 
 const MAX_OOXML_ENTRIES: usize = 10_000;
@@ -174,7 +174,7 @@ fn mask_ooxml(
         let mut entry = archive
             .by_index(idx)
             .with_context(|| format!("read zip entry {idx}"))?;
-        let name = entry.name().to_string();
+        let name = zip_entry_name(&entry)?;
         let options = entry_options(&entry);
 
         declared_total = declared_total
@@ -267,7 +267,7 @@ pub fn extract_ooxml_text_entries(
         let mut entry = archive
             .by_index(idx)
             .with_context(|| format!("read zip entry {idx}"))?;
-        let name = entry.name().to_string();
+        let name = zip_entry_name(&entry)?;
         if entry.is_dir() || !(format.should_mask_entry)(&name) {
             continue;
         }
@@ -412,10 +412,12 @@ fn paths_refer_to_same_target(input: &Path, output: &Path) -> Result<bool> {
     Ok(input_abs == output_abs)
 }
 
-pub(crate) fn entry_options<R: Read>(
-    entry: &zip::read::ZipFile<'_, R>,
-) -> FileOptions<'static, ()> {
-    let mut options = FileOptions::default().compression_method(entry.compression());
+pub(crate) fn zip_entry_name<R: Read>(entry: &zip::read::ZipFile<'_, R>) -> Result<String> {
+    Ok(entry.name().context("decode zip entry name")?.into_owned())
+}
+
+pub(crate) fn entry_options<R: Read>(entry: &zip::read::ZipFile<'_, R>) -> SimpleFileOptions {
+    let mut options = SimpleFileOptions::default().compression_method(entry.compression());
     if let Some(mod_time) = entry.last_modified() {
         options = options.last_modified_time(mod_time);
     }
@@ -800,7 +802,7 @@ fn process_ooxml_text_groups(
         let mut entry = archive
             .by_index(idx)
             .with_context(|| format!("read zip entry {idx}"))?;
-        let name = entry.name().to_string();
+        let name = zip_entry_name(&entry)?;
         let options = entry_options(&entry);
 
         declared_total = declared_total
@@ -1393,8 +1395,8 @@ mod tests {
         assert!(!text.contains(&secret), "{text}");
     }
 
-    fn deflated_zip_options() -> FileOptions<'static, ()> {
-        FileOptions::default().compression_method(zip::CompressionMethod::Deflated)
+    fn deflated_zip_options() -> SimpleFileOptions {
+        SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)
     }
 
     fn create_minimal_docx(path: &Path, text: &str) -> Result<()> {
