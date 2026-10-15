@@ -1077,8 +1077,9 @@ pub fn has_managed_ai_hooks(root: &Path) -> bool {
         .iter()
         .any(|&tool| {
             crate::hooks::resolve_ai_config_path(tool, root, false)
-                .and_then(|path| Ok(fs::read_to_string(path)?))
-                .is_ok_and(|content| crate::hooks::has_managed_hooks(tool, &content))
+                .ok()
+                .and_then(|path| fs::read_to_string(path).ok())
+                .is_some_and(|content| crate::hooks::has_managed_hooks(tool, &content))
         })
 }
 

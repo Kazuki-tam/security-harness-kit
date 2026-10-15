@@ -490,27 +490,29 @@ pub(crate) fn has_managed_hooks(tool: AiTool, content: &str) -> bool {
             && content.contains(&format!("--hook-mode {}", tool.kebab_str()))
     };
     let parsed = || serde_json::from_str::<Value>(content).ok();
+    let marked = |is_managed: fn(&Value) -> bool| {
+        parsed().map_or_else(
+            || content.contains(MANAGED_MARKER_JSON),
+            |root| is_managed(&root),
+        )
+    };
     match tool {
         AiTool::Codex => content.contains(MANAGED_MARKER_SH),
         AiTool::Opencode => is_managed_opencode_plugin(content),
-        AiTool::ClaudeCode | AiTool::Cursor | AiTool::Antigravity => {
-            let Some(root) = parsed() else {
-                return content.contains(MANAGED_MARKER_JSON);
-            };
-            match tool {
-                AiTool::ClaudeCode => {
-                    hook_list_entries(root.get("hooks")).any(is_managed_claude_block)
-                }
-                AiTool::Cursor => hook_list_entries(root.get("hooks")).any(is_managed_cursor_entry),
-                // Antigravity maps hook names to event configurations whose
-                // blocks share Claude's `_shk_managed` shape.
-                _ => root
-                    .as_object()
-                    .into_iter()
-                    .flat_map(|hooks| hooks.values())
-                    .any(|config| hook_list_entries(Some(config)).any(is_managed_claude_block)),
-            }
+        AiTool::ClaudeCode => {
+            marked(|root| hook_list_entries(root.get("hooks")).any(is_managed_claude_block))
         }
+        AiTool::Cursor => {
+            marked(|root| hook_list_entries(root.get("hooks")).any(is_managed_cursor_entry))
+        }
+        // Antigravity maps hook names to event configurations whose blocks
+        // share Claude's `_shk_managed` shape.
+        AiTool::Antigravity => marked(|root| {
+            root.as_object()
+                .into_iter()
+                .flat_map(|hooks| hooks.values())
+                .any(|config| hook_list_entries(Some(config)).any(is_managed_claude_block))
+        }),
         // Copilot entries written before the command-string identification
         // still carry `_shk_managed`.
         AiTool::Copilot => {
