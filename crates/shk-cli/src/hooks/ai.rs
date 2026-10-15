@@ -4,8 +4,9 @@ use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde_json::{Value, json};
 use shk_integrations::{
-    CONFIG_REL_PATH, HOOKS_FEATURE_KEY, LEGACY_HOOKS_FEATURE_KEY, RECOMMENDED_APPROVAL_POLICY,
-    RECOMMENDED_SANDBOX_MODE, RISKY_APPROVAL_POLICY, RISKY_SANDBOX_MODE, USER_PROMPT_HOOK_FAIL_ON,
+    CONFIG_REL_PATH, HOOKS_FEATURE_KEY, LEGACY_HOOKS_FEATURE_KEY, MANAGED_MARKER_JSON,
+    MANAGED_MARKER_SH, RECOMMENDED_APPROVAL_POLICY, RECOMMENDED_SANDBOX_MODE,
+    RISKY_APPROVAL_POLICY, RISKY_SANDBOX_MODE, USER_PROMPT_HOOK_FAIL_ON,
     normalize_claude_deny_entry,
 };
 use std::collections::HashSet;
@@ -477,6 +478,59 @@ fn remove_managed_claude(root: &mut Value, key: &str) -> Result<usize> {
     let before = arr.len();
     arr.retain(|b| !is_managed_claude_block(b));
     Ok(before - arr.len())
+}
+
+/// True when `content`, the text of `tool`'s hook config file, holds
+/// shk-managed hooks. JSON configs are parsed, so a file reformatted after
+/// install (compact, re-indented, keys reordered) is still recognized. A JSON
+/// file that does not parse falls back to the textual marker.
+pub(crate) fn has_managed_hooks(tool: AiTool, content: &str) -> bool {
+    let has_scan_command = || {
+        content.contains("shk scan")
+            && content.contains(&format!("--hook-mode {}", tool.kebab_str()))
+    };
+    let parsed = || serde_json::from_str::<Value>(content).ok();
+    match tool {
+        AiTool::Codex => content.contains(MANAGED_MARKER_SH),
+        AiTool::Opencode => is_managed_opencode_plugin(content),
+        AiTool::ClaudeCode | AiTool::Cursor | AiTool::Antigravity => {
+            let Some(root) = parsed() else {
+                return content.contains(MANAGED_MARKER_JSON);
+            };
+            match tool {
+                AiTool::ClaudeCode => {
+                    hook_list_entries(root.get("hooks")).any(is_managed_claude_block)
+                }
+                AiTool::Cursor => hook_list_entries(root.get("hooks")).any(is_managed_cursor_entry),
+                // Antigravity maps hook names to event configurations whose
+                // blocks share Claude's `_shk_managed` shape.
+                _ => root
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|hooks| hooks.values())
+                    .any(|config| hook_list_entries(Some(config)).any(is_managed_claude_block)),
+            }
+        }
+        // Copilot entries written before the command-string identification
+        // still carry `_shk_managed`.
+        AiTool::Copilot => {
+            has_scan_command()
+                || parsed().is_some_and(|root| {
+                    hook_list_entries(root.get("hooks")).any(is_managed_copilot_entry)
+                })
+        }
+        AiTool::Windsurf | AiTool::Grok => has_scan_command(),
+    }
+}
+
+/// Entries of every event list in a JSON object mapping event names to arrays.
+fn hook_list_entries(events: Option<&Value>) -> impl Iterator<Item = &Value> {
+    events
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|events| events.values())
+        .filter_map(Value::as_array)
+        .flatten()
 }
 
 fn merge_claude_permissions_deny(root: &mut Value) -> Result<usize> {
@@ -2677,5 +2731,76 @@ sandbox_mode = "danger-full-access"
         let handlers = root["hooks"]["PreToolUse"][0]["hooks"].as_array().unwrap();
         assert_eq!(handlers.len(), 1, "{root}");
         assert_eq!(handlers[0]["command"], "./mine.sh");
+    }
+
+    #[test]
+    fn has_managed_hooks_ignores_json_formatting() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = InstallAiOptions {
+            audit: false,
+            log_blocked: false,
+            dry_run: false,
+            global: false,
+            fail_closed: false,
+            apply_deny: false,
+            apply_sandbox: false,
+        };
+        install_ai_with_summaries(dir.path(), None, opts).unwrap();
+
+        for &tool in <AiTool as clap::ValueEnum>::value_variants() {
+            let path = resolve_ai_config_path(tool, dir.path(), false).unwrap();
+            let pretty = fs::read_to_string(&path).unwrap();
+            assert!(has_managed_hooks(tool, &pretty), "{tool:?}: {pretty}");
+            let Ok(root) = serde_json::from_str::<Value>(&pretty) else {
+                continue;
+            };
+            let compact = serde_json::to_string(&root).unwrap();
+            assert!(has_managed_hooks(tool, &compact), "{tool:?}: {compact}");
+        }
+    }
+
+    #[test]
+    fn has_managed_hooks_detects_compact_json_markers() {
+        for (tool, managed, unmanaged) in [
+            (
+                AiTool::ClaudeCode,
+                r#"{"hooks":{"PreToolUse":[{"_shk_managed":true,"matcher":"Bash","hooks":[]}]}}"#,
+                r#"{"hooks":{"PreToolUse":[{"_shk_managed":false,"matcher":"Bash","hooks":[]}]}}"#,
+            ),
+            (
+                AiTool::Cursor,
+                r#"{"version":1,"hooks":{"beforeShellExecution":[{"command":"x","_shk_managed":true}]}}"#,
+                r#"{"version":1,"hooks":{"beforeShellExecution":[{"command":"x"}]}}"#,
+            ),
+            (
+                AiTool::Antigravity,
+                r#"{"shk-security":{"PreToolUse":[{"_shk_managed":true,"matcher":".*","hooks":[]}]}}"#,
+                r#"{"my-hook":{"PreToolUse":[{"matcher":".*","hooks":[]}]}}"#,
+            ),
+            (
+                AiTool::Copilot,
+                r#"{"version":1,"hooks":{"preToolUse":[{"type":"command","command":"x","_shk_managed":true}]}}"#,
+                r#"{"version":1,"hooks":{"preToolUse":[{"type":"command","command":"x"}]}}"#,
+            ),
+        ] {
+            assert!(has_managed_hooks(tool, managed), "{tool:?}: {managed}");
+            assert!(!has_managed_hooks(tool, unmanaged), "{tool:?}: {unmanaged}");
+        }
+    }
+
+    #[test]
+    fn has_managed_hooks_requires_a_managed_hook_entry() {
+        // A marker outside any hook list, or inside a string, is not a managed hook.
+        for content in [
+            r#"{"_shk_managed":true}"#,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","note":"\"_shk_managed\": true"}]}}"#,
+        ] {
+            assert!(!has_managed_hooks(AiTool::ClaudeCode, content), "{content}");
+        }
+        // Unparseable JSON keeps the textual marker check.
+        assert!(has_managed_hooks(
+            AiTool::ClaudeCode,
+            "{\"hooks\": {\"PreToolUse\": [{\"_shk_managed\": true,"
+        ));
     }
 }
