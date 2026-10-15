@@ -5987,11 +5987,9 @@ fn doctor_warns_when_managed_claude_pre_tool_matcher_is_outdated() {
     let mut settings: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
     settings["hooks"]["PreToolUse"][0]["matcher"] = "Read|Write|Bash|WebFetch|mcp__.*".into();
-    std::fs::write(
-        &settings_path,
-        serde_json::to_string_pretty(&settings).unwrap(),
-    )
-    .unwrap();
+    // Compact JSON: managed hooks must still be found after a reformat, so the
+    // matcher warning is the only new one.
+    std::fs::write(&settings_path, serde_json::to_string(&settings).unwrap()).unwrap();
 
     let stale = doctor_json();
     assert_eq!(

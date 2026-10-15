@@ -1,3 +1,4 @@
+use crate::args::AiTool;
 use crate::env_store::{OpPathSource, collect_onepassword_doctor_status};
 use crate::exit::CliExit;
 use crate::shk_executable;
@@ -8,9 +9,9 @@ use shk_core::git;
 use shk_core::policy::{Policy, SecretStoreBackend};
 use shk_core::scanner::{ScanOptions, scan_string};
 use shk_integrations::{
-    CONFIG_REL_PATH, HOOKS_FEATURE_KEY, LEGACY_HOOKS_FEATURE_KEY, MANAGED_MARKER_JSON,
-    MANAGED_MARKER_SH, RISKY_APPROVAL_POLICY, RISKY_DEFAULT_PERMISSIONS, RISKY_SANDBOX_MODE,
-    claude_deny_entry_covers, claude_recommended_deny_entries,
+    CONFIG_REL_PATH, HOOKS_FEATURE_KEY, LEGACY_HOOKS_FEATURE_KEY, RISKY_APPROVAL_POLICY,
+    RISKY_DEFAULT_PERMISSIONS, RISKY_SANDBOX_MODE, claude_deny_entry_covers,
+    claude_recommended_deny_entries,
 };
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -1072,30 +1073,14 @@ fn run_dotenvx(root: &Path) {
 }
 
 pub fn has_managed_ai_hooks(root: &Path) -> bool {
-    let paths = [
-        root.join(".claude/settings.json"),
-        root.join(".cursor/hooks.json"),
-        root.join(".agents/hooks.json"),
-        root.join(".github/hooks/shk-security.json"),
-        root.join(".windsurf/hooks.json"),
-        root.join(".grok/hooks/shk-security.json"),
-        root.join(".opencode/plugins/shk-security.js"),
-        root.join(CONFIG_REL_PATH),
-    ];
-    for p in paths {
-        if let Ok(s) = fs::read_to_string(&p)
-            && (s.contains(MANAGED_MARKER_JSON)
-                || s.contains(MANAGED_MARKER_SH)
-                || crate::hooks::is_managed_opencode_plugin(&s)
-                || (s.contains("shk scan")
-                    && (s.contains("--hook-mode copilot")
-                        || s.contains("--hook-mode windsurf")
-                        || s.contains("--hook-mode grok"))))
-        {
-            return true;
-        }
-    }
-    false
+    <AiTool as clap::ValueEnum>::value_variants()
+        .iter()
+        .any(|&tool| {
+            crate::hooks::resolve_ai_config_path(tool, root, false)
+                .ok()
+                .and_then(|path| fs::read_to_string(path).ok())
+                .is_some_and(|content| crate::hooks::has_managed_hooks(tool, &content))
+        })
 }
 
 pub fn has_shk_pre_commit(root: &Path) -> bool {
@@ -1907,6 +1892,30 @@ mod tests {
             has_managed_ai_hooks(dir.path()),
             "managed Windsurf Cascade hooks should be detected"
         );
+    }
+
+    #[test]
+    fn has_managed_ai_hooks_detects_compact_json_configs() {
+        for (rel_path, content) in [
+            (
+                ".claude/settings.json",
+                r#"{"hooks":{"PreToolUse":[{"_shk_managed":true,"matcher":"Bash","hooks":[]}]}}"#,
+            ),
+            (
+                ".cursor/hooks.json",
+                r#"{"version":1,"hooks":{"beforeShellExecution":[{"command":"x","_shk_managed":true}]}}"#,
+            ),
+            (
+                ".agents/hooks.json",
+                r#"{"shk-security":{"PreToolUse":[{"_shk_managed":true,"matcher":".*","hooks":[]}]}}"#,
+            ),
+        ] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join(rel_path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, content).unwrap();
+            assert!(has_managed_ai_hooks(dir.path()), "{rel_path}: {content}");
+        }
     }
 
     #[test]
