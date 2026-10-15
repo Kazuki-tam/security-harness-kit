@@ -5,7 +5,7 @@ use super::table::{TableOptions, TableResult, meta_from_parts};
 use super::{INFER_SAMPLE_ROWS, TABLE_PREVIEW_ROWS};
 use crate::document_masker::{
     copy_entry_bounded, decode_general_ref, decode_xml_text as decode_text, local_name,
-    read_entry_bounded,
+    read_entry_bounded, zip_entry_name,
 };
 use anyhow::{Context, Result, bail};
 use quick_xml::Reader;
@@ -47,10 +47,7 @@ pub fn run_xlsx(
                 .with_context(|| format!("xlsx sheet relationship is missing: {}", sheet.name))
         })
         .collect::<Result<BTreeSet<_>>>()?;
-    let shared = if archive
-        .file_names()
-        .any(|name| name == "xl/sharedStrings.xml")
-    {
+    let shared = if archive_contains_entry(&archive, "xl/sharedStrings.xml")? {
         read_zip_string(&mut archive, "xl/sharedStrings.xml")?
     } else {
         String::new()
@@ -644,7 +641,7 @@ fn write_xlsx_copy(
     // Keep indices stable, but remove originals no longer referenced by any sheet.
     let mut used = BTreeSet::new();
     for idx in 0..archive.len() {
-        let name = archive.by_index(idx)?.name().to_string();
+        let name = zip_entry_name(&archive.by_index(idx)?)?;
         if worksheet_paths.contains(&name)
             || (name.starts_with("xl/worksheets/") && name.ends_with(".xml"))
         {
@@ -655,10 +652,7 @@ fn write_xlsx_copy(
             }
         }
     }
-    let shared = if archive
-        .file_names()
-        .any(|name| name == "xl/sharedStrings.xml")
-    {
+    let shared = if archive_contains_entry(archive, "xl/sharedStrings.xml")? {
         Some(prune_shared_strings(
             &read_zip_string(archive, "xl/sharedStrings.xml")?,
             &used,
@@ -682,7 +676,7 @@ fn write_xlsx_copy(
     let mut actual_total = 0u64;
     for idx in 0..archive.len() {
         let mut entry = archive.by_index(idx)?;
-        let name = entry.name().to_string();
+        let name = zip_entry_name(&entry)?;
         let options = crate::document_masker::entry_options(&entry);
         if entry.is_dir() {
             writer.add_directory(&name, options)?;
@@ -792,6 +786,15 @@ fn prune_shared_strings(xml: &str, used: &BTreeSet<usize>) -> Result<String> {
     String::from_utf8(writer.into_inner()).context("shared strings rewrite is not UTF-8")
 }
 
+fn archive_contains_entry(archive: &ZipArchive<File>, expected: &str) -> Result<bool> {
+    for name in archive.file_names() {
+        if name.context("decode zip entry name")? == expected {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn read_zip_string(archive: &mut ZipArchive<File>, name: &str) -> Result<String> {
     let mut entry = archive.by_name(name)?;
     let bytes = read_entry_bounded(&mut entry, MAX_XML_BYTES, name)?;
@@ -836,7 +839,7 @@ mod tests {
     use std::io::{Read, Write};
     use tempfile::tempdir;
     use zip::CompressionMethod;
-    use zip::write::FileOptions;
+    use zip::write::SimpleFileOptions;
 
     fn material() -> KeyMaterial {
         KeyMaterial::from_parts([0x77; 32], [0x88; 32])
@@ -865,7 +868,7 @@ mod tests {
     fn build_xlsx(path: &Path, entries: &[(&str, String)], dirs: &[&str]) {
         let file = File::create(path).unwrap();
         let mut zip = ZipWriter::new(file);
-        let opts = FileOptions::<()>::default().compression_method(CompressionMethod::Deflated);
+        let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
         for dir in dirs {
             zip.add_directory(*dir, opts).unwrap();
         }

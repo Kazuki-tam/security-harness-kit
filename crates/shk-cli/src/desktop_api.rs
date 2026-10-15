@@ -35,7 +35,6 @@ use shk_core::pseudonymize::{
     ColumnOverrides, ColumnSource, Kind, ResolvedColumn, TableResult, delimiter_for_path,
     list_sheets,
 };
-use shk_integrations::{MANAGED_MARKER_JSON, MANAGED_MARKER_SH};
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
@@ -2388,10 +2387,12 @@ fn ai_tool_statuses(root: &Path, global: bool) -> Vec<AiHookToolStatus> {
     .into_iter()
     .filter_map(|tool| {
         let config_path = resolve_ai_config_path(tool, root, global).ok()?;
+        // A stale or hand-edited managed OpenCode plugin still counts as
+        // installed, so applying other settings rewrites it rather than
+        // removing it; `shk doctor` reports the drift.
         let installed = config_path.is_file()
             && fs::read_to_string(&config_path)
-                .map(|s| has_managed_hook_marker(tool, &s))
-                .unwrap_or(false);
+                .is_ok_and(|s| crate::hooks::has_managed_hooks(tool, &s));
         Some(AiHookToolStatus {
             tool: tool.kebab_str().to_string(),
             config_path: config_path.display().to_string(),
@@ -2399,20 +2400,6 @@ fn ai_tool_statuses(root: &Path, global: bool) -> Vec<AiHookToolStatus> {
         })
     })
     .collect()
-}
-
-fn has_managed_hook_marker(tool: AiTool, content: &str) -> bool {
-    if tool == AiTool::Opencode {
-        // A stale or hand-edited managed plugin still counts as installed, so
-        // applying other settings rewrites it rather than removing it;
-        // `shk doctor` reports the drift.
-        return crate::hooks::is_managed_opencode_plugin(content);
-    }
-    content.contains(MANAGED_MARKER_JSON)
-        || content.contains(MANAGED_MARKER_SH)
-        || ((tool == AiTool::Copilot || tool == AiTool::Windsurf || tool == AiTool::Grok)
-            && content.contains("shk scan")
-            && content.contains(&format!("--hook-mode {}", tool.kebab_str())))
 }
 
 fn resolve_ai_config_path(tool: AiTool, root: &Path, global: bool) -> Result<PathBuf> {
@@ -4025,6 +4012,16 @@ mod tests {
         .unwrap();
 
         let status = build_project_status(dir.path());
+        let claude = status
+            .hooks
+            .ai_tools
+            .iter()
+            .find(|tool| tool.tool == "claude-code")
+            .unwrap();
+        assert!(
+            claude.installed,
+            "compact JSON is still managed: {status:?}"
+        );
         assert!(!status.doctor.ai_managed_hooks, "{status:?}");
         assert!(
             status
