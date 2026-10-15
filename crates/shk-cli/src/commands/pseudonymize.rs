@@ -1843,7 +1843,7 @@ pub(crate) mod test_support {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::{Arc, Mutex};
-    use zip::write::{FileOptions, ZipWriter};
+    use zip::write::{SimpleFileOptions, ZipWriter};
 
     /// Single-project in-memory store; `Arc` so every `open_store` call
     /// sees the same entries, like a real keyring would.
@@ -1897,8 +1897,8 @@ pub(crate) mod test_support {
         ["ada", "@", "example.com"].concat()
     }
 
-    pub(crate) fn zip_options() -> FileOptions<'static, ()> {
-        FileOptions::default().compression_method(zip::CompressionMethod::Deflated)
+    pub(crate) fn zip_options() -> SimpleFileOptions {
+        SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)
     }
 
     pub(crate) fn create_docx(path: &Path, text: &str) {

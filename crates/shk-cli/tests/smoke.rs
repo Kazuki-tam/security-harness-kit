@@ -848,8 +848,8 @@ fn mask_pptx_writes_redacted_output() {
     assert!(!slide.contains(&secret), "{slide}");
 }
 
-fn deflated_zip_options() -> zip::write::FileOptions<'static, ()> {
-    zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated)
+fn deflated_zip_options() -> zip::write::SimpleFileOptions {
+    zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)
 }
 
 fn create_minimal_docx(path: &Path, text: &str) {
