@@ -36,7 +36,9 @@ tauri-plugin-notification = "2"
 libc = "0.2"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-tauri-plugin-updater = "2"
+# `zip` is omitted: update artifacts are raw `*setup*.exe` / `.AppImage` / `.app.tar.gz`
+# (see generate-tauri-latest-json.sh), so zipped Windows and gzipped AppImage updates are unsupported.
+tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls", "system-proxy"] }
 
 [dev-dependencies]
 tempfile.workspace = true
