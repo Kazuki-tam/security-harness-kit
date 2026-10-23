@@ -1,13 +1,3 @@
 [advisories]
 # Keep advisories visible; compatible upstream updates removed the old XML exceptions.
-ignore = [
-  # Transitive zip 4.6.1 pulled in by tauri-plugin-updater 2.14.0 (Windows only).
-  # The latest 2.x updater still requires zip 4.x, so there is no upstream fix we
-  # can pull via a dependency bump. The updater verifies the minisign signature
-  # before extracting, so only archives signed with our updater key reach zip.
-  # Our direct dependency is already on zip 9.x (unaffected). Remove once
-  # tauri-plugin-updater releases a version depending on zip >= 9.0.0.
-  "RUSTSEC-2026-0367",
-  "RUSTSEC-2026-0368",
-  "RUSTSEC-2026-0369",
-]
+ignore = []
