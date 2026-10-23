@@ -277,7 +277,7 @@ fn run_hook_mode(
     }
 
     let repo_root = resolve_repo_root(cwd);
-    let hook_body_result = shk_integrations::stdin_to_hook_body(
+    let hook_body_result = shk_integrations::hook_body_from_stdin(
         tool.integration_tool(),
         post,
         stdin_trim,
@@ -285,13 +285,35 @@ fn run_hook_mode(
         &repo_root,
     );
     stdin_str.zeroize();
-    let (disp, mut body) = hook_body_result?;
+    let mut segments = hook_body_result?.segments;
     let (mut policy, _) = Policy::load_from_dir(&repo_root)?;
     apply_redaction_override(&mut policy, redaction);
     apply_min_severity_override(&mut policy, min_severity);
-    let mask_result = shk_core::masker::mask_from_policy(&body, &policy, &disp);
-    body.zeroize();
-    let (mut masked, findings) = mask_result.context("hook mask failed")?;
+    // Each segment is masked under its own path, like `scan --hook-mode`, so
+    // path-dependent rules (e.g. env files) only apply to that file's text.
+    let mask_results: Vec<_> = segments
+        .iter()
+        .map(|segment| {
+            let path = if segment.file {
+                crate::commands::scan::hook_policy_path(&repo_root, &segment.label)
+            } else {
+                segment.label.clone()
+            };
+            shk_core::masker::mask_from_policy(&segment.text, &policy, &path)
+        })
+        .collect();
+    segments
+        .iter_mut()
+        .for_each(|segment| segment.text.zeroize());
+    let mut masked_parts = Vec::with_capacity(mask_results.len());
+    let mut findings = Vec::new();
+    for result in mask_results {
+        let (masked, found) = result.context("hook mask failed")?;
+        masked_parts.push(masked);
+        findings.extend(found);
+    }
+    let mut masked = masked_parts.join("\n---\n");
+    masked_parts.iter_mut().for_each(Zeroize::zeroize);
 
     println!(
         "{}",

@@ -300,8 +300,8 @@ pub struct HookSegment {
 }
 
 impl HookBody {
-    /// Every segment joined into one text (for masking, which rewrites the
-    /// payload as a whole).
+    /// Every segment joined into one text, each file under a `// ---- <path>`
+    /// heading.
     pub fn joined_text(&self) -> String {
         self.segments
             .iter()
@@ -365,8 +365,15 @@ pub fn hook_body_from_stdin(
     let edit_targets: Vec<_> = writes.edits.iter().map(|e| file_target(e.path)).collect();
     let text_targets: Vec<_> = writes.texts.iter().map(|t| file_target(t.path)).collect();
     let mut files = candidates.files;
+    let mut edit_work = 0usize;
     for (index, file) in files.iter_mut().enumerate() {
-        apply_text_edits(&mut file.text, index, &mut writes.edits, &edit_targets);
+        apply_text_edits(
+            &mut file.text,
+            index,
+            &mut writes.edits,
+            &edit_targets,
+            &mut edit_work,
+        );
     }
 
     let mut texts = HookTexts {
@@ -724,24 +731,25 @@ fn writes_local_file(tool: AiHookTool, v: &Value) -> bool {
 /// `original_len + MAX_HOOK_TEXT_BYTES` (a `replace_all` of a short `old` can
 /// otherwise multiply the body until the hook times out, and a timed-out hook
 /// does not block). For the same reason, edits stop being applied once
-/// searching and rewriting the body has touched `MAX_EDIT_WORK_BYTES`: each
+/// searching and rewriting bodies has touched `MAX_EDIT_WORK_BYTES`: each
 /// edit costs a pass over the whole body, so a long edit list on a large file
-/// would otherwise run past the hook timeout.
+/// would otherwise run past the hook timeout. `work` is shared by every file
+/// in the payload, so spreading edits over many files does not reset it.
 fn apply_text_edits(
     text: &mut String,
     index: usize,
     edits: &mut [TextEdit<'_>],
     targets: &[Option<usize>],
+    work: &mut usize,
 ) {
     let max_len = text.len().saturating_add(MAX_HOOK_TEXT_BYTES);
-    let mut work = 0usize;
     for (edit, target) in edits.iter_mut().zip(targets) {
         if *target != Some(index) || edit.old.is_empty() {
             continue;
         }
         // One pass to search, one more to rewrite.
-        work = work.saturating_add(text.len().saturating_mul(2));
-        if work > MAX_EDIT_WORK_BYTES {
+        *work = work.saturating_add(text.len().saturating_mul(2));
+        if *work > MAX_EDIT_WORK_BYTES {
             break;
         }
         let (mut old, mut new) = (Cow::Borrowed(edit.old), Cow::Borrowed(edit.new));
@@ -749,7 +757,7 @@ fn apply_text_edits(
         if count == 0 && old.contains('\n') && !old.contains('\r') && text.contains("\r\n") {
             // Editors match `old` with line endings normalised; on a CRLF file
             // the edit lands with CRLF line endings.
-            work = work.saturating_add(text.len());
+            *work = work.saturating_add(text.len());
             old = Cow::Owned(edit.old.replace('\n', "\r\n"));
             new = Cow::Owned(edit.new.replace('\n', "\r\n"));
             count = match_count(text, &old, edit.replace_all);
@@ -2115,6 +2123,43 @@ mod tests {
         );
         assert!(standalone.contains("new-edit-marker-39"), "{standalone}");
         assert!(!standalone.contains("new-edit-marker-00"), "{standalone}");
+    }
+
+    #[test]
+    fn edit_work_budget_is_shared_across_files() {
+        // 20 edits per file fit a per-file budget twice over; a shared budget
+        // runs out partway through the second file.
+        let repo = tempdir().expect("temp repo");
+        let mut replacements = Vec::new();
+        for name in ["a", "b"] {
+            let markers: Vec<String> = (0..20).map(|i| format!("{name}-marker-{i:02}")).collect();
+            let file = format!(
+                "{}\n{}\n",
+                "x".repeat(MAX_HOOK_TEXT_BYTES),
+                markers.join("\n")
+            );
+            std::fs::write(repo.path().join(format!("{name}.txt")), file).expect("write file");
+            replacements.extend(markers.iter().map(|marker| {
+                serde_json::json!({
+                    "filePath": format!("{name}.txt"),
+                    "oldString": marker,
+                    "newString": format!("new-{marker}")
+                })
+            }));
+        }
+        let stdin = serde_json::json!({
+            "tool_name": "multi_replace_string_in_file",
+            "tool_input": { "replacements": replacements }
+        });
+
+        let (_display, body) = pre_body(AiHookTool::Copilot, repo.path(), &stdin);
+
+        assert!(body.contains("\nnew-b-marker-00\n"), "first b edit applied");
+        assert!(body.contains("\nb-marker-19\n"), "last b edit not applied");
+        assert!(
+            body.contains("\n---\nnew-b-marker-19"),
+            "left for standalone scanning"
+        );
     }
 
     #[test]

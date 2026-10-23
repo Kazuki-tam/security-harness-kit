@@ -35,6 +35,8 @@ export type AiHookToolStatus = {
   tool: string;
   configPath: string;
   installed: boolean;
+  /** The user's own file sits at the managed path, so installs skip this tool. */
+  conflict: boolean;
 };
 
 export type HooksStatus = {

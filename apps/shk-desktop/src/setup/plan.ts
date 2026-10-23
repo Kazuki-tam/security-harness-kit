@@ -30,7 +30,10 @@ export type QuickSetupStep = {
 };
 
 export function hasManagedAiHooks(status: ProjectStatus): boolean {
-  return status.hooks.aiTools.length > 0 && status.hooks.aiTools.every((tool) => tool.installed);
+  return (
+    status.hooks.aiTools.length > 0 &&
+    status.hooks.aiTools.every((tool) => tool.installed || tool.conflict)
+  );
 }
 
 export function aiSafetyReady(status: ProjectStatus): boolean {

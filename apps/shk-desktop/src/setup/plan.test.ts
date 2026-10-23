@@ -9,6 +9,7 @@ import {
   defaultQuickSetupIgnoreTargets,
   defaultRecommendedFixIds,
   envEncryptTargets,
+  hasManagedAiHooks,
   npmSettingsReady,
   projectSkillsInstalled,
   quickSetupCanApply,
@@ -40,6 +41,7 @@ function status(overrides: Partial<ProjectStatus> = {}): ProjectStatus {
           tool: "cursor",
           configPath: "/workspace/demo/.cursor/hooks.json",
           installed: false,
+          conflict: false,
         },
       ],
     },
@@ -170,6 +172,7 @@ describe("buildQuickSetupSteps", () => {
             tool: "cursor",
             configPath: "/workspace/demo/.cursor/hooks.json",
             installed: true,
+            conflict: false,
           },
         ],
       },
@@ -227,11 +230,13 @@ describe("buildQuickSetupSteps", () => {
             tool: "claude-code",
             configPath: "/workspace/demo/.claude/settings.json",
             installed: true,
+            conflict: false,
           },
           {
             tool: "cursor",
             configPath: "/workspace/demo/.cursor/hooks.json",
             installed: false,
+            conflict: false,
           },
         ],
       },
@@ -253,6 +258,30 @@ describe("buildQuickSetupSteps", () => {
     });
   });
 
+  it("does not wait on a tool whose managed path holds the user's own file", () => {
+    const current = status({
+      hooks: {
+        preCommit: { installed: true, isGitRepo: true },
+        aiTools: [
+          {
+            tool: "claude-code",
+            configPath: "/workspace/demo/.claude/settings.json",
+            installed: true,
+            conflict: false,
+          },
+          {
+            tool: "opencode",
+            configPath: "/workspace/demo/.opencode/plugins/shk-security.js",
+            installed: false,
+            conflict: true,
+          },
+        ],
+      },
+    });
+
+    expect(hasManagedAiHooks(current)).toBe(true);
+  });
+
   it("keeps the AI step pending while the Claude Code hook matcher is outdated", () => {
     const current = status({
       hooks: {
@@ -262,6 +291,7 @@ describe("buildQuickSetupSteps", () => {
             tool: "claude-code",
             configPath: "/workspace/demo/.claude/settings.json",
             installed: true,
+            conflict: false,
           },
         ],
       },

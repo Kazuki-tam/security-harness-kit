@@ -375,7 +375,7 @@ fn inherits_project_policy(cwd_root: &Path, project_root: &Path) -> bool {
 /// launch context; submodules and nested clones keep the project-relative path.
 /// The audit log keeps the project-relative label, so entries still say
 /// which checkout was read.
-fn hook_policy_path(repo_root: &Path, disp: &str) -> String {
+pub(crate) fn hook_policy_path(repo_root: &Path, disp: &str) -> String {
     let abs = repo_root.join(disp);
     if !abs.is_file() {
         // Virtual labels such as `<claude-hook>`.

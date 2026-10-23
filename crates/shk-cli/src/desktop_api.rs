@@ -114,6 +114,9 @@ pub struct AiHookToolStatus {
     pub tool: String,
     pub config_path: String,
     pub installed: bool,
+    /// The user's own file sits at the managed path, so installs skip this
+    /// tool (OpenCode only) and it cannot become `installed`.
+    pub conflict: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1510,6 +1513,7 @@ struct ProjectCheckStatus {
     scan_hooks_windsurf: bool,
     scan_hooks_grok: bool,
     scan_hooks_opencode: bool,
+    opencode_plugin_drift: Option<String>,
     ignore: IgnoreStatus,
     claude: ClaudePermissionsStatus,
     codex: CodexConfigStatus,
@@ -2328,7 +2332,7 @@ fn collect_project_check_status(root: &Path) -> ProjectCheckStatus {
     };
     ProjectCheckStatus {
         git_pre_commit: has_shk_pre_commit(root),
-        ai_managed_hooks: has_all_managed_ai_hooks(root),
+        ai_managed_hooks: has_all_managed_ai_hooks(&ai_tools),
         scan_hooks_claude_code: scan_hooks_for("claude-code"),
         scan_hooks_cursor: scan_hooks_for("cursor"),
         scan_hooks_codex: scan_hooks_for("codex"),
@@ -2337,6 +2341,7 @@ fn collect_project_check_status(root: &Path) -> ProjectCheckStatus {
         scan_hooks_windsurf: scan_hooks_for("windsurf"),
         scan_hooks_grok: scan_hooks_for("grok"),
         scan_hooks_opencode: scan_hooks_for("opencode"),
+        opencode_plugin_drift: crate::hooks::opencode_plugin_drift(root),
         ignore: collect_ignore_status(root),
         claude: collect_claude_permissions_status(root),
         codex: collect_codex_config_status(root),
@@ -2355,9 +2360,13 @@ fn env_encrypt_targets(files: &[EnvFileStatus]) -> Vec<String> {
         .collect()
 }
 
-fn has_all_managed_ai_hooks(root: &Path) -> bool {
-    let statuses = ai_tool_statuses(root, false);
-    !statuses.is_empty() && statuses.iter().all(|status| status.installed)
+/// A conflicting tool is reported through `opencode_plugin_drift` instead:
+/// requiring it would keep recommending an install that always skips it.
+fn has_all_managed_ai_hooks(statuses: &[AiHookToolStatus]) -> bool {
+    !statuses.is_empty()
+        && statuses
+            .iter()
+            .all(|status| status.installed || status.conflict)
 }
 
 fn build_hooks_status(root: &Path, git_root: Option<&Path>) -> HooksStatus {
@@ -2390,13 +2399,24 @@ fn ai_tool_statuses(root: &Path, global: bool) -> Vec<AiHookToolStatus> {
         // A stale or hand-edited managed OpenCode plugin still counts as
         // installed, so applying other settings rewrites it rather than
         // removing it; `shk doctor` reports the drift.
-        let installed = config_path.is_file()
-            && fs::read_to_string(&config_path)
-                .is_ok_and(|s| crate::hooks::has_managed_hooks(tool, &s));
+        let bytes = config_path
+            .is_file()
+            .then(|| fs::read(&config_path).ok())
+            .flatten();
+        let installed = bytes
+            .as_deref()
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .is_some_and(|s| crate::hooks::has_managed_hooks(tool, s));
+        // Decoded the way the installer decides whether it may overwrite.
+        let conflict = tool == AiTool::Opencode
+            && bytes.as_deref().is_some_and(|b| {
+                !crate::hooks::is_managed_opencode_plugin(&String::from_utf8_lossy(b))
+            });
         Some(AiHookToolStatus {
             tool: tool.kebab_str().to_string(),
             config_path: config_path.display().to_string(),
             installed,
+            conflict,
         })
     })
     .collect()
@@ -2577,6 +2597,13 @@ fn build_doctor_status_from(checks: &ProjectCheckStatus) -> DoctorStatus {
             severity: "warn".into(),
             message: "Claude Code managed PreToolUse matcher is outdated — refresh it via Setup"
                 .into(),
+        });
+    }
+    if let Some(drift) = &checks.opencode_plugin_drift {
+        issues.push(DoctorIssue {
+            id: "ai_opencode_plugin".into(),
+            severity: "warn".into(),
+            message: drift.clone(),
         });
     }
     if checks.codex.config_exists && !codex_config_ok {
@@ -4203,6 +4230,60 @@ mod tests {
         apply_ai_hook_settings(dir.path().to_str().unwrap(), options(true)).unwrap();
         let body = fs::read_to_string(&plugin).unwrap();
         assert!(body.contains("--hook-mode opencode"), "{body}");
+    }
+
+    #[test]
+    fn desktop_user_opencode_plugin_does_not_keep_ai_hooks_fix_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "").unwrap();
+        let plugin = dir.path().join(".opencode/plugins/shk-security.js");
+        fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        fs::write(&plugin, "export default { id: \"mine\" }\n").unwrap();
+
+        install_ai_hooks(
+            dir.path().to_str().unwrap(),
+            desktop_default_install_ai_hooks_options(),
+        )
+        .unwrap();
+
+        let tools = ai_tool_statuses(dir.path(), false);
+        let opencode = tools.iter().find(|t| t.tool == "opencode").unwrap();
+        assert!(!opencode.installed && opencode.conflict, "{opencode:?}");
+        let checks = collect_project_check_status(dir.path());
+        assert!(checks.ai_managed_hooks);
+        assert!(
+            !build_recommended_fixes(&checks, true, false)
+                .iter()
+                .any(|fix| fix.id == "ai_hooks")
+        );
+        let doctor = build_doctor_status_from(&checks);
+        assert!(
+            doctor
+                .issues
+                .iter()
+                .any(|issue| issue.id == "ai_opencode_plugin"
+                    && issue.message.contains("not shk-managed")),
+            "{:?}",
+            doctor.issues
+        );
+    }
+
+    #[test]
+    fn desktop_doctor_reports_a_modified_managed_opencode_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = dir.path().join(".opencode/plugins/shk-security.js");
+        fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        fs::write(&plugin, "// shk-managed: older template\n").unwrap();
+
+        let doctor = build_doctor_status_from(&collect_project_check_status(dir.path()));
+        assert!(
+            doctor
+                .issues
+                .iter()
+                .any(|issue| issue.id == "ai_opencode_plugin" && issue.message.contains("differs")),
+            "{:?}",
+            doctor.issues
+        );
     }
 
     #[cfg(unix)]
