@@ -1073,14 +1073,12 @@ fn run_dotenvx(root: &Path) {
 }
 
 pub fn has_managed_ai_hooks(root: &Path) -> bool {
-    <AiTool as clap::ValueEnum>::value_variants()
-        .iter()
-        .any(|&tool| {
-            crate::hooks::resolve_ai_config_path(tool, root, false)
-                .ok()
-                .and_then(|path| fs::read_to_string(path).ok())
-                .is_some_and(|content| crate::hooks::has_managed_hooks(tool, &content))
-        })
+    AiTool::all().iter().copied().any(|tool| {
+        crate::hooks::resolve_ai_config_path(tool, root, false)
+            .ok()
+            .and_then(|path| fs::read_to_string(path).ok())
+            .is_some_and(|content| crate::hooks::has_managed_hooks(tool, &content))
+    })
 }
 
 pub fn has_shk_pre_commit(root: &Path) -> bool {

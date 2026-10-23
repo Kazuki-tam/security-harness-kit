@@ -108,10 +108,6 @@ pub fn blocked_action_guard_payload(
     })
 }
 
-pub fn blocked_policy_error_payload(tool: AiTool, event: HookEvent) -> serde_json::Value {
-    blocked_reason_payload(tool, event, REASON_POLICY_ERROR)
-}
-
 fn blocked_reason_payload(tool: AiTool, event: HookEvent, reason: &str) -> serde_json::Value {
     serde_json::json!({
         "event": EVENT_BLOCKED,
@@ -169,9 +165,13 @@ pub fn append_blocked_action_guard(
 }
 
 pub fn append_blocked_policy_error(repo_root: &Path, tool: AiTool, event: HookEvent) -> Result<()> {
-    audit_log::append_line(repo_root, blocked_policy_error_payload(tool, event))?;
-    eprintln!("shk blocked: invalid policy (see .shk/audit.log)");
-    Ok(())
+    append_blocked_reason(
+        repo_root,
+        tool,
+        event,
+        REASON_POLICY_ERROR,
+        "invalid policy",
+    )
 }
 
 pub fn append_blocked_payload_too_large(
@@ -179,11 +179,24 @@ pub fn append_blocked_payload_too_large(
     tool: AiTool,
     event: HookEvent,
 ) -> Result<()> {
-    audit_log::append_line(
+    append_blocked_reason(
         repo_root,
-        blocked_reason_payload(tool, event, REASON_PAYLOAD_TOO_LARGE),
-    )?;
-    eprintln!("shk blocked: hook payload too large to scan (see .shk/audit.log)");
+        tool,
+        event,
+        REASON_PAYLOAD_TOO_LARGE,
+        "hook payload too large to scan",
+    )
+}
+
+fn append_blocked_reason(
+    repo_root: &Path,
+    tool: AiTool,
+    event: HookEvent,
+    reason: &str,
+    note: &str,
+) -> Result<()> {
+    audit_log::append_line(repo_root, blocked_reason_payload(tool, event, reason))?;
+    eprintln!("shk blocked: {note} (see .shk/audit.log)");
     Ok(())
 }
 
@@ -310,13 +323,39 @@ mod tests {
 
     #[test]
     fn blocked_policy_error_payload_is_metadata_only() {
-        let payload = blocked_policy_error_payload(AiTool::ClaudeCode, HookEvent::PreToolUse);
+        let payload = blocked_reason_payload(
+            AiTool::ClaudeCode,
+            HookEvent::PreToolUse,
+            REASON_POLICY_ERROR,
+        );
 
         assert_eq!(payload["event"], EVENT_BLOCKED);
         assert_eq!(payload["reason"], REASON_POLICY_ERROR);
         assert_eq!(payload["tool"], "claude-code");
         assert_eq!(payload["hook"], "pre");
         assert_eq!(payload.as_object().map(serde_json::Map::len), Some(4));
+    }
+
+    #[test]
+    fn blocked_payload_too_large_payload_is_metadata_only() {
+        let payload = blocked_reason_payload(
+            AiTool::Cursor,
+            HookEvent::PreToolUse,
+            REASON_PAYLOAD_TOO_LARGE,
+        );
+
+        assert_eq!(payload["event"], EVENT_BLOCKED);
+        assert_eq!(payload["reason"], REASON_PAYLOAD_TOO_LARGE);
+        assert_eq!(payload["tool"], "cursor");
+        assert_eq!(payload["hook"], "pre");
+        let mut keys: Vec<_> = payload
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["event", "hook", "reason", "tool"]);
     }
 
     #[test]

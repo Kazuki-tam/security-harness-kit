@@ -974,6 +974,44 @@ fn mask_hook_mode_cursor_returns_masked_content() {
 }
 
 #[test]
+fn mask_hook_mode_masks_file_segments_without_headings() {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+    // not real credential: synthetic detector fixture values only
+    let file_secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+    let prompt_secret = "sk-proj-zyxwvutsrqponmlkjihgfedcba9876543210";
+    std::fs::write(dir.path().join("app.txt"), format!("TOKEN={file_secret}\n")).unwrap();
+    let stdin = serde_json::to_string(&serde_json::json!({
+        "hook_event_name": "beforeReadFile",
+        "file_path": "app.txt",
+        "prompt": format!("also check {prompt_secret}")
+    }))
+    .unwrap();
+    let out = Command::new(shk_bin())
+        .current_dir(dir.path())
+        .args(["mask", "--hook-mode", "cursor"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("mask hook");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let masked = v["masked_content"].as_str().unwrap_or_default();
+    assert_eq!(masked, "TOKEN=[REDACTED]\n\n---\nalso check [REDACTED]");
+    assert!(!masked.contains(file_secret) && !masked.contains(prompt_secret));
+}
+
+#[test]
 fn mask_hook_mode_clean_payload_does_not_echo_content() {
     use std::io::Write;
 

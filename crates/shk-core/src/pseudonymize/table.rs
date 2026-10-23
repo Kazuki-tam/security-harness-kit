@@ -409,7 +409,7 @@ mod tests {
 
     #[test]
     fn preview_preserves_row_order_and_caps_csv_and_tsv_with_or_without_headers() {
-        for delimiter in [b',', b'\t'] {
+        for delimiter in *b",\t" {
             for no_header in [false, true] {
                 for count in [0, 1, 5, 99, 100, 101] {
                     let mut opts = options("Value:custom:sample", true);

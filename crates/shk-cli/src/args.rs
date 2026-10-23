@@ -408,6 +408,21 @@ pub enum AiTool {
 }
 
 impl AiTool {
+    /// Every tool, in install and desktop display order. A test checks this
+    /// against the CLI variants, so adding a tool cannot stop at the enum.
+    pub const fn all() -> [Self; 8] {
+        [
+            Self::ClaudeCode,
+            Self::Codex,
+            Self::Cursor,
+            Self::Copilot,
+            Self::Antigravity,
+            Self::Grok,
+            Self::Opencode,
+            Self::Windsurf,
+        ]
+    }
+
     pub fn kebab_str(self) -> &'static str {
         match self {
             Self::Antigravity => "antigravity",
