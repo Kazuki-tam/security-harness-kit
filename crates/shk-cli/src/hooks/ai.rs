@@ -27,6 +27,7 @@ const CURSOR_PROJECT_DIR_ARG: &str = r#""${CURSOR_PROJECT_DIR:-.}""#;
 /// block's matcher differs from this one.
 pub(crate) const CLAUDE_PRE_TOOL_USE_MATCHER: &str =
     "Read|Write|Edit|MultiEdit|NotebookEdit|Bash|WebFetch|mcp__.*";
+pub(crate) const CLAUDE_POST_TOOL_USE_MATCHER: &str = "WebFetch|WebSearch|Bash|mcp__.*|Skill|Agent";
 
 #[derive(Clone, Copy, Debug)]
 pub struct InstallAiOptions {
@@ -209,31 +210,83 @@ fn hook_scan_commands(
 }
 
 pub fn install_ai(cwd: &Path, maybe_tool: Option<AiTool>, opts: InstallAiOptions) -> Result<()> {
-    let summaries = install_ai_with_summaries(cwd, maybe_tool, opts)?;
-    for summary in summaries {
+    let report = install_ai_with_summaries(cwd, maybe_tool, opts)?;
+    for summary in report.summaries {
         println!("{summary}");
     }
     Ok(())
+}
+
+/// What an install or configure run changed, plus tools it had to leave alone.
+#[derive(Debug)]
+pub struct AiHookInstallReport {
+    pub summaries: Vec<String>,
+    pub skipped: Vec<AiTool>,
+}
+
+/// Directory managed writes must stay inside. `None` during a dry run, which
+/// only reports what it would change.
+fn hook_write_base(global: bool, dry_run: bool, cwd: &Path) -> Result<Option<PathBuf>> {
+    if dry_run {
+        return Ok(None);
+    }
+    if global {
+        Ok(Some(dirs::home_dir().context("home directory not found")?))
+    } else {
+        Ok(Some(cwd.to_path_buf()))
+    }
+}
+
+/// Why an all-tools run must leave this OpenCode path alone. A read error
+/// counts: the file cannot be identified as shk's, and aborting would stop
+/// the other tools. An explicit `--tool opencode` install does not use this
+/// and still refuses to overwrite.
+fn opencode_conflict_summary(path: &Path, base: Option<&Path>) -> Result<Option<String>> {
+    if let Some(base) = base
+        && let Err(err) = safety::ensure_write_path_within(base, path)
+    {
+        return Ok(Some(format!(
+            "{}: {OPENCODE_SKIPPED}: {err:#}",
+            path.display()
+        )));
+    }
+    if !path.is_file() {
+        return Ok(None);
+    }
+    match fs::read(path) {
+        Ok(bytes) if is_managed_opencode_plugin(&String::from_utf8_lossy(&bytes)) => Ok(None),
+        Ok(_) => Ok(Some(format!(
+            "{}: {OPENCODE_SKIPPED}: not an shk-managed plugin (move it aside and rerun)",
+            path.display()
+        ))),
+        Err(err) => Ok(Some(format!(
+            "{}: {OPENCODE_SKIPPED}: {err}",
+            path.display()
+        ))),
+    }
+}
+
+fn record_opencode_skip(
+    report: &mut AiHookInstallReport,
+    path: &Path,
+    base: Option<&Path>,
+) -> Result<bool> {
+    let Some(line) = opencode_conflict_summary(path, base)? else {
+        return Ok(false);
+    };
+    report.skipped.push(AiTool::Opencode);
+    report.summaries.push(line);
+    Ok(true)
 }
 
 pub fn install_ai_with_summaries(
     cwd: &Path,
     maybe_tool: Option<AiTool>,
     opts: InstallAiOptions,
-) -> Result<Vec<String>> {
-    let tools = if let Some(t) = maybe_tool {
-        vec![t]
-    } else {
-        vec![
-            AiTool::ClaudeCode,
-            AiTool::Codex,
-            AiTool::Cursor,
-            AiTool::Copilot,
-            AiTool::Antigravity,
-            AiTool::Grok,
-            AiTool::Opencode,
-            AiTool::Windsurf,
-        ]
+) -> Result<AiHookInstallReport> {
+    let tools = match maybe_tool {
+        Some(tool) => vec![tool],
+        None => AiTool::all().to_vec(),
     };
 
     println!(
@@ -241,47 +294,42 @@ pub fn install_ai_with_summaries(
         opts.global, opts.audit, opts.log_blocked, opts.dry_run, opts.apply_sandbox
     );
     let cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    let mut summaries = Vec::new();
+    let write_base = hook_write_base(opts.global, opts.dry_run, &cwd)?;
+    let mut report = AiHookInstallReport {
+        summaries: Vec::new(),
+        skipped: Vec::new(),
+    };
 
-    for t in tools {
-        let path = resolve_ai_config_path(t, &cwd, opts.global)?;
+    for tool in tools {
+        let path = resolve_ai_config_path(tool, &cwd, opts.global)?;
         // In an all-tools install, OpenCode conflicts the user has to resolve
         // by hand are reported and skipped so the other tools still get
-        // installed: their own plugin at the managed path, or a path the write
-        // guard refuses (e.g. XDG_CONFIG_HOME outside the home directory).
-        // Any other error still aborts.
-        let skip_conflicts = maybe_tool.is_none() && t == AiTool::Opencode;
-        if !opts.dry_run {
-            let base = if opts.global {
-                dirs::home_dir().context("home directory not found")?
-            } else {
-                cwd.clone()
-            };
-            if let Err(err) = safety::ensure_write_path_within(&base, &path) {
-                if !skip_conflicts {
-                    return Err(err);
-                }
-                summaries.push(format!("{}: {OPENCODE_SKIPPED}: {err:#}", path.display()));
+        // installed. Any other error still aborts.
+        if maybe_tool.is_none() && tool == AiTool::Opencode {
+            if record_opencode_skip(&mut report, &path, write_base.as_deref())? {
                 continue;
             }
-        }
-        if skip_conflicts && is_unmanaged_opencode_plugin(&path)? {
-            summaries.push(format!(
-                "{}: {OPENCODE_SKIPPED}: not an shk-managed plugin (move it aside and rerun)",
-                path.display()
-            ));
-            continue;
+        } else if let Some(base) = &write_base {
+            safety::ensure_write_path_within(base, &path)?;
         }
         let project_root = (!opts.global).then_some(cwd.as_path());
-        let summary = apply_tool(&path, t, opts, project_root)?;
-        summaries.push(format!("{}: {}", path.display(), summary.trim()));
+        let summary = apply_tool(&path, tool, opts, project_root)?;
+        report
+            .summaries
+            .push(format!("{}: {}", path.display(), summary.trim()));
     }
-    Ok(summaries)
+    Ok(report)
 }
 
-pub fn configure_ai_with_summaries(cwd: &Path, opts: ConfigureAiOptions) -> Result<Vec<String>> {
+pub fn configure_ai_with_summaries(
+    cwd: &Path,
+    opts: ConfigureAiOptions,
+) -> Result<AiHookInstallReport> {
     let cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    let mut summaries = Vec::new();
+    let mut report = AiHookInstallReport {
+        summaries: Vec::new(),
+        skipped: Vec::new(),
+    };
     let install_opts = InstallAiOptions {
         audit: opts.audit,
         log_blocked: opts.log_blocked,
@@ -291,48 +339,25 @@ pub fn configure_ai_with_summaries(cwd: &Path, opts: ConfigureAiOptions) -> Resu
         apply_deny: false,
         apply_sandbox: false,
     };
+    let write_base = hook_write_base(opts.global, opts.dry_run, &cwd)?;
 
-    for tool in [
-        AiTool::ClaudeCode,
-        AiTool::Codex,
-        AiTool::Cursor,
-        AiTool::Copilot,
-        AiTool::Antigravity,
-        AiTool::Grok,
-        AiTool::Opencode,
-        AiTool::Windsurf,
-    ] {
+    for tool in AiTool::all() {
         let path = resolve_ai_config_path(tool, &cwd, opts.global)?;
-        // As in an all-tools install, OpenCode conflicts are reported and
-        // skipped rather than aborting halfway through the other tools.
-        let skip_conflicts = tool == AiTool::Opencode;
-        if !opts.dry_run {
-            let base = if opts.global {
-                dirs::home_dir().context("home directory not found")?
-            } else {
-                cwd.clone()
-            };
-            if let Err(err) = safety::ensure_write_path_within(&base, &path) {
-                if !skip_conflicts {
-                    return Err(err);
-                }
-                summaries.push(format!("{}: {OPENCODE_SKIPPED}: {err:#}", path.display()));
+        if tool == AiTool::Opencode {
+            if record_opencode_skip(&mut report, &path, write_base.as_deref())? {
                 continue;
             }
+        } else if let Some(base) = &write_base {
+            safety::ensure_write_path_within(base, &path)?;
         }
         if scan_hooks_enabled_for(&opts, tool) {
-            if skip_conflicts && is_unmanaged_opencode_plugin(&path)? {
-                summaries.push(format!(
-                    "{}: {OPENCODE_SKIPPED}: not an shk-managed plugin (move it aside and rerun)",
-                    path.display()
-                ));
-                continue;
-            }
             let project_root = (!opts.global).then_some(cwd.as_path());
             let summary = apply_tool(&path, tool, install_opts, project_root)?;
-            summaries.push(format!("{}: {}", path.display(), summary.trim()));
+            report
+                .summaries
+                .push(format!("{}: {}", path.display(), summary.trim()));
         } else if path.is_file() {
-            summaries.push(format!(
+            report.summaries.push(format!(
                 "{}: {}",
                 path.display(),
                 remove_scan_hooks_for_tool(&path, tool, opts.dry_run)?.trim()
@@ -349,7 +374,7 @@ pub fn configure_ai_with_summaries(cwd: &Path, opts: ConfigureAiOptions) -> Resu
             opts.claude_sandbox,
             !opts.global,
         )?;
-        summaries.push(format!(
+        report.summaries.push(format!(
             "{}: {}",
             claude_path.display(),
             claude_summary.trim()
@@ -359,14 +384,14 @@ pub fn configure_ai_with_summaries(cwd: &Path, opts: ConfigureAiOptions) -> Resu
     let codex_path = resolve_ai_config_path(AiTool::Codex, &cwd, opts.global)?;
     if opts.codex_sandbox || codex_path.is_file() {
         let codex_summary = configure_codex_sandbox(&codex_path, opts.dry_run, opts.codex_sandbox)?;
-        summaries.push(format!(
+        report.summaries.push(format!(
             "{}: {}",
             codex_path.display(),
             codex_summary.trim()
         ));
     }
 
-    Ok(summaries)
+    Ok(report)
 }
 
 fn apply_tool(
@@ -449,6 +474,25 @@ fn load_json(path: &Path) -> Result<Value> {
 
 pub(crate) fn is_managed_claude_block(block: &Value) -> bool {
     block.get("_shk_managed") == Some(&json!(true))
+}
+
+/// `(audit, log_blocked)` taken from the managed Claude `PreToolUse` command.
+/// `--audit` wins, matching how the command is generated. `None` when there
+/// is no managed command to copy.
+pub fn claude_managed_scan_flags(settings: &Path) -> Option<(bool, bool)> {
+    let value = load_json(settings).ok()?;
+    let command = value
+        .pointer("/hooks/PreToolUse")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|block| is_managed_claude_block(block))?
+        .get("hooks")
+        .and_then(Value::as_array)?
+        .iter()
+        .find_map(|hook| hook.get("command").and_then(Value::as_str))?;
+    let audit = command.split_whitespace().any(|arg| arg == "--audit");
+    let log_blocked = !audit && command.split_whitespace().any(|arg| arg == "--log-blocked");
+    Some((audit, log_blocked))
 }
 
 fn push_managed_claude(root: &mut Value, key: &str, block: Value) -> Result<()> {
@@ -704,7 +748,7 @@ fn apply_claude(
     });
     let post_block = json!({
         "_shk_managed": true,
-        "matcher": "WebFetch|WebSearch|Bash|mcp__.*|Skill|Agent",
+        "matcher": CLAUDE_POST_TOOL_USE_MATCHER,
         "hooks": [{ "type": "command", "command": commands.post }]
     });
     let user_prompt_block = json!({
@@ -1480,7 +1524,13 @@ fn remove_opencode_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
     if !path.is_file() {
         return Ok("no OpenCode plugin file".to_string());
     }
-    if is_unmanaged_opencode_plugin(path)? {
+    // Unreadable files stay: deleting something shk cannot identify as its own
+    // would be worse, and the error must not abort the other tools.
+    let existing = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) => return Ok(format!("left OpenCode plugin untouched: {err}")),
+    };
+    if !is_managed_opencode_plugin(&String::from_utf8_lossy(&existing)) {
         return Ok("left unmanaged OpenCode plugin untouched".to_string());
     }
     if !dry_run {
@@ -2617,7 +2667,7 @@ sandbox_mode = "danger-full-access"
         fs::create_dir_all(plugin.parent().unwrap()).unwrap();
         fs::write(&plugin, "export default { id: \"mine\" }\n").unwrap();
 
-        let summaries = configure_ai_with_summaries(
+        let report = configure_ai_with_summaries(
             dir.path(),
             ConfigureAiOptions {
                 audit: false,
@@ -2640,11 +2690,13 @@ sandbox_mode = "danger-full-access"
         )
         .unwrap();
 
+        assert_eq!(report.skipped, vec![AiTool::Opencode]);
         assert!(
-            summaries
+            report
+                .summaries
                 .iter()
                 .any(|line| line.contains("skipped OpenCode")),
-            "{summaries:?}"
+            "{report:?}"
         );
         assert_eq!(
             fs::read_to_string(&plugin).unwrap(),
@@ -2653,6 +2705,91 @@ sandbox_mode = "danger-full-access"
         // Windsurf comes after OpenCode and is still configured.
         let windsurf = fs::read_to_string(dir.path().join(".windsurf/hooks.json")).unwrap();
         assert!(windsurf.contains("--hook-mode windsurf"), "{windsurf}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configure_ai_skips_an_unreadable_opencode_plugin() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = dir.path().join(OPENCODE_PLUGIN_REL_PATH);
+        fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        fs::write(&plugin, "export default { id: \"mine\" }\n").unwrap();
+        fs::set_permissions(&plugin, fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(
+            fs::read(&plugin).is_err(),
+            "this test needs a file the process cannot read"
+        );
+
+        let report = configure_ai_with_summaries(
+            dir.path(),
+            ConfigureAiOptions {
+                audit: false,
+                log_blocked: false,
+                dry_run: false,
+                global: false,
+                fail_closed: false,
+                scan_hooks_claude_code: true,
+                scan_hooks_cursor: false,
+                scan_hooks_codex: false,
+                scan_hooks_copilot: false,
+                scan_hooks_antigravity: false,
+                scan_hooks_grok: false,
+                scan_hooks_opencode: true,
+                scan_hooks_windsurf: false,
+                claude_deny: false,
+                claude_sandbox: false,
+                codex_sandbox: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.skipped, vec![AiTool::Opencode]);
+        let claude = fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
+        assert!(claude.contains("--hook-mode claude-code"), "{claude}");
+        fs::set_permissions(&plugin, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[test]
+    fn claude_managed_scan_flags_follow_the_installed_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let write = |command: &str| {
+            fs::write(
+                &settings,
+                serde_json::json!({
+                    "hooks": { "PreToolUse": [{
+                        "_shk_managed": true,
+                        "hooks": [{ "command": command }]
+                    }] }
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+
+        write("shk scan --hook-mode claude-code --audit");
+        assert_eq!(claude_managed_scan_flags(&settings), Some((true, false)));
+        write("shk scan --hook-mode claude-code --log-blocked");
+        assert_eq!(claude_managed_scan_flags(&settings), Some((false, true)));
+        write("shk scan --hook-mode claude-code");
+        assert_eq!(claude_managed_scan_flags(&settings), Some((false, false)));
+        write("shk scan --hook-mode claude-code --audit --log-blocked");
+        assert_eq!(claude_managed_scan_flags(&settings), Some((true, false)));
+        assert_eq!(claude_managed_scan_flags(dir.path()), None);
+    }
+
+    #[test]
+    fn ai_tool_all_lists_every_cli_variant() {
+        let mut listed: Vec<_> = AiTool::all().iter().map(|tool| tool.kebab_str()).collect();
+        let mut variants: Vec<_> = <AiTool as clap::ValueEnum>::value_variants()
+            .iter()
+            .map(|tool| tool.kebab_str())
+            .collect();
+        listed.sort_unstable();
+        variants.sort_unstable();
+        assert_eq!(listed, variants);
     }
 
     #[test]

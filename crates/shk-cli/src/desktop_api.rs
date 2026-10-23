@@ -1601,7 +1601,7 @@ pub fn install_ai_hooks(path: &str, options: InstallAiHooksOptions) -> Result<Ac
         safety::require_project_policy(&root, "hooks install-ai")?;
     }
     let tool = options.tool.as_deref().map(parse_ai_tool).transpose()?;
-    let summaries = install_ai_with_summaries(
+    let report = install_ai_with_summaries(
         &root,
         tool,
         InstallAiOptions {
@@ -1621,7 +1621,7 @@ pub fn install_ai_hooks(path: &str, options: InstallAiHooksOptions) -> Result<Ac
         } else {
             "AI hooks installed".to_string()
         },
-        details: summaries,
+        details: report.summaries,
     })
 }
 
@@ -1633,11 +1633,9 @@ pub fn apply_ai_hook_settings(
     ensure_desktop_project_root_allowed(&root)?;
     safety::require_project_policy(&root, "hooks install-ai")?;
     let before = ai_safety_applied_from(&collect_project_check_status(&root));
-    let summaries = configure_ai_with_summaries(&root, desktop_configure_ai_options(&options))?;
+    let report = configure_ai_with_summaries(&root, desktop_configure_ai_options(&options))?;
     let after = ai_safety_applied_from(&collect_project_check_status(&root));
-    let skipped_opencode = summaries
-        .iter()
-        .any(|line| line.contains(crate::hooks::OPENCODE_SKIPPED));
+    let skipped_opencode = report.skipped.contains(&AiTool::Opencode);
     let message = if skipped_opencode {
         "OpenCode was skipped; see details. Other AI editor settings were applied".to_string()
     } else if ai_safety_applied_matches(&before, &after) {
@@ -1650,7 +1648,7 @@ pub fn apply_ai_hook_settings(
     Ok(ActionResult {
         success: true,
         message,
-        details: summaries,
+        details: report.summaries,
     })
 }
 
@@ -1857,11 +1855,18 @@ fn apply_recommended_fix(
                 anyhow::bail!("Claude hook refresh requires shk.toml");
             }
             // Re-install only the Claude Code hooks; deny and sandbox settings
-            // are left as they are.
+            // are left as they are. Keep `--audit` / `--log-blocked` from the
+            // command already installed, so a refresh does not change whether
+            // the hook blocks.
+            let settings = resolve_ai_config_path(AiTool::ClaudeCode, root, false)?;
+            let (audit, log_blocked) = crate::hooks::claude_managed_scan_flags(&settings)
+                .unwrap_or((false, DESKTOP_AI_HOOK_LOG_BLOCKED));
             install_ai_hooks(
                 &root.display().to_string(),
                 InstallAiHooksOptions {
                     tool: Some("claude-code".into()),
+                    audit,
+                    log_blocked,
                     ..desktop_default_install_ai_hooks_options()
                 },
             )
@@ -2383,43 +2388,34 @@ fn build_hooks_status(root: &Path, git_root: Option<&Path>) -> HooksStatus {
 }
 
 fn ai_tool_statuses(root: &Path, global: bool) -> Vec<AiHookToolStatus> {
-    [
-        AiTool::ClaudeCode,
-        AiTool::Codex,
-        AiTool::Cursor,
-        AiTool::Copilot,
-        AiTool::Antigravity,
-        AiTool::Grok,
-        AiTool::Opencode,
-        AiTool::Windsurf,
-    ]
-    .into_iter()
-    .filter_map(|tool| {
-        let config_path = resolve_ai_config_path(tool, root, global).ok()?;
-        // A stale or hand-edited managed OpenCode plugin still counts as
-        // installed, so applying other settings rewrites it rather than
-        // removing it; `shk doctor` reports the drift.
-        let bytes = config_path
-            .is_file()
-            .then(|| fs::read(&config_path).ok())
-            .flatten();
-        let installed = bytes
-            .as_deref()
-            .and_then(|b| std::str::from_utf8(b).ok())
-            .is_some_and(|s| crate::hooks::has_managed_hooks(tool, s));
-        // Decoded the way the installer decides whether it may overwrite.
-        let conflict = tool == AiTool::Opencode
-            && bytes.as_deref().is_some_and(|b| {
-                !crate::hooks::is_managed_opencode_plugin(&String::from_utf8_lossy(b))
-            });
-        Some(AiHookToolStatus {
-            tool: tool.kebab_str().to_string(),
-            config_path: config_path.display().to_string(),
-            installed,
-            conflict,
+    AiTool::all()
+        .into_iter()
+        .filter_map(|tool| {
+            let config_path = resolve_ai_config_path(tool, root, global).ok()?;
+            // A stale or hand-edited managed OpenCode plugin still counts as
+            // installed, so applying other settings rewrites it rather than
+            // removing it; `shk doctor` reports the drift.
+            let bytes = config_path
+                .is_file()
+                .then(|| fs::read(&config_path).ok())
+                .flatten();
+            let installed = bytes
+                .as_deref()
+                .and_then(|b| std::str::from_utf8(b).ok())
+                .is_some_and(|s| crate::hooks::has_managed_hooks(tool, s));
+            // Decoded the way the installer decides whether it may overwrite.
+            let conflict = tool == AiTool::Opencode
+                && bytes.as_deref().is_some_and(|b| {
+                    !crate::hooks::is_managed_opencode_plugin(&String::from_utf8_lossy(b))
+                });
+            Some(AiHookToolStatus {
+                tool: tool.kebab_str().to_string(),
+                config_path: config_path.display().to_string(),
+                installed,
+                conflict,
+            })
         })
-    })
-    .collect()
+        .collect()
 }
 
 fn resolve_ai_config_path(tool: AiTool, root: &Path, global: bool) -> Result<PathBuf> {
@@ -2883,7 +2879,7 @@ mod tests {
         );
         assert_eq!(
             dirs.iter()
-                .filter(|dir| **dir == PathBuf::from("/usr/bin"))
+                .filter(|dir| dir.as_path() == Path::new("/usr/bin"))
                 .count(),
             1
         );
@@ -3656,6 +3652,45 @@ mod tests {
         );
         let settings = fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
         assert!(settings.contains("Bash(custom:*)"), "{settings}");
+    }
+
+    #[test]
+    fn desktop_claude_hook_refresh_keeps_the_installed_scan_mode() {
+        let refresh = |command: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(dir.path().join("shk.toml"), "").unwrap();
+            fs::create_dir(dir.path().join(".claude")).unwrap();
+            fs::write(
+                dir.path().join(".claude/settings.json"),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "hooks": { "PreToolUse": [{
+                        "_shk_managed": true,
+                        "matcher": "Bash",
+                        "hooks": [{ "type": "command", "command": command }]
+                    }] }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            apply_recommended_fixes(
+                dir.path().to_str().unwrap(),
+                ApplyRecommendedFixesOptions {
+                    fix_ids: vec!["ai_claude_hook_matcher".into()],
+                    ignore_targets: Vec::new(),
+                    env_targets: None,
+                },
+            )
+            .unwrap();
+            fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap()
+        };
+
+        let audited = refresh("shk scan --hook-mode claude-code --audit");
+        assert!(audited.contains("--audit"), "{audited}");
+        assert!(!audited.contains("--log-blocked"), "{audited}");
+
+        let plain = refresh("shk scan --hook-mode claude-code");
+        assert!(!plain.contains("--audit"), "{plain}");
+        assert!(!plain.contains("--log-blocked"), "{plain}");
     }
 
     #[test]

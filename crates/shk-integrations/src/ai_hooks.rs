@@ -896,7 +896,7 @@ fn text_priority_chunks<'a>(
 ) {
     let mut push = |val: &'a Value, texts: &mut HookTexts<'a>| {
         if post {
-            push_strings_from_value(val, texts);
+            collect_large_strings(val, texts, 0);
         } else {
             push_envelope_strings(tool, val, read_paths, texts);
         }
@@ -950,23 +950,6 @@ fn grab_strings_for_keys_deep<'a>(
         Value::Array(a) => {
             for i in a {
                 grab_strings_for_keys_deep(i, keys, push, acc);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn push_strings_from_value<'a>(v: &'a Value, acc: &mut HookTexts<'a>) {
-    match v {
-        Value::String(s) => acc.push(s),
-        Value::Array(items) => {
-            for x in items {
-                push_strings_from_value(x, acc);
-            }
-        }
-        Value::Object(map) => {
-            for val in map.values() {
-                push_strings_from_value(val, acc);
             }
         }
         _ => {}

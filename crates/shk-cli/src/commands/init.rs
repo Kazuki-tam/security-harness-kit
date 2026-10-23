@@ -238,30 +238,9 @@ fn resolve_tools(prompt: &mut Prompt, args: &InitArgs) -> Result<Vec<AiTool>> {
         return Ok(dedupe_tools(&args.tools));
     }
     if args.yes {
-        return Ok(vec![
-            AiTool::ClaudeCode,
-            AiTool::Codex,
-            AiTool::Cursor,
-            AiTool::Copilot,
-            AiTool::Antigravity,
-            AiTool::Grok,
-            AiTool::Opencode,
-            AiTool::Windsurf,
-        ]);
+        return Ok(AiTool::all().to_vec());
     }
-    prompt.tools(
-        "AI tools",
-        &[
-            AiTool::ClaudeCode,
-            AiTool::Codex,
-            AiTool::Cursor,
-            AiTool::Copilot,
-            AiTool::Antigravity,
-            AiTool::Grok,
-            AiTool::Opencode,
-            AiTool::Windsurf,
-        ],
-    )
+    prompt.tools("AI tools", &AiTool::all())
 }
 
 fn dedupe_tools(tools: &[AiTool]) -> Vec<AiTool> {

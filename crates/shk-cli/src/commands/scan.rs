@@ -481,46 +481,16 @@ fn run_hook_mode(
         return run_user_prompt_mode(tool, audit, log_blocked, fail_on, &repo_root, stdin_trim);
     }
 
-    if should_run_action_guard(post, audit) {
-        let trusted_guard_roots = hook_action_guard_trusted_policy_roots(cwd, path_arg.as_path());
-        for guard_root in hook_action_guard_policy_roots(cwd, path_arg.as_path(), stdin_trim) {
-            let (policy, _) = match Policy::load_from_dir(&guard_root) {
-                Ok(loaded) => loaded,
-                Err(_) => {
-                    if !trusted_guard_roots.is_empty() && !trusted_guard_roots.contains(&guard_root)
-                    {
-                        continue;
-                    }
-                    let reason = action_guard_policy_error_reason(&guard_root);
-                    return deny_hook_with_log(
-                        &repo_root,
-                        log_blocked,
-                        tool,
-                        hook_event,
-                        &reason,
-                        BlockLog::PolicyError,
-                    );
-                }
-            };
-            let action_guard_config = action_guard_config_from_policy(&policy);
-            if !action_guard_config.enabled {
-                continue;
-            }
-            if let Some(guard_match) = shk_integrations::detect_dangerous_action_with_config(
-                stdin_trim,
-                &action_guard_config,
-            )? {
-                let reason = action_guard_deny_reason(&guard_match);
-                return deny_hook_with_log(
-                    &repo_root,
-                    log_blocked,
-                    tool,
-                    hook_event,
-                    &reason,
-                    BlockLog::ActionGuard(&guard_match),
-                );
-            }
-        }
+    let scan = HookScan {
+        tool,
+        post,
+        audit,
+        log_blocked,
+        event: hook_event,
+        repo_root: &repo_root,
+    };
+    if deny_dangerous_hook_action(&scan, cwd, path_arg.as_path(), stdin_trim)? {
+        return Ok(());
     }
 
     let shk_integrations::HookBody {
@@ -566,41 +536,111 @@ fn run_hook_mode(
         tool.integration_tool().virtual_path_label(),
     );
 
-    if audit {
-        if post {
-            append_post_audit_hook(&repo_root, tool, hook_event, &disp, &res);
+    emit_hook_scan_decision(&scan, &disp, &res, truncated)
+}
+
+struct HookScan<'a> {
+    tool: AiTool,
+    post: bool,
+    audit: bool,
+    log_blocked: bool,
+    event: hook_output::HookEvent,
+    repo_root: &'a Path,
+}
+
+/// Returns true when the call was denied and the hook response is already written.
+fn deny_dangerous_hook_action(
+    scan: &HookScan<'_>,
+    cwd: &Path,
+    path_arg: &Path,
+    stdin_trim: &str,
+) -> Result<bool> {
+    if !should_run_action_guard(scan.post, scan.audit) {
+        return Ok(false);
+    }
+    let trusted_guard_roots = hook_action_guard_trusted_policy_roots(cwd, path_arg);
+    for guard_root in hook_action_guard_policy_roots(cwd, path_arg, stdin_trim) {
+        let (policy, _) = match Policy::load_from_dir(&guard_root) {
+            Ok(loaded) => loaded,
+            Err(_) => {
+                if !trusted_guard_roots.is_empty() && !trusted_guard_roots.contains(&guard_root) {
+                    continue;
+                }
+                let reason = action_guard_policy_error_reason(&guard_root);
+                deny_hook_with_log(
+                    scan.repo_root,
+                    scan.log_blocked,
+                    scan.tool,
+                    scan.event,
+                    &reason,
+                    BlockLog::PolicyError,
+                )?;
+                return Ok(true);
+            }
+        };
+        let action_guard_config = action_guard_config_from_policy(&policy);
+        if !action_guard_config.enabled {
+            continue;
+        }
+        if let Some(guard_match) =
+            shk_integrations::detect_dangerous_action_with_config(stdin_trim, &action_guard_config)?
+        {
+            let reason = action_guard_deny_reason(&guard_match);
+            deny_hook_with_log(
+                scan.repo_root,
+                scan.log_blocked,
+                scan.tool,
+                scan.event,
+                &reason,
+                BlockLog::ActionGuard(&guard_match),
+            )?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn emit_hook_scan_decision(
+    scan: &HookScan<'_>,
+    disp: &str,
+    res: &ScanResult,
+    truncated: bool,
+) -> Result<()> {
+    if scan.audit {
+        if scan.post {
+            append_post_audit_hook(scan.repo_root, scan.tool, scan.event, disp, res);
         } else {
-            hook_audit_log::append_audit_hook(&repo_root, tool, hook_event, &disp, &res)?;
+            hook_audit_log::append_audit_hook(scan.repo_root, scan.tool, scan.event, disp, res)?;
         }
         println!(
             "{}",
             hook_output::allow_stdout_for_event(
-                tool,
-                hook_event,
+                scan.tool,
+                scan.event,
                 Some("shk audit: non-blocking (see .shk/audit.log)"),
             ),
         );
         return Ok(());
     }
 
-    if post {
-        if log_blocked {
-            append_post_audit_hook(&repo_root, tool, hook_event, &disp, &res);
+    if scan.post {
+        if scan.log_blocked {
+            append_post_audit_hook(scan.repo_root, scan.tool, scan.event, disp, res);
         }
-        emit_post_hook_result(tool, hook_event, &res);
+        emit_post_hook_result(scan.tool, scan.event, res);
         return Ok(());
     }
 
     if res.should_fail() {
         return deny_hook_with_log(
-            &repo_root,
-            log_blocked,
-            tool,
-            hook_event,
+            scan.repo_root,
+            scan.log_blocked,
+            scan.tool,
+            scan.event,
             HOOK_DENY_REASON_DEFAULT,
             BlockLog::Scan {
-                display_path: &disp,
-                result: &res,
+                display_path: disp,
+                result: res,
             },
         );
     }
@@ -608,10 +648,10 @@ fn run_hook_mode(
     // Part of the payload went unscanned, so a clean result proves nothing.
     if truncated {
         return deny_hook_with_log(
-            &repo_root,
-            log_blocked,
-            tool,
-            hook_event,
+            scan.repo_root,
+            scan.log_blocked,
+            scan.tool,
+            scan.event,
             HOOK_DENY_REASON_PAYLOAD_TOO_LARGE,
             BlockLog::PayloadTooLarge,
         );
@@ -619,7 +659,7 @@ fn run_hook_mode(
 
     println!(
         "{}",
-        hook_output::allow_stdout_for_event(tool, hook_event, None)
+        hook_output::allow_stdout_for_event(scan.tool, scan.event, None)
     );
     Ok(())
 }
