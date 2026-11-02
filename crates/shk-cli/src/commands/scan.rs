@@ -582,9 +582,19 @@ fn deny_dangerous_hook_action(
         if !action_guard_config.enabled {
             continue;
         }
-        if let Some(guard_match) =
-            shk_integrations::detect_dangerous_action_with_config(stdin_trim, &action_guard_config)?
-        {
+        let guard_match = match shk_integrations::detect_dangerous_action_with_config(
+            stdin_trim,
+            &action_guard_config,
+        )? {
+            None if scan.tool == AiTool::Opencode => {
+                shk_integrations::detect_opencode_code_mode_egress(
+                    stdin_trim,
+                    &action_guard_config,
+                )?
+            }
+            found => found,
+        };
+        if let Some(guard_match) = guard_match {
             let reason = action_guard_deny_reason(&guard_match);
             deny_hook_with_log(
                 scan.repo_root,
