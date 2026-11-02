@@ -296,7 +296,9 @@ OpenCode gets a managed plugin, `.opencode/plugins/shk-security.js`, that works 
 2.x plugin API and 1.x from 1.18.29. It runs `shk scan --hook-mode opencode` before and
 after every tool call (MCP tools and subagents included) and on each prompt. Pre-tool
 and prompt hooks fail closed: a missing `shk`, a timeout (30 s), or an unrecognized hook
-payload blocks. A blocked prompt is replaced by a notice. GUI-launched OpenCode may not
+payload blocks. A blocked prompt is replaced by a notice. On 2.x, MCP tools run inside the
+Code Mode `execute` tool; each call they make is hooked, and the action guard blocks
+`fetch` there as an external transfer. GUI-launched OpenCode may not
 see the shell `PATH`; set `SHK_BIN` to the absolute path of the `shk` executable (on
 Windows, the `shk.exe` path when shk came from npm). `shk doctor` warns when the plugin differs from the template.
 

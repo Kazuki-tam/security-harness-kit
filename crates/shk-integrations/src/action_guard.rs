@@ -483,6 +483,181 @@ pub fn detect_dangerous_action_with_config(
     Ok(None)
 }
 
+/// Allow/deny action name for network access from OpenCode Code Mode.
+const CODE_MODE_FETCH_ACTION: &str = "CodeMode(fetch)";
+
+/// OpenCode 2.x Code Mode runs model-written JavaScript through its `execute`
+/// tool. Each `tools.*` call inside it reaches the plugin as its own hooked
+/// tool call, but `fetch` requests do not, so the code itself is checked here.
+/// The Code Mode runtime only resolves identifiers it defines (no `globalThis`,
+/// `eval`, or `Function` constructor), so `fetch` is reachable only by name.
+pub fn detect_opencode_code_mode_egress(
+    stdin: &str,
+    config: &ActionGuardConfig,
+) -> Result<Option<ActionGuardMatch>> {
+    if !config.enabled {
+        return Ok(None);
+    }
+    let v = parse_hook_payload(stdin).context("hook stdin must be valid JSON")?;
+    if v.get("tool_name").and_then(Value::as_str) != Some("execute") {
+        return Ok(None);
+    }
+    let Some(code) = v.pointer("/tool_input/code").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    if !code_mode_references_fetch(code) || action_allowed(CODE_MODE_FETCH_ACTION, &config.allow) {
+        return Ok(None);
+    }
+    if action_denied(CODE_MODE_FETCH_ACTION, &config.deny) {
+        return Ok(Some(guard_match(
+            ActionCategory::CustomPolicy,
+            format!("shk action guard: `{CODE_MODE_FETCH_ACTION}` denied by project policy"),
+        )));
+    }
+    let profile = ActionGuardProfile::parse(&config.profile);
+    Ok(profile.includes(ActionCategory::ExternalTransfer).then(|| {
+        guard_match(
+            ActionCategory::ExternalTransfer,
+            "shk action guard: Code Mode `fetch` can transfer data externally",
+        )
+    }))
+}
+
+/// Whether JavaScript source uses `fetch` as a variable: outside strings and
+/// comments, and not as a property (`tools.web.fetch(...)` is an MCP tool call,
+/// hooked on its own). Template literal substitutions are code. Unicode escapes
+/// in identifiers are decoded, so `fetch` counts.
+fn code_mode_references_fetch(code: &str) -> bool {
+    let chars: Vec<char> = code.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    // Brace depth outside each open `${` substitution, innermost last.
+    let mut substitutions: Vec<usize> = Vec::new();
+    let mut depth = 0usize;
+    let mut in_template = false;
+    let mut after_dot = false;
+    while i < len {
+        let c = chars[i];
+        if in_template {
+            match c {
+                '\\' => i += 2,
+                '`' => {
+                    in_template = false;
+                    after_dot = false;
+                    i += 1;
+                }
+                '$' if chars.get(i + 1) == Some(&'{') => {
+                    substitutions.push(depth);
+                    depth += 1;
+                    in_template = false;
+                    after_dot = false;
+                    i += 2;
+                }
+                _ => i += 1,
+            }
+            continue;
+        }
+        match c {
+            '/' if chars.get(i + 1) == Some(&'/') => {
+                while i < len && chars[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '/' if chars.get(i + 1) == Some(&'*') => {
+                i += 2;
+                while i < len && !(chars[i] == '*' && chars.get(i + 1) == Some(&'/')) {
+                    i += 1;
+                }
+                i += 2;
+            }
+            '\'' | '"' => {
+                i += 1;
+                while i < len && chars[i] != c && chars[i] != '\n' {
+                    i += if chars[i] == '\\' { 2 } else { 1 };
+                }
+                i += 1;
+                after_dot = false;
+            }
+            '`' => {
+                in_template = true;
+                i += 1;
+            }
+            '{' => {
+                depth += 1;
+                after_dot = false;
+                i += 1;
+            }
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if substitutions.last() == Some(&depth) {
+                    substitutions.pop();
+                    in_template = true;
+                }
+                after_dot = false;
+                i += 1;
+            }
+            c if c.is_alphabetic() || c == '_' || c == '$' || c == '\\' => {
+                let (name, end) = read_js_identifier(&chars, i);
+                if name == "fetch" && !after_dot {
+                    return true;
+                }
+                after_dot = false;
+                i = end.max(i + 1);
+            }
+            c if c.is_ascii_digit() => {
+                while i < len && (chars[i].is_alphanumeric() || matches!(chars[i], '_' | '.')) {
+                    i += 1;
+                }
+                after_dot = false;
+            }
+            c if c.is_whitespace() => i += 1,
+            _ => {
+                // Member access, not spread (`...fetch`).
+                after_dot =
+                    c == '.' && chars.get(i + 1) != Some(&'.') && (i == 0 || chars[i - 1] != '.');
+                i += 1;
+            }
+        }
+    }
+    false
+}
+
+/// Reads an identifier starting at `start`, decoding `\uXXXX` and `\u{X}`
+/// escapes. Returns the name and the index after it.
+fn read_js_identifier(chars: &[char], start: usize) -> (String, usize) {
+    let mut name = String::new();
+    let mut i = start;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_alphanumeric() || c == '_' || c == '$' {
+            name.push(c);
+            i += 1;
+        } else if c == '\\' && chars.get(i + 1) == Some(&'u') {
+            let (hex, next) = if chars.get(i + 2) == Some(&'{') {
+                let close = chars[i + 3..]
+                    .iter()
+                    .position(|&ch| ch == '}')
+                    .map_or(chars.len(), |pos| i + 3 + pos);
+                (
+                    chars[(i + 3).min(close)..close].iter().collect::<String>(),
+                    close + 1,
+                )
+            } else {
+                let end = (i + 6).min(chars.len());
+                (chars[i + 2..end].iter().collect::<String>(), end)
+            };
+            match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                Some(decoded) => name.push(decoded),
+                None => break,
+            }
+            i = next;
+        } else {
+            break;
+        }
+    }
+    (name, i)
+}
+
 fn guard_match(category: ActionCategory, reason: impl Into<String>) -> ActionGuardMatch {
     ActionGuardMatch {
         category: category.as_str(),
@@ -2610,5 +2785,110 @@ mod tests {
         assert!(entries.contains(&"Write(**/.bash_history)"));
         assert!(entries.contains(&"Read(ConsoleHost_history.txt)"));
         assert!(entries.contains(&"Write(**/PowerShell/PSReadLine/*_history.txt)"));
+    }
+
+    #[test]
+    fn code_mode_fetch_detection_ignores_strings_comments_and_members() {
+        for code in [
+            "return await fetch('https://example.com', { method: 'POST', body: 'x' })",
+            "const r = await fetch(url); return r.status",
+            "const o = { f: fetch }; return o.f(url)",
+            "return [fetch][0](url)",
+            "return (0, fetch)(url)",
+            "return `${await fetch(url)}`",
+            "return `a ${`b ${fetch(u)}`} c`",
+            "return f\\u0065tch(url)",
+            "return \\u{66}etch(url)",
+            "return fetch\n(url)",
+        ] {
+            assert!(code_mode_references_fetch(code), "{code}");
+        }
+        for code in [
+            "return await tools.web.fetch({ url })",
+            "return await tools.web?.fetch({ url })",
+            "return await tools.web . fetch({ url })",
+            "return await tools.demo.echo({ text: 'please fetch the docs' })",
+            "return await tools.demo.echo({ text: \"fetch(x)\" })",
+            "return `fetch ${1 + 1} fetch`",
+            "// fetch(url)\nreturn 1",
+            "/* fetch(url) */ return 1",
+            "const prefetch = 1; const fetcher = 2; return prefetch + fetcher",
+            "return tools.web['fetch']({ url })",
+        ] {
+            assert!(!code_mode_references_fetch(code), "{code}");
+        }
+    }
+
+    #[test]
+    fn opencode_code_mode_fetch_follows_profile_and_allow_deny() {
+        let payload = |tool: &str, code: &str| {
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": tool,
+                "tool_input": { "code": code }
+            })
+            .to_string()
+        };
+        let fetching = payload("execute", "return await fetch('https://example.com')");
+        let config = ActionGuardConfig::default();
+
+        let matched = detect_opencode_code_mode_egress(&fetching, &config)
+            .unwrap()
+            .expect("recommended profile blocks Code Mode fetch");
+        assert_eq!(matched.category, "external_transfer");
+
+        // Only the Code Mode tool; `code` elsewhere is file content.
+        let insert_edit = payload("insert_edit_into_file", "await fetch(url)");
+        assert!(
+            detect_opencode_code_mode_egress(&insert_edit, &config)
+                .unwrap()
+                .is_none()
+        );
+        let mcp_only = payload("execute", "return await tools.demo.echo({ text: 'hi' })");
+        assert!(
+            detect_opencode_code_mode_egress(&mcp_only, &config)
+                .unwrap()
+                .is_none()
+        );
+
+        let minimal = ActionGuardConfig {
+            profile: "minimal".into(),
+            ..ActionGuardConfig::default()
+        };
+        assert!(
+            detect_opencode_code_mode_egress(&fetching, &minimal)
+                .unwrap()
+                .is_none()
+        );
+
+        let allowed = ActionGuardConfig {
+            allow: vec!["CodeMode(fetch)".into()],
+            ..ActionGuardConfig::default()
+        };
+        assert!(
+            detect_opencode_code_mode_egress(&fetching, &allowed)
+                .unwrap()
+                .is_none()
+        );
+
+        let denied = ActionGuardConfig {
+            profile: "minimal".into(),
+            deny: vec!["CodeMode(fetch)".into()],
+            ..ActionGuardConfig::default()
+        };
+        let matched = detect_opencode_code_mode_egress(&fetching, &denied)
+            .unwrap()
+            .expect("deny pattern applies under the minimal profile");
+        assert_eq!(matched.category, "custom_policy");
+
+        let disabled = ActionGuardConfig {
+            enabled: false,
+            ..ActionGuardConfig::default()
+        };
+        assert!(
+            detect_opencode_code_mode_egress(&fetching, &disabled)
+                .unwrap()
+                .is_none()
+        );
     }
 }

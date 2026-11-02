@@ -175,14 +175,22 @@ const parts = [
   { id: "p1", sessionID: "s", messageID: "m", type: "text", text: "use " + SECRET },
   { type: "file", url: "https://example.com/attachment" },
 ];
-await rejects(
-  () => v1["chat.message"]({ sessionID: "s" }, { message: {}, parts }),
-  /prompt blocked/,
-);
+// A blocked V1 draft is replaced, not rejected: a rejection only shows the
+// user a generic server error.
+await v1["chat.message"]({ sessionID: "s" }, { message: {}, parts });
 if (!noticePattern.test(parts[0].text) || parts[0].text.includes(SECRET))
   fail(`V1 prompt parts not scrubbed: ${parts[0].text}`);
 assert.equal(parts.length, 1, "denied V1 draft must discard attachment parts");
 assert.deepEqual([parts[0].id, parts[0].sessionID, parts[0].messageID], ["p1", "s", "m"]);
+await assert.rejects(
+  () =>
+    v1["chat.message"](
+      { sessionID: "s" },
+      { message: {}, parts: Object.freeze([{ type: "text", text: "use " + SECRET }]) },
+    ),
+  TypeError,
+  "a V1 draft that cannot be scrubbed must reject admission",
+);
 if (missing && !logs.some((entry) => /not found/.test(entry?.body?.message ?? "")))
   fail("V1 host was not warned about the missing binary");
 // Scanner protocol failures deny pre/prompt but never block post/audit.

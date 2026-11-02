@@ -11,8 +11,9 @@ mod hook_payload;
 pub use action_guard::{
     ActionGuardConfig, ActionGuardMatch, antigravity_recommended_deny_entries,
     claude_deny_entry_covers, claude_recommended_deny_entries, detect_dangerous_action,
-    detect_dangerous_action_with_config, normalize_claude_deny_entry, payload_command_hints,
-    payload_path_hints, payload_repository_context_hints,
+    detect_dangerous_action_with_config, detect_opencode_code_mode_egress,
+    normalize_claude_deny_entry, payload_command_hints, payload_path_hints,
+    payload_repository_context_hints,
 };
 pub use ai_hooks::{
     AiHookTool, HookBody, HookSegment, USER_PROMPT_HOOK_FAIL_ON, extract_user_prompt,

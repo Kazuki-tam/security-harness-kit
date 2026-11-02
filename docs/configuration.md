@@ -189,6 +189,8 @@ Action patterns use tool-like strings with `*` wildcards, such as `Bash(psql:*)`
 
 Shell commands are evaluated segment by segment. A single-command allow such as `Bash(echo:*)` does not allow a later segment in `echo ok && curl ...`; allow the complete compound command explicitly only when every segment is trusted. This prevents a broadly allowed first command from hiding a dangerous later command.
 
+OpenCode 2.x Code Mode (the `execute` tool, which runs model-written JavaScript) is checked for `fetch`: code that uses `fetch` outside strings and comments is blocked as `external_transfer` in the `recommended` and `strict` profiles. MCP calls such as `tools.web.fetch(...)` are not matched, because each reaches the hook as its own tool call. Use `CodeMode(fetch)` in `allow` to permit it, or in `deny` to block it under the `minimal` profile.
+
 The `strict` profile also blocks opaque execution forms such as `bash -c`, `sh -c`, `zsh -c`, `python -c`, `python3 -c`, `node -e`, `node --eval`, `ruby -e`, and `perl -e` instead of trying to fully interpret embedded scripts.
 
 ## Pseudonymize Settings
