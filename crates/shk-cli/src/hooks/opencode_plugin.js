@@ -386,11 +386,13 @@ export default {
           log,
         );
         if (!outcome.block) return;
-        // Replace the entire draft, attachment parts included, as on 2.x. A
-        // rejection here only surfaces as "Unexpected server error", so it is
-        // kept for drafts that cannot be replaced.
+        // Replace the entire draft, attachment parts included, as on 2.x.
+        // OpenCode 1.x stores and sends this same array after the hook
+        // (checked live on 1.19.5). A rejection here only surfaces as
+        // "Unexpected server error", so it is kept for drafts that cannot be
+        // replaced.
         const notice = promptNotice(outcome.reason);
-        if (!Array.isArray(output?.parts)) throw new Error(notice);
+        if (!Array.isArray(output?.parts) || output.parts.length === 0) throw new Error(notice);
         const { id, sessionID, messageID } = output.parts[0] ?? {};
         output.parts.splice(0, output.parts.length, { id, sessionID, messageID, type: "text", text: notice });
       },

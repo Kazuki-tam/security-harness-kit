@@ -7432,8 +7432,8 @@ fn hook_mode_opencode_denies_pre_tool_use_and_blocks_user_prompt() {
     std::fs::write(&fixture, format!("{secret}\n")).unwrap();
     let fixture = std::fs::canonicalize(fixture).unwrap();
 
-    let run = |payload: String, extra: &[&str]| {
-        let mut args = vec!["scan", ".", "--hook-mode", "opencode"];
+    let run_mode = |mode: &str, payload: String, extra: &[&str]| {
+        let mut args = vec!["scan", ".", "--hook-mode", mode];
         args.extend_from_slice(extra);
         Command::new(shk_bin())
             .args(&args)
@@ -7452,6 +7452,7 @@ fn hook_mode_opencode_denies_pre_tool_use_and_blocks_user_prompt() {
             })
             .expect("opencode hook")
     };
+    let run = |payload: String, extra: &[&str]| run_mode("opencode", payload, extra);
 
     let pre = run(
         serde_json::json!({
@@ -7521,6 +7522,19 @@ fn hook_mode_opencode_denies_pre_tool_use_and_blocks_user_prompt() {
     );
     let tools_only = code_mode("return await tools.demo.echo({ text: 'fetch the docs' })");
     assert_eq!(tools_only.status.code(), Some(0), "{tools_only:?}");
+    // Other editors have no Code Mode, so an `execute` tool there is not checked.
+    let other_editor = run_mode(
+        "claude-code",
+        serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "execute",
+            "tool_input": { "code": "return await fetch('https://example.com')" },
+            "cwd": root
+        })
+        .to_string(),
+        &[],
+    );
+    assert_eq!(other_editor.status.code(), Some(0), "{other_editor:?}");
 
     let clean = run(
         serde_json::json!({

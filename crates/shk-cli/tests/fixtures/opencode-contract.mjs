@@ -191,7 +191,11 @@ await assert.rejects(
   TypeError,
   "a V1 draft that cannot be scrubbed must reject admission",
 );
-if (missing && !logs.some((entry) => /not found/.test(entry?.body?.message ?? "")))
+// Only a fail-closed verdict blocks an empty draft; with no part to take the
+// ids from, the notice cannot be stored as a valid part.
+if (missing)
+  await rejects(() => v1["chat.message"]({ sessionID: "s" }, { message: {}, parts: [] }), noticePattern);
+if (missing &&!logs.some((entry) => /not found/.test(entry?.body?.message ?? "")))
   fail("V1 host was not warned about the missing binary");
 // Scanner protocol failures deny pre/prompt but never block post/audit.
 for (const result of [

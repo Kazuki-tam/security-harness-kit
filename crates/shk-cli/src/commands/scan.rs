@@ -586,7 +586,7 @@ fn deny_dangerous_hook_action(
             stdin_trim,
             &action_guard_config,
         )? {
-            None if matches!(scan.tool, AiTool::Opencode) => {
+            None if scan.tool == AiTool::Opencode => {
                 shk_integrations::detect_opencode_code_mode_egress(
                     stdin_trim,
                     &action_guard_config,

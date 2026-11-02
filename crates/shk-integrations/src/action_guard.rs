@@ -490,7 +490,8 @@ const CODE_MODE_FETCH_ACTION: &str = "CodeMode(fetch)";
 /// tool. Each `tools.*` call inside it reaches the plugin as its own hooked
 /// tool call, but `fetch` requests do not, so the code itself is checked here.
 /// The Code Mode runtime only resolves identifiers it defines (no `globalThis`,
-/// `eval`, or `Function` constructor), so `fetch` is reachable only by name.
+/// `eval`, global `this`, or `Function` constructor, including through
+/// `.constructor`), so `fetch` is reachable only by name.
 pub fn detect_opencode_code_mode_egress(
     stdin: &str,
     config: &ActionGuardConfig,
@@ -523,19 +524,40 @@ pub fn detect_opencode_code_mode_egress(
     }))
 }
 
-/// Whether JavaScript source uses `fetch` as a variable: outside strings and
-/// comments, and not as a property (`tools.web.fetch(...)` is an MCP tool call,
-/// hooked on its own). Template literal substitutions are code. Unicode escapes
-/// in identifiers are decoded, so `fetch` counts.
+/// Whether JavaScript source uses `fetch` as a variable, not as a property
+/// (`tools.web.fetch(...)` is an MCP tool call, hooked on its own). Strings and
+/// comments are skipped only while the source can be split into them exactly:
+/// a `/` that is not a comment (division or a regex literal) or an HTML-like
+/// comment needs a parser to place, so then every word counts, strings and
+/// comments included.
 fn code_mode_references_fetch(code: &str) -> bool {
     let chars: Vec<char> = code.chars().collect();
+    code_tokens_reference_fetch(&chars).unwrap_or_else(|| words_reference_fetch(&chars))
+}
+
+/// `Some(found)` after a full pass over code, strings, templates, and comments;
+/// `None` at the first construct this lexer cannot place without a parser.
+fn code_tokens_reference_fetch(chars: &[char]) -> Option<bool> {
     let len = chars.len();
+    let at = |i: usize, text: &str| {
+        text.chars()
+            .enumerate()
+            .all(|(k, ch)| chars.get(i + k) == Some(&ch))
+    };
     let mut i = 0;
     // Brace depth outside each open `${` substitution, innermost last.
     let mut substitutions: Vec<usize> = Vec::new();
     let mut depth = 0usize;
     let mut in_template = false;
     let mut after_dot = false;
+    // Last punctuator outside comments, or `None` after a word or literal.
+    let mut prev: Option<char> = None;
+    // `fetch` right after `{` or `,`: an object key or label if `:` follows.
+    let mut maybe_key = false;
+    // A hashbang line is a comment only at the very start.
+    if at(0, "#!") {
+        i = skip_line(chars, 0);
+    }
     while i < len {
         let c = chars[i];
         if in_template {
@@ -544,6 +566,7 @@ fn code_mode_references_fetch(code: &str) -> bool {
                 '`' => {
                     in_template = false;
                     after_dot = false;
+                    prev = None;
                     i += 1;
                 }
                 '$' if chars.get(i + 1) == Some(&'{') => {
@@ -551,32 +574,50 @@ fn code_mode_references_fetch(code: &str) -> bool {
                     depth += 1;
                     in_template = false;
                     after_dot = false;
+                    prev = Some('{');
                     i += 2;
                 }
                 _ => i += 1,
             }
             continue;
         }
-        match c {
-            '/' if chars.get(i + 1) == Some(&'/') => {
-                while i < len && chars[i] != '\n' {
-                    i += 1;
-                }
+        let comment = c == '/' && matches!(chars.get(i + 1), Some('/' | '*'));
+        if maybe_key && !c.is_whitespace() && !comment {
+            if c != ':' {
+                return Some(true);
             }
+            maybe_key = false;
+        }
+        match c {
+            // Comments do not end a member access (`x./* */fetch`).
+            '/' if chars.get(i + 1) == Some(&'/') => i = skip_line(chars, i),
             '/' if chars.get(i + 1) == Some(&'*') => {
                 i += 2;
-                while i < len && !(chars[i] == '*' && chars.get(i + 1) == Some(&'/')) {
+                while i < len && !at(i, "*/") {
                     i += 1;
                 }
                 i += 2;
             }
+            '/' => return None,
+            '<' if at(i, "<!--") => return None,
+            '-' if at(i, "-->") => return None,
+            // A raw line break inside a string is a syntax error, so strings
+            // end only at their quote; `\` skips the next character, which
+            // keeps `\` + CRLF line continuations inside the string.
             '\'' | '"' => {
                 i += 1;
-                while i < len && chars[i] != c && chars[i] != '\n' {
-                    i += if chars[i] == '\\' { 2 } else { 1 };
+                while i < len && chars[i] != c {
+                    i += if chars[i] == '\\' && at(i + 1, "\r\n") {
+                        3
+                    } else if chars[i] == '\\' {
+                        2
+                    } else {
+                        1
+                    };
                 }
                 i += 1;
                 after_dot = false;
+                prev = None;
             }
             '`' => {
                 in_template = true;
@@ -585,6 +626,7 @@ fn code_mode_references_fetch(code: &str) -> bool {
             '{' => {
                 depth += 1;
                 after_dot = false;
+                prev = Some('{');
                 i += 1;
             }
             '}' => {
@@ -594,14 +636,19 @@ fn code_mode_references_fetch(code: &str) -> bool {
                     in_template = true;
                 }
                 after_dot = false;
+                prev = Some('}');
                 i += 1;
             }
             c if c.is_alphabetic() || c == '_' || c == '$' || c == '\\' => {
-                let (name, end) = read_js_identifier(&chars, i);
+                let (name, end) = read_js_identifier(chars, i);
                 if name == "fetch" && !after_dot {
-                    return true;
+                    if !matches!(prev, Some('{' | ',')) {
+                        return Some(true);
+                    }
+                    maybe_key = true;
                 }
                 after_dot = false;
+                prev = None;
                 i = end.max(i + 1);
             }
             c if c.is_ascii_digit() => {
@@ -609,17 +656,70 @@ fn code_mode_references_fetch(code: &str) -> bool {
                     i += 1;
                 }
                 after_dot = false;
+                prev = None;
             }
             c if c.is_whitespace() => i += 1,
             _ => {
-                // Member access, not spread (`...fetch`).
-                after_dot =
-                    c == '.' && chars.get(i + 1) != Some(&'.') && (i == 0 || chars[i - 1] != '.');
+                // Member access (not spread, `...fetch`) or a private name.
+                after_dot = c == '#'
+                    || (c == '.'
+                        && chars.get(i + 1) != Some(&'.')
+                        && (i == 0 || chars[i - 1] != '.'));
+                prev = Some(c);
                 i += 1;
             }
         }
     }
+    Some(maybe_key)
+}
+
+/// Every `fetch` word, wherever it is, except a property (`.` before it on the
+/// same line), an object key (`{` or `,` before it and `:` after it on the
+/// same line), and prose such as `fetch the docs` (another word after it on
+/// the same line). JavaScript allows only `in`, `instanceof`, and `of` there;
+/// `in` and `instanceof` can hand `fetch` to user code (`Symbol.hasInstance`,
+/// `Symbol.toPrimitive`), so they count, while `of` only follows an
+/// assignment target (`for (fetch of list)`).
+fn words_reference_fetch(chars: &[char]) -> bool {
+    let blank = |ch: char| ch == ' ' || ch == '\t';
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if !(c.is_alphanumeric() || c == '_' || c == '$' || c == '\\') {
+            i += 1;
+            continue;
+        }
+        let (name, end) = read_js_identifier(chars, i);
+        if name == "fetch" {
+            let mut back = chars[..i].iter().copied().rev().skip_while(|&ch| blank(ch));
+            let before = back.next();
+            let dot_before = before == Some('.') && back.next() != Some('.');
+            let after = chars[end..]
+                .iter()
+                .position(|&ch| !blank(ch))
+                .map(|k| end + k);
+            let prose_after = after.is_some_and(|k| {
+                k > end
+                    && (chars[k].is_alphanumeric() || chars[k] == '_' || chars[k] == '$')
+                    && !matches!(read_js_identifier(chars, k).0.as_str(), "in" | "instanceof")
+            });
+            let key = matches!(before, Some('{' | ',')) && after.is_some_and(|k| chars[k] == ':');
+            if !dot_before && !prose_after && !key {
+                return true;
+            }
+        }
+        i = end.max(i + 1);
+    }
     false
+}
+
+/// Index after the line terminator-free run starting at `start`. JavaScript
+/// ends a line at LF, CR, U+2028, and U+2029.
+fn skip_line(chars: &[char], start: usize) -> usize {
+    chars[start..]
+        .iter()
+        .position(|&ch| matches!(ch, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
+        .map_or(chars.len(), |k| start + k)
 }
 
 /// Reads an identifier starting at `start`, decoding `\uXXXX` and `\u{X}`
@@ -633,20 +733,26 @@ fn read_js_identifier(chars: &[char], start: usize) -> (String, usize) {
             name.push(c);
             i += 1;
         } else if c == '\\' && chars.get(i + 1) == Some(&'u') {
+            // An unterminated escape ends the identifier.
             let (hex, next) = if chars.get(i + 2) == Some(&'{') {
-                let close = chars[i + 3..]
-                    .iter()
-                    .position(|&ch| ch == '}')
-                    .map_or(chars.len(), |pos| i + 3 + pos);
+                let Some(close) = chars[i + 3..].iter().position(|&ch| ch == '}') else {
+                    break;
+                };
                 (
-                    chars[(i + 3).min(close)..close].iter().collect::<String>(),
-                    close + 1,
+                    chars[i + 3..i + 3 + close].iter().collect::<String>(),
+                    i + 4 + close,
                 )
+            } else if i + 6 <= chars.len() {
+                (chars[i + 2..i + 6].iter().collect::<String>(), i + 6)
             } else {
-                let end = (i + 6).min(chars.len());
-                (chars[i + 2..end].iter().collect::<String>(), end)
+                break;
             };
-            match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+            let digits = !hex.is_empty() && hex.chars().all(|ch| ch.is_ascii_hexdigit());
+            match digits
+                .then(|| u32::from_str_radix(&hex, 16).ok())
+                .flatten()
+                .and_then(char::from_u32)
+            {
                 Some(decoded) => name.push(decoded),
                 None => break,
             }
@@ -2788,7 +2894,7 @@ mod tests {
     }
 
     #[test]
-    fn code_mode_fetch_detection_ignores_strings_comments_and_members() {
+    fn code_mode_fetch_detection_ignores_strings_comments_members_and_keys() {
         for code in [
             "return await fetch('https://example.com', { method: 'POST', body: 'x' })",
             "const r = await fetch(url); return r.status",
@@ -2800,22 +2906,102 @@ mod tests {
             "return f\\u0065tch(url)",
             "return \\u{66}etch(url)",
             "return fetch\n(url)",
+            // Shorthand properties and ternaries are references, not keys.
+            "return { fetch }",
+            "return { a: 1, fetch }",
+            "return { fetch /* x */ }",
+            "const o = { fetch, x: 1 }",
+            "const o = { a: c ? fetch : null }",
+            "const o = { a: 1, fetch",
+            // Line comments end at every JavaScript line terminator.
+            "// note\rreturn fetch(u)",
+            "// note\u{2028}return fetch(u)",
+            "// note\u{2029}return fetch(u)",
+            // `\` + CRLF continues a string.
+            "const s = 'abc\\\r\ndef'; return fetch(u)",
         ] {
-            assert!(code_mode_references_fetch(code), "{code}");
+            assert!(code_mode_references_fetch(code), "{code:?}");
         }
         for code in [
             "return await tools.web.fetch({ url })",
             "return await tools.web?.fetch({ url })",
             "return await tools.web . fetch({ url })",
+            "return await tools.web./* x */fetch({ url })",
+            "return await tools.web\n  .fetch({ url })",
             "return await tools.demo.echo({ text: 'please fetch the docs' })",
             "return await tools.demo.echo({ text: \"fetch(x)\" })",
             "return `fetch ${1 + 1} fetch`",
             "// fetch(url)\nreturn 1",
             "/* fetch(url) */ return 1",
+            "#!/usr/bin/env fetch\nreturn 1",
             "const prefetch = 1; const fetcher = 2; return prefetch + fetcher",
             "return tools.web['fetch']({ url })",
+            "return await tools.web.crawl({ url, fetch: true })",
+            "return await tools.web.crawl({ fetch /* c */ : true })",
+            "const { fetch: f } = tools.web; return f",
+            "class A { #fetch = 1 }",
+            // `\u+066` is not a JavaScript escape.
+            "return f\\u+066etch",
         ] {
-            assert!(!code_mode_references_fetch(code), "{code}");
+            assert!(!code_mode_references_fetch(code), "{code:?}");
+        }
+    }
+
+    #[test]
+    fn code_mode_fetch_detection_falls_back_to_words_when_lexing_is_ambiguous() {
+        // A regex literal can hold a quote, backtick, or comment opener, and
+        // HTML-like comments hide what follows; none may hide a `fetch`.
+        for code in [
+            "const re = /'/; return await fetch('https://example.com')",
+            "if (1) /'/.test(\"\"); return fetch(u)",
+            "const re = /`/;\nreturn await fetch(u)\n// `",
+            "const re = /\\/\\//; return fetch(u)",
+            "const re = /\\/*/; return fetch(u) // */",
+            "const re = /[/*]/; return fetch(u); // */",
+            "const a = 6 / 3; return a / fetch(u) / 1",
+            "<!-- `\nreturn fetch(u)\n// `",
+            "x\n--> `\nreturn fetch(u)\n// `",
+            "#! `\nreturn fetch(u)\n// `",
+            "const n = 1 / 2; //.\nreturn fetch(u)",
+            "const n = 1 / 2; return x.y ...fetch",
+            "const n = 1 / 2; x = fetch\nfoo()",
+            "const n = 1 / 2; return fetch",
+            "const n = 1 / 2; return { a: 1, fetch }",
+            "const n = 1 / 2; return { fetch\n: 1 }",
+            // In the fallback, strings and comments count too.
+            "const n = 1 / 2; return 'fetch(u)'",
+            // `instanceof` and `in` pass `fetch` to user code; they are not prose.
+            "const n = 1 / 2; const C = { [Symbol.hasInstance](f) { g = f } };\nfetch instanceof C",
+            "const n = 1 / 2;\nfetch\tinstanceof C",
+            "const n = 1 / 2;\nfetch in {}",
+        ] {
+            assert!(code_mode_references_fetch(code), "{code:?}");
+        }
+        for code in [
+            "const n = 6 / 3; return tools.web.fetch({ url })",
+            "const n = 6 / 3; return tools.demo.echo({ text: 'please fetch the docs' })",
+            "const n = 6 / 3; return tools.github.search({ q: 'fetch api' })",
+            "const n = 6 / 3; return tools.web.crawl({ url, fetch: true })",
+        ] {
+            assert!(!code_mode_references_fetch(code), "{code:?}");
+        }
+        // Truncated escapes and unterminated constructs do not panic.
+        for code in [
+            "\\",
+            "\\u",
+            "\\u{",
+            "\\u{110000}",
+            "'\\",
+            "`\\",
+            "`${",
+            "/*",
+            "#!",
+            "f\\u006",
+            "'\\\r",
+            "1/2;fetc\\u{68",
+            "1/2;fetc\\u006",
+        ] {
+            code_mode_references_fetch(code);
         }
     }
 
