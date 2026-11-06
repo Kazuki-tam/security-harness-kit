@@ -531,7 +531,7 @@ fn claude_hook_on_failure_ok(value: &Value) -> bool {
             let audit = hook
                 .get("command")
                 .and_then(Value::as_str)
-                .is_some_and(|command| command.split_whitespace().any(|arg| arg == "--audit"));
+                .is_some_and(crate::hooks::claude_command_is_audit);
             audit
                 || hook.get("onFailure").and_then(Value::as_str)
                     == Some(crate::hooks::CLAUDE_HOOK_ON_FAILURE)

@@ -6019,6 +6019,10 @@ fn doctor_warns_when_managed_claude_pre_tool_matcher_is_outdated() {
         fresh["claudePermissions"]["pre_tool_matcher_ok"], true,
         "{fresh}"
     );
+    assert_eq!(
+        fresh["claudePermissions"]["hook_on_failure_ok"], true,
+        "a fresh install must not warn about its own hooks: {fresh}"
+    );
 
     // Rewrite the managed block to the matcher written before Edit coverage.
     let settings_path = dir.path().join(".claude/settings.json");

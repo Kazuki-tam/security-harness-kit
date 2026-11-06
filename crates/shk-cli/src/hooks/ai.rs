@@ -494,9 +494,14 @@ pub fn claude_managed_scan_flags(settings: &Path) -> Option<(bool, bool)> {
         .and_then(Value::as_array)?
         .iter()
         .find_map(|hook| hook.get("command").and_then(Value::as_str))?;
-    let audit = command.split_whitespace().any(|arg| arg == "--audit");
+    let audit = claude_command_is_audit(command);
     let log_blocked = !audit && command.split_whitespace().any(|arg| arg == "--log-blocked");
     Some((audit, log_blocked))
+}
+
+/// True when a managed hook command was installed with `--audit` and so never blocks.
+pub(crate) fn claude_command_is_audit(command: &str) -> bool {
+    command.split_whitespace().any(|arg| arg == "--audit")
 }
 
 fn push_managed_claude(root: &mut Value, key: &str, block: Value) -> Result<()> {

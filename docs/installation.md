@@ -320,6 +320,8 @@ target/release/shk
 
 `shk` does not ship a dedicated `shk uninstall` command. Removal has two layers: the CLI binary, and any project or user-level files written by `shk` while it was in use.
 
+Remove managed Claude Code hooks before the binary. Otherwise Claude Code blocks prompts and tool calls in those projects, or in every project for a `--global` install, until the entries are removed. See [step 2](#2-remove-project-artifacts).
+
 ### 1. Remove The Binary
 
 Pick the method that matches how `shk` was installed.
@@ -371,7 +373,7 @@ Source build: run `cargo clean` in the cloned repository to remove build output,
 | `shk init` with npm hardening | `.npmrc`, `pnpm-workspace.yaml`, `.yarnrc.yml`, `bunfig.toml` as applicable | Project package-manager hardening files. Remove only settings added for `ignore-scripts` or package age gates if the file also contains your own package-manager configuration. |
 | `shk scan --audit`, audit-mode hooks | `.shk/audit.log` and the `.shk/` directory | Metadata-only audit log. |
 | `shk hooks install` | `.git/hooks/pre-commit` | Managed block delimited by `# shk-managed-start` / `# shk-managed-end`. Delete the file if `shk` is the only owner, or remove just the managed block to keep other pre-commit logic. |
-| `shk hooks install-ai` (Claude Code) | `.claude/settings.json` | Remove entries tagged with `"_shk_managed": true`. Delete the file if it has no remaining entries. If you used `--apply-deny` or `--apply-sandbox`, also review the `permissions.deny` and `sandbox` settings that were merged into the same file. |
+| `shk hooks install-ai` (Claude Code) | `.claude/settings.json` (global: `~/.claude/settings.json`) | Remove entries tagged with `"_shk_managed": true`. Delete the file if it has no remaining entries. If you used `--apply-deny` or `--apply-sandbox`, also review the `permissions.deny` and `sandbox` settings that were merged into the same file. |
 | `shk hooks install-ai` (Cursor) | `.cursor/hooks.json` | Remove entries tagged with `"_shk_managed": true`. |
 | `shk hooks install-ai` (Codex) | `.codex/config.toml` | Remove the block delimited by `# shk-managed-start` / `# shk-managed-end`, and `features.hooks = true` if no longer needed. The managed block covers `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, and `PostToolUse`. If you used `--apply-sandbox`, also review the top-level `sandbox_mode` and `approval_policy` values. |
 | `shk hooks install-ai` (Copilot) | `.github/hooks/shk-security.json` | Remove entries whose command contains `shk scan --hook-mode copilot`. |

@@ -128,6 +128,8 @@ pub struct DoctorStatus {
     pub missing_ignore_patterns: Vec<String>,
     pub claude_deny_ok: bool,
     pub claude_sandbox_ok: bool,
+    /// `false` when the managed Claude Code hooks need a refresh: an outdated
+    /// matcher or a missing `onFailure`, not only the matcher its name suggests.
     pub claude_hook_matcher_ok: bool,
     pub codex_config_ok: bool,
     pub env_applicable: bool,
