@@ -44,7 +44,7 @@ libc.workspace = true
 dotenvx.workspace = true
 arboard.workspace = true
 encoding_rs.workspace = true
-keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"] }
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native-async-persistent", "async-io", "crypto-rust"] }
 fs2 = "0.4.3"
 wait-timeout = "0.2.1"
 

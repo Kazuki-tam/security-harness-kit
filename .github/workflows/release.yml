@@ -131,6 +131,11 @@ jobs:
         shell: bash
         run: ./target/${{ matrix.target }}/dist/shk --version
 
+      - name: verify CLI linkage (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: ./.github/scripts/ci/verify-cli-linkage.sh ./target/${{ matrix.target }}/dist/shk
+
       - name: smoke version
         if: runner.os == 'Windows'
         shell: pwsh

@@ -82,6 +82,16 @@ jobs:
           # pubkey assertion only applies to real release workflows.
           SHK_ALLOW_MISSING_UPDATER_PUBKEY: "1"
 
+      - name: verify CLI linkage (Linux)
+        if: runner.os == 'Linux'
+        run: ./.github/scripts/ci/verify-cli-linkage.sh target/release/shk
+
+      - name: env store end-to-end (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y dbus gnome-keyring
+          dbus-run-session -- ./.github/scripts/ci/test-linux-env-store.sh target/release/shk
+
       - name: optimized GTK string iterator regression
         if: runner.os == 'Linux'
         run: cargo test -p shk-desktop --release --test glib_regression --locked
@@ -265,3 +275,6 @@ jobs:
 
       - name: test release scripts
         run: ./.github/scripts/release/test.sh
+
+      - name: test CLI linkage guard
+        run: ./.github/scripts/ci/test-verify-cli-linkage.sh
