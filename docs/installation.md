@@ -178,6 +178,8 @@ The formula file (`shk.rb`) is also attached to each release as an asset. Curren
 
 Intel macOS, Apple Silicon macOS, Linux x86_64/aarch64, and Windows x86_64 are supported. Scoop manifests are not published by the current release pipeline.
 
+On Linux, the CLI only needs glibc, so it runs in minimal containers such as `debian:bookworm-slim`. musl-based images such as Alpine are not supported. With `[env].secret_store = "keyring"` (the default), `shk env` also needs a Secret Service provider such as gnome-keyring in a running D-Bus session; in containers and on headless servers, use the [1Password backend](commands.md) instead. `shk scan` and the AI hooks do not use the secret store.
+
 ## Desktop App
 
 The desktop app is distributed separately from the CLI. The hooks that Quick
