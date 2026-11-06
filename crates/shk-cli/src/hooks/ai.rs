@@ -28,6 +28,10 @@ const CURSOR_PROJECT_DIR_ARG: &str = r#""${CURSOR_PROJECT_DIR:-.}""#;
 pub(crate) const CLAUDE_PRE_TOOL_USE_MATCHER: &str =
     "Read|Write|Edit|MultiEdit|NotebookEdit|Bash|WebFetch|mcp__.*";
 pub(crate) const CLAUDE_POST_TOOL_USE_MATCHER: &str = "WebFetch|WebSearch|Bash|mcp__.*|Skill|Agent";
+/// `onFailure` value on managed Claude Code handlers for events that can block.
+/// Existing installs keep what they were written with, so `shk doctor` warns
+/// when a blocking handler lacks it.
+pub(crate) const CLAUDE_HOOK_ON_FAILURE: &str = "block";
 
 #[derive(Clone, Copy, Debug)]
 pub struct InstallAiOptions {
@@ -490,9 +494,14 @@ pub fn claude_managed_scan_flags(settings: &Path) -> Option<(bool, bool)> {
         .and_then(Value::as_array)?
         .iter()
         .find_map(|hook| hook.get("command").and_then(Value::as_str))?;
-    let audit = command.split_whitespace().any(|arg| arg == "--audit");
+    let audit = claude_command_is_audit(command);
     let log_blocked = !audit && command.split_whitespace().any(|arg| arg == "--log-blocked");
     Some((audit, log_blocked))
+}
+
+/// True when a managed hook command was installed with `--audit` and so never blocks.
+pub(crate) fn claude_command_is_audit(command: &str) -> bool {
+    command.split_whitespace().any(|arg| arg == "--audit")
 }
 
 fn push_managed_claude(root: &mut Value, key: &str, block: Value) -> Result<()> {
@@ -727,6 +736,18 @@ fn remove_json_string_array_item(
     removed
 }
 
+/// Handler for an event that can block. Without `onFailure`, Claude Code lets
+/// the action proceed when `shk` is missing or cannot start, so the session
+/// loses its protection silently. `--audit` installs never block, by design.
+/// Claude Code older than v2.1.295 ignores the field.
+fn claude_blocking_hook(command: &str, audit: bool) -> Value {
+    let mut hook = json!({ "type": "command", "command": command });
+    if !audit {
+        hook["onFailure"] = json!(CLAUDE_HOOK_ON_FAILURE);
+    }
+    hook
+}
+
 fn apply_claude(
     path: &Path,
     opts: InstallAiOptions,
@@ -744,8 +765,10 @@ fn apply_claude(
     let pre_block = json!({
         "_shk_managed": true,
         "matcher": CLAUDE_PRE_TOOL_USE_MATCHER,
-        "hooks": [{ "type": "command", "command": commands.pre }]
+        "hooks": [claude_blocking_hook(&commands.pre, opts.audit)]
     });
+    // Post hooks stay continuity-first: the tool already ran, so there is
+    // nothing left to block.
     let post_block = json!({
         "_shk_managed": true,
         "matcher": CLAUDE_POST_TOOL_USE_MATCHER,
@@ -753,7 +776,7 @@ fn apply_claude(
     });
     let user_prompt_block = json!({
         "_shk_managed": true,
-        "hooks": [{ "type": "command", "command": commands.user_prompt }]
+        "hooks": [claude_blocking_hook(&commands.user_prompt, opts.audit)]
     });
 
     push_managed_claude(&mut root, "UserPromptSubmit", user_prompt_block)?;
@@ -2385,6 +2408,65 @@ mod tests {
             cmd.contains(&format!("--fail-on {USER_PROMPT_HOOK_FAIL_ON}")),
             "UserPromptSubmit should block medium PII: {cmd}"
         );
+    }
+
+    fn claude_managed_handlers(root: &Value, event: &str) -> Vec<Value> {
+        root["hooks"][event]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|block| is_managed_claude_block(block))
+            .flat_map(|block| block["hooks"].as_array().unwrap().clone())
+            .collect()
+    }
+
+    fn apply_claude_with_audit(path: &Path, audit: bool) {
+        let opts = InstallAiOptions {
+            audit,
+            log_blocked: false,
+            apply_deny: false,
+            apply_sandbox: false,
+            fail_closed: false,
+            dry_run: false,
+            global: false,
+        };
+        apply_claude(path, opts, false, None).unwrap();
+    }
+
+    #[test]
+    fn claude_blocking_hooks_block_when_shk_cannot_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        apply_claude_with_audit(&path, false);
+
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        for event in ["PreToolUse", "UserPromptSubmit"] {
+            let handlers = claude_managed_handlers(&root, event);
+            assert_eq!(handlers.len(), 1, "{event}: {handlers:?}");
+            assert_eq!(handlers[0]["onFailure"], "block", "{event}");
+        }
+        let post = claude_managed_handlers(&root, "PostToolUse");
+        assert!(
+            post[0].get("onFailure").is_none(),
+            "post hooks must not block: {post:?}"
+        );
+    }
+
+    #[test]
+    fn claude_audit_hooks_stay_non_blocking_and_rerun_refreshes_handlers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        apply_claude_with_audit(&path, false);
+        apply_claude_with_audit(&path, true);
+
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        for event in ["PreToolUse", "UserPromptSubmit", "PostToolUse"] {
+            let handlers = claude_managed_handlers(&root, event);
+            assert_eq!(handlers.len(), 1, "{event}: {handlers:?}");
+            assert!(handlers[0].get("onFailure").is_none(), "{event}");
+        }
     }
 
     #[test]

@@ -453,7 +453,7 @@ shk doctor --strict
 
 `shk doctor` runs the available diagnostics for the current directory. The full check includes the running and PATH-resolved `shk` executables, Git hooks, managed AI hooks, ignore coverage, plaintext env files, GitHub Actions checkout hardening, and npm/package-manager supply-chain hardening when `package.json` is present.
 
-Managed AI hooks are also checked for drift: doctor warns when a shk-managed Claude Code `PreToolUse` block in `.claude/settings.json` uses a matcher other than the one `shk hooks install-ai` writes today (for example an install from before `Edit` / `MultiEdit` / `NotebookEdit` coverage, or a hand edit), and when the managed OpenCode plugin differs from the embedded template. Re-run `shk hooks install-ai --tool claude-code` (or `--tool opencode`) to refresh the managed entries, passing `--audit` or `--log-blocked` again if the hooks were installed that way. The desktop app offers the Claude Code refresh as a recommended fix. The Claude Code result is reported in JSON as `claudePermissions.pre_tool_matcher_ok`.
+Managed AI hooks are also checked for drift: doctor warns when a shk-managed Claude Code `PreToolUse` block in `.claude/settings.json` uses a matcher other than the one `shk hooks install-ai` writes today (for example an install from before `Edit` / `MultiEdit` / `NotebookEdit` coverage, or a hand edit), when a managed `PreToolUse` or `UserPromptSubmit` handler lacks `onFailure: "block"` (unless it was installed with `--audit`), and when the managed OpenCode plugin differs from the embedded template. Re-run `shk hooks install-ai --tool claude-code` (or `--tool opencode`) to refresh the managed entries, passing `--audit` or `--log-blocked` again if the hooks were installed that way. The desktop app offers the Claude Code refresh as a recommended fix. The Claude Code results are reported in JSON as `claudePermissions.pre_tool_matcher_ok` and `claudePermissions.hook_on_failure_ok`.
 
 When distinct `shk` executables are present on PATH (for example, separate installer, Homebrew, and npm installations), doctor reports the first executable PATH would select and the shadowed locations. Paths that resolve to the same binary through symlinks are deduplicated, and shadowed executables are never run.
 
@@ -780,6 +780,18 @@ OpenCode prompt scanning covers text; it does not inspect attached file contents
 Managed entries are tagged with `"_shk_managed": true` or `# shk-managed-start` / `# shk-managed-end`. Copilot, Grok Build, and Windsurf instead keep a schema-clean config and identify managed entries by their `--hook-mode <tool>` command string. The OpenCode plugin file starts with a `// shk-managed:` header. Re-running replaces managed entries and leaves non-managed entries in place.
 
 The Claude Code `PreToolUse` hook covers `Edit`, `MultiEdit`, and `NotebookEdit`, and the target file is scanned as it will look after the edit (see the hook mode notes under `shk scan`). An edit is therefore denied when the edited file would contain a blocking finding, including one already in the file outside the edited text; an edit that removes the finding is allowed. Projects installed before this coverage was added keep the narrower matcher until `shk hooks install-ai --tool claude-code` is re-run; `shk doctor` reports an advisory warning (counted by `--strict`) while a managed `PreToolUse` matcher differs from the current one.
+
+Managed Claude Code `PreToolUse` and `UserPromptSubmit` handlers set `"onFailure": "block"`, so tool calls and prompts are blocked when `shk` is missing, cannot start, or times out, instead of proceeding without a scan. `PostToolUse` handlers and `--audit` installs do not set it. The field requires Claude Code v2.1.295 or later; older versions ignore it and let the action proceed, and `shk doctor` does not check the Claude Code version.
+
+`shk` must be on the `PATH` of every Claude Code that loads these hooks:
+
+- **Committed settings:** a committed `.claude/settings.json` also applies to teammates, cloud sessions, and CI runners.
+- **Global installs:** `--global` applies to every project on the machine.
+- **GUI-launched clients:** these may not inherit your shell `PATH`, for example when `shk` is in `~/.cargo/bin`.
+
+To recover from a block, install `shk` or fix its `PATH`, or remove the entries tagged `"_shk_managed": true` from the settings file. To keep blocking on findings but let actions proceed when `shk` cannot run, change `"block"` to `"continue"` by hand; `shk doctor` keeps warning, and re-running `shk hooks install-ai` restores `"block"`. `--audit` is a different trade-off: it never blocks at all.
+
+Projects installed before this behavior keep their fail-open handlers until `shk hooks install-ai --tool claude-code` is re-run; `shk doctor` reports an advisory warning (counted by `--strict`) until then. `shk doctor` only reads the project's `.claude/settings.json`, so it does not report this for `--global` installs.
 
 See [Uninstall](installation.md#uninstall) for removing managed hooks, skills, generated workflows, and stored dotenvx keys.
 

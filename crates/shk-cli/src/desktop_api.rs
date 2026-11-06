@@ -128,6 +128,8 @@ pub struct DoctorStatus {
     pub missing_ignore_patterns: Vec<String>,
     pub claude_deny_ok: bool,
     pub claude_sandbox_ok: bool,
+    /// `false` when the managed Claude Code hooks need a refresh: an outdated
+    /// matcher or a missing `onFailure`, not only the matcher its name suggests.
     pub claude_hook_matcher_ok: bool,
     pub codex_config_ok: bool,
     pub env_applicable: bool,
@@ -2480,7 +2482,7 @@ fn build_recommended_fixes(
             default_selected: true,
         });
     }
-    if policy_exists && !checks.claude.pre_tool_matcher_ok {
+    if policy_exists && !checks.claude.managed_hooks_current() {
         fixes.push(RecommendedFixDto {
             id: "ai_claude_hook_matcher".into(),
             severity: "warn".into(),
@@ -2587,12 +2589,16 @@ fn build_doctor_status_from(checks: &ProjectCheckStatus) -> DoctorStatus {
             message: "Claude Code sandbox settings are incomplete".into(),
         });
     }
-    if !checks.claude.pre_tool_matcher_ok {
+    if !checks.claude.managed_hooks_current() {
+        let message = if checks.claude.pre_tool_matcher_ok {
+            "Claude Code managed hooks let actions proceed when shk cannot run — refresh them via Setup"
+        } else {
+            "Claude Code managed PreToolUse matcher is outdated — refresh it via Setup"
+        };
         issues.push(DoctorIssue {
             id: "ai_claude_hook_matcher".into(),
             severity: "warn".into(),
-            message: "Claude Code managed PreToolUse matcher is outdated — refresh it via Setup"
-                .into(),
+            message: message.into(),
         });
     }
     if let Some(drift) = &checks.opencode_plugin_drift {
@@ -2662,7 +2668,7 @@ fn build_doctor_status_from(checks: &ProjectCheckStatus) -> DoctorStatus {
         missing_ignore_patterns: checks.ignore.missing_patterns.clone(),
         claude_deny_ok: !checks.claude.settings_exists || checks.claude.deny_ok,
         claude_sandbox_ok: !checks.claude.settings_exists || checks.claude.sandbox_ok,
-        claude_hook_matcher_ok: checks.claude.pre_tool_matcher_ok,
+        claude_hook_matcher_ok: checks.claude.managed_hooks_current(),
         codex_config_ok,
         env_applicable: !checks.env_files.is_empty(),
         env_ok: env_encrypt_targets(&checks.env_files).is_empty(),
@@ -3652,6 +3658,49 @@ mod tests {
         );
         let settings = fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
         assert!(settings.contains("Bash(custom:*)"), "{settings}");
+    }
+
+    #[test]
+    fn desktop_claude_hooks_without_on_failure_are_reported_and_refreshed() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shk.toml"), "").unwrap();
+        fs::create_dir(dir.path().join(".claude")).unwrap();
+        fs::write(
+            dir.path().join(".claude/settings.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": { "PreToolUse": [{
+                    "_shk_managed": true,
+                    "matcher": crate::hooks::CLAUDE_PRE_TOOL_USE_MATCHER,
+                    "hooks": [{ "type": "command", "command": "shk scan --hook-mode claude-code" }]
+                }] }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let before = build_project_status(dir.path());
+        assert!(!before.doctor.claude_hook_matcher_ok, "{before:?}");
+        let issue = before
+            .doctor
+            .issues
+            .iter()
+            .find(|issue| issue.id == "ai_claude_hook_matcher")
+            .expect("reported as a doctor issue");
+        assert!(issue.message.contains("shk cannot run"), "{issue:?}");
+
+        let result = apply_recommended_fixes(
+            dir.path().to_str().unwrap(),
+            ApplyRecommendedFixesOptions {
+                fix_ids: vec!["ai_claude_hook_matcher".into()],
+                ignore_targets: Vec::new(),
+                env_targets: None,
+            },
+        )
+        .unwrap();
+        assert!(result.success, "{result:?}");
+
+        let after = build_project_status(dir.path());
+        assert!(after.doctor.claude_hook_matcher_ok, "{after:?}");
     }
 
     #[test]

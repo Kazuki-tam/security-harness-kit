@@ -89,6 +89,17 @@ pub struct ClaudePermissionsStatus {
     /// `false` when a shk-managed `PreToolUse` block carries a matcher other
     /// than the one `shk hooks install-ai` writes today (older install or hand edit).
     pub pre_tool_matcher_ok: bool,
+    /// `false` when a blocking shk-managed handler would let the action proceed
+    /// if `shk` cannot run (older install or hand edit).
+    pub hook_on_failure_ok: bool,
+}
+
+impl ClaudePermissionsStatus {
+    /// `true` when re-running `shk hooks install-ai` would not change the
+    /// behavior of the managed hooks.
+    pub fn managed_hooks_current(&self) -> bool {
+        self.pre_tool_matcher_ok && self.hook_on_failure_ok
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -453,6 +464,7 @@ pub fn collect_claude_permissions_status(root: &Path) -> ClaudePermissionsStatus
             sandbox_ok: true,
             missing_entries: Vec::new(),
             pre_tool_matcher_ok: true,
+            hook_on_failure_ok: true,
         };
     }
 
@@ -463,6 +475,7 @@ pub fn collect_claude_permissions_status(root: &Path) -> ClaudePermissionsStatus
             sandbox_ok: false,
             missing_entries: vec!["unable to read .claude/settings.json".into()],
             pre_tool_matcher_ok: true,
+            hook_on_failure_ok: true,
         };
     };
     let Ok(value) = serde_json::from_str::<Value>(&text) else {
@@ -472,6 +485,7 @@ pub fn collect_claude_permissions_status(root: &Path) -> ClaudePermissionsStatus
             sandbox_ok: false,
             missing_entries: vec!["unable to parse .claude/settings.json".into()],
             pre_tool_matcher_ok: true,
+            hook_on_failure_ok: true,
         };
     };
 
@@ -499,7 +513,29 @@ pub fn collect_claude_permissions_status(root: &Path) -> ClaudePermissionsStatus
         sandbox_ok: claude_sandbox_ok(&value),
         missing_entries,
         pre_tool_matcher_ok: claude_pre_tool_matcher_ok(&value),
+        hook_on_failure_ok: claude_hook_on_failure_ok(&value),
     }
+}
+
+/// Every handler in a blocking shk-managed block must block when `shk` cannot
+/// run. `--audit` handlers never block, and `PostToolUse` runs after the tool.
+fn claude_hook_on_failure_ok(value: &Value) -> bool {
+    ["/hooks/PreToolUse", "/hooks/UserPromptSubmit"]
+        .into_iter()
+        .filter_map(|pointer| value.pointer(pointer).and_then(Value::as_array))
+        .flatten()
+        .filter(|block| crate::hooks::is_managed_claude_block(block))
+        .filter_map(|block| block.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .all(|hook| {
+            let audit = hook
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(crate::hooks::claude_command_is_audit);
+            audit
+                || hook.get("onFailure").and_then(Value::as_str)
+                    == Some(crate::hooks::CLAUDE_HOOK_ON_FAILURE)
+        })
 }
 
 /// Every shk-managed `PreToolUse` block must use the current matcher; settings
@@ -519,6 +555,9 @@ fn claude_pre_tool_matcher_ok(value: &Value) -> bool {
 
 /// Advisory text for an outdated managed Claude Code `PreToolUse` matcher.
 const CLAUDE_PRE_TOOL_MATCHER_WARNING: &str = ".claude/settings.json has a shk-managed PreToolUse matcher that differs from the current one (older install or hand edit), so some tools may go unscanned; rerun `shk hooks install-ai --tool claude-code` (with `--audit` or `--log-blocked` if the hooks were installed that way)";
+
+/// Advisory text for managed Claude Code hooks that would not block when `shk` cannot run.
+const CLAUDE_HOOK_ON_FAILURE_WARNING: &str = ".claude/settings.json has shk-managed hooks without `onFailure: \"block\"` (older install or hand edit), so Claude Code lets actions proceed when `shk` is missing or cannot start; rerun `shk hooks install-ai --tool claude-code` (with `--audit` or `--log-blocked` if the hooks were installed that way)";
 
 fn run_claude_permissions_check(root: &Path) {
     let status = collect_claude_permissions_status(root);
@@ -1363,6 +1402,9 @@ pub fn run_all(root: &Path, json: bool, strict: bool) -> Result<()> {
     if !report.claude.pre_tool_matcher_ok {
         println!("  warning: {CLAUDE_PRE_TOOL_MATCHER_WARNING}");
     }
+    if !report.claude.hook_on_failure_ok {
+        println!("  warning: {CLAUDE_HOOK_ON_FAILURE_WARNING}");
+    }
     if let Some(drift) = &report.opencode_plugin_drift {
         println!("  warning: {drift}");
     }
@@ -1415,6 +1457,7 @@ fn doctor_warning_count(inputs: DoctorWarningInputs<'_>) -> usize {
         warnings += usize::from(!inputs.claude.deny_ok);
         warnings += usize::from(!inputs.claude.sandbox_ok);
         warnings += usize::from(!inputs.claude.pre_tool_matcher_ok);
+        warnings += usize::from(!inputs.claude.hook_on_failure_ok);
     }
     if inputs.codex.config_exists {
         warnings += usize::from(!inputs.codex.hooks_enabled);
@@ -1817,6 +1860,39 @@ mod tests {
 
             let status = collect_claude_permissions_status(dir.path());
             assert!(!status.pre_tool_matcher_ok, "{block}");
+        }
+    }
+
+    #[test]
+    fn claude_hook_on_failure_requires_block_on_blocking_events() {
+        let block_on_failure = serde_json::json!({
+            "type": "command", "command": "shk scan . --hook-mode claude-code", "onFailure": "block"
+        });
+        let fail_open = serde_json::json!({
+            "type": "command", "command": "shk scan . --hook-mode claude-code"
+        });
+        let audit = serde_json::json!({
+            "type": "command", "command": "shk scan . --hook-mode claude-code --audit"
+        });
+        let managed = |event: &str, hook: &serde_json::Value| serde_json::json!({ "hooks": { event: [{ "_shk_managed": true, "hooks": [hook] }] } });
+
+        for (settings, expected) in [
+            (managed("PreToolUse", &block_on_failure), true),
+            (managed("UserPromptSubmit", &block_on_failure), true),
+            (managed("PreToolUse", &fail_open), false),
+            (managed("UserPromptSubmit", &fail_open), false),
+            (managed("PreToolUse", &audit), true),
+            // The tool already ran, and unmanaged blocks belong to the user.
+            (managed("PostToolUse", &fail_open), true),
+            (
+                serde_json::json!({ "hooks": { "PreToolUse": [{ "hooks": [fail_open.clone()] }] } }),
+                true,
+            ),
+        ] {
+            let dir = tempdir().unwrap();
+            write_claude_settings(dir.path(), &settings);
+            let status = collect_claude_permissions_status(dir.path());
+            assert_eq!(status.hook_on_failure_ok, expected, "{settings}");
         }
     }
 
