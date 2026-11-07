@@ -266,6 +266,124 @@ fi
 rm -rf "$notarize_tmp"
 echo "ok: notarize with no DMG artifacts rejected"
 
+# Stapling retries. Stubs stand in for xcrun and sleep, so nothing reaches Apple.
+staple_tmp="$(mktemp -d)"
+mkdir -p "$staple_tmp/bin" "$staple_tmp/dmg"
+touch "$staple_tmp/dmg/shk.dmg"
+cat > "$staple_tmp/bin/xcrun" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >> "$STUB_DIR/xcrun.log"
+if [[ "${1:-}" != "stapler" ]]; then
+  exit "${STUB_OTHER_STATUS:-0}"
+fi
+attempt="$(grep -c '^stapler' "$STUB_DIR/xcrun.log")"
+if ((attempt <= STUB_STAPLE_FAILURES)); then
+  echo "The network connection was lost." >&2
+  exit 68
+fi
+STUB
+cat > "$staple_tmp/bin/sleep" <<'STUB'
+#!/usr/bin/env bash
+echo "$1" >> "$STUB_DIR/sleep.log"
+STUB
+chmod +x "$staple_tmp/bin/xcrun" "$staple_tmp/bin/sleep"
+
+reset_staple_stubs() {
+  rm -f "$staple_tmp/xcrun.log" "$staple_tmp/sleep.log" "$staple_tmp/shim.log"
+  touch "$staple_tmp/xcrun.log" "$staple_tmp/sleep.log"
+}
+
+staple_call_count() {
+  grep -c "^$1" "$staple_tmp/xcrun.log" || true
+}
+
+sleep_delays() {
+  tr '\n' ' ' < "$staple_tmp/sleep.log"
+}
+
+run_notarize_with_stubs() {
+  PATH="$staple_tmp/bin:$PATH" STUB_DIR="$staple_tmp" STUB_STAPLE_FAILURES="$1" \
+    APPLE_ID=apple-id APPLE_PASSWORD=app-password APPLE_TEAM_ID=TEAMID \
+    ./.github/scripts/release/notarize-macos-dmg.sh "$staple_tmp/dmg" 2>&1
+}
+
+run_shim_with_stubs() {
+  local failures="$1"
+  shift
+  PATH="$staple_tmp/bin:$PATH" STUB_DIR="$staple_tmp" STUB_STAPLE_FAILURES="$failures" \
+    SHK_REAL_XCRUN="$staple_tmp/bin/xcrun" SHK_STAPLE_LOG="$staple_tmp/shim.log" \
+    ./.github/scripts/release/xcrun-shim/xcrun "$@"
+}
+
+reset_staple_stubs
+notarize_output="$(run_notarize_with_stubs 2)"
+assert_contains "notarize reports the DMG after a retried staple" \
+  "$notarize_output" "notarized and stapled: shk.dmg"
+assert_output "notarize staples until the ticket arrives" "3" staple_call_count "stapler staple"
+assert_output "notarize does not resubmit on a staple retry" "1" staple_call_count "notarytool submit"
+assert_output "notarize backs off between staple attempts" "15 30 " sleep_delays
+echo "ok: notarize retries a transient staple failure"
+
+reset_staple_stubs
+if notarize_output="$(run_notarize_with_stubs 99)"; then
+  echo "FAIL: notarize should fail once the staple attempts run out" >&2
+  exit 1
+fi
+if [[ "$notarize_output" == *"notarized and stapled"* ]]; then
+  echo "FAIL: notarize reported success for a DMG with no ticket" >&2
+  exit 1
+fi
+assert_output "notarize bounds the staple attempts" "5" staple_call_count "stapler staple"
+assert_output "notarize does not resubmit when stapling keeps failing" "1" staple_call_count "notarytool submit"
+assert_output "notarize caps the staple backoff" "15 30 60 120 " sleep_delays
+echo "ok: notarize fails after the staple attempts run out"
+
+reset_staple_stubs
+run_shim_with_stubs 2 stapler staple -v shk.app
+assert_output "xcrun shim keeps stapler arguments" "stapler staple -v shk.app" tail -n 1 "$staple_tmp/xcrun.log"
+assert_output "xcrun shim retries stapling" "3" staple_call_count "stapler staple -v shk.app"
+assert_output "xcrun shim backs off between attempts" "15 30 " sleep_delays
+assert_contains "xcrun shim keeps stapler output for the workflow to print" \
+  "$(<"$staple_tmp/shim.log")" "The network connection was lost."
+echo "ok: xcrun shim retries a transient staple failure"
+
+reset_staple_stubs
+if run_shim_with_stubs 99 stapler staple -v shk.app; then
+  echo "FAIL: xcrun shim should fail once the staple attempts run out" >&2
+  exit 1
+fi
+assert_output "xcrun shim bounds the attempts" "5" staple_call_count "stapler staple -v shk.app"
+assert_contains "xcrun shim logs that it gave up" \
+  "$(<"$staple_tmp/shim.log")" "gave up stapling after 5 attempts"
+echo "ok: xcrun shim fails after the staple attempts run out"
+
+reset_staple_stubs
+run_shim_with_stubs 0 notarytool submit --team-id "team id"
+assert_output "xcrun shim keeps other commands' arguments" "notarytool submit --team-id team id" \
+  tail -n 1 "$staple_tmp/xcrun.log"
+if STUB_OTHER_STATUS=7 run_shim_with_stubs 0 --find stapler; then
+  echo "FAIL: xcrun shim should keep the exit status of other commands" >&2
+  exit 1
+fi
+assert_output "xcrun shim does not retry other commands" "" sleep_delays
+if [[ -e "$staple_tmp/shim.log" ]]; then
+  echo "FAIL: xcrun shim should only log stapling" >&2
+  exit 1
+fi
+echo "ok: xcrun shim passes other commands through unchanged"
+
+rm -rf "$staple_tmp"
+
+if [[ ! -x ./.github/scripts/release/xcrun-shim/xcrun ]]; then
+  echo "FAIL: xcrun shim must be executable" >&2
+  exit 1
+fi
+assert_contains "signed desktop build retries stapling through the xcrun shim" \
+  "$release_workflow" 'export PATH="${GITHUB_WORKSPACE}/.github/scripts/release/xcrun-shim:${PATH}"'
+assert_contains "signed desktop build prints the stapler log" \
+  "$release_workflow" 'cat "$SHK_STAPLE_LOG"'
+echo "ok: signed desktop build uses the xcrun shim"
+
 tmpdir="$(mktemp -d)"
 case "$(uname -s)" in
   Darwin)

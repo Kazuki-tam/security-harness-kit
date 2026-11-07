@@ -241,6 +241,14 @@ jobs:
       - name: build desktop bundles
         shell: bash
         run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            # Tauri staples shk.app before it builds the DMG and the signed
+            # updater archive, and discards stapler's exit status and output.
+            # Retry at that call so both contain the ticket; see xcrun-shim/xcrun.
+            export SHK_STAPLE_LOG="${RUNNER_TEMP}/tauri-stapler.log"
+            export PATH="${GITHUB_WORKSPACE}/.github/scripts/release/xcrun-shim:${PATH}"
+            trap 'if [[ -f "$SHK_STAPLE_LOG" ]]; then cat "$SHK_STAPLE_LOG"; else echo "::warning::Tauri did not staple through xcrun-shim, so stapling shk.app was not retried"; fi' EXIT
+          fi
           pnpm tauri build \
             --target ${{ matrix.target }} \
             --config "../../target/tauri-updater-${{ matrix.target }}.json"
