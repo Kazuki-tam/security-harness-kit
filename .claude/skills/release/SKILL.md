@@ -30,6 +30,10 @@ RELEASE_COMPONENT=<cli|desktop|both> RELEASE_VERSION=X.Y.Z \
 bash .github/scripts/release/test.sh
 ```
 
+Check that the runner labels in `release.yml` are still listed in
+[actions/runner-images](https://github.com/actions/runner-images). PR CI does
+not run that workflow, so a retired label only fails once a tag is pushed.
+
 For desktop releases while Windows Authenticode is unconfigured, the repo
 variable `SHK_ALLOW_UNSIGNED_WINDOWS=true` must exist
 (`gh variable list`). Delete it once Authenticode signing lands.
