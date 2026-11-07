@@ -77,7 +77,7 @@ jobs:
           - os: macos-15-intel
             target: x86_64-apple-darwin
             bundles: app
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             bundles: app
           - os: windows-2022
