@@ -354,17 +354,24 @@ if run_shim_with_stubs 99 stapler staple -v shk.app; then
 fi
 assert_output "xcrun shim bounds the attempts" "5" staple_call_count "stapler staple -v shk.app"
 assert_contains "xcrun shim logs that it gave up" \
-  "$(<"$staple_tmp/shim.log")" "gave up stapling after 5 attempts"
+  "$(<"$staple_tmp/shim.log")" "gave up stapling"
 echo "ok: xcrun shim fails after the staple attempts run out"
+
+reset_staple_stubs
+PATH="$staple_tmp/bin:$PATH" STUB_DIR="$staple_tmp" STUB_STAPLE_FAILURES=0 \
+  SHK_REAL_XCRUN="$staple_tmp/bin/xcrun" SHK_STAPLE_LOG="$staple_tmp/missing-dir/shim.log" \
+  ./.github/scripts/release/xcrun-shim/xcrun stapler staple -v shk.app >/dev/null 2>&1
+assert_output "xcrun shim still staples when the log cannot be written" "1" \
+  staple_call_count "stapler staple -v shk.app"
+echo "ok: xcrun shim staples without a writable log"
 
 reset_staple_stubs
 run_shim_with_stubs 0 notarytool submit --team-id "team id"
 assert_output "xcrun shim keeps other commands' arguments" "notarytool submit --team-id team id" \
   tail -n 1 "$staple_tmp/xcrun.log"
-if STUB_OTHER_STATUS=7 run_shim_with_stubs 0 --find stapler; then
-  echo "FAIL: xcrun shim should keep the exit status of other commands" >&2
-  exit 1
-fi
+passthrough_status=0
+STUB_OTHER_STATUS=7 run_shim_with_stubs 0 --find stapler || passthrough_status=$?
+assert_output "xcrun shim keeps the exit status of other commands" "7" echo "$passthrough_status"
 assert_output "xcrun shim does not retry other commands" "" sleep_delays
 if [[ -e "$staple_tmp/shim.log" ]]; then
   echo "FAIL: xcrun shim should only log stapling" >&2
@@ -382,6 +389,8 @@ assert_contains "signed desktop build retries stapling through the xcrun shim" \
   "$release_workflow" 'export PATH="${GITHUB_WORKSPACE}/.github/scripts/release/xcrun-shim:${PATH}"'
 assert_contains "signed desktop build prints the stapler log" \
   "$release_workflow" 'cat "$SHK_STAPLE_LOG"'
+assert_contains "signed desktop build warns when Tauri bypasses the xcrun shim" \
+  "$release_workflow" 'Tauri did not staple through xcrun-shim'
 echo "ok: signed desktop build uses the xcrun shim"
 
 tmpdir="$(mktemp -d)"

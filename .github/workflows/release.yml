@@ -247,11 +247,14 @@ jobs:
             # Retry at that call so both contain the ticket; see xcrun-shim/xcrun.
             export SHK_STAPLE_LOG="${RUNNER_TEMP}/tauri-stapler.log"
             export PATH="${GITHUB_WORKSPACE}/.github/scripts/release/xcrun-shim:${PATH}"
-            trap 'if [[ -f "$SHK_STAPLE_LOG" ]]; then cat "$SHK_STAPLE_LOG"; else echo "::warning::Tauri did not staple through xcrun-shim, so stapling shk.app was not retried"; fi' EXIT
+            trap 'if [[ -f "$SHK_STAPLE_LOG" ]]; then cat "$SHK_STAPLE_LOG"; fi' EXIT
           fi
           pnpm tauri build \
             --target ${{ matrix.target }} \
             --config "../../target/tauri-updater-${{ matrix.target }}.json"
+          if [[ "$RUNNER_OS" == "macOS" && ! -f "$SHK_STAPLE_LOG" ]]; then
+            echo "::warning::Tauri did not staple through xcrun-shim, so stapling shk.app was not retried"
+          fi
 
       - name: notarize and staple macOS DMG
         if: runner.os == 'macOS'

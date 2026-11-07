@@ -23,14 +23,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 source "${ROOT}/.github/scripts/release/common.sh"
 
 # Tauri captures and drops this process's output, so keep it where the workflow
-# can print it.
+# can print it. Losing the log must not cost the staple.
 if [[ -n "${SHK_STAPLE_LOG:-}" ]]; then
-  exec >>"$SHK_STAPLE_LOG" 2>&1
+  exec >>"$SHK_STAPLE_LOG" 2>&1 || echo "xcrun-shim: cannot write the stapler log" >&2
 fi
 
 echo "xcrun-shim: stapler staple ${*:3}"
 if ! shk_retry 5 15 120 "$real_xcrun" "$@"; then
-  echo "xcrun-shim: gave up stapling after 5 attempts"
+  echo "xcrun-shim: gave up stapling"
   exit 1
 fi
 echo "xcrun-shim: stapled"

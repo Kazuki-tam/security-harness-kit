@@ -117,7 +117,7 @@ after bundling the workflow notarizes and staples each `.dmg` itself
 `.app` bundles from updater archives with `codesign`, `spctl`, and
 `xcrun stapler validate`.
 
-Stapling is retried up to five times because GitHub runners intermittently lose
+Stapling gets up to five attempts because GitHub runners intermittently lose
 the connection to Apple's ticket service. `notarize-macos-dmg.sh` retries the DMG
 directly. Tauri staples the `.app` itself and ignores the result, so the build step
 puts `.github/scripts/release/xcrun-shim` on `PATH` to retry that call and prints
