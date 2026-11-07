@@ -180,7 +180,7 @@ Intel macOS, Apple Silicon macOS, Linux x86_64/aarch64, and Windows x86_64 are s
 
 ## Containers And Sandboxes
 
-Install `shk` into the image, in a directory on the default `PATH`, such as `/usr/local/bin`. AI hooks run `shk` by name, and the [default script install location](#install-with-script), `~/.cargo/bin`, reaches `PATH` only through shell profiles. A container command that starts without a login shell does not read them, so the hooks fail with `shk: not found`. Claude Code then [blocks every action](commands.md#shk-hooks-install-ai), or skips the scan if the hooks were installed before this behavior was added or Claude Code is older than v2.1.295.
+Install `shk` into the image, in a directory on the default `PATH`, such as `/usr/local/bin`. AI hooks run `shk` by name, and the [default script install location](#install-with-script), `~/.cargo/bin`, reaches `PATH` only through shell profiles. A container command that starts without a login or interactive shell does not read them, so the hooks fail with `shk: not found`. Claude Code then [blocks every action](commands.md#shk-hooks-install-ai), or skips the scan if the hooks were installed before this behavior was added or Claude Code is older than v2.1.295.
 
 ### Dockerfile
 
@@ -198,8 +198,8 @@ RUN apt-get update \
 - **Run it as root:** writing to `/usr/local/bin` needs root, so switch to your unprivileged `USER` after this step. Every user in the image can then run `shk`.
 - **Keep `xz-utils`:** release archives are `.tar.xz`, and slim images cannot unpack them without it. This also applies to the npm package.
 - **Keep `shk --version`:** it fails the build if the download or the binary does not work, because a failed `curl` in the pipe does not stop the build by itself.
-- **Pin the release:** replace `latest/download` with `download/vX.Y.Z` so that rebuilds stay reproducible. To verify the archive as well, use the [verified archive install](#verified-archive-install).
-- **v0.7.6 and earlier:** add `libdbus-1-3` to the `apt-get install` list. These releases do not start without it.
+- **Pin the release:** replace `latest/download` with `download/vX.Y.Z` so that rebuilds stay reproducible. To verify the archive as well, follow the [verified archive install](#verified-archive-install), and place the binary in `/usr/local/bin` instead of `~/.cargo/bin`.
+- **v0.7.6 and earlier:** add `libdbus-1-3` to the `apt-get install` list. These releases do not start without it. <!-- shk-version-pin -->
 
 In a Node.js image, `npm install -g security-harness-kit` also places `shk` on the default `PATH`. `-slim` Node.js images need `xz-utils` installed first.
 
@@ -207,7 +207,7 @@ The CLI only needs glibc, so it runs in minimal images such as `debian:bookworm-
 
 ### Check The Image
 
-Check from a non-login shell, because that is what a container command gets:
+Check from a non-login, non-interactive shell, because that is what a container command gets:
 
 ```bash
 docker run --rm <image> sh -c 'command -v shk && shk --version'
@@ -217,7 +217,7 @@ Then run `shk doctor` from your project inside the container.
 
 ### Dev Containers
 
-Build the image from a Dockerfile like the one above:
+Build the image from a Dockerfile like the one above, saved next to `.devcontainer/devcontainer.json`:
 
 ```json
 {
@@ -229,7 +229,7 @@ Avoid installing `shk` in `postCreateCommand`. By default, tools connect once `u
 
 ### Docker Sandboxes
 
-Add `shk` with a [kit](https://docs.docker.com/ai/sandboxes/customize/), an experimental `sbx` feature. It needs v0.7.7 or later: this kit adds only the `shk` binary, not the `libdbus-1-3` that earlier releases need. Create these two files:
+Add `shk` with a [kit](https://docs.docker.com/ai/sandboxes/customize/), an experimental `sbx` feature. It needs v0.7.7 or later: this kit adds only the `shk` binary, not the `libdbus-1-3` that earlier releases need. Create these two files: <!-- shk-version-pin -->
 
 `shk-kit/shk-kit.yaml`:
 
@@ -271,7 +271,7 @@ BUILDX_BUILDER=sbx-kits sbx run claude --kit ./shk-kit
 
 ### Claude Code Cloud Sessions
 
-Run the install from the Dockerfile above in a [setup script](https://code.claude.com/docs/en/cloud-environments.md#setup-scripts). Setup scripts run as root before Claude Code starts. Your `~/.claude/settings.json` is not available there, so use project hooks rather than `--global`.
+Run the install from the Dockerfile above in a [setup script](https://code.claude.com/docs/en/cloud-environments#setup-scripts). Setup scripts run as root before Claude Code starts. Keep `shk --version` in the script so that a failed install exits non-zero, and do not use the **None** network access level, which blocks the download. Your `~/.claude/settings.json` is not available there, so use project hooks rather than `--global`.
 
 ### What Works In A Container
 
