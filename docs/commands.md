@@ -785,7 +785,7 @@ Managed Claude Code `PreToolUse` and `UserPromptSubmit` handlers set `"onFailure
 
 `shk` must be on the `PATH` of every Claude Code that loads these hooks:
 
-- **Committed settings:** a committed `.claude/settings.json` also applies to teammates, cloud sessions, and CI runners.
+- **Committed settings:** a committed `.claude/settings.json` also applies to teammates, cloud sessions, and CI runners. For images and cloud sessions, see [Containers And Sandboxes](installation.md#containers-and-sandboxes).
 - **Global installs:** `--global` applies to every project on the machine.
 - **GUI-launched clients:** these may not inherit your shell `PATH`, for example when `shk` is in `~/.cargo/bin`.
 
