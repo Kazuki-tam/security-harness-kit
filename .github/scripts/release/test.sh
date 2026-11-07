@@ -964,4 +964,33 @@ if bash -c 'source "$1"; require_same_commit shk-v1.2.3 source-sha v1.2.3 other-
 fi
 echo "ok: mirror rejects a tag at a different commit"
 
+release_body_dir="$tmpdir/release-body"
+mkdir -p "$release_body_dir/bin" "$release_body_dir/notes"
+cat > "$release_body_dir/bin/dist" <<'STUB'
+#!/usr/bin/env bash
+echo '{"announcement_github_body":"## Install stub"}'
+STUB
+chmod +x "$release_body_dir/bin/dist"
+echo "## CLI notes stub" > "$release_body_dir/notes/v1.2.3.md"
+echo "## Desktop notes stub" > "$release_body_dir/notes/desktop-v1.2.3.md"
+
+release_body_first_line() {
+  (
+    cd "$release_body_dir"
+    env PATH="$release_body_dir/bin:$PATH" SHK_RELEASE_NOTES_DIR="$release_body_dir/notes" \
+      RELEASE_COMPONENT="$1" RELEASE_VERSION="$2" \
+      "${ROOT}/.github/scripts/release/generate-release-body.sh" body.md >/dev/null
+    head -n 1 body.md
+  )
+}
+
+assert_output "CLI notes lead the release body" "## CLI notes stub" release_body_first_line cli 1.2.3
+assert_contains "CLI release body keeps the dist announcement" \
+  "$(<"$release_body_dir/body.md")" "## Install stub"
+assert_output "desktop notes lead the release body" "## Desktop notes stub" release_body_first_line desktop 1.2.3
+assert_output "combined release body starts with the CLI notes" "## CLI notes stub" release_body_first_line both 1.2.3
+assert_contains "combined release body includes the desktop notes" \
+  "$(<"$release_body_dir/body.md")" "## Desktop notes stub"
+assert_output "release body without notes starts with the dist announcement" "## Install stub" release_body_first_line cli 9.9.9
+
 echo "release script tests passed"
