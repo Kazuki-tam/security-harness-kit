@@ -273,6 +273,7 @@ touch "$staple_tmp/dmg/shk.dmg"
 cat > "$staple_tmp/bin/xcrun" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "$STUB_DIR/xcrun.log"
+echo "$#" > "$STUB_DIR/xcrun.argc"
 if [[ "${1:-}" != "stapler" ]]; then
   exit "${STUB_OTHER_STATUS:-0}"
 fi
@@ -348,6 +349,10 @@ assert_contains "xcrun shim keeps stapler output for the workflow to print" \
 echo "ok: xcrun shim retries a transient staple failure"
 
 reset_staple_stubs
+run_shim_with_stubs 0 stapler staple -v "my app.app"
+assert_output "xcrun shim does not split stapler arguments" "4" cat "$staple_tmp/xcrun.argc"
+
+reset_staple_stubs
 if run_shim_with_stubs 99 stapler staple -v shk.app; then
   echo "FAIL: xcrun shim should fail once the staple attempts run out" >&2
   exit 1
@@ -369,6 +374,7 @@ reset_staple_stubs
 run_shim_with_stubs 0 notarytool submit --team-id "team id"
 assert_output "xcrun shim keeps other commands' arguments" "notarytool submit --team-id team id" \
   tail -n 1 "$staple_tmp/xcrun.log"
+assert_output "xcrun shim does not split other commands' arguments" "4" cat "$staple_tmp/xcrun.argc"
 passthrough_status=0
 STUB_OTHER_STATUS=7 run_shim_with_stubs 0 --find stapler || passthrough_status=$?
 assert_output "xcrun shim keeps the exit status of other commands" "7" echo "$passthrough_status"
@@ -385,6 +391,9 @@ if [[ ! -x ./.github/scripts/release/xcrun-shim/xcrun ]]; then
   echo "FAIL: xcrun shim must be executable" >&2
   exit 1
 fi
+# Calling plain `xcrun` here would find the shim on PATH and recurse forever.
+assert_contains "xcrun shim defaults to an absolute path" \
+  "$(<./.github/scripts/release/xcrun-shim/xcrun)" 'real_xcrun="${SHK_REAL_XCRUN:-/usr/bin/xcrun}"'
 assert_contains "signed desktop build retries stapling through the xcrun shim" \
   "$release_workflow" 'export PATH="${GITHUB_WORKSPACE}/.github/scripts/release/xcrun-shim:${PATH}"'
 assert_contains "signed desktop build prints the stapler log" \
