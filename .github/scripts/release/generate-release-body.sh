@@ -16,19 +16,32 @@ shk_dist_announcement() {
   jq -r '.announcement_github_body' dist-plan.json
 }
 
+# Hand-written notes for a tag, when present, lead the release body.
+shk_handwritten_notes() {
+  local notes_file="${SHK_RELEASE_NOTES_DIR:-${ROOT}/docs/release-notes}/$1.md"
+  if [[ -f "$notes_file" ]]; then
+    cat "$notes_file"
+    echo ""
+  fi
+}
+
 {
   case "$component" in
     cli)
+      shk_handwritten_notes "v${version}"
       shk_dist_announcement
       shk_winget_release_notes
       ;;
     desktop)
+      shk_handwritten_notes "desktop-v${version}"
       shk_desktop_release_notes "$version"
       ;;
     desktop-unsigned)
       shk_desktop_unsigned_release_notes "$version"
       ;;
     both)
+      shk_handwritten_notes "v${version}"
+      shk_handwritten_notes "desktop-v${version}"
       shk_dist_announcement
       shk_winget_release_notes
       echo ""

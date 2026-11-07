@@ -170,6 +170,9 @@ releases need no mirror.
 1. Update versions with `cargo run -p xtask -- bump-version X.Y.Z` so
    `Cargo.toml`, `apps/shk-desktop/package.json`, and
    `apps/shk-desktop/src-tauri/tauri.conf.json` stay aligned.
+   When a release changes behavior for existing users, add
+   `docs/release-notes/vX.Y.Z.md` or `docs/release-notes/desktop-vX.Y.Z.md`;
+   the publish job puts it above the generated release body.
 2. Confirm the `release` GitHub environment has updater signing secrets.
    For signed releases, also configure macOS Developer ID/notarization secrets
    and one Windows Authenticode signing mode.

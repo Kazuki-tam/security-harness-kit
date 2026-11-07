@@ -16,6 +16,10 @@ is `.github/workflows/release.yml`; maintainer docs live in
 ## 1. Pre-flight (on a clean, up-to-date `main`)
 
 The version bump must already be merged (use the `bump-version` skill).
+To lead the release with hand-written notes, add `docs/release-notes/vX.Y.Z.md`
+(CLI) or `docs/release-notes/desktop-vX.Y.Z.md` (desktop) in the bump PR. The
+publish job puts them above the generated install and change lists. Write them
+whenever a release changes behavior for existing users.
 Historical statements — e.g. the `desktop-v0.6.0` signing milestone in
 README.md and docs/installation.md — carry a `<!-- shk-version-pin -->` marker
 that bump-version respects; pin any new sentence that names a past release.
