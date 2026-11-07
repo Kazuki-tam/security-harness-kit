@@ -6,6 +6,10 @@ set -euo pipefail
 # notarization and staple the ticket so the DMG passes spctl offline.
 # Keep this script bash-3.2 compatible; macOS runners resolve `bash` to 3.2.
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# shellcheck source=.github/scripts/release/common.sh
+source "${ROOT}/.github/scripts/release/common.sh"
+
 bundle_dir="${1:?dmg bundle directory required}"
 
 : "${APPLE_ID:?APPLE_ID is required}"
@@ -33,7 +37,10 @@ for dmg in "${dmg_files[@]}"; do
     --team-id "$APPLE_TEAM_ID" \
     --wait
   # notarytool --wait can exit 0 on an Invalid submission; stapling only
-  # succeeds when a ticket was actually issued, so it is the real gate.
-  xcrun stapler staple "$dmg"
+  # succeeds when a ticket was actually issued, so it is the real gate. Retry
+  # only the stapling: GitHub runners lose the connection to Apple's ticket
+  # service intermittently (NSURLError -1005, exit 68). A rejected submission
+  # keeps failing here and still fails the step once the attempts run out.
+  shk_retry 5 15 120 xcrun stapler staple "$dmg"
   echo "notarized and stapled: $(basename "$dmg")"
 done

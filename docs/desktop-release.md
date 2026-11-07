@@ -117,6 +117,13 @@ after bundling the workflow notarizes and staples each `.dmg` itself
 `.app` bundles from updater archives with `codesign`, `spctl`, and
 `xcrun stapler validate`.
 
+Stapling gets up to five attempts because GitHub runners intermittently lose
+the connection to Apple's ticket service. `notarize-macos-dmg.sh` retries the DMG
+directly. Tauri staples the `.app` itself and ignores the result, so the build step
+puts `.github/scripts/release/xcrun-shim` on `PATH` to retry that call and prints
+what happened from `tauri-stapler.log`. The verify step above still rejects any
+artifact without a ticket.
+
 The Windows **signed** release job fails unless Authenticode signing is configured. After
 bundling, the workflow verifies every generated `.exe` and `.msi` with
 `Get-AuthenticodeSignature` and fails the release when any signature is invalid.

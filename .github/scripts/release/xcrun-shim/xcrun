@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Put on PATH for `tauri build` on macOS. Tauri runs `xcrun stapler staple -v
+# shk.app` right after notarizing the app and only fails if the process cannot
+# spawn, so a dropped connection to Apple's ticket service silently leaves
+# shk.app without a ticket. The DMG and the signed updater archive are built from
+# that app afterwards, so retrying has to happen here, before either exists.
+#
+# Tauri never sees a failure either way: if the attempts run out, the verify step
+# rejects the unstapled app in the updater archive. If Tauri stops resolving xcrun
+# through PATH, this shim goes unused and the build behaves as it would without it.
+# Keep this script bash-3.2 compatible; macOS runners resolve `bash` to 3.2.
+
+real_xcrun="${SHK_REAL_XCRUN:-/usr/bin/xcrun}"
+
+if [[ "${1:-}" != "stapler" || "${2:-}" != "staple" ]]; then
+  exec "$real_xcrun" "$@"
+fi
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+# shellcheck source=.github/scripts/release/common.sh
+source "${ROOT}/.github/scripts/release/common.sh"
+
+# Tauri captures and drops this process's output, so keep it where the workflow
+# can print it. Losing the log must not cost the staple.
+if [[ -n "${SHK_STAPLE_LOG:-}" ]]; then
+  exec >>"$SHK_STAPLE_LOG" 2>&1 || echo "xcrun-shim: cannot write the stapler log" >&2
+fi
+
+echo "xcrun-shim: stapler staple ${*:3}"
+if ! shk_retry 5 15 120 "$real_xcrun" "$@"; then
+  echo "xcrun-shim: gave up stapling"
+  exit 1
+fi
+echo "xcrun-shim: stapled"
