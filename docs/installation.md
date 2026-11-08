@@ -269,15 +269,161 @@ docker buildx create --name sbx-kits --driver docker-container
 BUILDX_BUILDER=sbx-kits sbx run claude --kit ./shk-kit
 ```
 
-### Claude Code Cloud Sessions
-
-Run the install from the Dockerfile above in a [setup script](https://code.claude.com/docs/en/cloud-environments#setup-scripts). Setup scripts run as root before Claude Code starts. Keep `shk --version` in the script so that a failed install exits non-zero, and do not use the **None** network access level, which blocks the download. Your `~/.claude/settings.json` is not available there, so use project hooks rather than `--global`.
-
 ### What Works In A Container
 
 Project hooks in a committed `.claude/settings.json` come with the repository, so you do not need to run `shk hooks install-ai` again in the container. Hooks installed with `--global` stay on the host unless you mount that file.
 
 `shk scan` and the AI hooks do not use the secret store. With `[env].secret_store = "keyring"` (the default), `shk env` needs a Secret Service provider such as gnome-keyring in a running D-Bus session; in containers and on headless servers, use the [1Password backend](commands.md) instead.
+
+## Cloud Agents
+
+A cloud agent runs on a machine other than yours, so neither your local `shk` nor your user-level hooks come with it, including hooks installed with `--global`. For each tool, install `shk` where its hooks can run it by name, commit the project hooks and `shk.toml`, and then [check that the hooks run](#check-that-hooks-run). `shk hooks install-ai` needs a `shk.toml`, so run [`shk init`](commands.md#shk-init) first if the project does not have one.
+
+Coverage differs by tool. This table reflects each vendor's documentation as of November 2026:
+
+| Tool | Install `shk` with | Project hooks | If `shk` cannot run | Cloud limits |
+|------|--------------------|---------------|---------------------|--------------------------|
+| [Claude Code](#claude-code-cloud-sessions) | Setup script | `.claude/settings.json` | Prompts and matched tool calls are blocked (Claude Code v2.1.295 or later) | Not scanned: sessions with several repositories, and cloud threads in a project |
+| [Cursor](#cursor-cloud-agents) | Dockerfile | `.cursor/hooks.json` | The action proceeds, unless you use `--fail-closed` | Not scanned: MCP tool calls, and early read-only turns |
+| [GitHub Copilot](#github-copilot-cloud-agent) | `copilot-setup-steps.yml` (GitHub Actions sessions only) | `.github/hooks/shk-security.json` | `preToolUse` denies on a non-zero exit; a timeout proceeds | No documented way to preinstall `shk` in cloud sandbox sessions |
+
+Before relying on these steps, run the check below in your own environment. Antigravity, Codex, Grok Build, OpenCode, and Windsurf are not covered here.
+
+### Check That Hooks Run
+
+`shk --version` only shows that the binary is installed. To confirm that the hooks fire, start a new session and ask the agent to run this command in a shell:
+
+```bash
+cat .env
+```
+
+Whether or not the file exists, the default action guard denies the command with this reason:
+
+```text
+shk action guard: secret_dump_command blocked
+```
+
+How to read the result:
+
+- **A reason that starts with `shk action guard:`:** the hook ran.
+- **A denial with any other reason:** `shk` may have failed to run. Claude Code, Copilot, and Cursor with `--fail-closed` can also deny an action when the hook itself fails.
+- **A `No such file` error or the file's contents:** the hook did not run, it was installed with `--audit`, or `[action_guard]` in `shk.toml` is off or allows the command.
+
+Where hooks do not run, a [CI scan](ci.md) still checks what reaches a pull request, but it does not see what the agent read or sent along the way.
+
+### Claude Code Cloud Sessions
+
+These steps apply to Anthropic-hosted environments.
+
+1. Install the project hooks, then commit and push `.claude/settings.json` and `shk.toml`:
+
+   ```bash
+   shk hooks install-ai --tool claude-code
+   ```
+
+2. On the new-session screen at [claude.ai/code](https://claude.ai/code), open the environment selector under the message box, add or edit an environment, and select **Setup script**. The **Default** environment starts without one.
+
+3. Paste this script and save:
+
+   ```bash
+   #!/bin/bash
+   set -euo pipefail
+   apt-get update
+   apt-get install -y --no-install-recommends ca-certificates curl xz-utils
+   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk-cli-installer.sh \
+     | SHK_CLI_UNMANAGED_INSTALL=/usr/local/bin sh
+   shk --version
+   ```
+
+4. Start a new session and [check that the hooks run](#check-that-hooks-run).
+
+[Setup scripts](https://code.claude.com/docs/en/cloud-environments#setup-scripts) run as root on Ubuntu 24.04 before Claude Code starts.
+
+- **Network access:** the default **Trusted** allowlist includes the hosts this script uses, and installs fail with **None**. With **Custom**, include the default domains, or allow at least `github.com`, `release-assets.githubusercontent.com`, and the Ubuntu package mirrors such as `archive.ubuntu.com` and `security.ubuntu.com`. Claude Code's documentation does not say how its GitHub proxy treats release downloads, so check the setup output if the download fails.
+- **Failed installs:** `set -euo pipefail` and `shk --version` make the script exit non-zero if the install fails. The session then fails to start or starts without `shk`, and in the second case Claude Code [blocks prompts and matched tool calls](commands.md#shk-hooks-install-ai). Fix the script and start a new session.
+- **Updates:** the result of the script is [cached](https://code.claude.com/docs/en/cloud-environments#environment-caching). It runs again when you change the script or the allowed hosts, or when the cache expires after about seven days, so `latest/download` does not pick up a new release right away. To control the version, pin it with `download/vX.Y.Z`; changing the pin rebuilds the cache for new sessions.
+
+[Some sessions do not run repository hooks](https://code.claude.com/docs/en/settings#settings-in-cloud-sessions), and `shk` does not scan them. This applies to sessions with several repositories and to cloud threads in a project. `~/.claude/settings.json` and `.claude/settings.local.json` are not read in any cloud session.
+
+### Cursor Cloud Agents
+
+1. Install the project hooks with `--fail-closed`, then commit and push `.cursor/hooks.json` and `shk.toml`:
+
+   ```bash
+   shk hooks install-ai --tool cursor --fail-closed
+   ```
+
+2. Add `shk` to the Dockerfile of your environment, before any `USER` instruction. This example assumes a Debian or Ubuntu base image:
+
+   ```dockerfile
+   RUN apt-get update \
+     && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
+     && curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk-cli-installer.sh \
+       | SHK_CLI_UNMANAGED_INSTALL=/usr/local/bin sh \
+     && shk --version
+   ```
+
+3. Point `.cursor/environment.json` at that file, then commit both and push them to the default branch. The path is relative to `.cursor`, so this example uses `.cursor/Dockerfile`:
+
+   ```json
+   {
+     "build": { "dockerfile": "Dockerfile" }
+   }
+   ```
+
+4. Start an agent and [check that the hooks run](#check-that-hooks-run) after it has started working in a writable environment.
+
+[Cursor builds](https://cursor.com/docs/cloud-agent/setup) use the configuration on the environment's default branch. Cursor checks a personal saved environment first, then a team saved environment, and then `.cursor/environment.json`, which it uses only for single-repository runs. A saved environment reads the committed file only if its **environment.json location** points at it, and new environments start with that set to **None**. Self-hosted machines never read the file. Cursor does not document which user the `install` command runs as, which is why this guide uses a Dockerfile. Cursor manages the checkout, so do not `COPY` the project into the image.
+
+- **Why `--fail-closed`:** by default, [Cursor lets an action proceed](https://cursor.com/docs/agent/hooks) when a hook crashes, times out, or exits with a code other than `2`, so without `shk` the agent keeps working with no scan. The flag blocks the action instead, for everyone who uses the committed file, so install `shk` for your team first. Re-running `shk hooks install-ai --tool cursor` without the flag turns it off.
+- **MCP tool calls:** `beforeMCPExecution` and `afterMCPExecution` do not run in cloud agents, so `shk` does not scan MCP calls there.
+- **Early turns:** hooks do not run during early exploratory turns in a read-only environment.
+- **User-level hooks:** `~/.cursor/hooks.json` is not available.
+
+### GitHub Copilot Cloud Agent
+
+Copilot sessions can run in a cloud sandbox, on GitHub Actions, or in a custom environment you manage. [Setup steps](https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/customize-cloud-agent/customize-the-agent-environment) apply only to sessions on GitHub Actions. Cloud sandbox sessions do not read them, and GitHub does not document another way to preinstall tools there, so this guide covers GitHub Actions sessions. In a custom environment, install `shk` as part of that environment.
+
+1. Install the project hooks, then commit `.github/hooks/shk-security.json` and `shk.toml` and merge them. The hooks file must be on the default branch for Copilot cloud agent to use it:
+
+   ```bash
+   shk hooks install-ai --tool copilot
+   ```
+
+2. Create `.github/workflows/copilot-setup-steps.yml` on the default branch. The job must be named `copilot-setup-steps`:
+
+   ```yaml
+   name: "Copilot Setup Steps"
+
+   on:
+     workflow_dispatch:
+
+   jobs:
+     copilot-setup-steps:
+       runs-on: ubuntu-latest
+       permissions:
+         contents: read
+       steps:
+         - name: Checkout code
+           uses: actions/checkout@v6
+
+         - name: Install shk
+           run: |
+             sudo apt-get update
+             sudo apt-get install -y --no-install-recommends xz-utils
+             curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Kazuki-tam/security-harness-kit/releases/latest/download/shk-cli-installer.sh \
+               | sudo env SHK_CLI_UNMANAGED_INSTALL=/usr/local/bin sh
+             shk --version
+   ```
+
+3. Start a session on GitHub Actions and [check that the hooks run](#check-that-hooks-run).
+
+GitHub's [setup steps guide](https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/customize-cloud-agent/customize-the-agent-environment) and [hooks reference](https://docs.github.com/en/copilot/reference/hooks-reference) describe this behavior in the cloud:
+
+- **Failures:** a non-zero exit from a command `preToolUse` hook denies the tool call, so expect tool calls to be denied wherever the committed hooks load without `shk`, including cloud sandbox sessions. If a setup step fails, Copilot skips the remaining steps and starts anyway. A hook timeout is different: the tool call proceeds. `shk` sets a 30-second timeout on these hooks.
+- **Permission requests:** `PermissionRequest` has no effect in the cloud because tool calls are pre-approved. `preToolUse` does the blocking.
+- **Audit logs:** files written by hooks are discarded when the job ends, including `.shk/audit.log` from `--log-blocked`.
+- **User-level hooks:** the sandbox does not ship with user-level hook files, so `~/.copilot/hooks/` does not apply.
 
 ## Desktop App
 
