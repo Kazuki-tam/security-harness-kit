@@ -9,6 +9,7 @@ import {
   quickSetupCanApply,
 } from "../setup/plan";
 import type { ProjectStatus } from "../types";
+import { ownLabel } from "../utils";
 import { IgnoreTargetsPicker } from "./IgnoreTargetsPicker";
 import { Button } from "./Button";
 
@@ -173,7 +174,7 @@ export function QuickSetupCard({ status, running, onQuickSetup, onOpenAdvanced }
                         />
                         <span className="min-w-0 flex-1">
                           <span className="block font-medium text-text">
-                            {fixLabels[fix.id] ?? fix.id}
+                            {ownLabel(fixLabels, fix.id) ?? fix.id}
                           </span>
                         </span>
                       </label>

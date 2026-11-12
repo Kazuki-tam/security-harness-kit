@@ -14,6 +14,7 @@ import {
   projectSkillStatuses,
 } from "../setup/plan";
 import type { ActionState, AiHookSetupSelection, ProjectStatus, SetupHandlers } from "../types";
+import { ownLabel } from "../utils";
 import { DEFAULT_IGNORE_TARGETS, IgnoreTargetsPicker } from "./IgnoreTargetsPicker";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { QuickSetupCard } from "./QuickSetupCard";
@@ -266,7 +267,7 @@ export function ProjectSetupPanel({
                 <ul className="grid gap-1">
                   {ignoreMissingPatterns.map((pat) => (
                     <li key={pat}>
-                      · {m.ignore.patternDescriptions[pat] ?? pat}
+                      · {ownLabel(m.ignore.patternDescriptions, pat) ?? pat}
                       <span className="ml-1 font-mono text-[10px] text-faint">({pat})</span>
                     </li>
                   ))}
@@ -337,7 +338,7 @@ export function ProjectSetupPanel({
                   className="flex items-center justify-between rounded-lg border border-border bg-surface-3/50 px-3 py-2 text-[11px]"
                 >
                   <span className="font-medium text-text">
-                    {m.aiHooks.toolNames[tool.tool] ?? tool.tool}
+                    {ownLabel(m.aiHooks.toolNames, tool.tool) ?? tool.tool}
                   </span>
                   <span className={tool.installed ? "text-emerald-300" : "text-amber-200"}>
                     {tool.installed ? m.statusReady : m.statusMissing}

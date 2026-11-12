@@ -1,5 +1,20 @@
 import type { Messages } from "./i18n/types";
 
+/**
+ * Look up the label for an identifier that did not come from this app (audit
+ * log, policy, backend result). Own string values only: a cloned repository can
+ * ship an id like `__proto__` or `constructor`, which would otherwise reach
+ * `Object.prototype` and yield a value React refuses to render.
+ */
+export function ownLabel(
+  labels: Record<string, string>,
+  id: string | null | undefined,
+): string | undefined {
+  if (!id || !Object.prototype.hasOwnProperty.call(labels, id)) return undefined;
+  const label = labels[id];
+  return typeof label === "string" ? label : undefined;
+}
+
 export function basenameOf(path: string): string {
   if (!path) return "";
   const trimmed = path.replace(/[\\/]+$/, "");

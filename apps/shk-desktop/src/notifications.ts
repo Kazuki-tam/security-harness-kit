@@ -1,3 +1,5 @@
+import { ownLabel } from "./utils";
+
 /** Tauri event carrying blocks appended to a watched project's audit log. */
 export const BLOCKED_EVENT = "shk://blocked";
 
@@ -253,8 +255,7 @@ function knownLabel(
   id: string | null | undefined,
   labels: Record<string, string>,
 ): string | undefined {
-  if (!id || !Object.prototype.hasOwnProperty.call(labels, id)) return undefined;
-  return labels[id];
+  return ownLabel(labels, id);
 }
 
 export type BlockedNotificationBatcher = {

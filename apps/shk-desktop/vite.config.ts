@@ -10,7 +10,10 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
   },
-  envPrefix: ["VITE_", "TAURI_"],
+  // Only `TAURI_ENV_*` (set by the Tauri CLI) is safe to expose. A bare `TAURI_`
+  // prefix would make `TAURI_SIGNING_PRIVATE_KEY` and its password eligible for
+  // inlining into the shipped bundle.
+  envPrefix: ["VITE_", "TAURI_ENV_"],
   build: {
     // Never inline assets as data: URIs. The Tauri CSP (`img-src 'self' asset:`)
     // does not allow `data:`, so an inlined app-logo.svg renders as a broken image

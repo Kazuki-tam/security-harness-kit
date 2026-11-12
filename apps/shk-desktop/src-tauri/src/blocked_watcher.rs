@@ -80,19 +80,51 @@ impl BlockedWatcher {
     /// Replace the watched set. Newly watched projects start at end-of-file so
     /// blocks recorded before the app opened do not produce notifications.
     pub fn set_watched(&self, paths: Vec<String>) {
-        let mut cursors = self.lock();
-        let mut next = HashMap::with_capacity(paths.len());
-        for path in paths {
-            if path.trim().is_empty() {
-                continue;
-            }
-            let offset = match cursors.get(&path) {
-                Some(offset) => *offset,
-                None => current_log_cursor(&path),
+        self.set_watched_with(paths, current_log_cursor);
+    }
+
+    /// `read_cursor` does file I/O and can block for seconds on an unresponsive
+    /// network volume, so it never runs under the cursor lock: that would stall
+    /// the poll thread's `drain_new_events` for every other project.
+    fn set_watched_with(&self, paths: Vec<String>, mut read_cursor: impl FnMut(&str) -> LogCursor) {
+        let paths: Vec<String> = paths
+            .into_iter()
+            .filter(|path| !path.trim().is_empty())
+            .collect();
+        // Cursors read for projects that were not registered yet.
+        let mut fresh: HashMap<String, LogCursor> = HashMap::new();
+        loop {
+            let missing: Vec<String> = {
+                let mut cursors = self.lock();
+                let missing: Vec<String> = paths
+                    .iter()
+                    .filter(|path| !cursors.contains_key(*path) && !fresh.contains_key(*path))
+                    .cloned()
+                    .collect();
+                if missing.is_empty() {
+                    // A cursor that is registered by now wins over one read
+                    // here: it may have been advanced by a drain, or put there
+                    // by a registration that raced with this one.
+                    let next = paths
+                        .into_iter()
+                        .filter_map(|path| {
+                            let cursor =
+                                cursors.get(&path).or_else(|| fresh.get(&path)).copied()?;
+                            Some((path, cursor))
+                        })
+                        .collect();
+                    *cursors = next;
+                    return;
+                }
+                missing
             };
-            next.insert(path, offset);
+            // Each pass reads at least one new path, so this ends after at
+            // most `paths.len()` passes even if registrations keep racing.
+            for path in missing {
+                let cursor = read_cursor(&path);
+                fresh.insert(path, cursor);
+            }
         }
-        *cursors = next;
     }
 
     /// Consume everything appended since the last call across all watched logs.
@@ -641,6 +673,66 @@ mod tests {
 
         assert_eq!(watcher.drain_new_events().len(), 1);
         assert!(watcher.drain_new_events().is_empty());
+    }
+
+    #[test]
+    fn set_watched_reads_new_cursors_without_holding_the_lock() {
+        let watcher = BlockedWatcher::default();
+        let mut lock_was_free = Vec::new();
+        watcher.set_watched_with(vec!["/a".to_string(), "/b".to_string()], |_| {
+            lock_was_free.push(watcher.cursors.try_lock().is_ok());
+            LogCursor {
+                offset: 7,
+                discard_until_newline: false,
+            }
+        });
+
+        assert_eq!(lock_was_free, vec![true, true]);
+        let cursors = watcher.lock();
+        assert_eq!(cursors.len(), 2);
+        assert!(cursors.values().all(|cursor| cursor.offset == 7));
+    }
+
+    #[test]
+    fn set_watched_keeps_a_cursor_registered_while_it_was_reading() {
+        let watcher = BlockedWatcher::default();
+        watcher.set_watched_with(vec!["/a".to_string()], |path| {
+            // Another registration lands while this one is statting the log.
+            watcher.lock().insert(
+                path.to_string(),
+                LogCursor {
+                    offset: 3,
+                    discard_until_newline: false,
+                },
+            );
+            LogCursor {
+                offset: 9,
+                discard_until_newline: false,
+            }
+        });
+
+        assert_eq!(
+            watcher.lock().get("/a").map(|cursor| cursor.offset),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn set_watched_registers_a_project_dropped_while_it_was_reading() {
+        let watcher = BlockedWatcher::default();
+        watcher.set_watched_with(vec!["/a".to_string()], |_| LogCursor::default());
+        let mut reads = Vec::new();
+        watcher.set_watched_with(vec!["/a".to_string(), "/b".to_string()], |path| {
+            reads.push(path.to_string());
+            // `/a` was registered when this call started and is dropped by a
+            // racing registration before the new set is committed.
+            watcher.lock().clear();
+            LogCursor::default()
+        });
+
+        assert_eq!(reads, vec!["/b".to_string(), "/a".to_string()]);
+        let cursors = watcher.lock();
+        assert!(cursors.contains_key("/a") && cursors.contains_key("/b"));
     }
 
     #[test]

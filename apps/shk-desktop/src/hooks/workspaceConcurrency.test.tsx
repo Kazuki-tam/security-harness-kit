@@ -219,6 +219,50 @@ describe("redaction request lifecycle", () => {
     expect(maskFile).toHaveBeenCalledTimes(1);
     expect(result.current.workspace.saving).toBe(false);
   });
+
+  it("keeps the masked result when saving the Office file fails", async () => {
+    vi.mocked(maskFile).mockResolvedValueOnce({
+      maskedContent: "preview",
+      findings: [],
+      fileKind: "office",
+      sourceLabel: "report.docx",
+      outputPath: undefined,
+    });
+    vi.mocked(maskFile).mockRejectedValueOnce(new Error("output path is outside the project"));
+    vi.mocked(save).mockResolvedValue("/elsewhere/report.masked.docx");
+    const { result } = renderHook(() => useRedact("/project"), { wrapper: I18nProvider });
+    act(() => result.current.input.applySelectedFile("/project/report.docx"));
+    await act(() => result.current.workspace.runMask());
+    await act(() => result.current.workspace.saveMaskedFile());
+
+    expect(result.current.workspace.maskState.status).toBe("done");
+    expect(result.current.workspace.maskedOutput).toBe("preview");
+    expect(result.current.workspace.saving).toBe(false);
+    expect(noticeMock).toHaveBeenCalledWith(
+      expect.stringContaining("output path is outside the project"),
+    );
+  });
+
+  it.each([
+    ["/project", "/project/report.masked.docx"],
+    ["C:\\work\\project", "C:\\work\\project\\report.masked.docx"],
+    [null, "report.masked.docx"],
+  ])("opens the save dialog in the project root (%s)", async (projectPath, defaultPath) => {
+    vi.mocked(maskFile).mockResolvedValue({
+      maskedContent: "preview",
+      findings: [],
+      fileKind: "office",
+      sourceLabel: "report.docx",
+      outputPath: undefined,
+    });
+    vi.mocked(save).mockResolvedValue(null);
+    const { result } = renderHook(() => useRedact(projectPath), { wrapper: I18nProvider });
+    act(() => result.current.input.applySelectedFile("/input/report.docx"));
+    await act(() => result.current.workspace.runMask());
+    await act(() => result.current.workspace.saveMaskedFile());
+
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({ defaultPath }));
+  });
 });
 
 function usePseudo() {

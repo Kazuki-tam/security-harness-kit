@@ -1,5 +1,6 @@
 import { useI18n } from "../i18n";
 import type { IgnoreFixTarget } from "../types";
+import { ownLabel } from "../utils";
 
 export const DEFAULT_IGNORE_TARGETS = [".gitignore"];
 
@@ -43,7 +44,7 @@ export function IgnoreTargetsPicker({
               />
               <span className="min-w-0 flex-1">
                 <span className="block font-medium text-text">
-                  {m.targetNames[target.name] ?? target.name}
+                  {ownLabel(m.targetNames, target.name) ?? target.name}
                 </span>
                 <span className="text-[10px] text-faint">
                   {target.exists ? m.targetExists : m.targetNew}

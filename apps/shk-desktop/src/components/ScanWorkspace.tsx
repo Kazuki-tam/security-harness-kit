@@ -18,6 +18,7 @@ import { formatRelativeTime } from "../utils";
 import { AuditPanel } from "./AuditPanel";
 import { Button } from "./Button";
 import { DoctorPanel } from "./DoctorPanel";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { FindingList } from "./FindingList";
 import { ProjectSetupPanel } from "./ProjectSetupPanel";
 import { ScanProgressCard } from "./ScanProgressCard";
@@ -236,20 +237,24 @@ export function ScanWorkspace({
                   }}
                 />
               )}
-              <DoctorPanel
-                doctor={projectStatus.data.doctor}
-                npmApplicable={projectStatus.data.npmHardening.hasProjects}
-                envFiles={projectStatus.data.envFiles}
-                onOpenSetup={() => setTab("setup")}
-              />
-              <div id="audit-panel">
-                <AuditPanel
-                  projectPath={project.path}
-                  auditState={auditState}
-                  onRefresh={(options) => void refreshAudit(options)}
+              <PanelBoundary>
+                <DoctorPanel
+                  doctor={projectStatus.data.doctor}
+                  npmApplicable={projectStatus.data.npmHardening.hasProjects}
+                  envFiles={projectStatus.data.envFiles}
                   onOpenSetup={() => setTab("setup")}
-                  onOpenFindings={report ? () => setTab("findings") : undefined}
                 />
+              </PanelBoundary>
+              <div id="audit-panel">
+                <PanelBoundary>
+                  <AuditPanel
+                    projectPath={project.path}
+                    auditState={auditState}
+                    onRefresh={(options) => void refreshAudit(options)}
+                    onOpenSetup={() => setTab("setup")}
+                    onOpenFindings={report ? () => setTab("findings") : undefined}
+                  />
+                </PanelBoundary>
               </div>
               {!projectStatus.data.policy.exists && (
                 <div className="flex flex-col gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[12px] text-amber-100 sm:flex-row sm:items-center sm:justify-between">
@@ -268,7 +273,9 @@ export function ScanWorkspace({
             <>
               <StatusBanner actionable={actionable} report={report} />
               <SeveritySummary report={report} filter={filter} onFilterChange={setFilter} />
-              <FindingList findings={report.findings} filter={filter} />
+              <PanelBoundary>
+                <FindingList findings={report.findings} filter={filter} />
+              </PanelBoundary>
             </>
           ) : scanState.status !== "error" ? (
             <EmptyHero isScanning={isScanning} onScan={onScan} />
@@ -285,25 +292,47 @@ export function ScanWorkspace({
                 </div>
               )}
               {projectStatus.status === "done" && (
-                <ProjectSetupPanel
-                  status={projectStatus.data}
-                  actionState={actionState}
-                  onDismissActionFeedback={onDismissActionFeedback}
-                  onQuickSetup={setupHandlers.onQuickSetup}
-                  onInitPolicy={setupHandlers.onInitPolicy}
-                  onFixDoctorIgnore={setupHandlers.onFixDoctorIgnore}
-                  onInstallPreCommit={setupHandlers.onInstallPreCommit}
-                  onInstallAiHooks={setupHandlers.onInstallAiHooks}
-                  onEncryptEnv={setupHandlers.onEncryptEnv}
-                  onApplyNpmHardening={setupHandlers.onApplyNpmHardening}
-                  onInstallSkills={setupHandlers.onInstallSkills}
-                />
+                <PanelBoundary>
+                  <ProjectSetupPanel
+                    status={projectStatus.data}
+                    actionState={actionState}
+                    onDismissActionFeedback={onDismissActionFeedback}
+                    onQuickSetup={setupHandlers.onQuickSetup}
+                    onInitPolicy={setupHandlers.onInitPolicy}
+                    onFixDoctorIgnore={setupHandlers.onFixDoctorIgnore}
+                    onInstallPreCommit={setupHandlers.onInstallPreCommit}
+                    onInstallAiHooks={setupHandlers.onInstallAiHooks}
+                    onEncryptEnv={setupHandlers.onEncryptEnv}
+                    onApplyNpmHardening={setupHandlers.onApplyNpmHardening}
+                    onInstallSkills={setupHandlers.onInstallSkills}
+                  />
+                </PanelBoundary>
               )}
             </>
           ) : null}
         </TabPanel>
       </div>
     </div>
+  );
+}
+
+/**
+ * Contains a render failure to one panel. The selected project is persisted, so
+ * an error that reached the root boundary would come straight back after a
+ * reload; here the rest of the project stays usable.
+ */
+function PanelBoundary({ children }: { children: ReactNode }) {
+  const { messages } = useI18n();
+  const m = messages.errorBoundary;
+  return (
+    <ErrorBoundary
+      variant="panel"
+      title={m.panelTitle}
+      description={m.panelDescription}
+      reloadLabel={m.retry}
+    >
+      {children}
+    </ErrorBoundary>
   );
 }
 

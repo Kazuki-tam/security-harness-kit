@@ -18,6 +18,9 @@ export const en: Messages = {
     title: "Something went wrong",
     description: "The app hit an unexpected error. Reload to continue.",
     reload: "Reload app",
+    panelTitle: "This section could not be displayed",
+    panelDescription: "The rest of the project is still available. Try again to reload it.",
+    retry: "Try again",
   },
   sidebar: {
     newProject: "New project",
@@ -403,6 +406,7 @@ export const en: Messages = {
       finding_threshold: "Secret/PII blocked",
       action_guard: "Risky action blocked",
       payload_too_large: "Oversized tool input blocked",
+      policy_error: "Policy error blocked",
     },
     toolNames: {
       "claude-code": "Claude Code",
