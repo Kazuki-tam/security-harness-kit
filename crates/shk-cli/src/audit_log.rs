@@ -1,10 +1,16 @@
 use crate::safety;
 use anyhow::{Context, Result, bail};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 const MAX_AUDIT_LOG_BYTES: u64 = 8 * 1024 * 1024;
 const AUDIT_LOG_ROTATIONS: usize = 3;
+
+/// Longest line `read_entries` hands to the JSON parser. Entries written by
+/// `append_line` are a few hundred bytes, so anything larger is malformed or
+/// hostile (a cloned repository can ship its own `.shk/audit.log`). Matches the
+/// desktop watcher's limit.
+const MAX_READ_LINE_BYTES: usize = 64 * 1024;
 
 /// Path to the project metadata-only audit log.
 pub fn log_path(repo_root: &Path) -> PathBuf {
@@ -156,32 +162,168 @@ pub fn clear_log(repo_root: &Path) -> Result<usize> {
     Ok(removed)
 }
 
-/// Read all parseable NDJSON lines from `.shk/audit.log`.
+/// Read all parseable NDJSON lines from `.shk/audit.log` and its rotations.
+///
+/// The log is untrusted input: a cloned repository can ship its own. Reading
+/// therefore holds the same line as `append_line` (no symlinked `.shk`, no
+/// symlinked, non-regular or hard-linked log file) and is bounded: at most
+/// `MAX_AUDIT_LOG_BYTES` — the rotation threshold, so a log written by shk is
+/// always read in full — from the end of each file, and lines longer than
+/// `MAX_READ_LINE_BYTES` are skipped and counted as parse errors.
 pub fn read_entries(repo_root: &Path) -> Result<ReadAuditLogResult> {
-    let path = log_path(repo_root);
-    let mut entries = Vec::new();
-    let mut parse_errors = 0;
-    for path in rotated_and_current_log_paths(&path) {
-        if !path.is_file() {
+    let mut result = ReadAuditLogResult {
+        entries: Vec::new(),
+        parse_errors: 0,
+    };
+    if !audit_dir_is_readable(repo_root)? {
+        return Ok(result);
+    }
+    for path in rotated_and_current_log_paths(&log_path(repo_root)) {
+        let Some(file) = open_log_for_read(&path)? else {
             continue;
-        }
-        let file =
-            std::fs::File::open(&path).with_context(|| format!("read {}", path.display()))?;
-        for line in BufReader::new(file).lines() {
-            let line = line.with_context(|| format!("read line from {}", path.display()))?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            match serde_json::from_str(&line) {
-                Ok(value) => entries.push(value),
-                Err(_) => parse_errors += 1,
-            }
+        };
+        read_log_tail(file, &path, &mut result)?;
+    }
+    Ok(result)
+}
+
+/// `Ok(false)` when there is no `.shk` directory; an error when `.shk` is
+/// anything but a real directory.
+fn audit_dir_is_readable(repo_root: &Path) -> Result<bool> {
+    let dir = repo_root.join(".shk");
+    match std::fs::symlink_metadata(&dir) {
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(true),
+        Ok(_) => bail!(
+            "refusing to read audit log through non-directory {}",
+            dir.display()
+        ),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err).with_context(|| format!("inspect {}", dir.display())),
+    }
+}
+
+/// Open one audit log file without following symlinks. `Ok(None)` when absent.
+fn open_log_for_read(log: &Path) -> Result<Option<std::fs::File>> {
+    match std::fs::symlink_metadata(log) {
+        Ok(metadata) => ensure_readable_audit_metadata(&metadata, log)?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("inspect {}", log.display())),
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = match options.open(log) {
+        Ok(file) => file,
+        // Removed by `clear_log` or a rotation since the check above.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("read {}", log.display())),
+    };
+    // Re-check the opened descriptor so a path swap between the inspection
+    // and `open` cannot turn an unsafe target into a readable one.
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspect {}", log.display()))?;
+    ensure_readable_audit_metadata(&metadata, log)?;
+    Ok(Some(file))
+}
+
+fn ensure_readable_audit_metadata(metadata: &std::fs::Metadata, log: &Path) -> Result<()> {
+    if !metadata.file_type().is_file() {
+        bail!(
+            "refusing to read non-regular audit log file {}",
+            log.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() > 1 {
+            bail!(
+                "refusing to read hard-linked audit log file {}",
+                log.display()
+            );
         }
     }
-    Ok(ReadAuditLogResult {
-        entries,
-        parse_errors,
-    })
+    Ok(())
+}
+
+/// Parse the newest `MAX_AUDIT_LOG_BYTES` of `file` into `result`.
+fn read_log_tail(
+    mut file: std::fs::File,
+    path: &Path,
+    result: &mut ReadAuditLogResult,
+) -> Result<()> {
+    let read_error = || format!("read {}", path.display());
+    let len = file.metadata().with_context(read_error)?.len();
+    let start = len.saturating_sub(MAX_AUDIT_LOG_BYTES);
+    // When the file is over the cap, begin one byte early and drop everything
+    // through the first newline: that is exactly the entry the cap cut into, or
+    // just the previous entry's terminator when the cap fell on a boundary.
+    let mut skip_first_line = start > 0;
+    if skip_first_line {
+        file.seek(SeekFrom::Start(start - 1))
+            .with_context(read_error)?;
+    }
+    let mut reader = BufReader::new(file.take(MAX_AUDIT_LOG_BYTES + 1));
+    let mut line = Vec::new();
+    loop {
+        let over_long = match read_bounded_line(&mut reader, &mut line) {
+            Ok(Some(over_long)) => over_long,
+            Ok(None) => break,
+            Err(err) => return Err(err).with_context(read_error),
+        };
+        if std::mem::take(&mut skip_first_line) {
+            continue;
+        }
+        if over_long {
+            result.parse_errors += 1;
+            continue;
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        match serde_json::from_slice(&line) {
+            Ok(value) => result.entries.push(value),
+            Err(_) => result.parse_errors += 1,
+        }
+    }
+    Ok(())
+}
+
+/// Read one line into `line` without ever buffering more than
+/// `MAX_READ_LINE_BYTES` of it. Returns `None` at end of input, otherwise
+/// whether the line exceeded the limit (in which case `line` is empty).
+fn read_bounded_line(
+    reader: &mut impl BufRead,
+    line: &mut Vec<u8>,
+) -> std::io::Result<Option<bool>> {
+    line.clear();
+    let mut over_long = false;
+    let mut read_any = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(read_any.then_some(over_long));
+        }
+        read_any = true;
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let content = &available[..newline.unwrap_or(available.len())];
+        if !over_long && line.len() + content.len() <= MAX_READ_LINE_BYTES {
+            line.extend_from_slice(content);
+        } else {
+            over_long = true;
+            line.clear();
+        }
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        reader.consume(consumed);
+        if newline.is_some() {
+            return Ok(Some(over_long));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -303,5 +445,141 @@ mod tests {
         let err = append_line(root.path(), serde_json::json!({"seq": 1})).unwrap_err();
         assert!(err.to_string().contains("hard-linked"));
         assert_eq!(std::fs::read(&outside_file).unwrap(), b"keep\n");
+    }
+
+    fn seqs(result: &ReadAuditLogResult) -> Vec<u64> {
+        result
+            .entries
+            .iter()
+            .filter_map(|entry| entry["seq"].as_u64())
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_entries_refuses_a_symlinked_audit_log() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".shk")).unwrap();
+        let outside_file = outside.path().join("target.log");
+        std::fs::write(&outside_file, "{\"seq\":1}\n").unwrap();
+        std::os::unix::fs::symlink(&outside_file, log_path(root.path())).unwrap();
+
+        let err = read_entries(root.path()).unwrap_err();
+        assert!(err.to_string().contains("refusing to read"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_entries_refuses_a_symlinked_rotated_log() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".shk")).unwrap();
+        let log = log_path(root.path());
+        std::fs::write(&log, "{\"seq\":2}\n").unwrap();
+        let outside_file = outside.path().join("target.log");
+        std::fs::write(&outside_file, "{\"seq\":1}\n").unwrap();
+        std::os::unix::fs::symlink(&outside_file, rotated_log_path(&log, 1)).unwrap();
+
+        let err = read_entries(root.path()).unwrap_err();
+        assert!(err.to_string().contains("refusing to read"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_entries_refuses_a_symlinked_audit_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("audit.log"), "{\"seq\":1}\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join(".shk")).unwrap();
+
+        let err = read_entries(root.path()).unwrap_err();
+        assert!(err.to_string().contains("refusing to read"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_entries_refuses_a_hard_linked_audit_log() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".shk")).unwrap();
+        let outside_file = outside.path().join("target.log");
+        std::fs::write(&outside_file, "{\"seq\":1}\n").unwrap();
+        std::fs::hard_link(&outside_file, log_path(root.path())).unwrap();
+
+        let err = read_entries(root.path()).unwrap_err();
+        assert!(err.to_string().contains("refusing to read"), "{err}");
+    }
+
+    #[test]
+    fn read_entries_skips_over_long_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".shk")).unwrap();
+        let long = format!(
+            "{{\"seq\":2,\"pad\":\"{}\"}}",
+            "x".repeat(MAX_READ_LINE_BYTES)
+        );
+        std::fs::write(
+            log_path(dir.path()),
+            format!("{{\"seq\":1}}\n{long}\n{{\"seq\":3}}\n"),
+        )
+        .unwrap();
+
+        let result = read_entries(dir.path()).unwrap();
+        assert_eq!(seqs(&result), vec![1, 3]);
+        assert_eq!(result.parse_errors, 1);
+    }
+
+    #[test]
+    fn read_entries_counts_invalid_utf8_as_a_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".shk")).unwrap();
+        std::fs::write(
+            log_path(dir.path()),
+            b"{\"seq\":1}\n\xff\xfe\n{\"seq\":2}\n",
+        )
+        .unwrap();
+
+        let result = read_entries(dir.path()).unwrap();
+        assert_eq!(seqs(&result), vec![1, 2]);
+        assert_eq!(result.parse_errors, 1);
+    }
+
+    #[test]
+    fn read_entries_reads_only_the_newest_bytes_of_an_oversized_log() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".shk")).unwrap();
+        let pad = "x".repeat(1000);
+        let mut content = String::new();
+        let mut count = 0u64;
+        while content.len() as u64 <= MAX_AUDIT_LOG_BYTES + 4096 {
+            count += 1;
+            content.push_str(&format!("{{\"seq\":{count},\"pad\":\"{pad}\"}}\n"));
+        }
+        std::fs::write(log_path(dir.path()), &content).unwrap();
+
+        let result = read_entries(dir.path()).unwrap();
+        let seqs = seqs(&result);
+        assert_eq!(seqs.last(), Some(&count));
+        assert!(seqs[0] > 1, "oldest entries are beyond the byte cap");
+        assert!(seqs.windows(2).all(|pair| pair[1] == pair[0] + 1));
+        // The entry cut by the cap is dropped, not reported as malformed.
+        assert_eq!(result.parse_errors, 0);
+        let kept_bytes = content.len() / count as usize * seqs.len();
+        assert!(kept_bytes as u64 <= MAX_AUDIT_LOG_BYTES);
+    }
+
+    #[test]
+    fn read_entries_keeps_a_log_that_fills_the_rotation_limit_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".shk")).unwrap();
+        let line = format!("{{\"pad\":\"{}\"}}\n", "x".repeat(1013));
+        assert_eq!(line.len(), 1024);
+        let lines = (MAX_AUDIT_LOG_BYTES / 1024) as usize;
+        std::fs::write(log_path(dir.path()), line.repeat(lines)).unwrap();
+
+        let result = read_entries(dir.path()).unwrap();
+        assert_eq!(result.entries.len(), lines);
+        assert_eq!(result.parse_errors, 0);
     }
 }
