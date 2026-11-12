@@ -1121,9 +1121,12 @@ const PIPX_RUN_RUNNER: PackageRunner = PackageRunner {
 /// Arguments following the first occurrence of `subcommand` words
 /// (`["tool", "run"]` must be adjacent).
 fn after_subcommand<'a>(args: &'a [String], subcommand: &[&str]) -> Option<&'a [String]> {
-    let start = args
-        .windows(subcommand.len())
-        .position(|window| window.iter().map(String::as_str).eq(subcommand.iter().copied()))?;
+    let start = args.windows(subcommand.len()).position(|window| {
+        window
+            .iter()
+            .map(String::as_str)
+            .eq(subcommand.iter().copied())
+    })?;
     Some(&args[start + subcommand.len()..])
 }
 
@@ -2053,8 +2056,14 @@ mod tests {
             ("npx.cmd", vec!["-y", "@scope/pkg"]),
             (r"C:\Program Files\nodejs\NPX.EXE", vec!["-y", "@scope/pkg"]),
             ("npx.bat", vec!["--yes", "@scope/pkg"]),
-            ("env", vec!["NODE_ENV=production", "npx", "-y", "@scope/pkg"]),
-            ("/usr/bin/env", vec!["-u", "DEBUG", "npx", "-y", "@scope/pkg"]),
+            (
+                "env",
+                vec!["NODE_ENV=production", "npx", "-y", "@scope/pkg"],
+            ),
+            (
+                "/usr/bin/env",
+                vec!["-u", "DEBUG", "npx", "-y", "@scope/pkg"],
+            ),
             ("npm", vec!["exec", "--yes", "--", "@scope/pkg"]),
         ] {
             let findings = audit_entry(stdio(command, &args));
@@ -2096,7 +2105,10 @@ mod tests {
             ("bunx", vec!["@scope/pkg@1.2.3"]),
             ("pnpm", vec!["dlx", "@scope/pkg@1.2.3"]),
             ("yarn", vec!["dlx", "-p", "@scope/pkg@1.2.3", "server"]),
-            ("npm", vec!["exec", "--package=@scope/pkg@1.2.3", "--", "server"]),
+            (
+                "npm",
+                vec!["exec", "--package=@scope/pkg@1.2.3", "--", "server"],
+            ),
             ("uv", vec!["tool", "run", "--from", "demo==1.2.3", "server"]),
             // Not a package runner invocation at all.
             ("npm", vec!["run", "start"]),
@@ -2119,9 +2131,15 @@ mod tests {
             ),
             ("npx", vec!["--cache", "/tmp/npx", "-y", "@scope/pkg@1.2.3"]),
             ("uvx", vec!["--python", "3.12", "demo==1.2.3"]),
-            ("uvx", vec!["--with", "extra", "--from", "demo==1.2.3", "server"]),
+            (
+                "uvx",
+                vec!["--with", "extra", "--from", "demo==1.2.3", "server"],
+            ),
             ("pipx", vec!["run", "--python", "python3.12", "demo==1.2.3"]),
-            ("pnpm", vec!["dlx", "--registry", "https://registry.example", "pkg@1.2.3"]),
+            (
+                "pnpm",
+                vec!["dlx", "--registry", "https://registry.example", "pkg@1.2.3"],
+            ),
         ] {
             let findings = audit_entry(stdio(command, &args));
             assert!(

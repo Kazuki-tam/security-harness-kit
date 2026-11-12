@@ -1562,7 +1562,8 @@ updates:
 
     #[test]
     fn npmrc_duplicate_keys_use_the_last_occurrence_like_npm() {
-        let npmrc = "ignore-scripts=true\nmin-release-age=7\nignore-scripts=false\nmin-release-age=1\n";
+        let npmrc =
+            "ignore-scripts=true\nmin-release-age=7\nignore-scripts=false\nmin-release-age=1\n";
         assert_eq!(npmrc_bool(npmrc, IGNORE_SCRIPTS_KEY), Some(false));
         assert_eq!(npmrc_u64(npmrc, MIN_RELEASE_AGE_KEY), Some(1));
 
@@ -1654,7 +1655,8 @@ updates:
 
     #[test]
     fn bunfig_update_reuses_table_whose_header_has_a_trailing_comment() {
-        let input = "[install] # bun install settings\ncache = true\n\n[test] # runner\ncoverage = true\n";
+        let input =
+            "[install] # bun install settings\ncache = true\n\n[test] # runner\ncoverage = true\n";
         let out = upsert_bunfig_min_release_age(input).unwrap();
         assert_eq!(out.matches("[install]").count(), 1, "{out}");
         let value: toml::Value = toml::from_str(&out).expect("valid TOML");
