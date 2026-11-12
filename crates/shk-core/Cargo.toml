@@ -28,6 +28,7 @@ sha2_hmac = { package = "sha2", version = "0.11" }
 csv.workspace = true
 unicode-normalization.workspace = true
 chrono.workspace = true
+encoding_rs.workspace = true
 zeroize.workspace = true
 quick-xml.workspace = true
 zip.workspace = true

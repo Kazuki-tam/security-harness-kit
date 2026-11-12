@@ -41,6 +41,23 @@ fn mask_text_with_custom(
 ) -> (String, Vec<crate::finding::Finding>) {
     let mut findings = Vec::new();
     let mut out = String::with_capacity(content.len());
+    // A leading byte order mark is kept in the output but must not sit in
+    // front of the first line, where it hides the line from anchored rules.
+    let content = match content.strip_prefix(BYTE_ORDER_MARK) {
+        Some(rest) => {
+            out.push(BYTE_ORDER_MARK);
+            rest
+        }
+        None => content,
+    };
+    // Rules run per line, so only the header line of a private key block
+    // matches. The body and footer are masked through these block ranges.
+    let key_blocks = if cfg.secrets {
+        shk_rules::private_key_block_ranges(content)
+    } else {
+        Vec::new()
+    };
+    let mut line_start = 0;
     // Preserve each line's original terminator (LF vs CRLF) so masking never
     // rewrites line endings on lines without findings.
     for (i, raw_line) in content.split_inclusive('\n').enumerate() {
@@ -51,6 +68,8 @@ fn mask_text_with_custom(
         } else {
             (raw_line, "")
         };
+        let block_spans = spans_within_line(&key_blocks, line_start, line.len());
+        line_start += raw_line.len();
         let mut ms = scan_content(line, rel_path, cfg);
         ms.retain(|m| Severity::from(m.severity).meets_threshold(min_severity));
         let mut custom_ms = custom_rules::scan_content(line, custom);
@@ -61,19 +80,19 @@ fn mask_text_with_custom(
         for m in &mut custom_ms {
             m.line = i + 1;
         }
-        if ms.is_empty() && custom_ms.is_empty() {
+        if ms.is_empty() && custom_ms.is_empty() && block_spans.is_empty() {
             out.push_str(line);
         } else {
             for m in &ms {
                 findings.push(
                     crate::finding::Finding::from_rule_match_with_custom_context(
-                        rel_path, m, false, line, cfg, custom,
+                        rel_path, m, None, line, cfg, custom,
                     ),
                 );
             }
             for m in &custom_ms {
                 findings.push(crate::finding::Finding::from_custom_match(
-                    rel_path, m, false, line, cfg, custom,
+                    rel_path, m, None, line, cfg, custom,
                 ));
             }
             let values = ms
@@ -83,16 +102,17 @@ fn mask_text_with_custom(
                 .collect();
             match redaction {
                 MaskRedaction::FullLine => out.push_str("[REDACTED_LINE]"),
-                MaskRedaction::Match => out.push_str(&mask_line_match(line, values)),
+                MaskRedaction::Match => {
+                    out.push_str(&mask_line_values(line, values, &block_spans, |_| {
+                        "[REDACTED]".into()
+                    }))
+                }
                 MaskRedaction::Partial {
                     preserve_prefix,
                     preserve_suffix,
-                } => out.push_str(&mask_line_partial(
-                    line,
-                    values,
-                    preserve_prefix,
-                    preserve_suffix,
-                )),
+                } => out.push_str(&mask_line_values(line, values, &block_spans, |value| {
+                    partial_value(value, preserve_prefix, preserve_suffix)
+                })),
             }
             for m in &mut ms {
                 m.matched_text.zeroize();
@@ -106,53 +126,94 @@ fn mask_text_with_custom(
     (out, findings)
 }
 
+const BYTE_ORDER_MARK: char = '\u{feff}';
+
+/// Parts of `ranges` (byte offsets into the whole content) that fall inside
+/// the line starting at `line_start`, as offsets into that line.
+fn spans_within_line(
+    ranges: &[std::ops::Range<usize>],
+    line_start: usize,
+    line_len: usize,
+) -> Vec<(usize, usize)> {
+    let line_end = line_start + line_len;
+    ranges
+        .iter()
+        .filter_map(|range| {
+            let start = range.start.max(line_start);
+            let end = range.end.min(line_end);
+            (start < end).then(|| (start - line_start, end - line_start))
+        })
+        .collect()
+}
+
+#[cfg(test)]
 fn mask_line_partial(
     line: &str,
     matches: Vec<String>,
     preserve_prefix: usize,
     preserve_suffix: usize,
 ) -> String {
-    mask_line_values(line, matches, |value| {
+    mask_line_values(line, matches, &[], |value| {
         partial_value(value, preserve_prefix, preserve_suffix)
     })
 }
 
+#[cfg(test)]
 fn mask_line_match(line: &str, matches: Vec<String>) -> String {
-    mask_line_values(line, matches, |_| "[REDACTED]".into())
+    mask_line_values(line, matches, &[], |_| "[REDACTED]".into())
 }
 
+/// Replace every occurrence of the matched values in `line`. Overlapping
+/// occurrences are merged into one span, so the tail of a partially
+/// overlapping match is never left behind. `forced_spans` are always replaced
+/// with the full placeholder, whatever `replacement_for` would preserve.
 fn mask_line_values(
     line: &str,
     matches: Vec<String>,
+    forced_spans: &[(usize, usize)],
     mut replacement_for: impl FnMut(&str) -> String,
 ) -> String {
     let mut values = matches;
-    values.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    values.sort();
     values.dedup();
 
-    let mut ranges: Vec<(usize, usize, String)> = Vec::new();
+    let mut spans: Vec<(usize, usize, bool)> = forced_spans
+        .iter()
+        .map(|&(start, end)| (start, end, true))
+        .collect();
     for value in &values {
         if value.is_empty() {
             continue;
         }
-        for (start, _) in line.match_indices(value) {
-            let end = start + value.len();
-            if ranges.iter().any(|(s, e, _)| start < *e && *s < end) {
-                continue;
-            }
-            ranges.push((start, end, replacement_for(value)));
+        for (start, _) in line.match_indices(value.as_str()) {
+            spans.push((start, start + value.len(), false));
         }
     }
     for value in &mut values {
         value.zeroize();
     }
-    ranges.sort_by_key(|(start, _, _)| *start);
+    spans.sort_by_key(|&(start, end, _)| (start, std::cmp::Reverse(end)));
+
+    let mut merged: Vec<(usize, usize, bool)> = Vec::with_capacity(spans.len());
+    for (start, end, forced) in spans {
+        match merged.last_mut() {
+            Some(last) if start < last.1 => {
+                last.1 = last.1.max(end);
+                last.2 |= forced;
+            }
+            _ => merged.push((start, end, forced)),
+        }
+    }
 
     let mut masked = String::with_capacity(line.len());
     let mut cursor = 0;
-    for (start, end, replacement) in ranges {
+    for (start, end, forced) in merged {
         masked.push_str(&line[cursor..start]);
-        masked.push_str(&replacement);
+        if forced {
+            masked.push_str("[REDACTED]");
+        } else {
+            masked.push_str(&replacement_for(&line[start..end]));
+        }
         cursor = end;
     }
     masked.push_str(&line[cursor..]);
@@ -434,5 +495,134 @@ mod tests {
 
         assert_eq!(out, "codename ProjectNebula\n");
         assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    /// Synthetic PEM-shaped block assembled at runtime; the body is not key
+    /// material.
+    fn synthetic_key_block(label: &str, eol: &str, terminated: bool) -> (String, Vec<String>) {
+        let dashes = "-".repeat(5);
+        let body: Vec<String> = ["Q1w2", "E3r4", "T5y6"]
+            .iter()
+            .map(|seed| seed.repeat(12))
+            .collect();
+        let mut block = format!("{dashes}BEGIN {label}{dashes}{eol}");
+        for line in &body {
+            block.push_str(line);
+            block.push_str(eol);
+        }
+        if terminated {
+            block.push_str(&format!("{dashes}END {label}{dashes}{eol}"));
+        }
+        (block, body)
+    }
+
+    const KEY_BLOCK_LABELS: &[&str] = &[
+        "PRIVATE KEY",
+        "RSA PRIVATE KEY",
+        "EC PRIVATE KEY",
+        "DSA PRIVATE KEY",
+        "ENCRYPTED PRIVATE KEY",
+        "OPENSSH PRIVATE KEY",
+        "PGP PRIVATE KEY BLOCK",
+    ];
+
+    #[test]
+    fn match_mask_redacts_whole_private_key_block() {
+        let cfg = RuleEngineConfig::default();
+        for label in KEY_BLOCK_LABELS {
+            let (block, body) = synthetic_key_block(label, "\n", true);
+            let content = format!("before\n{block}after\n");
+            let (out, hits) = mask_text(&content, &cfg, "x.txt", MaskRedaction::Match);
+            assert!(!hits.is_empty(), "{label}");
+            for line in &body {
+                assert!(!out.contains(line.as_str()), "{label}: body leaked");
+            }
+            assert!(!out.contains("END "), "{label}: footer kept: {out}");
+            assert!(out.starts_with("before\n"), "{label}: {out}");
+            assert!(out.ends_with("after\n"), "{label}: {out}");
+            assert_eq!(out.lines().count(), content.lines().count(), "{label}");
+        }
+    }
+
+    #[test]
+    fn full_line_mask_redacts_every_private_key_block_line() {
+        let cfg = RuleEngineConfig::default();
+        let (block, _) = synthetic_key_block("RSA PRIVATE KEY", "\r\n", true);
+        let content = format!("before\r\n{block}after\r\n");
+        let (out, _) = mask_text(&content, &cfg, "x.txt", MaskRedaction::FullLine);
+        let expected = format!("before\r\n{}after\r\n", "[REDACTED_LINE]\r\n".repeat(5));
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn partial_mask_does_not_preserve_private_key_block_edges() {
+        let cfg = RuleEngineConfig::default();
+        let (block, body) = synthetic_key_block("EC PRIVATE KEY", "\n", true);
+        let (out, _) = mask_text(
+            &block,
+            &cfg,
+            "x.txt",
+            MaskRedaction::Partial {
+                preserve_prefix: 4,
+                preserve_suffix: 4,
+            },
+        );
+        for line in &body {
+            assert!(!out.contains(&line[..4]), "{out}");
+        }
+    }
+
+    #[test]
+    fn unterminated_private_key_block_is_masked_to_end_of_input() {
+        let cfg = RuleEngineConfig::default();
+        let (block, body) = synthetic_key_block("OPENSSH PRIVATE KEY", "\n", false);
+        let content = format!("before\n{block}trailing words");
+        let (out, _) = mask_text(&content, &cfg, "x.txt", MaskRedaction::Match);
+        for line in &body {
+            assert!(!out.contains(line.as_str()), "{out}");
+        }
+        assert!(!out.contains("trailing words"), "{out}");
+        assert!(out.starts_with("before\n"), "{out}");
+    }
+
+    #[test]
+    fn private_key_block_is_left_alone_when_secret_rules_are_off() {
+        let cfg = RuleEngineConfig {
+            secrets: false,
+            ..RuleEngineConfig::default()
+        };
+        let (block, _) = synthetic_key_block("RSA PRIVATE KEY", "\n", true);
+        let (out, hits) = mask_text(&block, &cfg, "x.txt", MaskRedaction::Match);
+        assert_eq!(out, block);
+        assert!(hits.is_empty(), "{hits:?}");
+    }
+
+    #[test]
+    fn match_mask_merges_partially_overlapping_values() {
+        let out = mask_line_match("xxabcdefyy", vec!["abcd".into(), "cdef".into()]);
+        assert_eq!(out, "xx[REDACTED]yy");
+    }
+
+    #[test]
+    fn partial_mask_merges_partially_overlapping_values() {
+        let out = mask_line_partial(
+            "xx0123456789abcdefyy",
+            vec!["0123456789ab".into(), "89abcdef".into()],
+            2,
+            2,
+        );
+        assert_eq!(out, "xx01[REDACTED]efyy");
+    }
+
+    #[test]
+    fn mask_keeps_leading_bom_and_still_masks_first_line() {
+        let policy = Policy::default();
+        let name = ["API", "TOKEN"].join("_");
+        let content = format!("\u{feff}{name}=abcdefghijklmnop1234\nplain\n");
+        let (out, hits) = mask_from_policy(&content, &policy, ".env").unwrap();
+        assert!(!hits.is_empty());
+        assert!(out.starts_with('\u{feff}'), "{out:?}");
+        assert!(!out.contains("abcdefghijklmnop1234"), "{out}");
+        assert!(out.ends_with("plain\n"), "{out}");
     }
 }

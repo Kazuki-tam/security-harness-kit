@@ -4469,6 +4469,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "csv",
+ "encoding_rs",
  "getrandom 0.4.3",
  "globset",
  "hkdf 0.13.0",
