@@ -5006,6 +5006,50 @@ mod tests {
             assert!(selected.is_none());
         }
 
+        #[test]
+        fn workbooks_with_cached_copies_report_the_engine_refusal() {
+            let dir = project();
+            let root = dir.path();
+            let store = Arc::new(MemoryStore::default());
+            let open = opener(Arc::clone(&store));
+            let workbook = r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Customers" sheetId="1" r:id="rId1"/><sheet name="Summary" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
+            let rels = r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#;
+            crate::commands::pseudonymize::test_support::build_xlsx(
+                &root.join("book.xlsx"),
+                &[
+                    ("xl/workbook.xml", workbook.into()),
+                    ("xl/_rels/workbook.xml.rels", rels.into()),
+                    (
+                        "xl/worksheets/sheet1.xml",
+                        format!(
+                            r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Email</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>{}</t></is></c></row></sheetData></worksheet>"#,
+                            email()
+                        ),
+                    ),
+                    (
+                        "xl/worksheets/sheet2.xml",
+                        format!(
+                            r#"<worksheet><sheetData><row r="1"><c r="B1" t="str"><f>Customers!A2</f><v>{}</v></c></row></sheetData></worksheet>"#,
+                            email()
+                        ),
+                    ),
+                ],
+            );
+            let expected = shk_core::pseudonymize::cached_formula_error("Summary", 0, 1);
+            let inspect = pseudonymize_inspect(root, file_options(&root.join("book.xlsx")))
+                .err()
+                .unwrap();
+            assert_eq!(inspect.to_string(), expected.to_string());
+            let mut run = run_options(
+                file_options(&root.join("book.xlsx")),
+                Some(&root.join("book.pseudo.xlsx")),
+            );
+            run.input.columns = vec![at(0, "email")];
+            let err = pseudonymize_run_with(root, run, &open).err().unwrap();
+            assert_eq!(err.to_string(), expected.to_string());
+            assert!(!root.join("book.pseudo.xlsx").exists());
+        }
+
         fn run_options(
             input: PseudonymizeInspectOptions,
             output: Option<&Path>,

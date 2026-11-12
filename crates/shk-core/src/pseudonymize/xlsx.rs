@@ -47,6 +47,7 @@ pub fn run_xlsx(
                 .with_context(|| format!("xlsx sheet relationship is missing: {}", sheet.name))
         })
         .collect::<Result<BTreeSet<_>>>()?;
+    refuse_cached_copies(&mut archive, &sheets, &rels)?;
     let shared = if archive_contains_entry(&archive, "xl/sharedStrings.xml")? {
         read_zip_string(&mut archive, "xl/sharedStrings.xml")?
     } else {
@@ -216,6 +217,174 @@ pub fn formula_cell_error(row: usize, col: usize) -> anyhow::Error {
         row + 1,
         col + 1
     )
+}
+
+/// The refusal for a formula cell that carries a cached result (0-based row
+/// and column). Only the selected sheet's selected cells are rewritten, so a
+/// cached result anywhere in the workbook can still hold a raw copy of one.
+pub fn cached_formula_error(sheet: &str, row: usize, col: usize) -> anyhow::Error {
+    anyhow::anyhow!(
+        "refusing to pseudonymize a workbook with cached formula results: sheet `{sheet}` row {}, column {} may hold a raw copy of another cell; replace the formulas with their values first",
+        row + 1,
+        col + 1
+    )
+}
+
+/// Only the selected cells of one sheet are rewritten; every other part is
+/// copied as it is. Parts that keep their own copies of cell values would
+/// therefore still hold the originals, so a workbook that has any is refused:
+/// pivot caches, chart caches, and formula cells with a cached result on any
+/// sheet.
+///
+/// Dropping the cached results and asking for a recalculation on load was
+/// the alternative. It was not chosen: it means rewriting every sheet and the
+/// workbook's calculation settings, readers that do not recalculate (most
+/// libraries) would see empty cells, and pivot and chart caches would still
+/// have to be refused.
+fn refuse_cached_copies(
+    archive: &mut ZipArchive<File>,
+    sheets: &[SheetInfo],
+    rels: &str,
+) -> Result<()> {
+    let mut names = Vec::new();
+    for name in archive.file_names() {
+        names.push(name.context("decode zip entry name")?.to_string());
+    }
+    let mut copies: Vec<(String, &'static str)> = names
+        .iter()
+        .filter(|name| !name.ends_with('/'))
+        .filter_map(|name| {
+            let lower = name.to_ascii_lowercase();
+            if lower.starts_with("xl/pivotcache/") {
+                Some((name.clone(), "pivot cache"))
+            } else if lower.starts_with("xl/charts/") {
+                Some((name.clone(), "chart"))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if names.iter().any(|name| name == "[Content_Types].xml") {
+        let types = read_zip_string(archive, "[Content_Types].xml")?;
+        copies.extend(cached_copy_content_types(&types)?);
+    }
+    if let Some((part, what)) = copies.first() {
+        bail!(
+            "refusing to pseudonymize a workbook with a {what} ({part}): it keeps its own copy of cell values, which would stay raw; remove pivot tables and charts, or export the sheet as CSV, first"
+        );
+    }
+
+    let sheet_names: BTreeMap<String, &str> = sheets
+        .iter()
+        .filter_map(|sheet| {
+            Some((
+                resolve_sheet_path(rels, &sheet.rel_id)?,
+                sheet.name.as_str(),
+            ))
+        })
+        .collect();
+    for name in &names {
+        let label = match sheet_names.get(name) {
+            Some(label) => *label,
+            None if name.starts_with("xl/worksheets/") && name.ends_with(".xml") => name,
+            None => continue,
+        };
+        let xml = read_zip_string(archive, name).with_context(|| format!("read {name}"))?;
+        if let Some((row, col)) = first_cached_formula(&xml)? {
+            return Err(cached_formula_error(label, row, col));
+        }
+    }
+    Ok(())
+}
+
+/// Parts that `[Content_Types].xml` declares as a pivot cache or a chart,
+/// whatever they are called.
+fn cached_copy_content_types(xml: &str) -> Result<Vec<(String, &'static str)>> {
+    let mut reader = Reader::from_str(xml);
+    let mut found = Vec::new();
+    loop {
+        match reader.read_event()? {
+            Event::Empty(tag) | Event::Start(tag)
+                if local_name(tag.name().as_ref()) == "Override" =>
+            {
+                let content_type = attr(&tag, "ContentType")
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let what = if content_type.contains("pivotcache") {
+                    "pivot cache"
+                } else if content_type.contains("drawingml.chart")
+                    || content_type.contains("chartex")
+                {
+                    "chart"
+                } else {
+                    continue;
+                };
+                let part = attr(&tag, "PartName").unwrap_or_default();
+                found.push((part.trim_start_matches('/').to_string(), what));
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(found)
+}
+
+/// The first cell (0-based row and column) that has both a formula and a
+/// non-empty cached result.
+fn first_cached_formula(xml: &str) -> Result<Option<(usize, usize)>> {
+    let mut reader = Reader::from_str(xml);
+    let mut cursor = CellCursor::default();
+    let mut current = None;
+    let mut has_formula = false;
+    let mut has_value = false;
+    let mut in_value = false;
+    loop {
+        match reader.read_event()? {
+            Event::Start(tag) | Event::Empty(tag) if local_name(tag.name().as_ref()) == "row" => {
+                cursor.enter_row(&tag)?;
+            }
+            Event::Start(tag) if local_name(tag.name().as_ref()) == "c" => {
+                current = Some(cursor.enter_cell(&tag)?);
+                has_formula = false;
+                has_value = false;
+            }
+            Event::Empty(tag) if local_name(tag.name().as_ref()) == "c" => {
+                cursor.enter_cell(&tag)?;
+            }
+            Event::Start(tag) | Event::Empty(tag) if local_name(tag.name().as_ref()) == "f" => {
+                has_formula = true;
+            }
+            Event::Start(tag) if matches!(local_name(tag.name().as_ref()), "v" | "t") => {
+                in_value = true;
+            }
+            Event::End(tag) if matches!(local_name(tag.name().as_ref()), "v" | "t") => {
+                in_value = false;
+            }
+            Event::Text(text) if in_value => {
+                has_value |= !decode_text(&text)?.trim().is_empty();
+            }
+            Event::CData(_) | Event::GeneralRef(_) if in_value => has_value = true,
+            Event::End(tag) if local_name(tag.name().as_ref()) == "c" => {
+                if has_formula && has_value {
+                    return Ok(current);
+                }
+                current = None;
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(None)
+}
+
+/// Worksheet parts the workbook's relationships point at. A part does not
+/// have to be called `xl/worksheets/sheetN.xml`, so readers that look for
+/// cell text must ask the workbook rather than guess from the name.
+pub(crate) fn worksheet_parts(workbook_xml: &str, rels_xml: &str) -> Result<BTreeSet<String>> {
+    Ok(parse_workbook_sheets(workbook_xml)?
+        .iter()
+        .filter_map(|sheet| resolve_sheet_path(rels_xml, &sheet.rel_id))
+        .collect())
 }
 
 /// Sheet names in workbook order. The position (1-based) is the number that
@@ -594,10 +763,11 @@ fn rewrite_sheet_cells(
                 writer.write_event(Event::Start(tag.into_owned()))?;
             }
             Event::Start(_) if skip_depth > 0 => skip_depth += 1,
-            Event::End(_) if skip_depth > 0 => {
+            Event::End(tag) if skip_depth > 0 => {
                 skip_depth -= 1;
                 if skip_depth == 0 {
-                    writer.write_event(Event::End(quick_xml::events::BytesEnd::new("c")))?;
+                    // The cell's own end tag, with whatever prefix it carries.
+                    writer.write_event(Event::End(tag.into_owned()))?;
                 }
             }
             // Everything else inside a replaced cell (old value, formula, rich text) is dropped.
@@ -615,7 +785,13 @@ fn write_inline_cell(
     original: &BytesStart<'_>,
     value: &str,
 ) -> Result<()> {
-    let mut start = BytesStart::new("c");
+    // SpreadsheetML may be written with a namespace prefix (`<x:c>`); the new
+    // children must live in the same namespace as the cell they replace.
+    let cell = original.name().as_ref().to_string();
+    let prefix = cell.rfind(':').map_or("", |colon| &cell[..=colon]);
+    let inline = format!("{prefix}is");
+    let text = format!("{prefix}t");
+    let mut start = BytesStart::new(cell.as_str());
     for attr in original.attributes().flatten() {
         if attr.key.as_ref() != "t" {
             start.push_attribute((attr.key.as_ref(), attr.value.as_ref()));
@@ -623,11 +799,13 @@ fn write_inline_cell(
     }
     start.push_attribute(("t", "inlineStr"));
     writer.write_event(Event::Start(start))?;
-    writer.write_event(Event::Start(BytesStart::new("is")))?;
-    writer.write_event(Event::Start(BytesStart::new("t")))?;
+    writer.write_event(Event::Start(BytesStart::new(inline.as_str())))?;
+    writer.write_event(Event::Start(BytesStart::new(text.as_str())))?;
     writer.write_event(Event::Text(BytesText::new(value)))?;
-    writer.write_event(Event::End(quick_xml::events::BytesEnd::new("t")))?;
-    writer.write_event(Event::End(quick_xml::events::BytesEnd::new("is")))?;
+    writer.write_event(Event::End(quick_xml::events::BytesEnd::new(text.as_str())))?;
+    writer.write_event(Event::End(quick_xml::events::BytesEnd::new(
+        inline.as_str(),
+    )))?;
     Ok(())
 }
 
@@ -755,7 +933,8 @@ fn prune_shared_strings(xml: &str, used: &BTreeSet<usize>) -> Result<String> {
         match event {
             Event::Eof => break,
             Event::Start(tag) if skip_depth == 0 && local_name(tag.name().as_ref()) == "sst" => {
-                let mut start = BytesStart::new("sst");
+                // Keep the element name as written, prefix included.
+                let mut start = BytesStart::new(tag.name().as_ref().to_string());
                 for attr in tag.attributes().flatten() {
                     let name = local_name(attr.key.as_ref());
                     if name != "count" && name != "uniqueCount" {
@@ -1101,8 +1280,8 @@ mod tests {
                 (
                     "xl/worksheets/sheet1.xml",
                     format!(
-                        r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Email</t></is></c></row><row r="2"><c r="A2" t="str"><f>LOWER(B2)</f><v>{}</v></c></row></sheetData></worksheet>"#,
-                        ["ada", "@", "example.com"].concat()
+                        r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Email</t></is></c></row><row r="2"><c r="A2" t="str"><f>LOWER(B2)</f></c><c r="B2" t="inlineStr"><is><t>{}</t></is></c></row></sheetData></worksheet>"#,
+                        ["ADA", "@", "example.com"].concat()
                     ),
                 ),
             ],
@@ -1129,6 +1308,192 @@ mod tests {
             "refusing to pseudonymize formula cell at row 2, column 1; select a value-only column"
         );
         assert!(!dir.path().join("out.xlsx").exists());
+    }
+
+    #[test]
+    fn namespace_prefixed_parts_keep_their_qualified_names() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("prefixed.xlsx");
+        let output = dir.path().join("out.xlsx");
+        let email = ["ada", "@", "example.com"].concat();
+        let ns = r#"xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main""#;
+        build_xlsx(
+            &input,
+            &[
+                ("xl/workbook.xml", WORKBOOK.into()),
+                ("xl/_rels/workbook.xml.rels", RELS.into()),
+                (
+                    "xl/sharedStrings.xml",
+                    format!(
+                        r#"<x:sst {ns} count="2" uniqueCount="2"><x:si><x:t>{email}</x:t></x:si><x:si><x:t>keep</x:t></x:si></x:sst>"#
+                    ),
+                ),
+                (
+                    "xl/worksheets/sheet1.xml",
+                    format!(
+                        r#"<x:worksheet {ns}><x:sheetData><x:row r="1"><x:c r="A1" t="inlineStr"><x:is><x:t>Email</x:t></x:is></x:c><x:c r="B1" t="inlineStr"><x:is><x:t>Note</x:t></x:is></x:c></x:row><x:row r="2"><x:c r="A2" t="s"><x:v>0</x:v></x:c><x:c r="B2" t="s"><x:v>1</x:v></x:c></x:row></x:sheetData></x:worksheet>"#
+                    ),
+                ),
+            ],
+            &[],
+        );
+        run_xlsx(
+            &input,
+            Some(&output),
+            None,
+            &options(),
+            Some(&material()),
+            None,
+        )
+        .unwrap();
+        let sheet = sheet_xml(&output, "xl/worksheets/sheet1.xml");
+        assert!(
+            sheet.contains(r#"t="inlineStr"><x:is><x:t>email_"#)
+                && sheet.contains("</x:t></x:is></x:c>"),
+            "{sheet}"
+        );
+        let shared = sheet_xml(&output, "xl/sharedStrings.xml");
+        assert!(
+            shared.starts_with("<x:sst ") && shared.ends_with("</x:sst>"),
+            "{shared}"
+        );
+        // The reader checks end-tag names, so both parts are well formed.
+        let strings = parse_shared_strings(&shared).unwrap();
+        assert_eq!(strings, vec!["", "keep"]);
+        let cells = parse_sheet_cells(&sheet, &strings).unwrap();
+        assert_eq!(cells.len(), 4);
+        assert_eq!(cells[3], ((1, 1), "keep".into()));
+        assert!(cells[2].1.starts_with("email_"), "{cells:?}");
+    }
+
+    #[test]
+    fn workbooks_with_cached_copies_are_refused() {
+        let dir = tempdir().unwrap();
+        let email = ["ada", "@", "example.com"].concat();
+        let sheet = format!(
+            r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Email</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>{email}</t></is></c></row></sheetData></worksheet>"#
+        );
+        let two_sheets = r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Customers" sheetId="1" r:id="rId1"/><sheet name="Summary" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
+        let two_rels = r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="custom/summary.xml"/></Relationships>"#;
+        let cached = |formula_cells: &str| {
+            format!(
+                r#"<worksheet><sheetData><row r="5">{formula_cells}</row></sheetData></worksheet>"#
+            )
+        };
+        let attempt = |name: &str, extra: Vec<(&str, String)>, workbook: &str, rels: &str| {
+            let input = dir.path().join(name);
+            let output = dir.path().join(format!("out-{name}"));
+            let mut entries = vec![
+                ("xl/workbook.xml", workbook.to_string()),
+                ("xl/_rels/workbook.xml.rels", rels.to_string()),
+                ("xl/worksheets/sheet1.xml", sheet.clone()),
+            ];
+            entries.extend(extra);
+            build_xlsx(&input, &entries, &[]);
+            let run = run_xlsx(
+                &input,
+                Some(&output),
+                None,
+                &options(),
+                Some(&material()),
+                None,
+            )
+            .map(|_| ())
+            .map_err(|err| err.to_string());
+            assert_eq!(output.exists(), run.is_ok(), "{name}");
+            // A planning pass refuses with the same text, before any key is used.
+            let dry = TableOptions {
+                dry_run: true,
+                ..options()
+            };
+            let plan = run_xlsx(&input, None, None, &dry, None, None)
+                .map(|_| ())
+                .map_err(|err| err.to_string());
+            assert_eq!(run, plan, "{name}");
+            run
+        };
+
+        let err = attempt(
+            "pivot.xlsx",
+            vec![(
+                "xl/pivotCache/pivotCacheRecords1.xml",
+                format!("<pivotCacheRecords><r><s v=\"{email}\"/></r></pivotCacheRecords>"),
+            )],
+            WORKBOOK,
+            RELS,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("pivot cache") && err.contains("xl/pivotCache/pivotCacheRecords1.xml"),
+            "{err}"
+        );
+
+        let err = attempt(
+            "chart.xlsx",
+            vec![(
+                "xl/charts/chart1.xml",
+                format!("<chartSpace><strCache><pt idx=\"0\"><v>{email}</v></pt></strCache></chartSpace>"),
+            )],
+            WORKBOOK,
+            RELS,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("chart") && err.contains("xl/charts/chart1.xml"),
+            "{err}"
+        );
+
+        // Parts under other names are still recognised by their content type.
+        let err = attempt(
+            "typed.xlsx",
+            vec![
+                (
+                    "[Content_Types].xml",
+                    r#"<Types><Override PartName="/xl/data/records.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheRecords+xml"/></Types>"#.to_string(),
+                ),
+                ("xl/data/records.xml", "<pivotCacheRecords/>".to_string()),
+            ],
+            WORKBOOK,
+            RELS,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("pivot cache") && err.contains("xl/data/records.xml"),
+            "{err}"
+        );
+
+        // A cached formula result on another sheet, found through the relationships.
+        let err = attempt(
+            "other-sheet.xlsx",
+            vec![(
+                "xl/custom/summary.xml",
+                cached(&format!(
+                    r#"<c r="C5" t="str"><f>Customers!A2</f><v>{email}</v></c>"#
+                )),
+            )],
+            two_sheets,
+            two_rels,
+        )
+        .unwrap_err();
+        assert_eq!(err, cached_formula_error("Summary", 4, 2).to_string());
+        assert_eq!(
+            err,
+            "refusing to pseudonymize a workbook with cached formula results: sheet `Summary` row 5, column 3 may hold a raw copy of another cell; replace the formulas with their values first"
+        );
+
+        // A formula that was never calculated holds no copy.
+        assert_eq!(
+            attempt(
+                "uncached.xlsx",
+                vec![(
+                    "xl/custom/summary.xml",
+                    cached(r#"<c r="C5"><f>Customers!A2</f></c><c r="D5"><f>1+1</f><v></v></c>"#),
+                )],
+                two_sheets,
+                two_rels,
+            ),
+            Ok(())
+        );
     }
 
     #[test]

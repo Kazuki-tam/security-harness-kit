@@ -2631,6 +2631,120 @@ mod tests {
         assert_eq!(exit_code(mask_with(missing, &open).unwrap_err()), 2);
     }
 
+    const CUSTOM_WORKBOOK: &str = r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Customers" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+    const CUSTOM_RELS: &str =
+        r#"<Relationships><Relationship Id="rId1" Target="custom/active.xml"/></Relationships>"#;
+
+    fn two_column_sheet(first: &str, second: &str) -> String {
+        format!(
+            r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Email</t></is></c><c r="B1" t="inlineStr"><is><t>Note</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>{first}</t></is></c><c r="B2" t="inlineStr"><is><t>{second}</t></is></c></row></sheetData></worksheet>"#
+        )
+    }
+
+    #[test]
+    fn xlsx_sheet_under_a_custom_part_name_is_checked_and_restored() {
+        let dir = project();
+        let root = dir.path();
+        let store = Arc::new(MemoryStore::default());
+        let open = opener(Arc::clone(&store));
+        let part = "xl/custom/active.xml";
+        // An address next to a phone number is not inferred as either kind.
+        let other = [
+            "bob",
+            "@",
+            "example.com",
+            " / ",
+            "090",
+            "-",
+            "1234",
+            "-",
+            "5678",
+        ]
+        .concat();
+        build_xlsx(
+            &root.join("leaky.xlsx"),
+            &[
+                ("xl/workbook.xml", CUSTOM_WORKBOOK.into()),
+                ("xl/_rels/workbook.xml.rels", CUSTOM_RELS.into()),
+                (part, two_column_sheet(&email(), &other)),
+            ],
+        );
+        // The unselected column still holds an address: the check must see it.
+        let mut leaky = args(root, "leaky.xlsx", Some("leaky.pseudo.xlsx"));
+        leaky.columns = Some("Email:email".into());
+        leaky.check_remaining = true;
+        let err = mask_with(leaky, &open).unwrap_err();
+        assert_eq!(exit_code(err), 1);
+
+        build_xlsx(
+            &root.join("book.xlsx"),
+            &[
+                ("xl/workbook.xml", CUSTOM_WORKBOOK.into()),
+                ("xl/_rels/workbook.xml.rels", CUSTOM_RELS.into()),
+                (part, two_column_sheet(&email(), "keep")),
+            ],
+        );
+        let mut run = args(root, "book.xlsx", Some("book.pseudo.xlsx"));
+        run.columns = Some("Email:email".into());
+        run.check_remaining = true;
+        run.map = Some(root.join("book.shk-map"));
+        mask_with(run, &open).unwrap();
+        let sheet = read_zip_entry(&root.join("book.pseudo.xlsx"), part);
+        assert!(
+            sheet.contains("email_") && !sheet.contains(&email()),
+            "{sheet}"
+        );
+        let summary = restore_with(
+            root,
+            root.join("book.pseudo.xlsx"),
+            root.join("book.shk-map"),
+            root.join("book.restored.xlsx"),
+            &open,
+        )
+        .unwrap();
+        assert_eq!(summary.replacements, 1);
+        let sheet = read_zip_entry(&root.join("book.restored.xlsx"), part);
+        assert!(
+            sheet.contains(&email()) && !sheet.contains("email_"),
+            "{sheet}"
+        );
+    }
+
+    #[test]
+    fn xlsx_with_cached_copies_exits_2_before_any_key_is_created() {
+        let dir = project();
+        let root = dir.path();
+        let store = Arc::new(MemoryStore::default());
+        let open = opener(Arc::clone(&store));
+        build_xlsx(
+            &root.join("pivot.xlsx"),
+            &[
+                ("xl/workbook.xml", CUSTOM_WORKBOOK.into()),
+                ("xl/_rels/workbook.xml.rels", CUSTOM_RELS.into()),
+                ("xl/custom/active.xml", two_column_sheet(&email(), "keep")),
+                (
+                    "xl/pivotCache/pivotCacheRecords1.xml",
+                    format!(
+                        "<pivotCacheRecords><r><s v=\"{}\"/></r></pivotCacheRecords>",
+                        email()
+                    ),
+                ),
+            ],
+        );
+        let mut run = args(root, "pivot.xlsx", Some("pivot.pseudo.xlsx"));
+        run.columns = Some("Email:email".into());
+        let err = mask_with(run, &open).unwrap_err();
+        assert!(err.to_string().contains("pivot cache"), "{err}");
+        assert_eq!(exit_code(err), 2);
+        assert!(!root.join("pivot.pseudo.xlsx").exists());
+        let (_, project, key_store, _) = open_context(root, &open).unwrap();
+        assert!(
+            load_material(key_store.as_ref(), &project)
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[test]
     fn map_from_another_key_is_rejected() {
         let dir = project();

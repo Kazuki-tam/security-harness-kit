@@ -6,8 +6,9 @@ use anyhow::{Context, Result, bail};
 use quick_xml::escape::unescape;
 use quick_xml::events::{BytesCData, BytesRef, BytesText, Event};
 use quick_xml::{Reader, Writer};
+use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read, Seek, Write};
 use std::path::Path;
 use tempfile::NamedTempFile;
 use zeroize::Zeroize;
@@ -79,6 +80,9 @@ struct OoxmlFormat {
     required_entry: &'static str,
     should_mask_entry: fn(&str) -> bool,
     text_group: TextGroupKind,
+    /// Text parts found by reading the document rather than by name; see
+    /// `discover_text_parts`.
+    discovered_parts: BTreeSet<String>,
 }
 
 impl OoxmlFormat {
@@ -88,6 +92,7 @@ impl OoxmlFormat {
             required_entry: "word/document.xml",
             should_mask_entry: is_docx_mask_target,
             text_group: TextGroupKind::Docx,
+            discovered_parts: BTreeSet::new(),
         }
     }
 
@@ -97,6 +102,7 @@ impl OoxmlFormat {
             required_entry: "xl/workbook.xml",
             should_mask_entry: is_xlsx_mask_target,
             text_group: TextGroupKind::Xlsx,
+            discovered_parts: BTreeSet::new(),
         }
     }
 
@@ -106,6 +112,7 @@ impl OoxmlFormat {
             required_entry: "ppt/presentation.xml",
             should_mask_entry: is_pptx_mask_target,
             text_group: TextGroupKind::Pptx,
+            discovered_parts: BTreeSet::new(),
         }
     }
 
@@ -121,6 +128,41 @@ impl OoxmlFormat {
             None
         }
     }
+
+    fn is_text_part(&self, name: &str) -> bool {
+        (self.should_mask_entry)(name) || self.discovered_parts.contains(name)
+    }
+
+    /// A worksheet does not have to be called `xl/worksheets/sheetN.xml`: the
+    /// workbook names its sheets through relationships. Add the parts they
+    /// point at so a sheet stored under another name is read like any other.
+    /// A workbook whose relationships cannot be read keeps the name pattern.
+    fn discover_text_parts<R: Read + Seek>(
+        &mut self,
+        archive: &mut ZipArchive<R>,
+        entry_limit: u64,
+    ) -> Result<()> {
+        if !matches!(self.text_group, TextGroupKind::Xlsx) {
+            return Ok(());
+        }
+        let mut read = |name: &str| -> Result<Option<String>> {
+            let Ok(mut entry) = archive.by_name(name) else {
+                return Ok(None);
+            };
+            let bytes = read_entry_bounded(&mut entry, entry_limit, name)?;
+            Ok(String::from_utf8(bytes).ok())
+        };
+        let (Some(workbook), Some(rels)) = (
+            read("xl/workbook.xml")?,
+            read("xl/_rels/workbook.xml.rels")?,
+        ) else {
+            return Ok(());
+        };
+        if let Ok(parts) = crate::pseudonymize::worksheet_parts(&workbook, &rels) {
+            self.discovered_parts = parts;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -134,7 +176,7 @@ fn mask_ooxml(
     input: &Path,
     output: &Path,
     policy: &Policy,
-    format: OoxmlFormat,
+    mut format: OoxmlFormat,
 ) -> Result<DocumentMaskResult> {
     if paths_refer_to_same_target(input, output)? {
         bail!("--output must not be the same as input for Office document masking");
@@ -154,6 +196,7 @@ fn mask_ooxml(
 
     ensure_archive_entry_limit(archive.len())?;
     let limits = ooxml_read_limits(policy.scan.max_file_size_bytes);
+    format.discover_text_parts(&mut archive, limits.entry_bytes)?;
 
     let output_parent = output
         .parent()
@@ -198,7 +241,7 @@ fn mask_ooxml(
             .start_file(&name, options)
             .with_context(|| format!("write zip entry {name}"))?;
 
-        if (format.should_mask_entry)(&name) {
+        if format.is_text_part(&name) {
             let remaining = limits.total_bytes.saturating_sub(actual_total);
             let mut bytes =
                 read_entry_bounded(&mut entry, limits.entry_bytes.min(remaining), &name)?;
@@ -244,7 +287,7 @@ pub fn extract_ooxml_text_entries(
     bytes: &[u8],
     max_file_size_bytes: u64,
 ) -> Result<Option<Vec<DocumentTextEntry>>> {
-    let Some(format) = OoxmlFormat::from_path(scan_rel) else {
+    let Some(mut format) = OoxmlFormat::from_path(scan_rel) else {
         return Ok(None);
     };
 
@@ -260,6 +303,7 @@ pub fn extract_ooxml_text_entries(
 
     ensure_archive_entry_limit(archive.len())?;
     let limits = ooxml_read_limits(max_file_size_bytes);
+    format.discover_text_parts(&mut archive, limits.entry_bytes)?;
 
     let mut entries = Vec::new();
     let mut actual_total = 0u64;
@@ -268,7 +312,7 @@ pub fn extract_ooxml_text_entries(
             .by_index(idx)
             .with_context(|| format!("read zip entry {idx}"))?;
         let name = zip_entry_name(&entry)?;
-        if entry.is_dir() || !(format.should_mask_entry)(&name) {
+        if entry.is_dir() || !format.is_text_part(&name) {
             continue;
         }
 
@@ -768,7 +812,7 @@ fn process_ooxml_text_groups(
     max_file_size_bytes: u64,
     mut transform: impl FnMut(&str) -> Result<String>,
 ) -> Result<()> {
-    let format = OoxmlFormat::from_path(&input.to_string_lossy()).ok_or_else(|| {
+    let mut format = OoxmlFormat::from_path(&input.to_string_lossy()).ok_or_else(|| {
         anyhow::anyhow!(
             "unsupported Office document for text rewrite: {}",
             input.display()
@@ -793,6 +837,7 @@ fn process_ooxml_text_groups(
     }
     ensure_archive_entry_limit(archive.len())?;
     let limits = ooxml_read_limits(max_file_size_bytes);
+    format.discover_text_parts(&mut archive, limits.entry_bytes)?;
 
     let mut writer = output.map(open_ooxml_output).transpose()?;
     let mut declared_total = 0u64;
@@ -829,7 +874,7 @@ fn process_ooxml_text_groups(
                 .with_context(|| format!("write zip entry {name}"))?;
         }
 
-        if (format.should_mask_entry)(&name) {
+        if format.is_text_part(&name) {
             let remaining = limits.total_bytes.saturating_sub(actual_total);
             let mut bytes =
                 read_entry_bounded(&mut entry, limits.entry_bytes.min(remaining), &name)?;
@@ -1327,6 +1372,66 @@ mod tests {
         assert!(sheet.contains("[REDACTED]"), "{sheet}");
         assert!(!shared.contains(&shared_secret), "{shared}");
         assert!(!sheet.contains(&inline_secret), "{sheet}");
+    }
+
+    #[test]
+    fn xlsx_worksheets_are_found_through_workbook_relationships() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("custom.xlsx");
+        let output = dir.path().join("custom.out.xlsx");
+        let secret = synthetic_openai_key('c');
+        let part = "xl/custom/active.xml";
+        let file = File::create(&input).unwrap();
+        let mut zip = ZipWriter::new(file);
+        for (name, body) in [
+            (
+                "xl/workbook.xml",
+                r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Active" sheetId="1" r:id="rId7"/></sheets></workbook>"#.to_string(),
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<Relationships><Relationship Id="rId7" Target="custom/active.xml"/></Relationships>"#.to_string(),
+            ),
+            (
+                part,
+                format!(
+                    r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{secret}</t></is></c></row></sheetData></worksheet>"#
+                ),
+            ),
+        ] {
+            zip.start_file(name, deflated_zip_options()).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+
+        // The scanner (and so `--check-remaining`) reads the sheet text.
+        let bytes = std::fs::read(&input).unwrap();
+        let entries = extract_ooxml_text_entries("custom.xlsx", &bytes, 1024 * 1024)
+            .unwrap()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].entry_path, part);
+        assert!(entries[0].text.contains(&secret));
+
+        // Restore and Office text mode rewrite it.
+        let mut seen = Vec::new();
+        rewrite_ooxml_text_groups(&input, &output, 1024 * 1024, |text| {
+            seen.push(text.to_string());
+            Ok("restored".to_string())
+        })
+        .unwrap();
+        assert_eq!(seen, vec![secret.clone()]);
+        let sheet = read_zip_entry(&output, part).unwrap();
+        assert!(
+            sheet.contains("restored") && !sheet.contains(&secret),
+            "{sheet}"
+        );
+
+        // Masking finds the same part.
+        let masked = dir.path().join("custom.masked.xlsx");
+        let result = mask_xlsx(&input, &masked, &Policy::default()).unwrap();
+        assert!(!result.findings.is_empty());
+        assert!(!read_zip_entry(&masked, part).unwrap().contains(&secret));
     }
 
     #[test]
