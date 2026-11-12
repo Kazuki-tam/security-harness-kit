@@ -346,20 +346,29 @@ shk scan --staged\n\
             body.contains("-- scan --staged || exit $?\n"),
             "cargo branch must propagate too: {body}"
         );
-        assert!(body.ends_with("# shk-managed-end\necho user-tail\n"), "{body}");
+        assert!(
+            body.ends_with("# shk-managed-end\necho user-tail\n"),
+            "{body}"
+        );
         assert_eq!(body.matches(MANAGED_START).count(), 1, "{body}");
     }
 
     #[test]
     fn unconditional_exit_or_exec_before_the_block_is_detected() {
         assert!(ends_unconditionally("#!/bin/sh\nrun-lint\nexit 0\n"));
-        assert!(ends_unconditionally("#!/bin/sh\nexit\n\n# trailing comment\n"));
-        assert!(ends_unconditionally("#!/bin/sh\nexec lefthook run pre-commit\n"));
+        assert!(ends_unconditionally(
+            "#!/bin/sh\nexit\n\n# trailing comment\n"
+        ));
+        assert!(ends_unconditionally(
+            "#!/bin/sh\nexec lefthook run pre-commit\n"
+        ));
         assert!(ends_unconditionally("exit $status;\n"));
 
         assert!(!ends_unconditionally("#!/bin/sh\n"));
         assert!(!ends_unconditionally("#!/bin/sh\nrun-lint || exit 1\n"));
-        assert!(!ends_unconditionally("#!/bin/sh\nif x; then\n  exit 1\nfi\n"));
+        assert!(!ends_unconditionally(
+            "#!/bin/sh\nif x; then\n  exit 1\nfi\n"
+        ));
         assert!(!ends_unconditionally("f() {\n  exit 1\n}\n"));
         assert!(!ends_unconditionally("#!/bin/sh\nexec 2>&1\n"));
         assert!(!ends_unconditionally("#!/bin/sh\nexec >/dev/null\n"));
@@ -402,7 +411,12 @@ shk scan --staged\n\
         fs::create_dir(&work).unwrap();
         git(
             &work,
-            &["init", "-q", "--separate-git-dir", git_dir.to_str().unwrap()],
+            &[
+                "init",
+                "-q",
+                "--separate-git-dir",
+                git_dir.to_str().unwrap(),
+            ],
         );
         assert!(work.join(".git").is_file());
         fs::create_dir_all(git_dir.join("hooks")).unwrap();

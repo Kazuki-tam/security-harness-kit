@@ -230,15 +230,29 @@ pub struct AiHookInstallReport {
 
 /// Directory managed writes must stay inside. `None` during a dry run, which
 /// only reports what it would change.
-fn hook_write_base(global: bool, dry_run: bool, cwd: &Path) -> Result<Option<PathBuf>> {
+fn hook_write_base(
+    tool: AiTool,
+    global: bool,
+    dry_run: bool,
+    cwd: &Path,
+) -> Result<Option<PathBuf>> {
     if dry_run {
         return Ok(None);
     }
-    if global {
-        Ok(Some(dirs::home_dir().context("home directory not found")?))
-    } else {
-        Ok(Some(cwd.to_path_buf()))
+    if !global {
+        return Ok(Some(cwd.to_path_buf()));
     }
+    // OpenCode's global plugin lives under the XDG config dir, which may sit
+    // outside the home directory.
+    if tool == AiTool::Opencode
+        && let Some(config_dir) =
+            absolute_xdg_config_home(std::env::var_os("XDG_CONFIG_HOME").as_deref())
+    {
+        fs::create_dir_all(&config_dir)
+            .with_context(|| format!("create {}", config_dir.display()))?;
+        return Ok(Some(config_dir));
+    }
+    Ok(Some(dirs::home_dir().context("home directory not found")?))
 }
 
 /// Why an all-tools run must leave this OpenCode path alone. A read error
@@ -298,7 +312,6 @@ pub fn install_ai_with_summaries(
         opts.global, opts.audit, opts.log_blocked, opts.dry_run, opts.apply_sandbox
     );
     let cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    let write_base = hook_write_base(opts.global, opts.dry_run, &cwd)?;
     let mut report = AiHookInstallReport {
         summaries: Vec::new(),
         skipped: Vec::new(),
@@ -306,6 +319,7 @@ pub fn install_ai_with_summaries(
 
     for tool in tools {
         let path = resolve_ai_config_path(tool, &cwd, opts.global)?;
+        let write_base = hook_write_base(tool, opts.global, opts.dry_run, &cwd)?;
         // In an all-tools install, OpenCode conflicts the user has to resolve
         // by hand are reported and skipped so the other tools still get
         // installed. Any other error still aborts.
@@ -343,10 +357,17 @@ pub fn configure_ai_with_summaries(
         apply_deny: false,
         apply_sandbox: false,
     };
-    let write_base = hook_write_base(opts.global, opts.dry_run, &cwd)?;
+    let write_base = |tool| hook_write_base(tool, opts.global, opts.dry_run, &cwd);
 
     for tool in AiTool::all() {
         let path = resolve_ai_config_path(tool, &cwd, opts.global)?;
+        let enabled = scan_hooks_enabled_for(&opts, tool);
+        // Nothing is written for a tool that is off and has no config file, so
+        // its directory must not be able to abort the other tools.
+        if !enabled && !path.is_file() {
+            continue;
+        }
+        let write_base = write_base(tool)?;
         if tool == AiTool::Opencode {
             if record_opencode_skip(&mut report, &path, write_base.as_deref())? {
                 continue;
@@ -354,13 +375,13 @@ pub fn configure_ai_with_summaries(
         } else if let Some(base) = &write_base {
             safety::ensure_write_path_within(base, &path)?;
         }
-        if scan_hooks_enabled_for(&opts, tool) {
+        if enabled {
             let project_root = (!opts.global).then_some(cwd.as_path());
             let summary = apply_tool(&path, tool, install_opts, project_root)?;
             report
                 .summaries
                 .push(format!("{}: {}", path.display(), summary.trim()));
-        } else if path.is_file() {
+        } else {
             report.summaries.push(format!(
                 "{}: {}",
                 path.display(),
@@ -371,6 +392,9 @@ pub fn configure_ai_with_summaries(
 
     let claude_path = resolve_ai_config_path(AiTool::ClaudeCode, &cwd, opts.global)?;
     if opts.claude_deny || opts.claude_sandbox || claude_path.is_file() {
+        if let Some(base) = write_base(AiTool::ClaudeCode)? {
+            safety::ensure_write_path_within(&base, &claude_path)?;
+        }
         let claude_summary = configure_claude_safety(
             &claude_path,
             opts.dry_run,
@@ -387,6 +411,9 @@ pub fn configure_ai_with_summaries(
 
     let codex_path = resolve_ai_config_path(AiTool::Codex, &cwd, opts.global)?;
     if opts.codex_sandbox || codex_path.is_file() {
+        if let Some(base) = write_base(AiTool::Codex)? {
+            safety::ensure_write_path_within(&base, &codex_path)?;
+        }
         let codex_summary = configure_codex_sandbox(&codex_path, opts.dry_run, opts.codex_sandbox)?;
         report.summaries.push(format!(
             "{}: {}",
@@ -625,6 +652,42 @@ fn merge_claude_permissions_deny(root: &mut Value) -> Result<usize> {
     Ok(added)
 }
 
+/// True when every shk-recommended deny entry is present, i.e. the deny
+/// feature is effectively on. Mirrors the doctor check.
+fn claude_deny_fully_applied(root: &Value) -> bool {
+    let denies: Vec<&str> = root
+        .pointer("/permissions/deny")
+        .and_then(Value::as_array)
+        .map(|entries| entries.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    shk_integrations::claude_recommended_deny_entries()
+        .iter()
+        .all(|required| {
+            denies
+                .iter()
+                .any(|entry| shk_integrations::claude_deny_entry_covers(entry, required))
+        })
+}
+
+/// True when the sandbox settings `merge_claude_sandbox` enforces are all
+/// present, i.e. the sandbox feature is effectively on.
+fn claude_sandbox_fully_applied(root: &Value, restrict_reads_to_project: bool) -> bool {
+    let Some(sandbox) = root.get("sandbox") else {
+        return false;
+    };
+    let flag = |key: &str| sandbox.get(key).and_then(Value::as_bool);
+    let lists = |key: &str, item: &str| {
+        sandbox
+            .pointer(&format!("/filesystem/{key}"))
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(|existing| existing.as_str() == Some(item)))
+    };
+    flag("enabled") == Some(true)
+        && flag("failIfUnavailable") == Some(true)
+        && flag("allowUnsandboxedCommands") == Some(false)
+        && (!restrict_reads_to_project || (lists("denyRead", "~/") && lists("allowRead", ".")))
+}
+
 fn remove_claude_permissions_deny(root: &mut Value) -> Result<usize> {
     let Some(deny_arr) = root
         .pointer_mut("/permissions/deny")
@@ -670,7 +733,7 @@ fn merge_claude_sandbox(root: &mut Value, restrict_reads_to_project: bool) -> Re
     Ok(())
 }
 
-fn remove_claude_sandbox(root: &mut Value) -> usize {
+fn remove_claude_sandbox(root: &mut Value, restricted_reads_to_project: bool) -> usize {
     let Some(obj) = root.as_object_mut() else {
         return 0;
     };
@@ -688,7 +751,10 @@ fn remove_claude_sandbox(root: &mut Value) -> usize {
             removed += 1;
         }
     }
-    if let Some(filesystem) = sandbox.get_mut("filesystem").and_then(Value::as_object_mut) {
+    // Global installs never add the filesystem entries, so they are the user's.
+    if restricted_reads_to_project
+        && let Some(filesystem) = sandbox.get_mut("filesystem").and_then(Value::as_object_mut)
+    {
         removed += remove_json_string_array_item(filesystem, "denyRead", "~/");
         removed += remove_json_string_array_item(filesystem, "allowRead", ".");
         if filesystem.is_empty() {
@@ -837,20 +903,28 @@ fn configure_claude_safety(
     } else {
         json!({})
     };
+    let original = root.clone();
 
+    // A flag that is off only removes settings when the full recommended set
+    // is present (the feature was on). Otherwise matching entries are the
+    // user's own, and "off" just mirrors the current state.
     let deny_count = if enable_deny {
         merge_claude_permissions_deny(&mut root)?
-    } else {
+    } else if claude_deny_fully_applied(&root) {
         remove_claude_permissions_deny(&mut root)?
+    } else {
+        0
     };
     let sandbox_changed = if enable_sandbox {
         merge_claude_sandbox(&mut root, restrict_sandbox_reads_to_project)?;
         1
+    } else if claude_sandbox_fully_applied(&root, restrict_sandbox_reads_to_project) {
+        remove_claude_sandbox(&mut root, restrict_sandbox_reads_to_project)
     } else {
-        remove_claude_sandbox(&mut root)
+        0
     };
 
-    if path.is_file() || enable_deny || enable_sandbox {
+    if root != original || !path.is_file() {
         save_json_formatted(path, &root, dry_run)?;
     }
     Ok(if dry_run {
@@ -1449,14 +1523,19 @@ pub(crate) const OPENCODE_SKIPPED: &str = "skipped OpenCode";
 /// absolute `XDG_CONFIG_HOME` moves it on every platform. Installing under
 /// `~/.config` regardless would leave a plugin OpenCode never loads.
 fn opencode_global_plugin_path(home: &Path, xdg_config_home: Option<&std::ffi::OsStr>) -> PathBuf {
-    let config_dir = xdg_config_home
-        .map(Path::new)
-        .filter(|dir| dir.is_absolute())
-        .map_or_else(|| home.join(".config"), Path::to_path_buf);
+    let config_dir =
+        absolute_xdg_config_home(xdg_config_home).unwrap_or_else(|| home.join(".config"));
     config_dir
         .join("opencode")
         .join("plugins")
         .join("shk-security.js")
+}
+
+fn absolute_xdg_config_home(xdg_config_home: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    xdg_config_home
+        .map(Path::new)
+        .filter(|dir| dir.is_absolute())
+        .map(Path::to_path_buf)
 }
 
 fn render_opencode_plugin(audit: bool, log_blocked: bool) -> String {
@@ -1674,8 +1753,11 @@ fn codex_managed_block(
             codex_inline_hook(event, command, status_message, include_matcher)
         })
         .collect::<String>();
-    format!("# shk-managed-start\n{body}# shk-managed-end\n")
+    format!("{CODEX_MANAGED_START}\n{body}{CODEX_MANAGED_END}\n")
 }
+
+const CODEX_MANAGED_START: &str = "# shk-managed-start";
+const CODEX_MANAGED_END: &str = "# shk-managed-end";
 
 fn codex_managed_block_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -1685,15 +1767,32 @@ fn codex_managed_block_regex() -> &'static Regex {
     })
 }
 
+/// `[features]`, allowing inner/trailing whitespace and a trailing comment.
+fn is_codex_features_header(line: &str) -> bool {
+    let Some(rest) = line.trim_start().strip_prefix('[') else {
+        return false;
+    };
+    let Some((name, tail)) = rest.split_once(']') else {
+        return false;
+    };
+    let tail = tail.trim();
+    name.trim() == "features" && (tail.is_empty() || tail.starts_with('#'))
+}
+
 fn ensure_codex_features_prefix(content: &str) -> String {
     let mut lines: Vec<String> = content.lines().map(ToOwned::to_owned).collect();
 
-    if let Some(features_idx) = lines.iter().position(|line| line.trim() == "[features]") {
+    // The managed block is replaced and removed wholesale, so `[features]`
+    // (which users extend) must end before it and never be created inside it.
+    let ends_section =
+        |line: &String| line.trim_start().starts_with('[') || line.trim() == CODEX_MANAGED_START;
+
+    if let Some(features_idx) = lines.iter().position(|line| is_codex_features_header(line)) {
         let section_end = lines
             .iter()
             .enumerate()
             .skip(features_idx + 1)
-            .find(|(_, line)| line.trim_start().starts_with('['))
+            .find(|(_, line)| ends_section(line))
             .map(|(idx, _)| idx)
             .unwrap_or(lines.len());
 
@@ -1725,7 +1824,10 @@ fn ensure_codex_features_prefix(content: &str) -> String {
         if let Some(idx) = canonical_idx {
             lines[idx] = format!("{HOOKS_FEATURE_KEY} = true");
         } else {
-            lines.insert(section_end, format!("{HOOKS_FEATURE_KEY} = true"));
+            let insert_at = (features_idx + 1..section_end)
+                .rfind(|&idx| !lines[idx].trim().is_empty())
+                .map_or(features_idx + 1, |idx| idx + 1);
+            lines.insert(insert_at, format!("{HOOKS_FEATURE_KEY} = true"));
         }
         for idx in legacy_idxs.into_iter().rev() {
             lines.remove(idx);
@@ -1733,10 +1835,7 @@ fn ensure_codex_features_prefix(content: &str) -> String {
         return finish_text_lines(lines, content.ends_with('\n'));
     }
 
-    let insert_at = lines
-        .iter()
-        .position(|line| line.trim_start().starts_with('['))
-        .unwrap_or(lines.len());
+    let insert_at = lines.iter().position(ends_section).unwrap_or(lines.len());
     let block = [
         "[features]".to_string(),
         format!("{HOOKS_FEATURE_KEY} = true"),
@@ -1757,6 +1856,42 @@ fn ensure_codex_features_prefix(content: &str) -> String {
         lines.insert(insert_at + 2, String::new());
     }
     finish_text_lines(lines, true)
+}
+
+/// Older releases wrote `[features]` inside the managed block. Moves that
+/// table (with anything the user added to it) in front of the block so that
+/// replacing or removing the block keeps it.
+fn hoist_codex_features_out_of_managed_block(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let Some(start) = lines
+        .iter()
+        .position(|line| line.trim() == CODEX_MANAGED_START)
+    else {
+        return content.to_string();
+    };
+    let Some(end) = (start + 1..lines.len()).find(|&idx| lines[idx].trim() == CODEX_MANAGED_END)
+    else {
+        return content.to_string();
+    };
+    let Some(features) = (start + 1..end).find(|&idx| is_codex_features_header(lines[idx])) else {
+        return content.to_string();
+    };
+    let section_end = (features + 1..end)
+        .find(|&idx| lines[idx].trim_start().starts_with('['))
+        .unwrap_or(end);
+    let section_len = lines[features..section_end]
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .map_or(1, |idx| idx + 1);
+
+    let mut output: Vec<String> = Vec::with_capacity(lines.len() + 1);
+    let mut push = |range: &[&str]| output.extend(range.iter().map(|line| (*line).to_string()));
+    push(&lines[..start]);
+    push(&lines[features..features + section_len]);
+    push(&[""]);
+    push(&lines[start..features]);
+    push(&lines[section_end..]);
+    finish_text_lines(output, content.ends_with('\n'))
 }
 
 fn finish_text_lines(lines: Vec<String>, trailing_newline: bool) -> String {
@@ -1784,7 +1919,10 @@ fn apply_codex(
         None
     };
 
-    let mut new_body = if let Some(mut s) = prev {
+    // Edit with LF endings and restore CRLF afterwards if the file used it.
+    let crlf = prev.as_deref().is_some_and(|s| s.contains("\r\n"));
+    let mut new_body = if let Some(s) = prev {
+        let mut s = hoist_codex_features_out_of_managed_block(&s.replace("\r\n", "\n"));
         let replaced = if re.is_match(&s) {
             re.replace(&s, format!("{block}\n")).to_string()
         } else {
@@ -1802,6 +1940,9 @@ fn apply_codex(
     };
     if apply_sandbox {
         new_body = ensure_codex_sandbox_settings(&new_body);
+    }
+    if crlf {
+        new_body = new_body.replace('\n', "\r\n");
     }
 
     if dry_run {
@@ -1826,7 +1967,12 @@ fn remove_codex_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
     }
     let existing = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let re = codex_managed_block_regex();
-    let updated = re.replace(&existing, "").to_string();
+    let crlf = existing.contains("\r\n");
+    let hoisted = hoist_codex_features_out_of_managed_block(&existing.replace("\r\n", "\n"));
+    let mut updated = re.replace(&hoisted, "").to_string();
+    if crlf {
+        updated = updated.replace('\n', "\r\n");
+    }
     if !dry_run && updated != existing {
         crate::fs_atomic::write_atomic(path, updated.as_bytes())?;
     }
@@ -1848,8 +1994,11 @@ fn configure_codex_sandbox(path: &Path, dry_run: bool, enabled: bool) -> Result<
     };
     let updated = if enabled {
         ensure_codex_sandbox_settings(&existing)
-    } else {
+    } else if codex_sandbox_fully_applied(&existing) {
         remove_codex_sandbox_settings(&existing)
+    } else {
+        // Never fully on: a value that happens to match is the user's own.
+        existing.clone()
     };
     if !dry_run && updated != existing {
         if let Some(parent) = path.parent() {
@@ -1879,7 +2028,22 @@ fn ensure_codex_sandbox_settings(content: &str) -> String {
     )
 }
 
-#[allow(dead_code)]
+/// True when both top-level settings hold the shk-recommended values.
+fn codex_sandbox_fully_applied(content: &str) -> bool {
+    top_level_string_setting(content, "sandbox_mode") == Some(RECOMMENDED_SANDBOX_MODE)
+        && top_level_string_setting(content, "approval_policy") == Some(RECOMMENDED_APPROVAL_POLICY)
+}
+
+fn top_level_string_setting<'a>(content: &'a str, key: &str) -> Option<&'a str> {
+    content
+        .lines()
+        .map(str::trim)
+        .take_while(|line| !line.starts_with('['))
+        .filter_map(|line| line.split_once('='))
+        .find(|(raw_key, _)| raw_key.trim() == key)
+        .and_then(|(_, raw_value)| parse_toml_string_value(raw_value))
+}
+
 fn remove_codex_sandbox_settings(content: &str) -> String {
     let content =
         remove_top_level_string_setting(content, "sandbox_mode", &[RECOMMENDED_SANDBOX_MODE]);
@@ -3023,5 +3187,247 @@ sandbox_mode = "danger-full-access"
             AiTool::ClaudeCode,
             "{\"hooks\": {\"PreToolUse\": [{\"_shk_managed\": true,"
         ));
+    }
+
+    fn features_header_count(body: &str) -> usize {
+        body.lines()
+            .filter(|line| is_codex_features_header(line))
+            .count()
+    }
+
+    fn assert_features_before_managed_block(body: &str) {
+        let features = body.find("[features]").expect("features table");
+        let start = body.find("# shk-managed-start").expect("managed block");
+        assert!(features < start, "{body}");
+        let end = body.find("# shk-managed-end").unwrap();
+        assert!(!body[start..end].contains("[features]"), "{body}");
+        toml::from_str::<toml::Value>(body).unwrap_or_else(|err| panic!("{err}: {body}"));
+    }
+
+    #[test]
+    fn codex_features_table_stays_outside_the_managed_block() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, initial) in [
+            ("fresh.toml", None),
+            ("headerless.toml", Some("model = \"gpt-5\"\n")),
+        ] {
+            let path = dir.path().join(name);
+            if let Some(initial) = initial {
+                fs::write(&path, initial).unwrap();
+            }
+            apply_codex(&path, false, false, false, false, true).unwrap();
+            let body = fs::read_to_string(&path).unwrap();
+            assert_features_before_managed_block(&body);
+
+            // A user addition under [features] survives reinstall and removal.
+            let edited = body.replace("hooks = true\n", "hooks = true\nmine = true\n");
+            assert_ne!(edited, body);
+            fs::write(&path, edited).unwrap();
+            apply_codex(&path, true, false, false, false, true).unwrap();
+            let body = fs::read_to_string(&path).unwrap();
+            assert!(body.contains("mine = true"), "{name}: {body}");
+            assert_features_before_managed_block(&body);
+            assert_eq!(features_header_count(&body), 1, "{name}: {body}");
+
+            remove_codex_scan_hooks(&path, false).unwrap();
+            let body = fs::read_to_string(&path).unwrap();
+            assert!(body.contains("[features]"), "{name}: {body}");
+            assert!(body.contains("mine = true"), "{name}: {body}");
+            assert!(!body.contains("shk-managed"), "{name}: {body}");
+        }
+    }
+
+    #[test]
+    fn codex_features_inside_an_old_managed_block_are_moved_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "model = \"gpt-5\"\n\n# shk-managed-start\n[features]\nhooks = true\nmine = true\n\n[[hooks.PreToolUse]]\ntimeout = 5\n# shk-managed-end\n",
+        )
+        .unwrap();
+
+        apply_codex(&path, false, false, false, false, true).unwrap();
+
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains("mine = true"), "{body}");
+        assert_features_before_managed_block(&body);
+        assert_eq!(features_header_count(&body), 1, "{body}");
+    }
+
+    #[test]
+    fn codex_features_header_with_trailing_comment_is_reused() {
+        let body = ensure_codex_features_prefix(
+            "[features] # experimental switches\t\nother = false\n\n[profiles.dev]\nmodel = \"x\"\n",
+        );
+
+        assert_eq!(features_header_count(&body), 1, "{body}");
+        assert!(
+            body.contains("[features] # experimental switches\t\nother = false\nhooks = true\n"),
+            "{body}"
+        );
+        toml::from_str::<toml::Value>(&body).unwrap();
+    }
+
+    #[test]
+    fn codex_install_preserves_crlf_line_endings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "model = \"gpt-5\"\r\n\r\n[profiles.dev]\r\nx = 1\r\n",
+        )
+        .unwrap();
+
+        apply_codex(&path, false, false, false, true, true).unwrap();
+        apply_codex(&path, false, false, false, true, true).unwrap();
+
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains("# shk-managed-start\r\n"), "{body:?}");
+        assert_eq!(
+            body.matches('\n').count(),
+            body.matches("\r\n").count(),
+            "{body:?}"
+        );
+        assert!(!body.contains("\r\r"), "{body:?}");
+    }
+
+    fn configure_options() -> ConfigureAiOptions {
+        ConfigureAiOptions {
+            audit: false,
+            log_blocked: false,
+            dry_run: false,
+            global: false,
+            fail_closed: false,
+            scan_hooks_claude_code: false,
+            scan_hooks_cursor: false,
+            scan_hooks_codex: false,
+            scan_hooks_copilot: false,
+            scan_hooks_antigravity: false,
+            scan_hooks_grok: false,
+            scan_hooks_opencode: false,
+            scan_hooks_windsurf: false,
+            claude_deny: false,
+            claude_sandbox: false,
+            codex_sandbox: false,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configure_ai_ignores_symlinked_dirs_of_tools_it_does_not_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        for tool_dir in [".cursor", ".claude", ".codex"] {
+            std::os::unix::fs::symlink(outside.path(), dir.path().join(tool_dir)).unwrap();
+        }
+
+        configure_ai_with_summaries(
+            dir.path(),
+            ConfigureAiOptions {
+                scan_hooks_windsurf: true,
+                ..configure_options()
+            },
+        )
+        .unwrap();
+
+        assert!(dir.path().join(".windsurf/hooks.json").is_file());
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+
+        // A selected tool behind a symlink is still refused.
+        let err = configure_ai_with_summaries(
+            dir.path(),
+            ConfigureAiOptions {
+                scan_hooks_cursor: true,
+                ..configure_options()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("symbolic link"), "{err}");
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn configure_ai_keeps_user_safety_settings_that_were_never_fully_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let recommended = shk_integrations::claude_recommended_deny_entries()[0];
+        let settings_path = dir.path().join(".claude/settings.json");
+        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        let settings = json!({
+            "permissions": { "deny": [recommended, "Bash(rm -rf *)"] },
+            "sandbox": {
+                "enabled": true,
+                "autoAllowBashIfSandboxed": true,
+                "filesystem": { "denyRead": ["~/"] }
+            }
+        });
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+        let codex_path = dir.path().join(CONFIG_REL_PATH);
+        fs::create_dir_all(codex_path.parent().unwrap()).unwrap();
+        let codex = format!(
+            "sandbox_mode = \"{RISKY_SANDBOX_MODE}\"\napproval_policy = \"{RECOMMENDED_APPROVAL_POLICY}\"\n"
+        );
+        fs::write(&codex_path, &codex).unwrap();
+
+        // The user only turned on an unrelated tool; every safety flag is
+        // off because none of them was fully applied.
+        configure_ai_with_summaries(
+            dir.path(),
+            ConfigureAiOptions {
+                scan_hooks_windsurf: true,
+                ..configure_options()
+            },
+        )
+        .unwrap();
+
+        let after: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert_eq!(after["permissions"], settings["permissions"], "{after}");
+        assert_eq!(after["sandbox"], settings["sandbox"], "{after}");
+        assert_eq!(fs::read_to_string(&codex_path).unwrap(), codex);
+    }
+
+    #[test]
+    fn configure_ai_removes_safety_settings_that_were_fully_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join(".claude/settings.json");
+        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        fs::write(
+            &settings_path,
+            r#"{"permissions":{"deny":["Bash(rm -rf *)"]}}"#,
+        )
+        .unwrap();
+        let codex_path = dir.path().join(CONFIG_REL_PATH);
+
+        configure_ai_with_summaries(
+            dir.path(),
+            ConfigureAiOptions {
+                claude_deny: true,
+                claude_sandbox: true,
+                codex_sandbox: true,
+                ..configure_options()
+            },
+        )
+        .unwrap();
+        let on: Value = serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert_eq!(on["sandbox"]["enabled"], true);
+        assert!(on["permissions"]["deny"].as_array().unwrap().len() > 1);
+        let codex_on = fs::read_to_string(&codex_path).unwrap();
+        assert!(codex_on.contains("sandbox_mode"), "{codex_on}");
+        assert!(codex_on.contains("approval_policy"), "{codex_on}");
+
+        configure_ai_with_summaries(dir.path(), configure_options()).unwrap();
+
+        let off: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert_eq!(off["permissions"]["deny"], json!(["Bash(rm -rf *)"]));
+        assert!(off.get("sandbox").is_none(), "{off}");
+        let codex_off = fs::read_to_string(&codex_path).unwrap();
+        assert!(!codex_off.contains("sandbox_mode"), "{codex_off}");
+        assert!(!codex_off.contains("approval_policy"), "{codex_off}");
     }
 }

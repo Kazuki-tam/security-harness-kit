@@ -204,8 +204,8 @@ pub(crate) fn install_selected_tools_for(
         }
 
         if existing == ExistingSkill::Keep && plan.dest.exists() {
-            let up_to_date = std::fs::read(&plan.dest)
-                .is_ok_and(|bytes| bytes == SKILL_CONTENT.as_bytes());
+            let up_to_date =
+                std::fs::read(&plan.dest).is_ok_and(|bytes| bytes == SKILL_CONTENT.as_bytes());
             details.push(if up_to_date {
                 format!(
                     "{} skill already up to date -> {}",
@@ -423,7 +423,7 @@ mod tests {
             false,
             ExistingSkill::Overwrite,
         )
-            .unwrap_err();
+        .unwrap_err();
 
         assert!(err.to_string().contains("symbolic link"), "{err}");
         assert!(!outside.path().join("skills/shk/SKILL.md").exists());

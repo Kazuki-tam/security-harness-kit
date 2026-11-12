@@ -4744,6 +4744,29 @@ fn init_yes_sets_up_selected_ai_tool_and_skill() {
     assert!(!dir.path().join(".claude/skills/shk/SKILL.md").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn global_opencode_install_follows_xdg_config_home_outside_home() {
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("shk.toml"), "").unwrap();
+
+    let out = Command::new(shk_bin())
+        .args(["hooks", "install-ai", "--tool", "opencode", "--global"])
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .current_dir(project.path())
+        .output()
+        .expect("hooks install-ai --global");
+
+    assert!(out.status.success(), "{}", output_log(&out));
+    let plugin = xdg.path().join("opencode/plugins/shk-security.js");
+    let body = std::fs::read_to_string(&plugin).unwrap();
+    assert!(body.contains("--hook-mode opencode"), "{body}");
+    assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+}
+
 #[test]
 fn init_yes_rerun_keeps_installed_skill_and_policy() {
     let dir = tempfile::tempdir().unwrap();
