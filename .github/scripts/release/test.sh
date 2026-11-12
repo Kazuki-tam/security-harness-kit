@@ -47,8 +47,14 @@ fi
 # cargo-dist-version, so a bump must update both.
 dist_config_version="$(awk -F'"' '/^cargo-dist-version = / { print $2; exit }' dist-workspace.toml)"
 dist_workflow_version="$(awk -F'"' '/^  DIST_VERSION: / { print $2; exit }' .github/workflows/release.yml)"
-shk_require_semver "$dist_config_version"
-shk_require_semver "$dist_workflow_version"
+if [[ ! "$dist_config_version" =~ $SHK_SEMVER_RE ]]; then
+  echo "FAIL: could not read cargo-dist-version from dist-workspace.toml" >&2
+  exit 1
+fi
+if [[ ! "$dist_workflow_version" =~ $SHK_SEMVER_RE ]]; then
+  echo "FAIL: could not read top-level env DIST_VERSION from release.yml" >&2
+  exit 1
+fi
 if [[ "$dist_config_version" != "$dist_workflow_version" ]]; then
   echo "FAIL: release.yml DIST_VERSION ${dist_workflow_version} != dist-workspace.toml cargo-dist-version ${dist_config_version}" >&2
   exit 1
