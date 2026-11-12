@@ -148,15 +148,16 @@ async fn audit_report(
 
 /// Replace the set of projects whose audit logs are tailed for live blocks.
 ///
-/// `async` so Tauri keeps it off the main thread: registering a project stats
-/// its log, which can block for seconds on an unresponsive network volume.
+/// Runs on the blocking pool: registering a project stats its log, which can
+/// block for seconds on an unresponsive network volume and must not occupy an
+/// async runtime worker.
 #[tauri::command]
-async fn watch_blocked_projects(
-    paths: Vec<String>,
-    watcher: tauri::State<'_, BlockedWatcher>,
-) -> Result<(), AppError> {
-    watcher.set_watched(paths);
-    Ok(())
+async fn watch_blocked_projects(paths: Vec<String>, app: tauri::AppHandle) -> Result<(), AppError> {
+    run_blocking(move || {
+        app.state::<BlockedWatcher>().set_watched(paths);
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
