@@ -174,7 +174,12 @@ pub(crate) struct PseudonymizeOutcome {
     /// could not be verified. Carried instead of raised so the CLI can print
     /// its summary first, exactly as it always has.
     pub remaining: Option<Result<Vec<String>>>,
+    /// Table modes: the first row was kept as a header without any selected
+    /// column confirming it by name (see `TableResult::header_assumed`).
+    pub header_assumed: bool,
 }
+
+const HEADER_ASSUMED_WARNING: &str = "warning: the first row was treated as a header and copied unchanged; if it is data, run again with --no-header";
 
 /// Opens the project's pseudonymize key store. Injected so the complete
 /// write / restore path can run against an in-memory store in unit tests.
@@ -195,6 +200,9 @@ fn mask_with(args: MaskPseudonymizeArgs, open_store: StoreOpener<'_>) -> Result<
     };
     let outcome = mask_core(request_from_cli(args), open_store, &interaction).map_err(fail_run)?;
     print_outcome(json, &outcome).map_err(fail_run)?;
+    if outcome.header_assumed {
+        eprintln!("{HEADER_ASSUMED_WARNING}");
+    }
     match outcome.remaining {
         Some(Err(err)) => Err(fail_run(err)),
         Some(Ok(leftover)) if !leftover.is_empty() => Err(leftover_error(&leftover)),
@@ -689,6 +697,7 @@ fn dry_run_outcome(
         columns,
         written: None,
         remaining: None,
+        header_assumed: false,
     }
 }
 
@@ -700,11 +709,12 @@ fn run_table_csv(
 ) -> Result<PseudonymizeOutcome> {
     let plan = plan_table_csv(req, policy)?;
     confirm_table_plan(interaction, &plan.preview)?;
+    let header_assumed = plan.preview.header_assumed;
     if req.dry_run {
-        return Ok(dry_run_outcome(
-            plan.preview.meta,
-            Some(plan.preview.columns),
-        ));
+        return Ok(PseudonymizeOutcome {
+            header_assumed,
+            ..dry_run_outcome(plan.preview.meta, Some(plan.preview.columns))
+        });
     }
 
     let output = req.output.as_ref().expect("checked above");
@@ -725,7 +735,7 @@ fn run_table_csv(
     plan.source.ensure_unchanged()?;
     tmp.flush()?;
     tmp.as_file().sync_all()?;
-    finish_run(
+    let outcome = finish_run(
         req,
         policy,
         &material,
@@ -734,7 +744,11 @@ fn run_table_csv(
         collector,
         "table",
         tmp.into_temp_path(),
-    )
+    )?;
+    Ok(PseudonymizeOutcome {
+        header_assumed,
+        ..outcome
+    })
 }
 
 fn run_table_xlsx(
@@ -751,11 +765,12 @@ fn run_table_xlsx(
         return Err(formula_cell_error(row, col));
     }
     confirm_table_plan(interaction, &plan.preview)?;
+    let header_assumed = plan.preview.header_assumed;
     if req.dry_run {
-        return Ok(dry_run_outcome(
-            plan.preview.meta,
-            Some(plan.preview.columns),
-        ));
+        return Ok(PseudonymizeOutcome {
+            header_assumed,
+            ..dry_run_outcome(plan.preview.meta, Some(plan.preview.columns))
+        });
     }
     let digest = plan.digest.expect("digest is taken for a real run");
 
@@ -776,7 +791,7 @@ fn run_table_xlsx(
         collector.as_mut(),
     )?;
     ensure_digest_unchanged(plan.input, digest)?;
-    finish_run(
+    let outcome = finish_run(
         req,
         policy,
         &material,
@@ -785,7 +800,11 @@ fn run_table_xlsx(
         collector,
         "table",
         staged_output,
-    )
+    )?;
+    Ok(PseudonymizeOutcome {
+        header_assumed,
+        ..outcome
+    })
 }
 
 fn run_text_plain(
@@ -936,6 +955,7 @@ fn finish_run(
             map: req.map.clone(),
         }),
         remaining,
+        header_assumed: false,
     })
 }
 
@@ -2629,6 +2649,175 @@ mod tests {
         let mut missing = args(root, "book.xlsx", Some("other.xlsx"));
         missing.sheet = Some("Nope".into());
         assert_eq!(exit_code(mask_with(missing, &open).unwrap_err()), 2);
+    }
+
+    const CUSTOM_WORKBOOK: &str = r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Customers" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+    const CUSTOM_RELS: &str =
+        r#"<Relationships><Relationship Id="rId1" Target="custom/active.xml"/></Relationships>"#;
+
+    fn two_column_sheet(first: &str, second: &str) -> String {
+        format!(
+            r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Email</t></is></c><c r="B1" t="inlineStr"><is><t>Note</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>{first}</t></is></c><c r="B2" t="inlineStr"><is><t>{second}</t></is></c></row></sheetData></worksheet>"#
+        )
+    }
+
+    #[test]
+    fn xlsx_sheet_under_a_custom_part_name_is_checked_and_restored() {
+        let dir = project();
+        let root = dir.path();
+        let store = Arc::new(MemoryStore::default());
+        let open = opener(Arc::clone(&store));
+        let part = "xl/custom/active.xml";
+        // An address next to a phone number is not inferred as either kind.
+        let other = [
+            "bob",
+            "@",
+            "example.com",
+            " / ",
+            "090",
+            "-",
+            "1234",
+            "-",
+            "5678",
+        ]
+        .concat();
+        build_xlsx(
+            &root.join("leaky.xlsx"),
+            &[
+                ("xl/workbook.xml", CUSTOM_WORKBOOK.into()),
+                ("xl/_rels/workbook.xml.rels", CUSTOM_RELS.into()),
+                (part, two_column_sheet(&email(), &other)),
+            ],
+        );
+        // The unselected column still holds an address: the check must see it.
+        let mut leaky = args(root, "leaky.xlsx", Some("leaky.pseudo.xlsx"));
+        leaky.columns = Some("Email:email".into());
+        leaky.check_remaining = true;
+        let err = mask_with(leaky, &open).unwrap_err();
+        assert_eq!(exit_code(err), 1);
+
+        build_xlsx(
+            &root.join("book.xlsx"),
+            &[
+                ("xl/workbook.xml", CUSTOM_WORKBOOK.into()),
+                ("xl/_rels/workbook.xml.rels", CUSTOM_RELS.into()),
+                (part, two_column_sheet(&email(), "keep")),
+            ],
+        );
+        let mut run = args(root, "book.xlsx", Some("book.pseudo.xlsx"));
+        run.columns = Some("Email:email".into());
+        run.check_remaining = true;
+        run.map = Some(root.join("book.shk-map"));
+        mask_with(run, &open).unwrap();
+        let sheet = read_zip_entry(&root.join("book.pseudo.xlsx"), part);
+        assert!(
+            sheet.contains("email_") && !sheet.contains(&email()),
+            "{sheet}"
+        );
+        let summary = restore_with(
+            root,
+            root.join("book.pseudo.xlsx"),
+            root.join("book.shk-map"),
+            root.join("book.restored.xlsx"),
+            &open,
+        )
+        .unwrap();
+        assert_eq!(summary.replacements, 1);
+        let sheet = read_zip_entry(&root.join("book.restored.xlsx"), part);
+        assert!(
+            sheet.contains(&email()) && !sheet.contains("email_"),
+            "{sheet}"
+        );
+    }
+
+    #[test]
+    fn unconfirmed_header_rows_are_flagged_for_a_warning() {
+        let dir = project();
+        let root = dir.path();
+        let store = Arc::new(MemoryStore::default());
+        let open = opener(Arc::clone(&store));
+        let decisions = CliInteraction {
+            yes: true,
+            no_create_key: false,
+        };
+        // No header: the address column is only found by sampling, and the
+        // first row's cell is not an address, so that row passes for a header.
+        std::fs::write(
+            root.join("raw.csv"),
+            format!("Hana Sato,unknown\nKen Suzuki,{0}\nMio Abe,{0}\n", email()),
+        )
+        .unwrap();
+        let mut dry = request(root, PseudonymizeSource::File(root.join("raw.csv")));
+        assert!(
+            mask_core(dry_clone(&dry), &open, &decisions)
+                .unwrap()
+                .header_assumed
+        );
+        dry.dry_run = false;
+        dry.output = Some(root.join("raw.pseudo.csv"));
+        let outcome = mask_core(dry, &open, &decisions).unwrap();
+        assert!(outcome.header_assumed);
+        assert!(HEADER_ASSUMED_WARNING.contains("--no-header"));
+
+        // A column found by its name confirms the header.
+        std::fs::write(
+            root.join("named.csv"),
+            format!("Email,Note\n{},keep\n", email()),
+        )
+        .unwrap();
+        let named = request(root, PseudonymizeSource::File(root.join("named.csv")));
+        assert!(!mask_core(named, &open, &decisions).unwrap().header_assumed);
+    }
+
+    fn dry_clone(req: &PseudonymizeRequest) -> PseudonymizeRequest {
+        PseudonymizeRequest {
+            project_root: req.project_root.clone(),
+            source: PseudonymizeSource::File(req.source.path().unwrap().to_path_buf()),
+            output: None,
+            dry_run: true,
+            columns: None,
+            no_header: false,
+            mode: None,
+            format: None,
+            sheet: None,
+            map: None,
+            check_remaining: false,
+        }
+    }
+
+    #[test]
+    fn xlsx_with_cached_copies_exits_2_before_any_key_is_created() {
+        let dir = project();
+        let root = dir.path();
+        let store = Arc::new(MemoryStore::default());
+        let open = opener(Arc::clone(&store));
+        build_xlsx(
+            &root.join("pivot.xlsx"),
+            &[
+                ("xl/workbook.xml", CUSTOM_WORKBOOK.into()),
+                ("xl/_rels/workbook.xml.rels", CUSTOM_RELS.into()),
+                ("xl/custom/active.xml", two_column_sheet(&email(), "keep")),
+                (
+                    "xl/pivotCache/pivotCacheRecords1.xml",
+                    format!(
+                        "<pivotCacheRecords><r><s v=\"{}\"/></r></pivotCacheRecords>",
+                        email()
+                    ),
+                ),
+            ],
+        );
+        let mut run = args(root, "pivot.xlsx", Some("pivot.pseudo.xlsx"));
+        run.columns = Some("Email:email".into());
+        let err = mask_with(run, &open).unwrap_err();
+        assert!(err.to_string().contains("pivot cache"), "{err}");
+        assert_eq!(exit_code(err), 2);
+        assert!(!root.join("pivot.pseudo.xlsx").exists());
+        let (_, project, key_store, _) = open_context(root, &open).unwrap();
+        assert!(
+            load_material(key_store.as_ref(), &project)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
