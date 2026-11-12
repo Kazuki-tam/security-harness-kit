@@ -217,10 +217,12 @@ pub fn allow_stdout_for_event(tool: AiTool, event: HookEvent, info: Option<&str>
         // empty object is the schema-valid no-op (plain text or
         // additionalContext would be injected into Claude's context).
         AiTool::ClaudeCode if event == HookEvent::UserPromptSubmit => "{}".to_string(),
-        AiTool::ClaudeCode => {
-            let reason = info.unwrap_or("shk: OK");
-            permission_output(event, "allow", reason).to_string()
-        }
+        // A clean scan must stay neutral. `permissionDecision: "allow"` from a
+        // PreToolUse hook skips Claude Code's own permission prompt, so
+        // emitting it would auto-approve every tool call shk does not flag.
+        // `{}` defers to the user's permission settings; an informational
+        // note travels as `systemMessage`, which carries no decision.
+        AiTool::ClaudeCode => codex_message_allow(info),
         // An allowing UserPromptSubmit's stdout is discarded.
         AiTool::Grok if event == HookEvent::UserPromptSubmit => "{}".to_string(),
         // Post-tool feedback reaches the model without blocking the operation.
@@ -337,11 +339,16 @@ pub fn mask_stdout(
                 json!({ "systemMessage": msg }).to_string()
             }
         }
+        // Pre-hook mask reports stay neutral for the same reason as
+        // `allow_stdout_for_event`: no `permissionDecision`, so Claude Code's
+        // own permission flow still applies.
         AiTool::ClaudeCode => {
-            let mut out = permission_output(event, "allow", &msg);
+            let mut out = json!({ "systemMessage": msg });
             if let Some(content) = masked_content {
-                out["hookSpecificOutput"]["output"] =
-                    json!(mask_replacement_message(finding_count, content));
+                out["hookSpecificOutput"] = json!({
+                    "hookEventName": event.json_name(),
+                    "output": mask_replacement_message(finding_count, content),
+                });
             }
             out.to_string()
         }
@@ -447,20 +454,30 @@ mod tests {
     }
 
     #[test]
-    fn claude_allow_uses_hook_specific_permission_output() {
-        let output = allow_stdout_for_event(
+    fn claude_pre_tool_allow_never_emits_a_permission_decision() {
+        // An explicit allow would bypass Claude Code's permission prompt for
+        // every tool call that passes the scan.
+        let clean = allow_stdout_for_event(AiTool::ClaudeCode, HookEvent::PreToolUse, None);
+        assert_eq!(clean, "{}");
+
+        let noted = allow_stdout_for_event(
             AiTool::ClaudeCode,
             HookEvent::PreToolUse,
             Some("looks good"),
         );
-        let value = parse_json(&output);
+        let value = parse_json(&noted);
+        assert_eq!(value["systemMessage"], "looks good");
+        assert!(value.get("hookSpecificOutput").is_none(), "{value}");
 
-        assert_eq!(value["hookSpecificOutput"]["hookEventName"], "PreToolUse");
-        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "allow");
-        assert_eq!(
-            value["hookSpecificOutput"]["permissionDecisionReason"],
-            "looks good"
-        );
+        for (findings, content) in [(0, None), (2, Some("masked text"))] {
+            let masked = parse_json(&mask_stdout(AiTool::ClaudeCode, false, findings, content));
+            assert!(
+                masked["hookSpecificOutput"]
+                    .get("permissionDecision")
+                    .is_none(),
+                "{masked}"
+            );
+        }
     }
 
     #[test]
