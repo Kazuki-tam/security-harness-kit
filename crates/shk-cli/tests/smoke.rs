@@ -3310,6 +3310,105 @@ fn hook_mode_invalid_action_guard_policy_fails_closed() {
     assert!(!reason.contains("definitely-not-a-boolean"), "{stdout}");
 }
 
+fn hook_mode_output_in(dir: &Path, extra_args: &[&str], stdin: &str) -> std::process::Output {
+    let mut args = vec!["scan", ".", "--hook-mode"];
+    args.extend_from_slice(extra_args);
+    output_with_stdin(Command::new(shk_bin()).args(args).current_dir(dir), stdin)
+}
+
+#[test]
+fn hook_mode_blocking_pre_hook_internal_errors_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    // Marker text stands in for payload content that must not be echoed back.
+    for stdin in ["", "   \n", "not json: payload-marker-text"] {
+        let out = hook_mode_output_in(dir.path(), &["claude-code"], stdin);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{stdin:?}: {}",
+            output_log(&out)
+        );
+        let stdout: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|err| panic!("{stdin:?}: {err}: {}", output_log(&out)));
+        assert_eq!(
+            stdout["hookSpecificOutput"]["permissionDecision"], "deny",
+            "{stdin:?}: {stdout}"
+        );
+        let reason = stdout["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            reason.starts_with("shk internal error: "),
+            "{stdin:?}: {stdout}"
+        );
+        assert!(!reason.contains("payload-marker-text"), "{stdout}");
+    }
+
+    // Tools whose deny contract is exit 0 plus a JSON decision keep it.
+    let out = hook_mode_output_in(dir.path(), &["copilot"], "not json");
+    assert_eq!(out.status.code(), Some(0), "{}", output_log(&out));
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(stdout["permissionDecision"], "deny", "{stdout}");
+
+    // Tools that read the deny reason from stderr get it there.
+    let out = hook_mode_output_in(dir.path(), &["windsurf"], "not json");
+    assert_eq!(out.status.code(), Some(2), "{}", output_log(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("shk internal error: "),
+        "{}",
+        output_log(&out)
+    );
+}
+
+#[test]
+fn hook_mode_claude_user_prompt_internal_error_blocks_with_exit_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("shk.toml"),
+        "[rules]\nsecrets = definitely-not-a-boolean\n",
+    )
+    .unwrap();
+    let stdin = serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "please summarise the meeting notes"
+    })
+    .to_string();
+    let out = hook_mode_output_in(dir.path(), &["claude-code"], &stdin);
+    assert_eq!(out.status.code(), Some(0), "{}", output_log(&out));
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|err| panic!("{err}: {}", output_log(&out)));
+    assert_eq!(stdout["decision"], "block", "{stdout}");
+    let reason = stdout["reason"].as_str().unwrap_or_default();
+    assert!(reason.starts_with("shk internal error: "), "{stdout}");
+    assert!(!reason.contains("meeting notes"), "{stdout}");
+}
+
+#[test]
+fn hook_mode_audit_and_post_hooks_never_block_on_internal_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    for extra in [
+        &["claude-code", "--post"][..],
+        &["cursor", "--post"][..],
+        &["claude-code", "--audit"][..],
+    ] {
+        for stdin in ["", "not json"] {
+            let out = hook_mode_output_in(dir.path(), extra, stdin);
+            assert_ne!(
+                out.status.code(),
+                Some(2),
+                "{extra:?} {stdin:?}: {}",
+                output_log(&out)
+            );
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                !stdout.contains("deny") && !stdout.contains("block"),
+                "{extra:?} {stdin:?}: {}",
+                output_log(&out)
+            );
+        }
+    }
+}
+
 #[test]
 fn hook_mode_ignores_invalid_policy_from_untrusted_payload_path() {
     use std::io::Write;
