@@ -138,12 +138,15 @@ pub fn audit(root: &Path, global: bool, fail_on: Severity) -> Result<McpAuditRep
         let (canonical, content) = match read_candidate(&candidate) {
             CandidateRead::Missing => continue,
             CandidateRead::Unreadable => {
+                // The file exists but was not audited. A client may still load
+                // it, so this must fail the default threshold: otherwise
+                // padding or hard-linking a config would bypass the audit.
                 config_files.push(candidate.label.clone());
                 findings.push(finding(
                     "mcp.config_unreadable",
-                    Severity::Low,
+                    Severity::High,
                     &candidate.label,
-                    "MCP configuration could not be safely read; the file was skipped",
+                    "MCP configuration exists but could not be safely read; the file was NOT audited",
                     1.0,
                 ));
                 continue;
@@ -163,16 +166,24 @@ pub fn audit(root: &Path, global: bool, fail_on: Severity) -> Result<McpAuditRep
             &content,
         );
         content.zeroize();
-        if let Ok(mut parsed) = parsed {
-            entries.append(&mut parsed);
-        } else {
-            findings.push(finding(
+        match parsed {
+            Ok(mut parsed) => entries.append(&mut parsed),
+            // A well-formed config over the entry limit is still loadable by a
+            // client, so skipping it is treated like an unreadable file.
+            Err(error) if error.is::<TooManyServers>() => findings.push(finding(
+                "mcp.config_unreadable",
+                Severity::High,
+                &candidate.label,
+                "MCP configuration exceeds the server entry limit; the file was NOT audited",
+                1.0,
+            )),
+            Err(_) => findings.push(finding(
                 "mcp.config_unreadable",
                 Severity::Low,
                 &candidate.label,
                 "MCP configuration could not be read or parsed; the file was skipped",
                 1.0,
-            ));
+            )),
         }
     }
     for entry in &entries {
@@ -340,6 +351,19 @@ fn metadata_has_multiple_links(_metadata: &fs::Metadata) -> bool {
     false
 }
 
+/// A syntactically valid configuration with more server entries than
+/// `MAX_SERVERS_PER_CONFIG`.
+#[derive(Debug)]
+struct TooManyServers;
+
+impl std::fmt::Display for TooManyServers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MCP configuration contains too many server entries")
+    }
+}
+
+impl std::error::Error for TooManyServers {}
+
 fn parse_config(
     client: &str,
     source: &Path,
@@ -359,7 +383,7 @@ fn parse_config(
             };
             let mut entries = parse_json_map(client, source, value.get(key));
             if entries.len() > MAX_SERVERS_PER_CONFIG {
-                anyhow::bail!("MCP configuration contains too many server entries");
+                return Err(TooManyServers.into());
             }
             if matches!(format, Format::ClaudeUser)
                 && let Some(projects) = value.get("projects").and_then(serde_json::Value::as_object)
@@ -367,7 +391,7 @@ fn parse_config(
                 for project in projects.values() {
                     entries.extend(parse_json_map(client, source, project.get("mcpServers")));
                     if entries.len() > MAX_SERVERS_PER_CONFIG {
-                        anyhow::bail!("MCP configuration contains too many server entries");
+                        return Err(TooManyServers.into());
                     }
                 }
             }
@@ -379,7 +403,7 @@ fn parse_config(
         }
     };
     if entries.len() > MAX_SERVERS_PER_CONFIG {
-        anyhow::bail!("MCP configuration contains too many server entries");
+        return Err(TooManyServers.into());
     }
     Ok(entries)
 }
@@ -511,11 +535,13 @@ fn check_entry(
     match &entry.transport {
         McpTransport::Stdio { command, args, env } => {
             let command_name = executable_name(command);
-            if command_name == "npx"
-                && args
+            let (runner_name, runner_args) = effective_invocation(command, args);
+            if npx_arguments(&runner_name, &runner_args).is_some_and(|npx_args| {
+                npx_args
                     .iter()
+                    .take_while(|arg| arg.as_str() != "--")
                     .any(|arg| matches!(arg.as_str(), "-y" | "--yes"))
-            {
+            }) {
                 findings.push(context_finding(
                     "mcp.npx_auto_install",
                     Severity::Medium,
@@ -526,7 +552,7 @@ fn check_entry(
                     0.95,
                 ));
             }
-            if let Some(package) = package_invocation(&command_name, args)
+            if let Some(package) = package_invocation(&runner_name, &runner_args)
                 && !package_is_pinned(package)
             {
                 findings.push(context_finding(
@@ -892,31 +918,245 @@ fn safe_identifier(value: &str) -> String {
     escape_control(&redacted)
 }
 
+/// Lower-cased basename of a command without a Windows launcher suffix, so
+/// `C:\nodejs\npx.cmd` and `npx` name the same tool.
 fn executable_name(command: &str) -> String {
-    command
+    let name = command
+        .trim()
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or(command)
-        .to_ascii_lowercase()
+        .to_ascii_lowercase();
+    for suffix in [".cmd", ".exe", ".bat", ".ps1"] {
+        if let Some(stem) = name.strip_suffix(suffix)
+            && !stem.is_empty()
+        {
+            return stem.to_string();
+        }
+    }
+    name
 }
 
-fn package_invocation<'a>(command: &str, args: &'a [String]) -> Option<&'a str> {
-    match command {
-        "npx" => package_argument(args, &["-p", "--package"]),
-        "uvx" => package_argument(args, &["--from"]),
-        "pipx" => {
-            let run = args.iter().position(|arg| arg == "run")?;
-            package_argument(&args[run + 1..], &["--spec"])
+/// The command a server really starts once launcher wrappers (`cmd /c`,
+/// `sh -c`, `env NAME=value`) are peeled off, as a normalised executable name
+/// plus its arguments. Wrappers are only unwrapped lexically; nothing is run.
+fn effective_invocation(
+    command: &str,
+    args: &[String],
+) -> (String, zeroize::Zeroizing<Vec<String>>) {
+    let mut name = executable_name(command);
+    let mut rest = zeroize::Zeroizing::new(args.to_vec());
+    for _ in 0..4 {
+        let Some(inner) = unwrap_launcher(&name, &rest) else {
+            break;
+        };
+        let mut inner = zeroize::Zeroizing::new(inner);
+        if inner.is_empty() {
+            break;
+        }
+        name = executable_name(&inner[0]);
+        inner.remove(0).zeroize();
+        rest = inner;
+    }
+    (name, rest)
+}
+
+/// Arguments (command first) wrapped by a launcher, or `None` when `name` is
+/// not a launcher or wraps nothing.
+fn unwrap_launcher(name: &str, args: &[String]) -> Option<Vec<String>> {
+    let after = |is_flag: &dyn Fn(&str) -> bool| {
+        let flag = args.iter().position(|arg| is_flag(arg))?;
+        Some(command_words(&args[flag + 1..]))
+    };
+    match name {
+        "cmd" => after(&|arg| arg.eq_ignore_ascii_case("/c") || arg.eq_ignore_ascii_case("/k")),
+        "sh" | "bash" | "zsh" | "dash" => after(&|arg| arg == "-c"),
+        "powershell" | "pwsh" => {
+            after(&|arg| arg.eq_ignore_ascii_case("-c") || arg.eq_ignore_ascii_case("-command"))
+        }
+        "env" => {
+            let mut index = 0;
+            while index < args.len() {
+                let arg = args[index].as_str();
+                if arg == "--" {
+                    index += 1;
+                    break;
+                }
+                if matches!(arg, "-u" | "--unset" | "-C" | "--chdir") {
+                    index += 2;
+                } else if arg.starts_with('-') || arg.contains('=') {
+                    index += 1;
+                } else {
+                    break;
+                }
+            }
+            args.get(index..).map(<[String]>::to_vec)
         }
         _ => None,
     }
 }
 
-fn package_argument<'a>(args: &'a [String], package_options: &[&str]) -> Option<&'a str> {
+/// A launcher's command, either already split into arguments or given as one
+/// command-line string (`cmd /c "npx -y pkg"`).
+fn command_words(args: &[String]) -> Vec<String> {
+    match args {
+        [line] if line.contains(char::is_whitespace) => {
+            line.split_whitespace().map(str::to_string).collect()
+        }
+        _ => args.to_vec(),
+    }
+}
+
+/// How one package runner names the package it downloads and runs.
+struct PackageRunner {
+    /// Options whose value is the package (`--package pkg`, `--from pkg`).
+    package_options: &'static [&'static str],
+    /// Other options that consume the next argument, so their value is not
+    /// mistaken for the package.
+    value_options: &'static [&'static str],
+}
+
+const NPX_RUNNER: PackageRunner = PackageRunner {
+    package_options: &["-p", "--package"],
+    value_options: &[
+        "-c",
+        "--call",
+        "-w",
+        "--workspace",
+        "--registry",
+        "--cache",
+        "--userconfig",
+        "--globalconfig",
+        "--prefix",
+        "--loglevel",
+        "--node-options",
+        "--script-shell",
+    ],
+};
+
+const BUNX_RUNNER: PackageRunner = PackageRunner {
+    package_options: &["-p", "--package"],
+    value_options: &["--cwd", "--config", "-c", "--registry"],
+};
+
+const PNPM_DLX_RUNNER: PackageRunner = PackageRunner {
+    package_options: &["--package"],
+    value_options: &[
+        "-C",
+        "--dir",
+        "--registry",
+        "--filter",
+        "--loglevel",
+        "--reporter",
+        "--store-dir",
+        "--config",
+    ],
+};
+
+const YARN_DLX_RUNNER: PackageRunner = PackageRunner {
+    package_options: &["-p", "--package"],
+    value_options: &["--cwd"],
+};
+
+const UVX_RUNNER: PackageRunner = PackageRunner {
+    package_options: &["--from"],
+    value_options: &[
+        "-w",
+        "--with",
+        "--with-editable",
+        "--with-requirements",
+        "-c",
+        "--constraints",
+        "-b",
+        "--build-constraints",
+        "--overrides",
+        "-p",
+        "--python",
+        "--python-platform",
+        "--python-preference",
+        "-i",
+        "--index-url",
+        "--extra-index-url",
+        "--index",
+        "--default-index",
+        "-f",
+        "--find-links",
+        "--index-strategy",
+        "--keyring-provider",
+        "--resolution",
+        "--prerelease",
+        "--fork-strategy",
+        "--exclude-newer",
+        "-P",
+        "--upgrade-package",
+        "--refresh-package",
+        "--reinstall-package",
+        "--no-binary-package",
+        "--no-build-package",
+        "-C",
+        "--config-setting",
+        "--link-mode",
+        "--env-file",
+        "--cache-dir",
+        "--config-file",
+        "--directory",
+        "--project",
+        "--color",
+        "--allow-insecure-host",
+    ],
+};
+
+const PIPX_RUN_RUNNER: PackageRunner = PackageRunner {
+    package_options: &["--spec"],
+    value_options: &[
+        "--python",
+        "--pip-args",
+        "-i",
+        "--index-url",
+        "--backend",
+        "--path",
+    ],
+};
+
+/// Arguments following the first occurrence of `subcommand` words
+/// (`["tool", "run"]` must be adjacent).
+fn after_subcommand<'a>(args: &'a [String], subcommand: &[&str]) -> Option<&'a [String]> {
+    let start = args
+        .windows(subcommand.len())
+        .position(|window| window.iter().map(String::as_str).eq(subcommand.iter().copied()))?;
+    Some(&args[start + subcommand.len()..])
+}
+
+/// Arguments handed to npm's package runner (`npx ...`, `npm exec ...`).
+fn npx_arguments<'a>(command: &str, args: &'a [String]) -> Option<&'a [String]> {
+    match command {
+        "npx" => Some(args),
+        "npm" => after_subcommand(args, &["exec"]).or_else(|| after_subcommand(args, &["x"])),
+        _ => None,
+    }
+}
+
+fn package_invocation<'a>(command: &str, args: &'a [String]) -> Option<&'a str> {
+    let (runner, args) = match command {
+        "npx" | "npm" => (&NPX_RUNNER, npx_arguments(command, args)?),
+        "bunx" => (&BUNX_RUNNER, args),
+        "bun" => (&BUNX_RUNNER, after_subcommand(args, &["x"])?),
+        "pnpx" => (&PNPM_DLX_RUNNER, args),
+        "pnpm" => (&PNPM_DLX_RUNNER, after_subcommand(args, &["dlx"])?),
+        "yarn" => (&YARN_DLX_RUNNER, after_subcommand(args, &["dlx"])?),
+        "uvx" => (&UVX_RUNNER, args),
+        "uv" => (&UVX_RUNNER, after_subcommand(args, &["tool", "run"])?),
+        "pipx" => (&PIPX_RUN_RUNNER, after_subcommand(args, &["run"])?),
+        _ => return None,
+    };
+    package_argument(args, runner)
+}
+
+fn package_argument<'a>(args: &'a [String], runner: &PackageRunner) -> Option<&'a str> {
     let mut index = 0;
     while index < args.len() {
         let arg = args[index].as_str();
-        for option in package_options {
+        for option in runner.package_options {
             if arg == *option {
                 return args.get(index + 1).map(String::as_str);
             }
@@ -926,6 +1166,11 @@ fn package_argument<'a>(args: &'a [String], package_options: &[&str]) -> Option<
         }
         if arg == "--" {
             return args.get(index + 1).map(String::as_str);
+        }
+        if runner.value_options.contains(&arg) {
+            // `--option value`: the value is not the package.
+            index += 2;
+            continue;
         }
         if !arg.starts_with('-') {
             return Some(arg);
@@ -982,7 +1227,7 @@ fn valid_version_identifiers(value: &str) -> bool {
 fn is_shell(command: &str) -> bool {
     matches!(
         command,
-        "sh" | "bash" | "zsh" | "cmd" | "cmd.exe" | "powershell" | "powershell.exe" | "pwsh"
+        "sh" | "bash" | "zsh" | "cmd" | "powershell" | "pwsh"
     )
 }
 
@@ -1794,5 +2039,169 @@ mod tests {
             .join(",");
         let content = format!("{{\"mcpServers\":{{{servers}}}}}");
         assert!(parse_config("test", Path::new(".mcp.json"), Format::JsonMcp, &content,).is_err());
+    }
+
+    fn has_rule(findings: &[Finding], rule_id: &str) -> bool {
+        findings.iter().any(|f| f.rule_id == rule_id)
+    }
+
+    #[test]
+    fn package_runner_checks_see_through_wrappers_and_suffixes() {
+        for (command, args) in [
+            ("cmd", vec!["/c", "npx", "-y", "@scope/pkg"]),
+            ("cmd.exe", vec!["/d", "/s", "/C", "npx -y @scope/pkg"]),
+            ("npx.cmd", vec!["-y", "@scope/pkg"]),
+            (r"C:\Program Files\nodejs\NPX.EXE", vec!["-y", "@scope/pkg"]),
+            ("npx.bat", vec!["--yes", "@scope/pkg"]),
+            ("env", vec!["NODE_ENV=production", "npx", "-y", "@scope/pkg"]),
+            ("/usr/bin/env", vec!["-u", "DEBUG", "npx", "-y", "@scope/pkg"]),
+            ("npm", vec!["exec", "--yes", "--", "@scope/pkg"]),
+        ] {
+            let findings = audit_entry(stdio(command, &args));
+            assert!(
+                has_rule(&findings, "mcp.npx_auto_install"),
+                "{command} {args:?}: {findings:?}"
+            );
+            assert!(
+                has_rule(&findings, "mcp.unpinned_package"),
+                "{command} {args:?}: {findings:?}"
+            );
+        }
+
+        let pinned = audit_entry(stdio("cmd", &["/c", "npx", "@scope/pkg@1.2.3"]));
+        assert!(!has_rule(&pinned, "mcp.unpinned_package"), "{pinned:?}");
+        assert!(!has_rule(&pinned, "mcp.npx_auto_install"), "{pinned:?}");
+    }
+
+    #[test]
+    fn package_runner_checks_cover_other_runners() {
+        for (command, args) in [
+            ("bunx", vec!["@scope/pkg"]),
+            ("bun", vec!["x", "@scope/pkg"]),
+            ("pnpm", vec!["dlx", "@scope/pkg"]),
+            ("pnpm.cmd", vec!["dlx", "@scope/pkg@latest"]),
+            ("pnpx", vec!["@scope/pkg"]),
+            ("yarn", vec!["dlx", "@scope/pkg"]),
+            ("npm", vec!["exec", "@scope/pkg"]),
+            ("npm", vec!["x", "--", "@scope/pkg"]),
+            ("uv", vec!["tool", "run", "demo"]),
+        ] {
+            let findings = audit_entry(stdio(command, &args));
+            assert!(
+                has_rule(&findings, "mcp.unpinned_package"),
+                "{command} {args:?}: {findings:?}"
+            );
+        }
+        for (command, args) in [
+            ("bunx", vec!["@scope/pkg@1.2.3"]),
+            ("pnpm", vec!["dlx", "@scope/pkg@1.2.3"]),
+            ("yarn", vec!["dlx", "-p", "@scope/pkg@1.2.3", "server"]),
+            ("npm", vec!["exec", "--package=@scope/pkg@1.2.3", "--", "server"]),
+            ("uv", vec!["tool", "run", "--from", "demo==1.2.3", "server"]),
+            // Not a package runner invocation at all.
+            ("npm", vec!["run", "start"]),
+            ("pnpm", vec!["start"]),
+        ] {
+            let findings = audit_entry(stdio(command, &args));
+            assert!(
+                !has_rule(&findings, "mcp.unpinned_package"),
+                "{command} {args:?}: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn value_taking_options_are_not_mistaken_for_the_package() {
+        for (command, args) in [
+            (
+                "npx",
+                vec!["--registry", "https://registry.example", "@scope/pkg@1.2.3"],
+            ),
+            ("npx", vec!["--cache", "/tmp/npx", "-y", "@scope/pkg@1.2.3"]),
+            ("uvx", vec!["--python", "3.12", "demo==1.2.3"]),
+            ("uvx", vec!["--with", "extra", "--from", "demo==1.2.3", "server"]),
+            ("pipx", vec!["run", "--python", "python3.12", "demo==1.2.3"]),
+            ("pnpm", vec!["dlx", "--registry", "https://registry.example", "pkg@1.2.3"]),
+        ] {
+            let findings = audit_entry(stdio(command, &args));
+            assert!(
+                !has_rule(&findings, "mcp.unpinned_package"),
+                "{command} {args:?}: {findings:?}"
+            );
+        }
+        // The option value is skipped, but the real package is still checked.
+        let findings = audit_entry(stdio(
+            "npx",
+            &["--registry", "https://registry.example", "@scope/pkg"],
+        ));
+        assert!(has_rule(&findings, "mcp.unpinned_package"), "{findings:?}");
+        let findings = audit_entry(stdio("uvx", &["--python", "3.12", "demo"]));
+        assert!(has_rule(&findings, "mcp.unpinned_package"), "{findings:?}");
+    }
+
+    fn config_unreadable_severities(report: &McpAuditReport) -> Vec<&str> {
+        report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == "mcp.config_unreadable")
+            .map(|f| f.severity.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn existing_but_skipped_configs_fail_the_default_threshold() {
+        // Padding a config past the size limit must not hide it from the audit.
+        let project = tempfile::tempdir().unwrap();
+        let mut padded =
+            br#"{"mcpServers":{"risky":{"command":"npx","args":["-y","pkg"]}}}"#.to_vec();
+        padded.resize(MAX_CONFIG_BYTES as usize + 1, b' ');
+        fs::write(project.path().join(".mcp.json"), padded).unwrap();
+        let report = audit(project.path(), false, Severity::High).unwrap();
+        assert_eq!(config_unreadable_severities(&report), ["high"]);
+        assert!(report.should_fail());
+
+        // Same for a server map beyond the entry limit.
+        let project = tempfile::tempdir().unwrap();
+        let servers = (0..=MAX_SERVERS_PER_CONFIG)
+            .map(|index| format!("\"server-{index}\":{{\"command\":\"node\"}}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        fs::write(
+            project.path().join(".mcp.json"),
+            format!("{{\"mcpServers\":{{{servers}}}}}"),
+        )
+        .unwrap();
+        let report = audit(project.path(), false, Severity::High).unwrap();
+        assert_eq!(config_unreadable_severities(&report), ["high"]);
+        assert!(report.should_fail());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_linked_config_fails_the_default_threshold() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(
+            outside.path().join("external.json"),
+            r#"{"mcpServers":{"outside":{"command":"node"}}}"#,
+        )
+        .unwrap();
+        fs::hard_link(
+            outside.path().join("external.json"),
+            project.path().join(".mcp.json"),
+        )
+        .unwrap();
+        let report = audit(project.path(), false, Severity::High).unwrap();
+        assert_eq!(config_unreadable_severities(&report), ["high"]);
+        assert!(report.should_fail());
+    }
+
+    #[test]
+    fn syntax_error_config_stays_a_low_finding() {
+        let project = tempfile::tempdir().unwrap();
+        fs::write(project.path().join(".mcp.json"), "{broken").unwrap();
+        let report = audit(project.path(), false, Severity::High).unwrap();
+        assert_eq!(config_unreadable_severities(&report), ["low"]);
+        assert!(!report.should_fail());
     }
 }
