@@ -376,7 +376,7 @@ fn transform_row(
 /// nobody selected and would be written out raw. A deliberately quoted
 /// multi-line value — a notes cell — is well-formed and is copied as it is,
 /// so a field with a line break is refused only when it looks like swallowed
-/// rows (see `looks_like_merged_rows`). A tab inside a TSV field is refused
+/// rows or parts of rows (see `looks_like_merged_rows`). A tab inside a TSV field is refused
 /// as before. Fields in selected columns are replaced as a whole and need no
 /// check. `column_count` is the width of the table.
 fn ensure_fields_not_merged(
@@ -390,7 +390,7 @@ fn ensure_fields_not_merged(
         if selected.iter().any(|column| column.index == index) {
             continue;
         }
-        let found = if looks_like_merged_rows(field, delimiter, column_count) {
+        let found = if looks_like_merged_rows(field, delimiter, column_count, row.len()) {
             "line breaks that look like other rows"
         } else if delimiter == b'\t' && field.contains('\t') {
             "a tab"
@@ -406,17 +406,30 @@ fn ensure_fields_not_merged(
 }
 
 /// Whether a field with a line break looks like rows that a stray quote
-/// merged into it rather than a multi-line value: one of its lines holds as
-/// many delimiters as a whole row of the table has (at least one), or its
-/// double quotes do not pair up.
-fn looks_like_merged_rows(field: &str, delimiter: u8, column_count: usize) -> bool {
+/// merged into it rather than a multi-line value:
+///
+/// - its record does not have the table's number of fields (`field_count`
+///   against `column_count`): the quote took part of a row with it, leaving
+///   the record short or too wide;
+/// - the field holds, over all its lines, as many delimiters as a whole row
+///   of the table has (at least one): parts of two rows add up to a record
+///   of a plausible width; or
+/// - its double quotes do not pair up.
+///
+/// A notes cell with several delimiters in a wide table is refused as well;
+/// the price of not writing a swallowed value out raw.
+fn looks_like_merged_rows(
+    field: &str,
+    delimiter: u8,
+    column_count: usize,
+    field_count: usize,
+) -> bool {
     if !field.contains(['\n', '\r']) {
         return false;
     }
     let row_delimiters = column_count.saturating_sub(1).max(1);
-    field
-        .split(['\n', '\r'])
-        .any(|line| line.bytes().filter(|&byte| byte == delimiter).count() >= row_delimiters)
+    field_count != column_count
+        || field.bytes().filter(|&byte| byte == delimiter).count() >= row_delimiters
         || field.bytes().filter(|&byte| byte == b'"').count() % 2 == 1
 }
 
@@ -904,6 +917,54 @@ mod tests {
                 csv.as_bytes(),
                 None::<&mut Vec<u8>>,
                 &positional(vec![(0, None)], true),
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(plan.copied_field_refusal, Some(err), "{csv}");
+        }
+    }
+
+    #[test]
+    fn stray_quote_that_swallows_part_of_a_row_is_refused() {
+        let material = material();
+        for (csv, place) in [
+            // Two rows whose middle field opens with a stray quote: one
+            // record of three fields, the middle one spanning two lines.
+            (
+                "Id,Note,Name\n1,\"x,Ada Lovelace\n2,\"y,Grace Hopper\n3,ok,Alan Turing\n",
+                "row 2, column 2",
+            ),
+            // A stray quote in the last row: a short record.
+            (
+                "Id,Note,Name\n1,ok,Ada Lovelace\n2,\"z,Grace Hopper\n",
+                "row 3, column 2",
+            ),
+            // Opened in the last column, closed in column 2 of the next row:
+            // a record that is too wide.
+            (
+                "Id,Name,City,Note\n1,Ada Lovelace,London,\"c\n2,Grace Hopper\",Paris,d\n",
+                "row 2, column 4",
+            ),
+        ] {
+            let mut out = Vec::new();
+            let err = run_table(
+                csv.as_bytes(),
+                Some(&mut out),
+                &options("Name:name", false),
+                Some(&material),
+                None,
+            )
+            .expect_err(csv)
+            .to_string();
+            assert!(err.contains(place), "{err}");
+            assert!(err.contains("select the column"), "{err}");
+            let written = String::from_utf8(out).unwrap();
+            assert!(!written.contains("Hopper"), "{written}");
+            let plan = run_table(
+                csv.as_bytes(),
+                None::<&mut Vec<u8>>,
+                &options("Name:name", true),
                 None,
                 None,
             )
