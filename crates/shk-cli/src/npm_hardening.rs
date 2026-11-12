@@ -357,10 +357,46 @@ fn remove_npmrc_settings(input: &str, package_managers: &[PackageManager]) -> St
 }
 
 fn upsert_npmrc_line(lines: &mut Vec<String>, key: &str, value: &str) {
+    drop_shadowed_npmrc_lines(lines, key);
     let replacement = format!("{key}={value}");
     upsert_managed_key_line(lines, key, &replacement, npmrc_line_key, |line| {
-        npmrc_line_value(line) == Some(value)
+        setting_is_at_least(npmrc_line_value(line), value)
     });
+}
+
+/// npm keeps the last occurrence of a repeated key, so earlier ones are dead
+/// settings. Remove them (and their managed markers) so the remaining line is
+/// the one npm reads and the one the upsert evaluates.
+fn drop_shadowed_npmrc_lines(lines: &mut Vec<String>, key: &str) {
+    let Some(last) = lines
+        .iter()
+        .rposition(|line| npmrc_line_key(line) == Some(key))
+    else {
+        return;
+    };
+    let mut idx = last;
+    while idx > 0 {
+        idx -= 1;
+        if npmrc_line_key(&lines[idx]) == Some(key) {
+            lines.remove(idx);
+            if is_managed_previous_line(lines, idx) {
+                lines.remove(idx - 1);
+                idx -= 1;
+            }
+        }
+    }
+}
+
+/// Whether an existing value already satisfies the managed default: numeric
+/// settings (release-age gates) may be stricter, anything else must match.
+fn setting_is_at_least(existing: Option<&str>, minimum: &str) -> bool {
+    let Some(existing) = existing else {
+        return false;
+    };
+    match (unquote(existing).parse::<u64>(), minimum.parse::<u64>()) {
+        (Ok(existing), Ok(minimum)) => existing >= minimum,
+        _ => existing == minimum,
+    }
 }
 
 fn npmrc_bool(input: &str, key: &str) -> Option<bool> {
@@ -375,14 +411,13 @@ fn npmrc_u64(input: &str, key: &str) -> Option<u64> {
     npmrc_value(input, key).and_then(|value| value.parse::<u64>().ok())
 }
 
+/// Value of `key` as npm resolves it: the last occurrence wins.
 fn npmrc_value(input: &str, key: &str) -> Option<String> {
-    input.lines().find_map(|line| {
-        if npmrc_line_key(line) == Some(key) {
-            npmrc_line_value(line).map(ToOwned::to_owned)
-        } else {
-            None
-        }
-    })
+    input
+        .lines()
+        .rev()
+        .find(|line| npmrc_line_key(line) == Some(key))
+        .and_then(|line| npmrc_line_value(line).map(ToOwned::to_owned))
 }
 
 fn npmrc_line_value(line: &str) -> Option<&str> {
@@ -407,7 +442,7 @@ fn upsert_yaml_line(input: &str, key: &str, value: &str) -> String {
     let mut lines = input.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
     let replacement = format!("{key}: {value}");
     upsert_managed_key_line(&mut lines, key, &replacement, yaml_line_key, |line| {
-        yaml_line_value(line) == Some(value)
+        setting_is_at_least(yaml_line_value(line), value)
     });
 
     let mut output = lines.join("\n");
@@ -476,12 +511,19 @@ fn upsert_bunfig_min_release_age(input: &str) -> Result<String> {
     if !input.trim().is_empty() {
         toml::from_str::<toml::Value>(input).context("parse existing bunfig.toml")?;
     }
-    Ok(upsert_toml_table_integer(
+    let updated = upsert_toml_table_integer(
         input,
         "install",
         "minimumReleaseAge",
         BUN_MIN_RELEASE_AGE_SECONDS,
-    ))
+    );
+    // The upsert is line-oriented. If the existing layout defeats it (for
+    // example an inline `install = { ... }` table), refuse to write a file bun
+    // can no longer parse.
+    toml::from_str::<toml::Value>(&updated).context(
+        "updated bunfig.toml would not be valid TOML; set [install] minimumReleaseAge by hand",
+    )?;
+    Ok(updated)
 }
 
 fn upsert_toml_table_integer(input: &str, table: &str, key: &str, value: u64) -> String {
@@ -491,7 +533,7 @@ fn upsert_toml_table_integer(input: &str, table: &str, key: &str, value: u64) ->
 
     if let Some(table_start) = lines
         .iter()
-        .position(|line| line.trim() == table_header.as_str())
+        .position(|line| toml_table_header_name(line) == Some(table))
     {
         let table_end = lines
             .iter()
@@ -508,7 +550,7 @@ fn upsert_toml_table_integer(input: &str, table: &str, key: &str, value: u64) ->
             key,
             &replacement,
             toml_line_key,
-            |line| toml_line_integer_value(line) == Some(value),
+            |line| toml_line_integer_value(line).is_some_and(|existing| existing >= value),
         );
     } else {
         if !lines.is_empty() && lines.last().is_some_and(|line| !line.trim().is_empty()) {
@@ -528,10 +570,9 @@ fn upsert_toml_table_integer(input: &str, table: &str, key: &str, value: u64) ->
 
 fn remove_toml_table_key(input: &str, table: &str, key: &str) -> String {
     let mut lines = input.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
-    let table_header = format!("[{table}]");
     if let Some(table_start) = lines
         .iter()
-        .position(|line| line.trim() == table_header.as_str())
+        .position(|line| toml_table_header_name(line) == Some(table))
     {
         let table_end = lines
             .iter()
@@ -577,7 +618,10 @@ fn upsert_managed_key_line_in_range(
         .position(|line| key_fn(line) == Some(key))
     {
         let idx = start + offset;
-        if desired_fn(&lines[idx]) && !is_managed_previous_line(lines, idx) {
+        // Only a weaker value is rewritten: a line that already satisfies the
+        // default (possibly a stricter value, possibly with a trailing
+        // comment) is left exactly as it is.
+        if desired_fn(&lines[idx]) {
             return;
         }
         lines[idx] = replacement.to_string();
@@ -651,8 +695,14 @@ fn finish_lines(lines: Vec<String>) -> String {
 }
 
 fn is_toml_table_header(line: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed.starts_with('[') && trimmed.ends_with(']')
+    toml_table_header_name(line).is_some()
+}
+
+/// Name inside a `[table]` header line, ignoring a trailing `# comment`.
+fn toml_table_header_name(line: &str) -> Option<&str> {
+    let line = line.split_once('#').map_or(line, |(before, _)| before);
+    let name = line.trim().strip_prefix('[')?.strip_suffix(']')?;
+    Some(name.trim())
 }
 
 fn toml_line_key(line: &str) -> Option<&str> {
@@ -1073,18 +1123,29 @@ fn minimum_release_age_days_from_text(text: &str) -> Option<u64> {
     })
 }
 
+/// Whole days in a duration such as `7 days`, `2 weeks`, `36 hours`, or `7d`
+/// (rounded down). A bare number is read as days; an unknown unit is `None`.
 fn parse_duration_days(value: &str) -> Option<u64> {
-    let value = value.trim();
-    let number = value
-        .split_whitespace()
-        .next()
-        .unwrap_or(value)
-        .trim_matches('"')
-        .trim_matches('\'')
-        .trim_end_matches('d')
-        .parse::<u64>()
-        .ok()?;
-    Some(number)
+    const DAY: f64 = 86_400.0;
+    let value = value.trim().trim_matches('"').trim_matches('\'').trim();
+    let unit_start = value
+        .find(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+        .unwrap_or(value.len());
+    let (number, unit) = value.split_at(unit_start);
+    let unit_seconds = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "d" | "day" | "days" => DAY,
+        "ms" | "msec" | "msecs" | "millisecond" | "milliseconds" => 0.001,
+        "s" | "sec" | "secs" | "second" | "seconds" => 1.0,
+        "m" | "min" | "mins" | "minute" | "minutes" => 60.0,
+        "h" | "hr" | "hrs" | "hour" | "hours" => 3_600.0,
+        "w" | "wk" | "wks" | "week" | "weeks" => 7.0 * DAY,
+        "mo" | "month" | "months" => 30.0 * DAY,
+        "y" | "yr" | "yrs" | "year" | "years" => 365.0 * DAY,
+        _ => return None,
+    };
+    let days = number.parse::<f64>().ok()? * unit_seconds / DAY;
+    // `as` saturates, and the value is finite and non-negative here.
+    days.is_finite().then_some(days.floor() as u64)
 }
 
 #[cfg(test)]
@@ -1497,5 +1558,122 @@ updates:
             "packages:\n  - \".\"\n# shk-managed npm-hardening\nminimumReleaseAge: 10080\n",
         );
         assert_eq!(out, "packages:\n  - \".\"\n");
+    }
+
+    #[test]
+    fn npmrc_duplicate_keys_use_the_last_occurrence_like_npm() {
+        let npmrc = "ignore-scripts=true\nmin-release-age=7\nignore-scripts=false\nmin-release-age=1\n";
+        assert_eq!(npmrc_bool(npmrc, IGNORE_SCRIPTS_KEY), Some(false));
+        assert_eq!(npmrc_u64(npmrc, MIN_RELEASE_AGE_KEY), Some(1));
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(PACKAGE_JSON),
+            r#"{"packageManager":"npm@10.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join(NPMRC_FILE), npmrc).unwrap();
+        let before = status(dir.path());
+        assert!(!before.ignore_scripts_ok);
+        assert!(!before.min_release_age_ok);
+
+        apply(dir.path()).unwrap();
+
+        let after = status(dir.path());
+        assert!(after.ignore_scripts_ok);
+        assert!(after.min_release_age_ok);
+        let npmrc = fs::read_to_string(dir.path().join(NPMRC_FILE)).unwrap();
+        assert_eq!(npmrc.matches("ignore-scripts=").count(), 1, "{npmrc}");
+        assert_eq!(npmrc.matches("min-release-age=").count(), 1, "{npmrc}");
+        assert!(npmrc.contains("ignore-scripts=true\n"), "{npmrc}");
+        assert!(npmrc.contains("min-release-age=7\n"), "{npmrc}");
+    }
+
+    #[test]
+    fn npmrc_apply_removes_shadowed_duplicates_and_their_markers() {
+        let out = upsert_npmrc_settings(
+            "# shk-managed npm-hardening\nignore-scripts=true\nregistry=https://registry.npmjs.org/\nignore-scripts=false\n",
+            &[PackageManager::Pnpm],
+        );
+        assert_eq!(
+            out,
+            "registry=https://registry.npmjs.org/\n# shk-managed npm-hardening\nignore-scripts=true\n"
+        );
+    }
+
+    #[test]
+    fn apply_keeps_stricter_existing_age_gates_and_their_comments() {
+        let npmrc = "ignore-scripts=true\nmin-release-age=14 # two weeks\n";
+        assert_eq!(upsert_npmrc_settings(npmrc, &[PackageManager::Npm]), npmrc);
+
+        let workspace = "packages:\n  - \"apps/*\"\nminimumReleaseAge: 20160 # two weeks\n";
+        assert_eq!(upsert_pnpm_workspace_settings(workspace), workspace);
+
+        let managed = "packages:\n  - \"apps/*\"\n# shk-managed npm-hardening\nminimumReleaseAge: 20160 # raised by hand\n";
+        assert_eq!(upsert_pnpm_workspace_settings(managed), managed);
+
+        let yarnrc = "npmMinimalAgeGate: 43200 # 30 days\n";
+        assert_eq!(
+            upsert_yaml_line(
+                yarnrc,
+                YARN_MIN_RELEASE_AGE_KEY,
+                &YARN_MIN_RELEASE_AGE_MINUTES.to_string()
+            ),
+            yarnrc
+        );
+
+        let bunfig = "[install]\nminimumReleaseAge = 1209600 # two weeks\n";
+        assert_eq!(upsert_bunfig_min_release_age(bunfig).unwrap(), bunfig);
+    }
+
+    #[test]
+    fn duration_parsing_honours_units() {
+        assert_eq!(parse_duration_days("7 days"), Some(7));
+        assert_eq!(parse_duration_days("7d"), Some(7));
+        assert_eq!(parse_duration_days("7"), Some(7));
+        assert_eq!(parse_duration_days("1 day"), Some(1));
+        assert_eq!(parse_duration_days("1 week"), Some(7));
+        assert_eq!(parse_duration_days("2 weeks"), Some(14));
+        assert_eq!(parse_duration_days("2w"), Some(14));
+        assert_eq!(parse_duration_days("36 hours"), Some(1));
+        assert_eq!(parse_duration_days("168h"), Some(7));
+        assert_eq!(parse_duration_days("12 hours"), Some(0));
+        assert_eq!(parse_duration_days("10080 minutes"), Some(7));
+        assert_eq!(parse_duration_days("3 fortnights"), None);
+        assert_eq!(parse_duration_days("soon"), None);
+
+        let hours = r#"{"minimumReleaseAge":"36 hours"}"#;
+        assert_eq!(renovate_minimum_release_age_days(hours), Some(1));
+        let weeks = r#"{"minimumReleaseAge":"2 weeks"}"#;
+        assert_eq!(renovate_minimum_release_age_days(weeks), Some(14));
+        assert_eq!(
+            minimum_release_age_days_from_text("  minimumReleaseAge: \"2 weeks\",\n"),
+            Some(14)
+        );
+    }
+
+    #[test]
+    fn bunfig_update_reuses_table_whose_header_has_a_trailing_comment() {
+        let input = "[install] # bun install settings\ncache = true\n\n[test] # runner\ncoverage = true\n";
+        let out = upsert_bunfig_min_release_age(input).unwrap();
+        assert_eq!(out.matches("[install]").count(), 1, "{out}");
+        let value: toml::Value = toml::from_str(&out).expect("valid TOML");
+        assert_eq!(
+            value["install"]["minimumReleaseAge"].as_integer(),
+            Some(BUN_MIN_RELEASE_AGE_SECONDS as i64)
+        );
+        assert_eq!(value["test"]["coverage"].as_bool(), Some(true));
+        assert!(value["test"].get("minimumReleaseAge").is_none(), "{out}");
+
+        let removed = remove_toml_table_key(&out, "install", "minimumReleaseAge");
+        assert_eq!(removed, input);
+    }
+
+    #[test]
+    fn bunfig_update_refuses_to_write_invalid_toml() {
+        // An inline `install` table cannot be extended with a `[install]`
+        // header; the result must be rejected instead of written.
+        let err = upsert_bunfig_min_release_age("install = { cache = true }\n").unwrap_err();
+        assert!(err.to_string().contains("bunfig.toml"), "{err}");
     }
 }

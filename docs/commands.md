@@ -42,7 +42,7 @@ Options:
 | `--global` | Write AI hooks and skills to user-level config directories. |
 | `--apply-sandbox` | Apply supported AI-tool sandbox hardening while installing hooks. |
 
-When `package.json` is detected, `shk init` can apply package-manager supply-chain hardening. For npm projects it writes project `.npmrc` settings such as `ignore-scripts=true` and `min-release-age=7`. For pnpm, Yarn, or Bun projects it writes the corresponding age-gate setting to `pnpm-workspace.yaml`, `.yarnrc.yml`, or `bunfig.toml`. Pass `--no-npm-hardening` to skip this step, including in `--yes` mode.
+When `package.json` is detected, `shk init` can apply package-manager supply-chain hardening. For npm projects it writes project `.npmrc` settings such as `ignore-scripts=true` and `min-release-age=7`. For pnpm, Yarn, or Bun projects it writes the corresponding age-gate setting to `pnpm-workspace.yaml`, `.yarnrc.yml`, or `bunfig.toml`. An existing age gate that is already at least as strict as the default is left untouched (including its trailing comment); a weaker value is raised to the default. Repeated `.npmrc` keys are evaluated the way npm reads them (the last occurrence wins) and the shadowed earlier lines are removed on apply. Pass `--no-npm-hardening` to skip this step, including in `--yes` mode.
 
 `shk policy init` writes only the starter `shk.toml` and skips the other setup steps:
 
