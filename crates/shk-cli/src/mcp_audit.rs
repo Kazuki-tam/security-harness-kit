@@ -113,6 +113,23 @@ struct Candidate {
     label: String,
     format: Format,
     scope_root: PathBuf,
+    /// A user-scope file under the home directory rather than a project file.
+    global: bool,
+}
+
+impl Candidate {
+    /// Severity of an existing file that was skipped without being audited.
+    /// A project file is repository content: padding or hard-linking it would
+    /// otherwise bypass the audit, so it must fail the default threshold. A
+    /// user-scope client file (which can legitimately outgrow the size limit
+    /// and is not something a repository controls) stays advisory.
+    fn skipped_severity(&self) -> Severity {
+        if self.global {
+            Severity::Low
+        } else {
+            Severity::High
+        }
+    }
 }
 
 pub fn audit(root: &Path, global: bool, fail_on: Severity) -> Result<McpAuditReport> {
@@ -129,7 +146,15 @@ pub fn audit(root: &Path, global: bool, fail_on: Severity) -> Result<McpAuditRep
             .context("home directory is unavailable for --global")?;
         candidates.extend(global_candidates(global_home));
     }
+    audit_candidates(&root, home.as_deref(), candidates, fail_on)
+}
 
+fn audit_candidates(
+    root: &Path,
+    home: Option<&Path>,
+    candidates: Vec<Candidate>,
+    fail_on: Severity,
+) -> Result<McpAuditReport> {
     let mut config_files = Vec::new();
     let mut entries = Vec::new();
     let mut findings = Vec::new();
@@ -137,16 +162,17 @@ pub fn audit(root: &Path, global: bool, fail_on: Severity) -> Result<McpAuditRep
     for candidate in candidates {
         let (canonical, content) = match read_candidate(&candidate) {
             CandidateRead::Missing => continue,
-            CandidateRead::Unreadable => {
-                // The file exists but was not audited. A client may still load
-                // it, so this must fail the default threshold: otherwise
-                // padding or hard-linking a config would bypass the audit.
+            CandidateRead::Unreadable(cause) => {
+                // The file exists but was not audited; a client may still load it.
                 config_files.push(candidate.label.clone());
                 findings.push(finding(
                     "mcp.config_unreadable",
-                    Severity::High,
+                    candidate.skipped_severity(),
                     &candidate.label,
-                    "MCP configuration exists but could not be safely read; the file was NOT audited",
+                    &format!(
+                        "MCP configuration exists but {}; the file was NOT audited",
+                        cause.describe()
+                    ),
                     1.0,
                 ));
                 continue;
@@ -172,9 +198,9 @@ pub fn audit(root: &Path, global: bool, fail_on: Severity) -> Result<McpAuditRep
             // client, so skipping it is treated like an unreadable file.
             Err(error) if error.is::<TooManyServers>() => findings.push(finding(
                 "mcp.config_unreadable",
-                Severity::High,
+                candidate.skipped_severity(),
                 &candidate.label,
-                "MCP configuration exceeds the server entry limit; the file was NOT audited",
+                "MCP configuration has too many server entries (over the entry limit); the file was NOT audited",
                 1.0,
             )),
             Err(_) => findings.push(finding(
@@ -187,7 +213,7 @@ pub fn audit(root: &Path, global: bool, fail_on: Severity) -> Result<McpAuditRep
         }
     }
     for entry in &entries {
-        check_entry(&root, home.as_deref(), entry, &mut findings)?;
+        check_entry(root, home, entry, &mut findings)?;
     }
     findings.sort_by(|a, b| {
         severity_rank(&b.severity)
@@ -205,7 +231,7 @@ pub fn audit(root: &Path, global: bool, fail_on: Severity) -> Result<McpAuditRep
         .iter()
         .map(|entry| McpServerInventory {
             client: escape_control(&entry.client),
-            source_file: display_label(&root, home.as_deref(), &entry.source_file),
+            source_file: display_label(root, home, &entry.source_file),
             name: safe_identifier(&entry.name),
             transport: match entry.transport {
                 McpTransport::Stdio { .. } => "stdio",
@@ -246,6 +272,7 @@ fn project_candidates(root: &Path) -> Vec<Candidate> {
             label: (*relative).into(),
             format: *format,
             scope_root: root.to_path_buf(),
+            global: false,
         })
         .collect()
 }
@@ -275,14 +302,39 @@ fn global_candidates(home: &Path) -> Vec<Candidate> {
         label: format!("~/{}", relative.replace('\\', "/")),
         format,
         scope_root: scope_root.clone(),
+        global: true,
     })
     .collect()
 }
 
 enum CandidateRead {
     Missing,
-    Unreadable,
+    Unreadable(SkipCause),
     Content { canonical: PathBuf, content: String },
+}
+
+/// Why an existing file was not read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkipCause {
+    TooLarge,
+    HardLinked,
+    OutsideScope,
+    NotUtf8,
+    NotRegularFile,
+    Io,
+}
+
+impl SkipCause {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::TooLarge => "is too large (over the 1 MiB read limit)",
+            Self::HardLinked => "is hard-linked to another path",
+            Self::OutsideScope => "resolves outside the audited scope",
+            Self::NotUtf8 => "is not UTF-8 text",
+            Self::NotRegularFile => "is not a regular file",
+            Self::Io => "could not be opened or read",
+        }
+    }
 }
 
 fn read_candidate(candidate: &Candidate) -> CandidateRead {
@@ -299,43 +351,46 @@ fn read_scoped_utf8(path: &Path, scope_root: &Path) -> CandidateRead {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return CandidateRead::Missing;
         }
-        Err(_) => return CandidateRead::Unreadable,
+        Err(_) => return CandidateRead::Unreadable(SkipCause::Io),
     }
     let Ok(canonical) = fs::canonicalize(path) else {
-        return CandidateRead::Unreadable;
+        return CandidateRead::Unreadable(SkipCause::Io);
     };
     let canonical_scope = fs::canonicalize(scope_root).unwrap_or_else(|_| scope_root.to_path_buf());
     if !canonical.starts_with(canonical_scope) {
-        return CandidateRead::Unreadable;
+        return CandidateRead::Unreadable(SkipCause::OutsideScope);
     }
     let Ok(file) = fs::File::open(&canonical) else {
-        return CandidateRead::Unreadable;
+        return CandidateRead::Unreadable(SkipCause::Io);
     };
     let Ok(metadata) = file.metadata() else {
-        return CandidateRead::Unreadable;
+        return CandidateRead::Unreadable(SkipCause::Io);
     };
-    if !metadata.is_file()
-        || metadata.len() > MAX_CONFIG_BYTES
-        || metadata_has_multiple_links(&metadata)
-    {
-        return CandidateRead::Unreadable;
+    if !metadata.is_file() {
+        return CandidateRead::Unreadable(SkipCause::NotRegularFile);
+    }
+    if metadata.len() > MAX_CONFIG_BYTES {
+        return CandidateRead::Unreadable(SkipCause::TooLarge);
+    }
+    if metadata_has_multiple_links(&metadata) {
+        return CandidateRead::Unreadable(SkipCause::HardLinked);
     }
     let mut bytes = Vec::new();
-    if file
-        .take(MAX_CONFIG_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .is_err()
-        || bytes.len() as u64 > MAX_CONFIG_BYTES
-    {
+    let read = file.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut bytes);
+    if read.is_err() || bytes.len() as u64 > MAX_CONFIG_BYTES {
         bytes.zeroize();
-        return CandidateRead::Unreadable;
+        return CandidateRead::Unreadable(if read.is_err() {
+            SkipCause::Io
+        } else {
+            SkipCause::TooLarge
+        });
     }
     match String::from_utf8(bytes) {
         Ok(content) => CandidateRead::Content { canonical, content },
         Err(error) => {
             let mut invalid = error.into_bytes();
             invalid.zeroize();
-            CandidateRead::Unreadable
+            CandidateRead::Unreadable(SkipCause::NotUtf8)
         }
     }
 }
@@ -806,7 +861,7 @@ fn audit_env_file(
         // A missing file means the server gets nothing; only an existing file
         // that cannot be safely read becomes a finding.
         CandidateRead::Missing => return Ok(()),
-        CandidateRead::Unreadable => {
+        CandidateRead::Unreadable(_) => {
             findings.push(context_finding(
                 "mcp.env_file_unreadable",
                 Severity::Low,
@@ -2212,6 +2267,97 @@ mod tests {
         let report = audit(project.path(), false, Severity::High).unwrap();
         assert_eq!(config_unreadable_severities(&report), ["high"]);
         assert!(report.should_fail());
+    }
+
+    fn config_unreadable_messages(report: &McpAuditReport) -> Vec<&str> {
+        report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == "mcp.config_unreadable")
+            .map(|f| f.message.as_str())
+            .collect()
+    }
+
+    fn audit_global_only(project: &Path, home: &Path) -> McpAuditReport {
+        audit_candidates(project, Some(home), global_candidates(home), Severity::High).unwrap()
+    }
+
+    #[test]
+    fn skipped_user_scope_configs_stay_low_and_name_the_cause() {
+        let project = tempfile::tempdir().unwrap();
+
+        // The user's own client config can legitimately outgrow the limit.
+        let home = tempfile::tempdir().unwrap();
+        let mut large = br#"{"mcpServers":{}}"#.to_vec();
+        large.resize(MAX_CONFIG_BYTES as usize + 1, b' ');
+        fs::write(home.path().join(".claude.json"), large).unwrap();
+        let report = audit_global_only(project.path(), home.path());
+        assert_eq!(config_unreadable_severities(&report), ["low"]);
+        assert!(!report.should_fail());
+        let messages = config_unreadable_messages(&report);
+        assert!(messages[0].contains("too large"), "{messages:?}");
+        assert!(messages[0].contains("NOT audited"), "{messages:?}");
+
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join(".cursor")).unwrap();
+        let servers = (0..=MAX_SERVERS_PER_CONFIG)
+            .map(|index| format!("\"server-{index}\":{{\"command\":\"node\"}}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        fs::write(
+            home.path().join(".cursor/mcp.json"),
+            format!("{{\"mcpServers\":{{{servers}}}}}"),
+        )
+        .unwrap();
+        let report = audit_global_only(project.path(), home.path());
+        assert_eq!(config_unreadable_severities(&report), ["low"]);
+        let messages = config_unreadable_messages(&report);
+        assert!(
+            messages[0].contains("too many server entries"),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn skipped_project_config_messages_name_the_cause() {
+        let project = tempfile::tempdir().unwrap();
+        let mut padded = br#"{"mcpServers":{}}"#.to_vec();
+        padded.resize(MAX_CONFIG_BYTES as usize + 1, b' ');
+        fs::write(project.path().join(".mcp.json"), padded).unwrap();
+        let report = audit(project.path(), false, Severity::High).unwrap();
+        let messages = config_unreadable_messages(&report);
+        assert!(messages[0].contains("too large"), "{messages:?}");
+
+        let project = tempfile::tempdir().unwrap();
+        fs::write(project.path().join(".mcp.json"), [0xff, 0xfe, b'{', b'}']).unwrap();
+        let report = audit(project.path(), false, Severity::High).unwrap();
+        assert_eq!(config_unreadable_severities(&report), ["high"]);
+        let messages = config_unreadable_messages(&report);
+        assert!(messages[0].contains("not UTF-8"), "{messages:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_linked_and_escaping_project_configs_name_the_cause() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let external = outside.path().join("external.json");
+        fs::write(&external, r#"{"mcpServers":{}}"#).unwrap();
+
+        fs::hard_link(&external, project.path().join(".mcp.json")).unwrap();
+        let report = audit(project.path(), false, Severity::High).unwrap();
+        let messages = config_unreadable_messages(&report);
+        assert!(messages[0].contains("hard-linked"), "{messages:?}");
+
+        fs::remove_file(project.path().join(".mcp.json")).unwrap();
+        std::os::unix::fs::symlink(&external, project.path().join(".mcp.json")).unwrap();
+        let report = audit(project.path(), false, Severity::High).unwrap();
+        assert_eq!(config_unreadable_severities(&report), ["high"]);
+        let messages = config_unreadable_messages(&report);
+        assert!(
+            messages[0].contains("outside the audited scope"),
+            "{messages:?}"
+        );
     }
 
     #[test]

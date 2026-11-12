@@ -125,7 +125,7 @@ subject of the finding is the server entry rather than a text position.
 | `mcp.http_no_tls` | `high` | Non-loopback remote endpoints using `http://`. |
 | `mcp.secret_in_url` | `high` | Sensitive query parameter names in a server URL. |
 | `mcp.unknown_transport` | `info` | Entries declaring neither a command nor a URL. |
-| `mcp.config_unreadable` | `high` / `low` | `high` for an existing file that was skipped by the read limits below or could not be safely read (it was not audited, yet a client may still load it); `low` for a file that cannot be parsed. |
+| `mcp.config_unreadable` | `high` / `low` | `high` for an existing project-scope file that was skipped by the read limits below or could not be safely read (it was not audited, yet a client may still load it); `low` for a skipped user-scope (`--global`) file and for a file that cannot be parsed. The message names the cause. |
 | `mcp.env_file_unreadable` | `low` | An existing `--env-file` target that escapes the selected scope or cannot be safely read (a symlink, oversized, or not a regular file). |
 
 Configured argument, process-variable, header, and URL values additionally pass through the
@@ -146,9 +146,11 @@ that escapes the scope or cannot be safely read becomes `mcp.env_file_unreadable
 Reads are bounded before parsing: 1 MiB per file, 1,000 server entries per file, and resolved paths
 must stay inside the selected project or home scope. Escaping symbolic links, oversized files,
 excessive server maps, non-regular files, and (on Unix) hard-linked configuration files are reported
-as `mcp.config_unreadable` at `high` severity instead of being read, so padding a configuration past
-the limits fails the default threshold rather than hiding it. A single unreadable file does not abort
-the audit.
+as `mcp.config_unreadable` instead of being read, with the cause named in the message. For
+project-scope files the severity is `high`, so padding a repository's configuration past the limits
+fails the default threshold rather than hiding it. For user-scope files read with `--global` the
+severity is `low`: a home-directory client file such as `~/.claude.json` is not repository content
+and can legitimately exceed the limits. A single unreadable file does not abort the audit.
 
 Reports contain no process-variable values, header values, or raw matches. See
 [`shk mcp audit`](commands.md#shk-mcp-audit) for the audited file locations and exit codes.

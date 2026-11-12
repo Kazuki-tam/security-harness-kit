@@ -17,12 +17,72 @@ else
 fi
 "#;
 
+/// `install_pre_commit` outcome when the hooks directory git runs for this
+/// work tree is not the repository's own (`core.hooksPath` pointing at a
+/// shared, tracked, husky-managed or missing directory). Nothing is written.
+#[derive(Debug)]
+pub struct HooksDirManagedElsewhere {
+    pub hooks_dir: PathBuf,
+    exists: bool,
+}
+
+impl HooksDirManagedElsewhere {
+    /// The file the user should edit: husky's user-facing `pre-commit` when
+    /// the directory looks husky-managed, else `pre-commit` in the directory.
+    fn user_hook(&self) -> (PathBuf, bool) {
+        let name = |path: &Path| path.file_name().and_then(|n| n.to_str()).map(str::to_owned);
+        let parent = self.hooks_dir.parent();
+        if name(&self.hooks_dir).as_deref() == Some("_")
+            && parent.and_then(name).as_deref() == Some(".husky")
+            && let Some(parent) = parent
+        {
+            return (parent.join("pre-commit"), true);
+        }
+        let husky = name(&self.hooks_dir).as_deref() == Some(".husky");
+        (self.hooks_dir.join("pre-commit"), husky)
+    }
+}
+
+impl std::fmt::Display for HooksDirManagedElsewhere {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (user_hook, husky) = self.user_hook();
+        write!(
+            f,
+            "Git runs hooks from {} (core.hooksPath), which is not this repository's own hooks \
+             directory{}; shk did not write a pre-commit hook there. Add `shk scan --staged` to \
+             {}{} yourself.",
+            self.hooks_dir.display(),
+            if self.exists {
+                ""
+            } else {
+                " and does not exist"
+            },
+            if husky {
+                "husky's pre-commit file "
+            } else {
+                "your own hook "
+            },
+            user_hook.display()
+        )
+    }
+}
+
+impl std::error::Error for HooksDirManagedElsewhere {}
+
+/// Hook directories of one work tree, both absolute.
+struct HookDirs {
+    /// Where git runs hooks from (honours `core.hooksPath`).
+    effective: PathBuf,
+    /// The repository's own hooks directory: `<git-common-dir>/hooks`.
+    own: PathBuf,
+}
+
 /// Directory git runs hooks from for the work tree at `repo_root`. Honours
 /// `core.hooksPath` and work trees whose `.git` is a file (linked worktrees,
 /// submodules, `--separate-git-dir`). Falls back to `<repo_root>/.git/hooks`
 /// when git is unavailable or does not report `repo_root` as its work tree.
 pub fn effective_hooks_dir(repo_root: &Path) -> PathBuf {
-    git_hooks_dir(repo_root).unwrap_or_else(|| repo_root.join(".git").join("hooks"))
+    hook_dirs(repo_root).effective
 }
 
 /// Path of the pre-commit hook git would run for the work tree at `repo_root`.
@@ -30,9 +90,36 @@ pub fn pre_commit_hook_path(repo_root: &Path) -> PathBuf {
     effective_hooks_dir(repo_root).join("pre-commit")
 }
 
-fn git_hooks_dir(repo_root: &Path) -> Option<PathBuf> {
-    let out = Command::new("git")
-        .args(["rev-parse", "--show-toplevel", "--git-path", "hooks"])
+fn hook_dirs(repo_root: &Path) -> HookDirs {
+    git_hook_dirs(repo_root).unwrap_or_else(|| {
+        let default = repo_root.join(".git").join("hooks");
+        HookDirs {
+            effective: default.clone(),
+            own: default,
+        }
+    })
+}
+
+/// `git`, isolated from the developer's global and system configuration in
+/// unit tests so a global `core.hooksPath` cannot redirect them.
+fn git_command() -> Command {
+    #[cfg_attr(not(test), allow(unused_mut))]
+    let mut cmd = Command::new("git");
+    #[cfg(test)]
+    cmd.env("GIT_CONFIG_GLOBAL", tests::empty_git_config())
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    cmd
+}
+
+fn git_hook_dirs(repo_root: &Path) -> Option<HookDirs> {
+    let out = git_command()
+        .args([
+            "rev-parse",
+            "--show-toplevel",
+            "--git-path",
+            "hooks",
+            "--git-common-dir",
+        ])
         .current_dir(repo_root)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -45,6 +132,7 @@ fn git_hooks_dir(repo_root: &Path) -> Option<PathBuf> {
     let mut lines = stdout.lines();
     let toplevel = lines.next()?;
     let hooks = lines.next().filter(|line| !line.is_empty())?;
+    let common_dir = lines.next().filter(|line| !line.is_empty())?;
     // An unusable `.git` entry makes git walk up to an enclosing repository,
     // whose hooks directory is not this work tree's.
     let canonical = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -52,7 +140,10 @@ fn git_hooks_dir(repo_root: &Path) -> Option<PathBuf> {
         return None;
     }
     // Relative output is relative to the directory git ran in.
-    Some(repo_root.join(hooks))
+    Some(HookDirs {
+        effective: repo_root.join(hooks),
+        own: repo_root.join(common_dir).join("hooks"),
+    })
 }
 
 /// True when the hook git would run for `repo_root` invokes
@@ -120,7 +211,24 @@ fn warn_if_block_unreachable(hook_path: &Path, prefix: &str) {
 
 pub fn install_pre_commit(repo_root: &Path) -> Result<()> {
     let repo_root = fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
-    let hooks_dir = effective_hooks_dir(&repo_root);
+    let HookDirs {
+        effective: hooks_dir,
+        own,
+    } = hook_dirs(&repo_root);
+    // Only the repository's own hooks directory is shk's to write. A
+    // `core.hooksPath` elsewhere is shared between repositories, tracked, or
+    // regenerated by a hook manager.
+    let is_own = match (fs::canonicalize(&hooks_dir), fs::canonicalize(&own)) {
+        (Ok(effective), Ok(own)) => effective == own,
+        _ => hooks_dir == own,
+    };
+    if !is_own {
+        return Err(HooksDirManagedElsewhere {
+            exists: hooks_dir.is_dir(),
+            hooks_dir,
+        }
+        .into());
+    }
     if !hooks_dir.exists() {
         bail!(
             "{} does not exist; not a git repository?",
@@ -134,8 +242,8 @@ pub fn install_pre_commit(repo_root: &Path) -> Result<()> {
         );
     }
     let hook_path = hooks_dir.join("pre-commit");
-    // `core.hooksPath` and linked worktrees can place the hooks directory
-    // outside the work tree; the managed root is then that directory itself.
+    // Linked worktrees, submodules and `--separate-git-dir` place the hooks
+    // directory outside the work tree; the managed root is then that directory.
     let write_base = if hooks_dir.starts_with(&repo_root) {
         repo_root.as_path()
     } else {
@@ -275,8 +383,15 @@ shk scan --staged\n\
         assert!(!updated.contains("\nshk scan --staged\n# shk-managed-end"));
     }
 
+    /// Empty file used as `GIT_CONFIG_GLOBAL` by every git call in unit tests.
+    pub(super) fn empty_git_config() -> &'static Path {
+        static FILE: std::sync::OnceLock<tempfile::NamedTempFile> = std::sync::OnceLock::new();
+        FILE.get_or_init(|| tempfile::NamedTempFile::new().expect("empty git config"))
+            .path()
+    }
+
     fn git(dir: &Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
+        let out = git_command()
             .args(args)
             .current_dir(dir)
             .output()
@@ -375,26 +490,136 @@ shk scan --staged\n\
         assert!(!ends_unconditionally("#!/bin/sh\nexit_code=0\n"));
     }
 
-    #[test]
-    fn install_and_detection_follow_core_hooks_path() {
+    fn git_repo() -> tempfile::TempDir {
         let repo = tempfile::tempdir().unwrap();
         git(repo.path(), &["init", "-q"]);
+        fs::create_dir_all(repo.path().join(".git/hooks")).unwrap();
+        repo
+    }
+
+    fn managed_elsewhere(repo_root: &Path) -> String {
+        let err = install_pre_commit(repo_root).expect_err("install must not write");
+        assert!(
+            err.downcast_ref::<HooksDirManagedElsewhere>().is_some(),
+            "{err:#}"
+        );
+        err.to_string()
+    }
+
+    #[test]
+    fn install_refuses_in_repo_core_hooks_path_but_detection_follows_it() {
+        let repo = git_repo();
         git(repo.path(), &["config", "core.hooksPath", ".githooks"]);
         fs::create_dir(repo.path().join(".githooks")).unwrap();
         assert!(!has_shk_pre_commit(repo.path()));
 
-        install_pre_commit(repo.path()).unwrap();
+        let message = managed_elsewhere(repo.path());
 
-        let hook = repo.path().join(".githooks/pre-commit");
-        assert!(hook.is_file(), "hook must land in core.hooksPath");
+        assert!(message.contains(".githooks"), "{message}");
+        assert!(message.contains("shk scan --staged"), "{message}");
+        assert!(!message.contains("husky"), "{message}");
+        assert!(!repo.path().join(".githooks/pre-commit").exists());
         assert!(!repo.path().join(".git/hooks/pre-commit").exists());
+
+        // The user wires the scan into their own hook; detection sees it.
+        let hook = repo.path().join(".githooks/pre-commit");
+        fs::write(&hook, "#!/bin/sh\nshk scan --staged\n").unwrap();
+        #[cfg(unix)]
+        make_executable(&hook);
         assert!(has_shk_pre_commit(repo.path()));
     }
 
     #[test]
+    fn install_refuses_hooks_path_outside_the_repository() {
+        let base = tempfile::tempdir().unwrap();
+        let shared = base.path().join("shared");
+        let work = base.path().join("work");
+        fs::create_dir(&shared).unwrap();
+        fs::create_dir(&work).unwrap();
+        git(&work, &["init", "-q"]);
+
+        for hooks_path in [shared.to_str().unwrap(), "../shared"] {
+            git(&work, &["config", "core.hooksPath", hooks_path]);
+
+            let message = managed_elsewhere(&work);
+
+            assert!(message.contains("shared"), "{message}");
+            assert!(fs::read_dir(&shared).unwrap().next().is_none());
+            assert!(!work.join(".git/hooks/pre-commit").exists());
+        }
+    }
+
+    #[test]
+    fn install_names_husky_user_hook_for_husky_managed_directory() {
+        let repo = git_repo();
+        git(repo.path(), &["config", "core.hooksPath", ".husky/_"]);
+        fs::create_dir_all(repo.path().join(".husky/_")).unwrap();
+
+        let message = managed_elsewhere(repo.path());
+
+        let user_hook = Path::new(".husky").join("pre-commit");
+        assert!(message.contains("husky's pre-commit file"), "{message}");
+        assert!(message.contains(user_hook.to_str().unwrap()), "{message}");
+        assert!(!repo.path().join(".husky/_/pre-commit").exists());
+    }
+
+    #[test]
+    fn install_reports_missing_core_hooks_path_directory_clearly() {
+        let repo = git_repo();
+        git(repo.path(), &["config", "core.hooksPath", ".githooks"]);
+
+        let message = managed_elsewhere(repo.path());
+
+        assert!(message.contains("does not exist"), "{message}");
+        assert!(message.contains("core.hooksPath"), "{message}");
+        assert!(!message.contains("not a git repository"), "{message}");
+        assert!(!repo.path().join(".githooks").exists());
+    }
+
+    #[test]
+    fn install_writes_when_core_hooks_path_is_the_default_directory() {
+        let repo = git_repo();
+        git(repo.path(), &["config", "core.hooksPath", ".git/hooks"]);
+
+        install_pre_commit(repo.path()).unwrap();
+
+        assert!(repo.path().join(".git/hooks/pre-commit").is_file());
+        assert!(has_shk_pre_commit(repo.path()));
+    }
+
+    #[test]
+    fn install_writes_to_common_hooks_of_a_linked_worktree() {
+        let base = tempfile::tempdir().unwrap();
+        let main = base.path().join("main");
+        let linked = base.path().join("linked");
+        fs::create_dir(&main).unwrap();
+        git(&main, &["init", "-q"]);
+        git(
+            &main,
+            &[
+                "-c",
+                "user.name=shk test",
+                "-c",
+                "user.email=shk@example.invalid",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        );
+        git(&main, &["worktree", "add", "-q", linked.to_str().unwrap()]);
+        fs::create_dir_all(main.join(".git/hooks")).unwrap();
+
+        install_pre_commit(&linked).unwrap();
+
+        assert!(main.join(".git/hooks/pre-commit").is_file());
+        assert!(has_shk_pre_commit(&linked));
+    }
+
+    #[test]
     fn detection_ignores_default_hook_when_core_hooks_path_points_elsewhere() {
-        let repo = tempfile::tempdir().unwrap();
-        git(repo.path(), &["init", "-q"]);
+        let repo = git_repo();
         install_pre_commit(repo.path()).unwrap();
         assert!(has_shk_pre_commit(repo.path()));
 

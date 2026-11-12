@@ -1902,6 +1902,13 @@ fn finish_text_lines(lines: Vec<String>, trailing_newline: bool) -> String {
     output
 }
 
+/// True when the text has line endings and every one of them is CRLF. A file
+/// with mixed endings is edited as-is instead of being converted wholesale.
+fn uses_only_crlf(text: &str) -> bool {
+    let crlf = text.matches("\r\n").count();
+    crlf > 0 && crlf == text.matches('\n').count()
+}
+
 fn apply_codex(
     path: &Path,
     audit: bool,
@@ -1920,9 +1927,10 @@ fn apply_codex(
     };
 
     // Edit with LF endings and restore CRLF afterwards if the file used it.
-    let crlf = prev.as_deref().is_some_and(|s| s.contains("\r\n"));
+    let crlf = prev.as_deref().is_some_and(uses_only_crlf);
     let mut new_body = if let Some(s) = prev {
-        let mut s = hoist_codex_features_out_of_managed_block(&s.replace("\r\n", "\n"));
+        let s = if crlf { s.replace("\r\n", "\n") } else { s };
+        let mut s = hoist_codex_features_out_of_managed_block(&s);
         let replaced = if re.is_match(&s) {
             re.replace(&s, format!("{block}\n")).to_string()
         } else {
@@ -1967,12 +1975,24 @@ fn remove_codex_scan_hooks(path: &Path, dry_run: bool) -> Result<String> {
     }
     let existing = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let re = codex_managed_block_regex();
-    let crlf = existing.contains("\r\n");
-    let hoisted = hoist_codex_features_out_of_managed_block(&existing.replace("\r\n", "\n"));
-    let mut updated = re.replace(&hoisted, "").to_string();
-    if crlf {
-        updated = updated.replace('\n', "\r\n");
-    }
+    let crlf = uses_only_crlf(&existing);
+    let normalized = if crlf {
+        existing.replace("\r\n", "\n")
+    } else {
+        existing.clone()
+    };
+    // Without a managed block there is nothing to remove, so nothing to rewrite.
+    let updated = if re.is_match(&normalized) {
+        let hoisted = hoist_codex_features_out_of_managed_block(&normalized);
+        let removed = re.replace(&hoisted, "").to_string();
+        if crlf {
+            removed.replace('\n', "\r\n")
+        } else {
+            removed
+        }
+    } else {
+        existing.clone()
+    };
     if !dry_run && updated != existing {
         crate::fs_atomic::write_atomic(path, updated.as_bytes())?;
     }
@@ -3290,6 +3310,74 @@ sandbox_mode = "danger-full-access"
             "{body:?}"
         );
         assert!(!body.contains("\r\r"), "{body:?}");
+    }
+
+    #[test]
+    fn codex_install_keeps_mixed_line_endings_as_they_are() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let user = "model = \"gpt-5\"\r\n\n[profiles.dev]\nx = 1\r\ny = 2\n";
+        fs::write(&path, user).unwrap();
+
+        apply_codex(&path, false, false, false, false, true).unwrap();
+
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains("# shk-managed-start\n"), "{body:?}");
+        assert!(!body.contains("# shk-managed-start\r\n"), "{body:?}");
+        assert!(!body.contains("y = 2\r\n"), "{body:?}");
+        assert!(
+            body.matches("\r\n").count() < body.matches('\n').count(),
+            "mixed file must not be converted to CRLF: {body:?}"
+        );
+        toml::from_str::<toml::Value>(&body).unwrap_or_else(|err| panic!("{err}: {body:?}"));
+    }
+
+    #[test]
+    fn codex_removal_does_not_rewrite_a_file_without_a_managed_block() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in [
+            (
+                "mixed.toml",
+                "model = \"gpt-5\"\r\n\n[profiles.dev]\nx = 1\r\n",
+            ),
+            (
+                "crlf.toml",
+                "model = \"gpt-5\"\r\n[profiles.dev]\r\nx = 1\r\n",
+            ),
+            ("lf.toml", "model = \"gpt-5\"\n[profiles.dev]\nx = 1\n"),
+        ] {
+            let path = dir.path().join(name);
+            fs::write(&path, body).unwrap();
+            let before = fs::metadata(&path).unwrap().modified().unwrap();
+
+            remove_codex_scan_hooks(&path, false).unwrap();
+
+            assert_eq!(fs::read_to_string(&path).unwrap(), body, "{name}");
+            let after = fs::metadata(&path).unwrap().modified().unwrap();
+            assert_eq!(before, after, "{name} must not be rewritten");
+        }
+    }
+
+    #[test]
+    fn codex_removal_preserves_crlf_line_endings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "model = \"gpt-5\"\r\n\r\n[profiles.dev]\r\nx = 1\r\n",
+        )
+        .unwrap();
+        apply_codex(&path, false, false, false, false, true).unwrap();
+
+        remove_codex_scan_hooks(&path, false).unwrap();
+
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(!body.contains("shk-managed"), "{body:?}");
+        assert_eq!(
+            body.matches('\n').count(),
+            body.matches("\r\n").count(),
+            "{body:?}"
+        );
     }
 
     fn configure_options() -> ConfigureAiOptions {
