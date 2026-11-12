@@ -443,12 +443,70 @@ fn run_hook_mode(
     cwd: &Path,
     path_arg: PathBuf,
 ) -> Result<()> {
+    // Until the payload is parsed, a failure is reported as the default event.
+    let mut hook_event = hook_event_from_stdin("", post);
+    let result = run_hook_mode_inner(
+        tool,
+        post,
+        audit,
+        log_blocked,
+        fail_on,
+        cwd,
+        path_arg,
+        &mut hook_event,
+    );
+    match result {
+        // A blocking pre-hook that cannot reach a decision must not let the
+        // pending operation through: several editors treat any exit code other
+        // than the tool's deny contract as non-blocking. Audit and post hooks
+        // never block, so their errors keep propagating unchanged.
+        Err(err) if !post && !audit && !crate::exit::is_cli_exit(&err) => {
+            eprintln!("Error: {err:#}");
+            deny_hook(tool, hook_event, &hook_internal_error_reason(&err))
+        }
+        result => result,
+    }
+}
+
+const HOOK_INTERNAL_ERROR_REASON_MAX_CHARS: usize = 160;
+
+/// Deny reason for an internal error on a blocking pre-hook. Uses only the
+/// outermost error message (a fixed description of the failed step), never the
+/// cause chain, so payload content and paths stay out of the tool-facing JSON.
+fn hook_internal_error_reason(err: &anyhow::Error) -> String {
+    let message = err.to_string();
+    let summary = message.lines().next().unwrap_or_default().trim();
+    let mut reason = String::from("shk internal error: ");
+    if summary.is_empty() {
+        reason.push_str("hook could not be evaluated");
+    } else if summary.chars().count() > HOOK_INTERNAL_ERROR_REASON_MAX_CHARS {
+        reason.extend(summary.chars().take(HOOK_INTERNAL_ERROR_REASON_MAX_CHARS));
+        reason.push_str("...");
+    } else {
+        reason.push_str(summary);
+    }
+    reason
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_hook_mode_inner(
+    tool: AiTool,
+    post: bool,
+    audit: bool,
+    log_blocked: bool,
+    fail_on: Option<SeverityArg>,
+    cwd: &Path,
+    path_arg: PathBuf,
+    event: &mut hook_output::HookEvent,
+) -> Result<()> {
     let mut stdin_raw = Vec::new();
     let mut stdin = std::io::stdin();
     if std::io::IsTerminal::is_terminal(&stdin) {
         bail!("`scan --hook-mode` requires hook JSON payload on stdin");
     }
-    stdin.read_to_end(&mut stdin_raw)?;
+    stdin
+        .read_to_end(&mut stdin_raw)
+        .context("read hook payload from stdin")?;
     let stdin_str = String::from_utf8_lossy(&stdin_raw);
     let stdin_trim = stdin_str.trim();
     if stdin_trim.is_empty() {
@@ -456,6 +514,7 @@ fn run_hook_mode(
     }
 
     let hook_event = hook_event_from_stdin(stdin_trim, post);
+    *event = hook_event;
     let path_arg =
         hook_path_arg_or_project_dir(path_arg, tool.project_dir_env().and_then(std::env::var_os));
     let repo_root = resolve_hook_repo_root(cwd, path_arg.as_path());
@@ -503,7 +562,8 @@ fn run_hook_mode(
         stdin_trim,
         &content_cwd,
         &repo_root,
-    )?;
+    )
+    .context("hook payload could not be read")?;
     let opts = hook_scan_options(fail_on, matches!(tool, AiTool::Cursor) && !post);
 
     // Files are matched against path-based policy at their policy path (see
@@ -1064,6 +1124,33 @@ mod tests {
 
     fn init_test_repo(path: &Path) {
         std::fs::create_dir(path.join(".git")).unwrap();
+    }
+
+    #[test]
+    fn hook_internal_error_reason_uses_only_the_outermost_message() {
+        let err = anyhow::anyhow!("read scanned file /work/private/notes.txt")
+            .context("hook payload could not be read");
+        assert_eq!(
+            hook_internal_error_reason(&err),
+            "shk internal error: hook payload could not be read"
+        );
+
+        let multiline = anyhow::anyhow!("first line\nsecond line with detail");
+        assert_eq!(
+            hook_internal_error_reason(&multiline),
+            "shk internal error: first line"
+        );
+
+        let long = anyhow::anyhow!("x".repeat(500));
+        let reason = hook_internal_error_reason(&long);
+        assert!(reason.ends_with("..."), "{reason}");
+        assert!(reason.chars().count() < 200, "{reason}");
+
+        let empty = anyhow::anyhow!("");
+        assert_eq!(
+            hook_internal_error_reason(&empty),
+            "shk internal error: hook could not be evaluated"
+        );
     }
 
     #[test]

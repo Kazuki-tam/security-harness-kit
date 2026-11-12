@@ -935,31 +935,374 @@ fn detect_command_with_config_at_depth(
                 return Some(matched);
             }
         }
-        let words = shell_tokens(&normalized);
-        let raw_command = words.first().map(String::as_str).unwrap_or_default();
-        let command_name = command_basename(raw_command);
-        for nested in nested_command_payloads(raw_command, command_name, &words) {
-            if let Some(matched) =
-                detect_command_with_config_at_depth(&nested, profile, config, depth + 1)
-            {
-                return Some(matched);
+        // The segment as written, plus the form bash actually runs once quotes
+        // and backslashes are removed from the command word (`cu""rl`, `c\url`).
+        let canonical = canonical_command_segment(&segment);
+        let variants = std::iter::once(segment.as_str())
+            .chain(canonical.as_deref())
+            .collect::<Vec<_>>();
+        for variant in &variants {
+            let normalized = normalize_shell(variant);
+            let words = shell_tokens(&normalized);
+            let raw_command = words.first().map(String::as_str).unwrap_or_default();
+            let command_name = command_basename(raw_command);
+            for nested in nested_command_payloads(raw_command, command_name, &words) {
+                if let Some(matched) =
+                    detect_command_with_config_at_depth(&nested, profile, config, depth + 1)
+                {
+                    return Some(matched);
+                }
             }
         }
         let action = format!("Bash({segment})");
         if action_allowed(&action, &config.allow) {
             continue;
         }
-        if action_denied(&action, &config.deny) {
-            return Some(guard_match(
-                ActionCategory::CustomPolicy,
-                format!("shk action guard: `{action}` denied by project policy"),
-            ));
+        for variant in &variants {
+            let action = format!("Bash({variant})");
+            if action_denied(&action, &config.deny) {
+                return Some(guard_match(
+                    ActionCategory::CustomPolicy,
+                    format!("shk action guard: `{action}` denied by project policy"),
+                ));
+            }
         }
-        if let Some(matched) = detect_builtin_command(&segment, profile) {
-            return Some(matched);
+        // Reserved words and exec-style wrappers run the command that follows
+        // them. An explicitly allowed segment (checked above) is not unwrapped.
+        for nested in prefixed_command_payloads(&normalized) {
+            if let Some(matched) =
+                detect_command_with_config_at_depth(&nested, profile, config, depth + 1)
+            {
+                return Some(matched);
+            }
+        }
+        for variant in &variants {
+            if let Some(matched) = detect_builtin_command(variant, profile) {
+                return Some(matched);
+            }
         }
     }
     None
+}
+
+/// One shell word after quote and backslash removal, with its byte span in the
+/// source text.
+struct ShellWord {
+    text: String,
+    start: usize,
+    end: usize,
+    /// The word holds an unquoted `*`, `?` or `[`, so the shell may expand it.
+    glob: bool,
+}
+
+/// Splits a simple command into words the way a POSIX shell does: quotes and
+/// backslashes are removed, and an unquoted redirection operator starts a new
+/// word unless it follows a file-descriptor number. ANSI-C (`$'...'`) escapes
+/// are not decoded beyond dropping the backslash.
+fn shell_words_unquoted(command: &str) -> Vec<ShellWord> {
+    fn flush(
+        words: &mut Vec<ShellWord>,
+        text: &mut String,
+        start: &mut Option<usize>,
+        glob: &mut bool,
+        end: usize,
+    ) {
+        if let Some(start) = start.take() {
+            words.push(ShellWord {
+                text: std::mem::take(text),
+                start,
+                end,
+                glob: std::mem::take(glob),
+            });
+        }
+    }
+
+    let mut words = Vec::new();
+    let mut text = String::new();
+    let mut start = None;
+    let mut glob = false;
+    let mut quote = None;
+    let mut after_dollar = false;
+    let mut chars = command.char_indices().peekable();
+
+    while let Some((index, ch)) = chars.next() {
+        let was_after_dollar = std::mem::take(&mut after_dollar);
+        match quote {
+            Some('\'') => {
+                if ch == '\'' {
+                    quote = None;
+                } else {
+                    text.push(ch);
+                }
+                continue;
+            }
+            Some('"') => {
+                match ch {
+                    '"' => quote = None,
+                    '\\' => match chars.peek().map(|(_, next)| *next) {
+                        Some(next @ ('$' | '`' | '"' | '\\')) => {
+                            text.push(next);
+                            chars.next();
+                        }
+                        Some('\n') => {
+                            chars.next();
+                        }
+                        _ => text.push('\\'),
+                    },
+                    _ => text.push(ch),
+                }
+                continue;
+            }
+            Some(_) => {
+                match ch {
+                    '\'' => quote = None,
+                    '\\' => {
+                        if let Some((_, next)) = chars.next() {
+                            text.push(next);
+                        }
+                    }
+                    _ => text.push(ch),
+                }
+                continue;
+            }
+            None => {}
+        }
+        if ch.is_whitespace() {
+            flush(&mut words, &mut text, &mut start, &mut glob, index);
+            continue;
+        }
+        if start.is_none() {
+            start = Some(index);
+        }
+        match ch {
+            '\\' => match chars.next() {
+                Some((_, '\n')) | None => {}
+                Some((_, next)) => text.push(next),
+            },
+            '\'' | '"' => {
+                if was_after_dollar && text.ends_with('$') {
+                    text.pop();
+                }
+                open_shell_quote(&mut quote, ch, was_after_dollar);
+            }
+            '<' | '>' => {
+                if !text.is_empty()
+                    && !text.chars().all(|c| c.is_ascii_digit())
+                    && !text.ends_with(['<', '>', '&'])
+                {
+                    flush(&mut words, &mut text, &mut start, &mut glob, index);
+                    start = Some(index);
+                }
+                text.push(ch);
+            }
+            _ => {
+                after_dollar = ch == '$';
+                glob |= matches!(ch, '*' | '?' | '[');
+                text.push(ch);
+            }
+        }
+    }
+    flush(&mut words, &mut text, &mut start, &mut glob, command.len());
+    words
+}
+
+/// Opens or closes a quoted region for an unescaped quote character. ANSI-C
+/// quoting (`$'...'`) is tracked as `Some('$')`: unlike plain single quotes, a
+/// backslash escapes the next character inside it. Returns false when the
+/// character is literal text inside another kind of quote.
+fn open_shell_quote(quote: &mut Option<char>, ch: char, after_dollar: bool) -> bool {
+    match (*quote, ch) {
+        (None, '\'') => *quote = Some(if after_dollar { '$' } else { '\'' }),
+        (None, '"') => *quote = Some('"'),
+        (Some('\'' | '$'), '\'') | (Some('"'), '"') => *quote = None,
+        _ => return false,
+    }
+    true
+}
+
+/// Strips a leading redirection operator (`<`, `2>`, `>>`, `<<<`, `>|`, …).
+/// Returns `None` when the word does not start with one.
+fn strip_redirection_operator(word: &str) -> Option<&str> {
+    let rest = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    if !rest.starts_with(['<', '>']) {
+        return None;
+    }
+    Some(rest.trim_start_matches(['<', '>', '&', '|']))
+}
+
+/// Rewrites a segment so its command word is what the shell executes: quotes
+/// and backslashes removed, an attached redirection split off, and leading
+/// redirections moved behind the command. Returns `None` when the segment is
+/// already in that form or the command word cannot be rewritten safely.
+fn canonical_command_segment(segment: &str) -> Option<String> {
+    let words = shell_words_unquoted(segment);
+    let mut command_index = 0;
+    while let Some(word) = words.get(command_index) {
+        match strip_redirection_operator(&word.text) {
+            Some("") => command_index += 2,
+            Some(_) => command_index += 1,
+            None => break,
+        }
+    }
+    let command = words.get(command_index)?;
+    let leading = &segment[words[0].start..command.start];
+    let attached = words
+        .get(command_index + 1)
+        .is_some_and(|next| next.start == command.end);
+    let unchanged = command.text == segment[command.start..command.end];
+    if (unchanged && !attached && leading.is_empty())
+        || command.text.is_empty()
+        || command.text.chars().any(|ch| {
+            ch.is_whitespace() || matches!(ch, '\'' | '"' | '`' | ';' | '|' | '&' | '(' | ')')
+        })
+    {
+        return None;
+    }
+    let rest = &segment[command.end..];
+    let mut canonical = command.text.clone();
+    if attached {
+        canonical.push(' ');
+    }
+    canonical.push_str(rest);
+    if !leading.is_empty() {
+        canonical.push(' ');
+        canonical.push_str(leading);
+    }
+    Some(canonical.trim().to_string())
+}
+
+const SHELL_RESERVED_PREFIX_WORDS: &[&str] = &[
+    "then", "do", "else", "elif", "if", "while", "until", "{", "!",
+];
+
+/// Commands that follow a shell reserved word (`then curl …`) or an exec-style
+/// wrapper (`timeout 5 curl …`), as raw text for re-parsing.
+fn prefixed_command_payloads(command: &str) -> Vec<String> {
+    let words = shell_words_unquoted(command);
+    let Some(first) = words.first() else {
+        return Vec::new();
+    };
+    let starts = if SHELL_RESERVED_PREFIX_WORDS.contains(&first.text.as_str()) {
+        vec![1]
+    } else {
+        let texts = words
+            .iter()
+            .map(|word| word.text.as_str())
+            .collect::<Vec<_>>();
+        exec_wrapper_command_starts(command_basename(&first.text), &texts)
+    };
+    starts
+        .into_iter()
+        .filter_map(|index| words.get(index))
+        .map(|word| command[word.start..].to_string())
+        .collect()
+}
+
+/// Word indexes where the command run by an exec-style wrapper may start.
+/// Words are lowercased, so options whose case matters (`xargs -I` / `-i`) and
+/// unknown options fall back to every later non-option word.
+fn exec_wrapper_command_starts(wrapper: &str, words: &[&str]) -> Vec<usize> {
+    // (options that consume the next word, flag-only options, positionals
+    // before the command)
+    let (value_options, flag_options, positionals): (&[&str], &[&str], usize) = match wrapper {
+        "time" => (
+            &["-f", "--format", "-o", "--output"],
+            &["-p", "-v", "-a", "--portability", "--verbose", "--append"],
+            0,
+        ),
+        "timeout" => (
+            &["-s", "--signal", "-k", "--kill-after"],
+            &["-v", "-p", "--verbose", "--foreground", "--preserve-status"],
+            1,
+        ),
+        "nice" => (&["-n", "--adjustment"], &[], 0),
+        "stdbuf" => (
+            &["-i", "-o", "-e", "--input", "--output", "--error"],
+            &[],
+            0,
+        ),
+        "xargs" => (&[], &[], 0),
+        "doas" => (&["-u", "-c"], &["-n", "-s", "-l"], 0),
+        "sudo" => (
+            &[
+                "-u",
+                "-g",
+                "-c",
+                "-d",
+                "-r",
+                "-t",
+                "--user",
+                "--group",
+                "--chdir",
+                "--role",
+                "--type",
+                "--host",
+                "--prompt",
+                "--other-user",
+                "--close-from",
+                "--chroot",
+                "--command-timeout",
+            ],
+            &[
+                "-a",
+                "-b",
+                "-e",
+                "-i",
+                "-k",
+                "-l",
+                "-n",
+                "-s",
+                "-v",
+                "--askpass",
+                "--background",
+                "--preserve-env",
+                "--login",
+                "--non-interactive",
+                "--reset-timestamp",
+                "--set-home",
+                "--shell",
+                "--stdin",
+            ],
+            0,
+        ),
+        _ => return Vec::new(),
+    };
+
+    let later_candidates = |start: usize| {
+        (start..words.len())
+            .filter(|index| !words[*index].starts_with('-') && !is_env_assignment(words[*index]))
+            .collect::<Vec<_>>()
+    };
+    let mut index = 1;
+    while index < words.len() {
+        let word = words[index];
+        if word == "--" {
+            index += 1;
+            break;
+        }
+        if !word.starts_with('-') || word == "-" {
+            break;
+        }
+        if value_options.contains(&word) {
+            index += 2;
+        } else if flag_options.contains(&word)
+            || (word.starts_with("--") && word.contains('='))
+            || (wrapper == "nice" && word[1..].chars().all(|c| c.is_ascii_digit()))
+            || (wrapper == "stdbuf"
+                && word.len() > 2
+                && ["-i", "-o", "-e"].iter().any(|opt| word.starts_with(opt)))
+        {
+            index += 1;
+        } else {
+            return later_candidates(index + 1);
+        }
+    }
+    index += positionals;
+    if index < words.len() {
+        vec![index]
+    } else {
+        Vec::new()
+    }
 }
 
 fn detect_builtin_command(command: &str, profile: ActionGuardProfile) -> Option<ActionGuardMatch> {
@@ -996,7 +1339,7 @@ fn detect_builtin_command(command: &str, profile: ActionGuardProfile) -> Option<
 
     if profile.includes(ActionCategory::PrivilegeSystemChange)
         && cmd == "chmod"
-        && words.contains(&"777")
+        && (words.contains(&"777") || chmod_world_writable(&normalized))
     {
         return Some(guard_match(
             ActionCategory::PrivilegeSystemChange,
@@ -1055,8 +1398,10 @@ fn shell_command_segments(command: &str) -> Vec<String> {
     let mut start = 0;
     let mut quote = None;
     let mut escaped = false;
+    let mut after_dollar = false;
 
     for (index, ch) in command.char_indices() {
+        let was_after_dollar = std::mem::take(&mut after_dollar);
         if escaped {
             escaped = false;
             continue;
@@ -1066,13 +1411,10 @@ fn shell_command_segments(command: &str) -> Vec<String> {
             continue;
         }
         if matches!(ch, '\'' | '"') {
-            if quote == Some(ch) {
-                quote = None;
-            } else if quote.is_none() {
-                quote = Some(ch);
-            }
+            open_shell_quote(&mut quote, ch, was_after_dollar);
             continue;
         }
+        after_dollar = ch == '$' && quote.is_none();
         if quote.is_none() && matches!(ch, ';' | '|' | '&' | '\n' | '(' | ')') {
             let segment = command[start..index].trim();
             if !segment.is_empty() {
@@ -1122,21 +1464,47 @@ fn command_without_heredoc_bodies(command: &str) -> String {
             continue;
         }
 
-        filtered.push_str(line_with_newline);
-        pending.extend(heredoc_delimiters(line, &mut quote));
+        let (delimiters, comment_start) = heredoc_delimiters(line, &mut quote);
+        match comment_start {
+            // A comment runs to the end of the line. Dropping it keeps its
+            // quotes and operators away from the segment splitter.
+            Some(comment_start) => {
+                filtered.push_str(&line[..comment_start]);
+                if line_with_newline.len() > line.len() {
+                    filtered.push('\n');
+                }
+            }
+            None => filtered.push_str(line_with_newline),
+        }
+        pending.extend(delimiters);
     }
 
     filtered
 }
 
-fn heredoc_delimiters(line: &str, quote: &mut Option<char>) -> Vec<HeredocDelimiter> {
+/// True when the quote character at `index` directly follows an unescaped `$`.
+fn quote_follows_dollar(chars: &[(usize, char)], index: usize) -> bool {
+    index
+        .checked_sub(1)
+        .is_some_and(|previous| chars[previous].1 == '$')
+        && index
+            .checked_sub(2)
+            .is_none_or(|previous| chars[previous].1 != '\\')
+}
+
+/// Heredoc delimiters opened on `line`, plus the byte offset where an unquoted
+/// `#` comment starts (nothing after it is shell syntax).
+fn heredoc_delimiters(
+    line: &str,
+    quote: &mut Option<char>,
+) -> (Vec<HeredocDelimiter>, Option<usize>) {
     let chars = line.char_indices().collect::<Vec<_>>();
     let mut delimiters = Vec::new();
     let mut index = 0;
     let mut escaped = false;
 
     while index < chars.len() {
-        let (_, ch) = chars[index];
+        let (offset, ch) = chars[index];
         if escaped {
             escaped = false;
             index += 1;
@@ -1148,13 +1516,18 @@ fn heredoc_delimiters(line: &str, quote: &mut Option<char>) -> Vec<HeredocDelimi
             continue;
         }
         if matches!(ch, '\'' | '"') {
-            if *quote == Some(ch) {
-                *quote = None;
-            } else if quote.is_none() {
-                *quote = Some(ch);
-            }
+            open_shell_quote(quote, ch, quote_follows_dollar(&chars, index));
             index += 1;
             continue;
+        }
+        if ch == '#'
+            && quote.is_none()
+            && index.checked_sub(1).is_none_or(|previous| {
+                let (_, before) = chars[previous];
+                before.is_whitespace() || matches!(before, ';' | '|' | '&' | '(' | ')')
+            })
+        {
+            return (delimiters, Some(offset));
         }
         if quote.is_none()
             && let Some(end) = shell_arithmetic_end(&chars, index)
@@ -1233,7 +1606,7 @@ fn heredoc_delimiters(line: &str, quote: &mut Option<char>) -> Vec<HeredocDelimi
             });
         }
     }
-    delimiters
+    (delimiters, None)
 }
 
 fn shell_arithmetic_end(chars: &[(usize, char)], index: usize) -> Option<usize> {
@@ -1562,7 +1935,9 @@ fn embedded_shell_commands(command: &str) -> Vec<String> {
     let chars = command.char_indices().collect::<Vec<_>>();
     let mut commands = Vec::new();
     let mut index = 0;
-    let mut single_quoted = false;
+    // Substitutions stay live inside double quotes, where an apostrophe is
+    // literal text; only single and ANSI-C quotes make them inert.
+    let mut quote = None;
     let mut escaped = false;
 
     while index < chars.len() {
@@ -1572,17 +1947,17 @@ fn embedded_shell_commands(command: &str) -> Vec<String> {
             index += 1;
             continue;
         }
-        if ch == '\\' && !single_quoted {
+        if ch == '\\' && quote != Some('\'') {
             escaped = true;
             index += 1;
             continue;
         }
-        if ch == '\'' {
-            single_quoted = !single_quoted;
+        if matches!(ch, '\'' | '"') {
+            open_shell_quote(&mut quote, ch, quote_follows_dollar(&chars, index));
             index += 1;
             continue;
         }
-        if single_quoted {
+        if matches!(quote, Some('\'' | '$')) {
             index += 1;
             continue;
         }
@@ -1675,11 +2050,23 @@ fn sensitive_file_access_command(command: &str, cmd: &str, words: &[&str]) -> bo
     if !SENSITIVE_FILE_ACCESS_COMMANDS.contains(&cmd) {
         return false;
     }
-    words.iter().skip(1).any(|word| is_secret_path(word))
+    // A redirection operator may be attached to its target (`<.env`).
+    let is_secret_argument =
+        |word: &str| is_secret_path(strip_redirection_operator(word).unwrap_or(word));
+    words.iter().skip(1).any(|word| is_secret_argument(word))
         || shell_tokens(command)
             .iter()
             .skip(1)
-            .any(|word| is_secret_path(word))
+            .any(|word| is_secret_argument(word))
+        || shell_words_unquoted(command).iter().skip(1).any(|word| {
+            // These words end where an attached redirection starts
+            // (`.env>/dev/null`), and know whether a glob is unquoted.
+            is_secret_argument(&word.text)
+                || (word.glob
+                    && dotenv_glob_word(
+                        strip_redirection_operator(&word.text).unwrap_or(&word.text),
+                    ))
+        })
 }
 
 fn environment_dump_command(command: &str, words: &[&str]) -> bool {
@@ -1868,7 +2255,121 @@ fn destructive_rm(words: &[&str]) -> bool {
         .iter()
         .skip(1)
         .filter(|w| !w.starts_with('-'))
-        .any(|target| matches!(*target, "/" | "~" | "~/*" | "/*" | "." | ".."))
+        .any(|target| destructive_rm_target(target))
+}
+
+/// True for targets that resolve to the filesystem root, the home directory,
+/// the current or a parent directory, or everything directly inside one of
+/// them. `target` is lowercased with quotes already removed.
+fn destructive_rm_target(target: &str) -> bool {
+    let home = ["${home}", "$home"]
+        .iter()
+        .find_map(|prefix| target.strip_prefix(prefix))
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'));
+    let target = match home {
+        Some(rest) => format!("~{rest}"),
+        None => target.to_string(),
+    };
+    let absolute = target.starts_with('/');
+    // Drop empty and `.` components: `//`, `/./`, `~/.` and `./*` name the same
+    // place as `/`, `/`, `~` and `*`.
+    let components = target
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect::<Vec<_>>();
+    match components.as_slice() {
+        [] => true,
+        ["*"] => true,
+        ["~"] | ["~", "*"] => !absolute,
+        [parents @ .., last] => {
+            !absolute
+                && parents.iter().all(|component| *component == "..")
+                && matches!(*last, ".." | "*")
+        }
+    }
+}
+
+/// `chmod` mode words that grant read, write and execute to everyone: octal
+/// `777` with any leading zeros (or special bits), `a+rwx`, `ugo=rwx`, ….
+fn chmod_world_writable(command: &str) -> bool {
+    shell_words_unquoted(command)
+        .iter()
+        .skip(1)
+        .flat_map(|word| word.text.split(','))
+        .any(|mode| {
+            if mode.len() >= 3 && mode.chars().all(|c| c.is_ascii_digit()) {
+                return mode.ends_with("777")
+                    && mode[..mode.len() - 3]
+                        .chars()
+                        .all(|c| matches!(c, '0'..='7'));
+            }
+            let Some((who, perms)) = mode.split_once(['+', '=']) else {
+                return false;
+            };
+            let everyone = who == "a" || ['u', 'g', 'o'].iter().all(|class| who.contains(*class));
+            everyone
+                && who.chars().all(|c| matches!(c, 'a' | 'u' | 'g' | 'o'))
+                && ['r', 'w', 'x'].iter().all(|perm| perms.contains(*perm))
+                && perms
+                    .chars()
+                    .all(|c| matches!(c, 'r' | 'w' | 'x' | 's' | 't'))
+        })
+}
+
+/// True when an unquoted glob word could expand to a dotenv file in its
+/// directory (`.env*`, `.en?`, `.[e]nv`, `.*`). Globs only match dotfiles when
+/// the pattern itself starts with a dot.
+fn dotenv_glob_word(word: &str) -> bool {
+    let name = word.rsplit('/').next().unwrap_or(word);
+    if !name.starts_with('.') {
+        return false;
+    }
+    let pattern = name.chars().collect::<Vec<_>>();
+    [".env", ".env.local"]
+        .iter()
+        .any(|candidate| glob_match(&pattern, &candidate.chars().collect::<Vec<_>>()))
+}
+
+/// Minimal shell glob matcher: `*`, `?` and bracket classes (with ranges and
+/// `!`/`^` negation). An unterminated `[` is a literal character.
+fn glob_match(pattern: &[char], text: &[char]) -> bool {
+    let Some((first, rest)) = pattern.split_first() else {
+        return text.is_empty();
+    };
+    match first {
+        '*' => (0..=text.len()).any(|skip| glob_match(rest, &text[skip..])),
+        '?' => !text.is_empty() && glob_match(rest, &text[1..]),
+        '[' => {
+            let Some(close) = rest
+                .iter()
+                .enumerate()
+                .position(|(index, ch)| *ch == ']' && index > 0)
+            else {
+                return text.first() == Some(&'[') && glob_match(rest, &text[1..]);
+            };
+            let Some(candidate) = text.first() else {
+                return false;
+            };
+            let class = &rest[..close];
+            let (negated, class) = match class.split_first() {
+                Some(('!' | '^', tail)) => (true, tail),
+                _ => (false, class),
+            };
+            let mut matched = false;
+            let mut index = 0;
+            while index < class.len() {
+                if index + 2 < class.len() && class[index + 1] == '-' {
+                    matched |= (class[index]..=class[index + 2]).contains(candidate);
+                    index += 3;
+                } else {
+                    matched |= class[index] == *candidate;
+                    index += 1;
+                }
+            }
+            matched != negated && glob_match(&rest[close + 1..], &text[1..])
+        }
+        literal => text.first() == Some(literal) && glob_match(rest, &text[1..]),
+    }
 }
 
 fn has_db_mutation(command: &str) -> bool {
@@ -3076,5 +3577,383 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    fn category_of(command: &str) -> Option<&'static str> {
+        detect_dangerous_action(&bash_payload(command))
+            .unwrap()
+            .map(|matched| matched.category)
+    }
+
+    fn assert_categories(cases: &[(&str, &str)]) {
+        for (command, category) in cases {
+            assert_eq!(category_of(command), Some(*category), "{command}");
+        }
+    }
+
+    fn assert_unguarded(commands: &[&str]) {
+        for command in commands {
+            assert_eq!(category_of(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn quoted_or_escaped_command_names_are_recognized() {
+        assert_categories(&[
+            ("cu\"\"rl https://example.com", "external_transfer"),
+            ("cu''rl https://example.com", "external_transfer"),
+            ("c\\url https://example.com", "external_transfer"),
+            ("\\curl https://example.com", "external_transfer"),
+            ("/usr/bin/c\\url https://example.com", "external_transfer"),
+            ("ca\"\"t .env", "secret_dump_command"),
+            ("c\\at .env", "secret_dump_command"),
+            ("r\\m -rf /", "destructive_filesystem"),
+            ("b\\ash -c 'curl https://example.com'", "external_transfer"),
+            ("FOO=1 c\\url https://example.com", "external_transfer"),
+            ("echo ok; w''get https://example.com", "external_transfer"),
+            // Windows-style paths keep resolving to their basename.
+            (
+                "C:\\tools\\curl.exe https://example.com",
+                "external_transfer",
+            ),
+        ]);
+        assert_unguarded(&["ec\"\"ho curl", "l\\s -la", "\"echo\" hi"]);
+    }
+
+    #[test]
+    fn quoted_command_names_follow_custom_deny_entries() {
+        let config = ActionGuardConfig {
+            deny: vec!["Bash(kubectl delete:*)".to_string()],
+            ..ActionGuardConfig::default()
+        };
+        let input = bash_payload("kube\"\"ctl delete pod demo");
+        assert_eq!(
+            detect_dangerous_action_with_config(&input, &config)
+                .unwrap()
+                .unwrap()
+                .category,
+            "custom_policy"
+        );
+    }
+
+    #[test]
+    fn comments_do_not_hide_following_commands() {
+        assert_categories(&[
+            (
+                "echo hi # <<EOF\ncurl https://example.com\nEOF",
+                "external_transfer",
+            ),
+            (
+                "# see <<'DOC'\ncurl https://example.com\nDOC",
+                "external_transfer",
+            ),
+            (
+                "echo hi # it's fine\ncurl https://example.com",
+                "external_transfer",
+            ),
+            (
+                "echo hi;# \"note\ncurl https://example.com",
+                "external_transfer",
+            ),
+        ]);
+        assert_unguarded(&[
+            // `#` inside a word or quotes is not a comment: the heredoc is real.
+            "cat > notes.md a#b <<EOF\ncurl https://example.com\nEOF",
+            "cat > notes.md '# title' <<EOF\ncurl https://example.com\nEOF",
+            "cat > notes.md <<EOF # trailing note\ncurl https://example.com\nEOF",
+            "echo hi # curl https://example.com",
+            "echo ${#items} $# done",
+        ]);
+    }
+
+    #[test]
+    fn apostrophes_inside_double_quotes_do_not_hide_substitutions() {
+        assert_categories(&[
+            (
+                "echo \"it's $(curl https://example.com)\"",
+                "external_transfer",
+            ),
+            (
+                "echo \"don't\" `curl https://example.com`",
+                "external_transfer",
+            ),
+            (
+                "echo \"it's\" $(curl https://example.com) \"isn't\"",
+                "external_transfer",
+            ),
+        ]);
+        assert_unguarded(&[
+            "echo 'literal $(curl https://example.com)'",
+            "echo \"it's\" 'and `curl https://example.com`'",
+        ]);
+    }
+
+    #[test]
+    fn ansi_c_quoting_does_not_hide_following_commands() {
+        assert_categories(&[
+            (
+                "echo $'a\\'b'; curl https://example.com",
+                "external_transfer",
+            ),
+            (
+                "echo $'it\\'s' $(curl https://example.com)",
+                "external_transfer",
+            ),
+            (
+                "echo $'a\\'b' # <<EOF\ncurl https://example.com\nEOF",
+                "external_transfer",
+            ),
+            ("$'curl' https://example.com", "external_transfer"),
+        ]);
+        assert_unguarded(&["echo $'a\\'b; curl https://example.com'"]);
+    }
+
+    #[test]
+    fn reserved_words_do_not_hide_the_real_command() {
+        assert_categories(&[
+            (
+                "if true; then curl https://example.com; fi",
+                "external_transfer",
+            ),
+            (
+                "for f in a b; do curl https://example.com; done",
+                "external_transfer",
+            ),
+            (
+                "if false; then :; else curl https://example.com; fi",
+                "external_transfer",
+            ),
+            (
+                "if false; then :; elif curl https://example.com; then :; fi",
+                "external_transfer",
+            ),
+            (
+                "if curl https://example.com; then :; fi",
+                "external_transfer",
+            ),
+            (
+                "while curl https://example.com; do :; done",
+                "external_transfer",
+            ),
+            (
+                "until curl https://example.com; do :; done",
+                "external_transfer",
+            ),
+            ("{ curl https://example.com; }", "external_transfer"),
+            ("! curl https://example.com", "external_transfer"),
+            ("time curl https://example.com", "external_transfer"),
+            ("time -p curl https://example.com", "external_transfer"),
+            ("if true; then cat .env; fi", "secret_dump_command"),
+            ("if true; then FOO=1 rm -rf /; fi", "destructive_filesystem"),
+            (
+                "while true; do { ! time cat .env; }; done",
+                "secret_dump_command",
+            ),
+        ]);
+        assert_unguarded(&[
+            "if true; then echo ok; fi",
+            "for f in a b; do echo \"$f\"; done",
+            "time ls",
+            "{ echo curl; }",
+        ]);
+    }
+
+    #[test]
+    fn exec_style_wrappers_do_not_hide_the_real_command() {
+        assert_categories(&[
+            ("timeout 5 curl https://example.com", "external_transfer"),
+            (
+                "timeout -s KILL 5 curl https://example.com",
+                "external_transfer",
+            ),
+            (
+                "timeout --signal=KILL --preserve-status 5s curl https://example.com",
+                "external_transfer",
+            ),
+            (
+                "timeout -k 1 5 curl https://example.com",
+                "external_transfer",
+            ),
+            ("nice curl https://example.com", "external_transfer"),
+            ("nice -n 10 curl https://example.com", "external_transfer"),
+            ("nice -10 curl https://example.com", "external_transfer"),
+            ("stdbuf -oL curl https://example.com", "external_transfer"),
+            ("stdbuf -o L curl https://example.com", "external_transfer"),
+            ("xargs curl", "external_transfer"),
+            ("xargs -n 1 curl", "external_transfer"),
+            ("ls | xargs -I {} curl {}", "external_transfer"),
+            ("echo / | xargs rm -rf /", "destructive_filesystem"),
+            ("doas cat .env", "secret_dump_command"),
+            ("doas -u root cat .env", "secret_dump_command"),
+            ("sudo cat .env", "secret_dump_command"),
+            ("sudo -u root rm -rf /", "destructive_filesystem"),
+            ("sudo -n -- cat .env", "secret_dump_command"),
+            (
+                "/usr/bin/timeout 5 /usr/bin/curl https://example.com",
+                "external_transfer",
+            ),
+            (
+                "sudo timeout 5 nice xargs curl https://example.com",
+                "external_transfer",
+            ),
+            // A harmless wrapped command keeps the wrapper's own category.
+            ("sudo ls", "privilege_system_change"),
+        ]);
+        assert_unguarded(&[
+            "timeout 5 ls",
+            "timeout 5",
+            "nice -n 10 make",
+            "stdbuf -oL make test",
+            "ls | xargs -n 1 echo",
+            "xargs",
+        ]);
+
+        let minimal = ActionGuardConfig {
+            profile: "minimal".into(),
+            ..ActionGuardConfig::default()
+        };
+        for command in [
+            "sudo cat .env",
+            "doas -u root cat .env",
+            "timeout 5 cat .env",
+        ] {
+            assert_eq!(
+                detect_dangerous_action_with_config(&bash_payload(command), &minimal)
+                    .unwrap()
+                    .map(|matched| matched.category),
+                Some("secret_dump_command"),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn allowed_wrapper_segments_are_not_unwrapped() {
+        let config = ActionGuardConfig {
+            allow: vec!["Bash(sudo systemctl status:*)".to_string()],
+            ..ActionGuardConfig::default()
+        };
+        let allowed = bash_payload("sudo systemctl status nginx");
+        assert!(
+            detect_dangerous_action_with_config(&allowed, &config)
+                .unwrap()
+                .is_none()
+        );
+        let other = bash_payload("sudo systemctl stop nginx");
+        assert_eq!(
+            detect_dangerous_action_with_config(&other, &config)
+                .unwrap()
+                .unwrap()
+                .category,
+            "privilege_system_change"
+        );
+    }
+
+    #[test]
+    fn destructive_rm_normalizes_targets() {
+        for target in [
+            "/.",
+            "//",
+            "/./",
+            "\"/\"",
+            "$HOME",
+            "${HOME}",
+            "\"$HOME\"",
+            "\"${HOME}\"",
+            "$HOME/",
+            "$HOME/*",
+            "${HOME}/.",
+            "~/",
+            "~/.",
+            "~//",
+            "*",
+            "./*",
+            "./",
+            "./.",
+            "../",
+            "../..",
+            "-- /",
+        ] {
+            let command = format!("rm -rf {target}");
+            assert_eq!(
+                category_of(&command),
+                Some("destructive_filesystem"),
+                "{command}"
+            );
+        }
+        assert_unguarded(&[
+            "rm -rf ./build",
+            "rm -rf build/",
+            "rm -rf ./build/",
+            "rm -rf ../build",
+            "rm -rf $HOME/project/build",
+            "rm -rf ~/tmp/cache",
+            "rm -rf /tmp/shk-test",
+            "rm -rf ./*.o",
+            "rm -rf target/*",
+            "rm -rf .cache",
+            "rm -rf ...",
+        ]);
+    }
+
+    #[test]
+    fn chmod_world_writable_modes_are_equivalent() {
+        assert_categories(&[
+            ("chmod 0777 target", "privilege_system_change"),
+            ("chmod -R 00777 .", "privilege_system_change"),
+            ("chmod a+rwx target", "privilege_system_change"),
+            ("chmod ugo+rwx target", "privilege_system_change"),
+            ("chmod a=rwx target", "privilege_system_change"),
+            ("chmod u+x,a+rwx target", "privilege_system_change"),
+            ("chmod +x,a+wxr target", "privilege_system_change"),
+        ]);
+        assert_unguarded(&[
+            "chmod 755 target",
+            "chmod 0755 target",
+            "chmod a+rx target",
+            "chmod u+rwx target",
+            "chmod +x script.sh",
+            "chmod 644 a+rwx.txt.bak",
+        ]);
+    }
+
+    #[test]
+    fn attached_redirections_do_not_hide_sensitive_paths() {
+        assert_categories(&[
+            ("cat <.env", "secret_dump_command"),
+            ("cat<.env", "secret_dump_command"),
+            ("cat 0<.env", "secret_dump_command"),
+            ("grep KEY <.env.local", "secret_dump_command"),
+            ("sort <config/.env", "secret_dump_command"),
+            ("cp .env>/dev/null backup.txt", "secret_dump_command"),
+            ("<.env cat", "secret_dump_command"),
+            ("< .env cat", "secret_dump_command"),
+        ]);
+        assert_unguarded(&["cat <notes.txt", "cat<notes.txt", "sort <data.csv >out.csv"]);
+    }
+
+    #[test]
+    fn dotenv_globs_are_treated_as_sensitive_paths() {
+        assert_categories(&[
+            ("cat .env*", "secret_dump_command"),
+            ("cat .en?", "secret_dump_command"),
+            ("cat .[e]nv", "secret_dump_command"),
+            ("cat .e[mn]v", "secret_dump_command"),
+            ("cat ./.env*", "secret_dump_command"),
+            ("cat config/.e*", "secret_dump_command"),
+            ("cat .en?.local", "secret_dump_command"),
+            ("head -n 1 .*", "secret_dump_command"),
+            ("cat <.env*", "secret_dump_command"),
+        ]);
+        assert_unguarded(&[
+            "cat *.txt",
+            "cat .eslintrc*",
+            "cat .git*",
+            "grep '.*' notes.txt",
+            "grep \".e*\" notes.txt",
+            "sed 's/.*//' notes.txt",
+            "cat src/*.rs",
+            "cat .envoy?",
+        ]);
     }
 }

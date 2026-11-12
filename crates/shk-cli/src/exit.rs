@@ -41,6 +41,13 @@ pub(crate) fn code_for(err: &Error) -> i32 {
         .unwrap_or(1)
 }
 
+/// True when the error is a deliberate exit (a decision already reported),
+/// not an unexpected internal failure.
+pub(crate) fn is_cli_exit(err: &Error) -> bool {
+    err.chain()
+        .any(|cause| cause.downcast_ref::<CliExit>().is_some())
+}
+
 pub(crate) fn is_silent(err: &Error) -> bool {
     err.chain()
         .find_map(|cause| {
@@ -82,6 +89,15 @@ mod tests {
         let err = anyhow!("plain failure");
 
         assert_eq!(code_for(&err), 1);
+    }
+
+    #[test]
+    fn is_cli_exit_distinguishes_deliberate_exits_from_plain_errors() {
+        let exit = anyhow!(CliExit::silent(2)).context("wrapper");
+        let plain = anyhow!("plain failure").context("wrapper");
+
+        assert!(is_cli_exit(&exit));
+        assert!(!is_cli_exit(&plain));
     }
 
     #[test]
