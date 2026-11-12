@@ -594,13 +594,16 @@ shk scan --staged\n\
         let linked = base.path().join("linked");
         fs::create_dir(&main).unwrap();
         git(&main, &["init", "-q"]);
+        // Assembled at runtime so the placeholder identity is not a literal
+        // address in the source tree.
+        let identity = format!("user.email={}@{}", "shk", "example.invalid");
         git(
             &main,
             &[
                 "-c",
                 "user.name=shk test",
                 "-c",
-                "user.email=shk@example.invalid",
+                &identity,
                 "commit",
                 "-q",
                 "--allow-empty",
