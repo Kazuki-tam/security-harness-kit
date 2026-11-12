@@ -185,6 +185,7 @@ pub fn run_xlsx(
             sample_rows: data_rows[..data_rows.len().min(TABLE_PREVIEW_ROWS)].to_vec(),
             formula_cells,
             formula_columns,
+            copied_field_refusal: None,
         });
     }
     let material = material.expect("checked above");
@@ -249,6 +250,7 @@ pub fn run_xlsx(
         sample_rows: Vec::new(),
         formula_cells: Vec::new(),
         formula_columns: Vec::new(),
+        copied_field_refusal: None,
     })
 }
 

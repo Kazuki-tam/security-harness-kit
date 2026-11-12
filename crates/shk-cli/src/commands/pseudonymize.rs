@@ -420,6 +420,7 @@ fn inline_table(
     interaction: &dyn Interaction,
 ) -> Result<InlineOutcome> {
     let plan = plan_table_csv(req, policy)?;
+    refuse_merged_fields(&plan.preview)?;
     confirm_table_plan(interaction, &plan.preview)?;
     let material = load_or_create_material(project, policy, open_store, interaction)?;
     let mut run_options = plan.options;
@@ -648,6 +649,16 @@ fn plan_table_csv<'a>(req: &'a PseudonymizeRequest, policy: &Policy) -> Result<C
     })
 }
 
+/// A plan is refused where its run would be: before any prompt or key use.
+/// `preview` does not call this, so a GUI can still show the table and let
+/// the user change the selection; the run then reports the refusal.
+fn refuse_merged_fields(plan: &TableResult) -> Result<()> {
+    match &plan.copied_field_refusal {
+        Some(refusal) => Err(fail(refusal.clone())),
+        None => Ok(()),
+    }
+}
+
 struct XlsxPlan<'a> {
     input: &'a Path,
     /// Taken before the planning read so a run can prove the file did not
@@ -708,6 +719,7 @@ fn run_table_csv(
     interaction: &dyn Interaction,
 ) -> Result<PseudonymizeOutcome> {
     let plan = plan_table_csv(req, policy)?;
+    refuse_merged_fields(&plan.preview)?;
     confirm_table_plan(interaction, &plan.preview)?;
     let header_assumed = plan.preview.header_assumed;
     if req.dry_run {
@@ -2728,6 +2740,71 @@ mod tests {
             sheet.contains(&email()) && !sheet.contains("email_"),
             "{sheet}"
         );
+    }
+
+    #[test]
+    fn swallowed_rows_fail_the_dry_run_like_the_run_but_still_preview() {
+        let dir = project();
+        let root = dir.path();
+        let store = Arc::new(MemoryStore::default());
+        let open = opener(Arc::clone(&store));
+        let decisions = CliInteraction {
+            yes: true,
+            no_create_key: false,
+        };
+        // A stray quote in an unselected column swallows the row below it.
+        std::fs::write(
+            root.join("broken.csv"),
+            format!(
+                "Id,Email,Note\n1,{0},\"keep\n2,{0},keep\n3,{0},keep\n",
+                email()
+            ),
+        )
+        .unwrap();
+        let mut req = request(root, PseudonymizeSource::File(root.join("broken.csv")));
+        // The merged field holds addresses, so inference would select it.
+        let selection = || {
+            Some(ColumnSelection::Resolved(ColumnOverrides {
+                entries: vec![("Email".into(), Kind::Email)],
+                skip: vec!["Note".into()],
+                positions: Vec::new(),
+            }))
+        };
+        req.columns = selection();
+        let mut dry = dry_clone(&req);
+        dry.columns = selection();
+        let planned = mask_core(dry, &open, &decisions).unwrap_err();
+        assert_eq!(crate::exit::code_for(&planned), 2);
+        assert!(planned.to_string().contains("row 2, column 3"), "{planned}");
+        // A GUI preview still shows the table so the selection can change.
+        let Preview::Table(table) = preview(&req).unwrap() else {
+            panic!("csv previews as a table");
+        };
+        assert!(table.copied_field_refusal.is_some());
+        req.dry_run = false;
+        req.output = Some(root.join("broken.pseudo.csv"));
+        let run = mask_core(req, &open, &decisions).unwrap_err();
+        assert_eq!(run.to_string(), planned.to_string());
+        assert!(!root.join("broken.pseudo.csv").exists());
+        assert!(
+            !root.join(".shk").exists(),
+            "refused before any key is made"
+        );
+
+        // A well-formed multi-line cell plans and runs.
+        std::fs::write(
+            root.join("notes.csv"),
+            format!("Id,Email,Note\n1,{},\"first line\nsecond line\"\n", email()),
+        )
+        .unwrap();
+        let mut req = request(root, PseudonymizeSource::File(root.join("notes.csv")));
+        mask_core(dry_clone(&req), &open, &decisions).unwrap();
+        req.dry_run = false;
+        req.output = Some(root.join("notes.pseudo.csv"));
+        mask_core(req, &open, &decisions).unwrap();
+        let written = std::fs::read_to_string(root.join("notes.pseudo.csv")).unwrap();
+        assert!(written.contains("\"first line\nsecond line\""), "{written}");
+        assert!(!written.contains(&email()), "{written}");
     }
 
     #[test]
