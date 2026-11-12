@@ -573,16 +573,50 @@ mod tests {
     }
 
     #[test]
-    fn unterminated_private_key_block_is_masked_to_end_of_input() {
+    fn unterminated_private_key_block_body_is_masked() {
         let cfg = RuleEngineConfig::default();
         let (block, body) = synthetic_key_block("OPENSSH PRIVATE KEY", "\n", false);
-        let content = format!("before\n{block}trailing words");
+        let content = format!("before\n{block}");
         let (out, _) = mask_text(&content, &cfg, "x.txt", MaskRedaction::Match);
         for line in &body {
             assert!(!out.contains(line.as_str()), "{out}");
         }
-        assert!(!out.contains("trailing words"), "{out}");
         assert!(out.starts_with("before\n"), "{out}");
+        assert_eq!(out.lines().count(), content.lines().count(), "{out}");
+
+        // Text after the armor body is not part of the key.
+        let content = format!("before\n{block}trailing words\n");
+        let (out, _) = mask_text(&content, &cfg, "x.txt", MaskRedaction::Match);
+        for line in &body {
+            assert!(!out.contains(line.as_str()), "{out}");
+        }
+        assert!(out.ends_with("trailing words\n"), "{out}");
+    }
+
+    #[test]
+    fn private_key_header_quoted_in_code_does_not_mask_following_code() {
+        let cfg = RuleEngineConfig::default();
+        let (header, _) = synthetic_key_block("RSA PRIVATE KEY", "\n", false);
+        let header = header.lines().next().unwrap();
+        let code = "fn main() {\n    let total = add(1, 2);\n}\n";
+        let content = format!("const HEADER: &str = \"{header}\";\n{code}");
+        for redaction in [MaskRedaction::Match, MaskRedaction::FullLine] {
+            let (out, hits) = mask_text(&content, &cfg, "x.rs", redaction);
+            assert!(!hits.is_empty());
+            assert!(out.ends_with(code), "{out}");
+        }
+    }
+
+    #[test]
+    fn private_key_header_inside_a_sentence_does_not_mask_following_prose() {
+        let cfg = RuleEngineConfig::default();
+        let (header, _) = synthetic_key_block("PRIVATE KEY", "\n", false);
+        let header = header.lines().next().unwrap();
+        let prose = "The next paragraph explains rotation.\nIt has two lines.\n";
+        let content = format!("Key files start with {header} on line one.\n{prose}");
+        let (out, _) = mask_text(&content, &cfg, "notes.md", MaskRedaction::Match);
+        assert!(out.starts_with("Key files start with "), "{out}");
+        assert!(out.ends_with(prose), "{out}");
     }
 
     #[test]

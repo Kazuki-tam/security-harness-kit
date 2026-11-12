@@ -122,9 +122,15 @@ static PRIVATE_KEY_FOOTER_RE: Lazy<Regex> = Lazy::new(|| {
 });
 
 /// Byte ranges of private key blocks in `content`, each running from the
-/// start of a `-----BEGIN … PRIVATE KEY-----` header through the end of the
-/// next footer. A block without a footer runs to the end of `content`, so a
-/// truncated key is still covered. Ranges are sorted and do not overlap.
+/// start of a `-----BEGIN … PRIVATE KEY-----` header through the end of its
+/// footer. Ranges are sorted and do not overlap.
+///
+/// A header without a footer (before the next header, if any) is either a
+/// truncated key or a header that is merely quoted in source code, command
+/// output or prose. Its range covers the rest of the header's line and then
+/// only the following lines that look like armor body — see
+/// [`unterminated_key_block_end`] — so a truncated key is still covered while
+/// ordinary text after a quoted header is left alone.
 ///
 /// Line-oriented callers (masking, context redaction) use this to treat the
 /// base64 body and footer as part of the secret, which per-line rules miss.
@@ -132,9 +138,16 @@ pub fn private_key_block_ranges(content: &str) -> Vec<std::ops::Range<usize>> {
     let mut out = Vec::new();
     let mut cursor = 0;
     while let Some(header) = PRIVATE_KEY_HEADER_RE.find_at(content, cursor) {
+        let next_header = PRIVATE_KEY_HEADER_RE
+            .find_at(content, header.end())
+            .map_or(content.len(), |next| next.start());
         let end = PRIVATE_KEY_FOOTER_RE
             .find_at(content, header.end())
-            .map_or(content.len(), |footer| footer.end());
+            .filter(|footer| footer.start() < next_header)
+            .map_or_else(
+                || unterminated_key_block_end(content, header.end()).min(next_header),
+                |footer| footer.end(),
+            );
         out.push(header.start()..end);
         if end >= content.len() {
             break;
@@ -142,6 +155,60 @@ pub fn private_key_block_ranges(content: &str) -> Vec<std::ops::Range<usize>> {
         cursor = end;
     }
     out
+}
+
+/// End of a private key block whose header ends at `header_end` and that has
+/// no footer. The block always covers the rest of the header's line. When
+/// nothing but whitespace follows the header on that line, it also covers the
+/// following lines for as long as they look like armor body: blank lines,
+/// armor header lines (`Proc-Type: …`, `Comment: …`) and lines made of base64
+/// characters only. Trailing blank lines are not part of the block.
+fn unterminated_key_block_end(content: &str, header_end: usize) -> usize {
+    let rest = &content[header_end..];
+    let header_line_len = rest.find('\n').unwrap_or(rest.len());
+    let mut end = header_end + rest[..header_line_len].trim_end().len();
+    if end > header_end {
+        return end;
+    }
+    let mut line_start = header_end + header_line_len;
+    while line_start < content.len() {
+        // `line_start` sits on the terminator of the previous line.
+        line_start += 1;
+        let line_len = content[line_start..]
+            .find('\n')
+            .unwrap_or(content.len() - line_start);
+        let raw = &content[line_start..line_start + line_len];
+        let line = raw.trim();
+        if line.is_empty() {
+            // Kept only if more armor body follows.
+        } else if is_armor_body_line(line) {
+            end = line_start + raw.trim_end().len();
+        } else {
+            break;
+        }
+        line_start += line_len;
+    }
+    end
+}
+
+/// Whether a trimmed, non-empty line can belong to the body of an armored
+/// key: an armor header such as `Proc-Type: 4,ENCRYPTED`, or base64 text
+/// (including the `=XXXX` checksum line of PGP armor).
+fn is_armor_body_line(line: &str) -> bool {
+    const ARMOR_HEADER_KEYS: &[&str] = &[
+        "Proc-Type",
+        "DEK-Info",
+        "Comment",
+        "Version",
+        "Hash",
+        "Charset",
+        "MessageID",
+    ];
+    if let Some((key, _)) = line.split_once(':') {
+        return ARMOR_HEADER_KEYS.contains(&key.trim_end());
+    }
+    line.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
 }
 
 static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
@@ -2938,12 +3005,79 @@ jobs:
         assert!(private_key_block_ranges("no keys here\n").is_empty());
     }
 
+    /// Header line plus `body_lines` base64 lines, without a footer.
+    fn unterminated_key_block(label: &str, body_lines: usize) -> String {
+        let block = synthetic_key_block(label);
+        let header = block.lines().next().unwrap();
+        let mut out = header.to_string();
+        for seed in ["Q1w2", "E3r4", "T5y6"].iter().take(body_lines) {
+            out.push('\n');
+            out.push_str(&seed.repeat(12));
+        }
+        out
+    }
+
     #[test]
-    fn unterminated_private_key_block_range_runs_to_end_of_input() {
-        let block = synthetic_key_block("OPENSSH PRIVATE KEY");
-        let cut = block.rfind('\n').unwrap();
-        let content = format!("intro\n{}\ntail", &block[..cut]);
+    fn unterminated_private_key_block_range_covers_only_the_armor_body() {
+        let block = unterminated_key_block("OPENSSH PRIVATE KEY", 3);
+        // No footer and nothing after the body: the block runs to the end.
+        let content = format!("intro\n{block}");
+        assert_eq!(private_key_block_ranges(&content), vec![6..content.len()]);
+        // Text that is not armor body ends the block.
+        let content = format!("intro\n{block}\n\ntrailing words\nmore text\n");
+        assert_eq!(private_key_block_ranges(&content), vec![6..6 + block.len()]);
+        // CRLF line endings and indentation do not end the body early.
+        let crlf = block.replace('\n', "\r\n  ");
+        let content = format!("intro\r\n{crlf}\r\ntrailing words\r\n");
+        assert_eq!(private_key_block_ranges(&content), vec![7..7 + crlf.len()]);
+    }
+
+    #[test]
+    fn unterminated_private_key_block_range_keeps_armor_headers_and_blank_lines() {
+        let block = unterminated_key_block("RSA PRIVATE KEY", 2);
+        let (header, body) = block.split_once('\n').unwrap();
+        let armored = format!(
+            "{header}\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,00FF\nComment: test\n\n{body}"
+        );
+        let content = format!("{armored}\n\nNote: not an armor header\n{body}\n");
+        assert_eq!(private_key_block_ranges(&content), vec![0..armored.len()]);
+    }
+
+    #[test]
+    fn private_key_header_quoted_in_source_code_covers_only_its_line() {
+        let header = unterminated_key_block("RSA PRIVATE KEY", 0);
+        let first_line = format!("const HEADER: &str = \"{header}\";");
+        let content = format!("{first_line}\nfn main() {{\n    run();\n}}\n");
+        let start = content.find(&header).unwrap();
+        assert_eq!(
+            private_key_block_ranges(&content),
+            vec![start..first_line.len()]
+        );
+        // A bare header line followed by ordinary code covers the header only.
+        let content = format!("{header}\nlet x = compute(1, 2);\n");
+        assert_eq!(private_key_block_ranges(&content), vec![0..header.len()]);
+    }
+
+    #[test]
+    fn private_key_header_inside_a_sentence_covers_only_its_line() {
+        let header = unterminated_key_block("PRIVATE KEY", 0);
+        let first_line = format!("A key file starts with {header} on its first line.");
+        let content = format!("{first_line}\nThe rest of this paragraph is prose.\n");
+        let start = content.find(&header).unwrap();
+        assert_eq!(
+            private_key_block_ranges(&content),
+            vec![start..first_line.len()]
+        );
+    }
+
+    #[test]
+    fn quoted_private_key_header_does_not_reach_a_later_key_block() {
+        let header = unterminated_key_block("RSA PRIVATE KEY", 0);
+        let block = synthetic_key_block("RSA PRIVATE KEY");
+        let content = format!("grep {header} *.pem\nsome output\n{block}\ndone\n");
         let ranges = private_key_block_ranges(&content);
-        assert_eq!(ranges, vec![6..content.len()]);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(&content[ranges[0].clone()], format!("{header} *.pem"));
+        assert_eq!(&content[ranges[1].clone()], block);
     }
 }

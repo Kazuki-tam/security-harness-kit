@@ -75,6 +75,12 @@ pub struct TableResult {
     /// xlsx dry runs only: every column with a formula in the data rows,
     /// selected or not, so a planner can warn before a column is picked.
     pub formula_columns: Vec<usize>,
+    /// CSV/TSV dry runs only: the refusal a real run with this selection
+    /// raises for a copied-through field that looks like swallowed rows (see
+    /// `ensure_fields_not_merged`). A planner reports it as the error it will
+    /// be; an interactive preview can still show the table so the selection
+    /// can be changed. It names a row and a column, never a value.
+    pub copied_field_refusal: Option<String>,
 }
 
 impl TableResult {
@@ -102,6 +108,7 @@ impl TableResult {
             sample_rows: Vec::new(),
             formula_cells: Vec::new(),
             formula_columns: Vec::new(),
+            copied_field_refusal: None,
         }
     }
 }
@@ -194,12 +201,36 @@ pub fn run_table<R: Read, W: Write>(
     }
 
     if options.dry_run {
+        // The same check a run makes, in the same order, so a plan and its
+        // run agree. Only the first refusal is kept.
+        let mut copied_field_refusal = None;
+        let mut check = |row: &[String], selected: &[ResolvedColumn], row_number: u64| {
+            if copied_field_refusal.is_none() {
+                copied_field_refusal = ensure_fields_not_merged(
+                    row,
+                    selected,
+                    row_number,
+                    options.delimiter,
+                    headers.len(),
+                )
+                .err()
+                .map(|err| err.to_string());
+            }
+        };
+        if has_header {
+            check(&headers, &[], 1);
+        }
+        let first_data_row = 1 + u64::from(has_header);
+        for (index, row) in pending_rows.iter().enumerate() {
+            check(row, &columns, first_data_row + index as u64);
+        }
         // Count the remaining rows so the plan reports the real table size.
         let mut rows_processed = pending_rows.len() as u64;
         for row in records {
-            let row = row.context("read CSV row")?;
+            let row = record_to_row(&row.context("read CSV row")?);
+            check(&row, &columns, first_data_row + rows_processed);
             if pending_rows.len() < TABLE_PREVIEW_ROWS {
-                pending_rows.push(record_to_row(&row));
+                pending_rows.push(row);
             }
             rows_processed += 1;
         }
@@ -221,6 +252,7 @@ pub fn run_table<R: Read, W: Write>(
             sample_rows: pending_rows,
             formula_cells: Vec::new(),
             formula_columns: Vec::new(),
+            copied_field_refusal,
         });
     }
 
@@ -239,7 +271,7 @@ pub fn run_table<R: Read, W: Write>(
 
     if has_header {
         // Every header cell is copied as it is, selected or not.
-        ensure_fields_not_merged(&headers, &[], 1, options.delimiter)?;
+        ensure_fields_not_merged(&headers, &[], 1, options.delimiter, headers.len())?;
         writer.write_record(&headers).context("write CSV header")?;
     }
 
@@ -253,6 +285,7 @@ pub fn run_table<R: Read, W: Write>(
             &columns,
             rows_processed + 1 + u64::from(has_header),
             options.delimiter,
+            headers.len(),
         )?;
         let out = transform_row(
             row,
@@ -294,6 +327,7 @@ pub fn run_table<R: Read, W: Write>(
         sample_rows: Vec::new(),
         formula_cells: Vec::new(),
         formula_columns: Vec::new(),
+        copied_field_refusal: None,
     })
 }
 
@@ -339,22 +373,25 @@ fn transform_row(
 /// CSV and TSV are both read and written with CSV quoting, so a field that
 /// merely begins with a stray `"` runs on until the next quote: the records
 /// (or, in TSV, the columns) it swallows end up inside one field of a column
-/// nobody selected and would be written out raw. Such a field cannot be told
-/// apart from a deliberately quoted multi-line value, so any line break in a
-/// field that is copied through is refused, as is a tab inside a TSV field.
-/// Fields in selected columns are replaced as a whole and need no check.
+/// nobody selected and would be written out raw. A deliberately quoted
+/// multi-line value — a notes cell — is well-formed and is copied as it is,
+/// so a field with a line break is refused only when it looks like swallowed
+/// rows (see `looks_like_merged_rows`). A tab inside a TSV field is refused
+/// as before. Fields in selected columns are replaced as a whole and need no
+/// check. `column_count` is the width of the table.
 fn ensure_fields_not_merged(
     row: &[String],
     selected: &[ResolvedColumn],
     row_number: u64,
     delimiter: u8,
+    column_count: usize,
 ) -> Result<()> {
     for (index, field) in row.iter().enumerate() {
         if selected.iter().any(|column| column.index == index) {
             continue;
         }
-        let found = if field.contains(['\n', '\r']) {
-            "a line break"
+        let found = if looks_like_merged_rows(field, delimiter, column_count) {
+            "line breaks that look like other rows"
         } else if delimiter == b'\t' && field.contains('\t') {
             "a tab"
         } else {
@@ -366,6 +403,21 @@ fn ensure_fields_not_merged(
         );
     }
     Ok(())
+}
+
+/// Whether a field with a line break looks like rows that a stray quote
+/// merged into it rather than a multi-line value: one of its lines holds as
+/// many delimiters as a whole row of the table has (at least one), or its
+/// double quotes do not pair up.
+fn looks_like_merged_rows(field: &str, delimiter: u8, column_count: usize) -> bool {
+    if !field.contains(['\n', '\r']) {
+        return false;
+    }
+    let row_delimiters = column_count.saturating_sub(1).max(1);
+    field
+        .split(['\n', '\r'])
+        .any(|line| line.bytes().filter(|&byte| byte == delimiter).count() >= row_delimiters)
+        || field.bytes().filter(|&byte| byte == b'"').count() % 2 == 1
 }
 
 /// The csv reader already strips a leading UTF-8 BOM, so fields are used as-is.
@@ -710,7 +762,10 @@ mod tests {
         let err = run_table(tsv.as_bytes(), Some(&mut out), &opts, Some(&material), None)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("line break"), "{err}");
+        assert!(
+            err.contains("line breaks that look like other rows"),
+            "{err}"
+        );
         assert!(err.contains("row 3, column 1"), "{err}");
         let written = String::from_utf8(out).unwrap();
         assert!(
@@ -742,18 +797,31 @@ mod tests {
         .to_string();
         assert!(err.contains("a tab"), "{err}");
 
-        // A header cell that spans lines is copied raw, so it is refused too.
-        let csv = "\"Name\nAda Lovelace\",Id\nGrace Hopper,2\n";
+        // A header cell that swallowed the rows below it is refused too.
+        let csv = "\"Name,Id\nAda Lovelace,1\nGrace Hopper,2\n";
         let err = run_table(
             csv.as_bytes(),
             Some(Vec::new()),
-            &options("Id:custom:id", false),
+            &positional(vec![(0, None)], false),
             Some(&material),
             None,
         )
         .unwrap_err()
         .to_string();
         assert!(err.contains("row 1, column 1"), "{err}");
+
+        // So is a swallowed tail that only shows as an unpaired quote.
+        let csv = "Id,Name,Note\n1,Ada Lovelace,\"said \"\"hi\nGrace Hopper\"\n";
+        let err = run_table(
+            csv.as_bytes(),
+            Some(Vec::new()),
+            &options("Name:name", false),
+            Some(&material),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("row 2, column 3"), "{err}");
 
         // A multi-line value in a selected column is replaced as a whole, and
         // a planning pass still previews the file so the column can be picked.
@@ -778,6 +846,101 @@ mod tests {
         )
         .unwrap();
         assert_eq!(preview.meta.rows_processed, 1);
+        assert_eq!(preview.copied_field_refusal, None);
+    }
+
+    #[test]
+    fn dry_run_reports_the_refusal_a_run_raises_for_swallowed_rows() {
+        let material = material();
+        // The stray quote sits past the rows sampled for inference.
+        let mut csv = String::from("Id,Name,Note\n");
+        for id in 0..150 {
+            csv.push_str(&format!("{id},Ada Lovelace,keep\n"));
+        }
+        csv.push_str("\"150,Grace Hopper,keep\n151,Alan Turing,keep\n");
+        let err = run_table(
+            csv.as_bytes(),
+            Some(Vec::new()),
+            &options("Name:name", false),
+            Some(&material),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("row 152, column 1"), "{err}");
+        let plan = run_table(
+            csv.as_bytes(),
+            None::<&mut Vec<u8>>,
+            &options("Name:name", true),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.copied_field_refusal, Some(err));
+        assert_eq!(plan.meta.rows_processed, 151);
+
+        // Early rows and the header are checked the same way.
+        for (csv, place) in [
+            (
+                "Id,Name\n\"1,Ada Lovelace\n2,Grace Hopper\n",
+                "row 2, column 1",
+            ),
+            (
+                "\"Id,Name\n1,Ada Lovelace\n2,Grace Hopper\n",
+                "row 1, column 1",
+            ),
+        ] {
+            let err = run_table(
+                csv.as_bytes(),
+                Some(Vec::new()),
+                &positional(vec![(0, None)], false),
+                Some(&material),
+                None,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains(place), "{err}");
+            let plan = run_table(
+                csv.as_bytes(),
+                None::<&mut Vec<u8>>,
+                &positional(vec![(0, None)], true),
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(plan.copied_field_refusal, Some(err), "{csv}");
+        }
+    }
+
+    #[test]
+    fn multi_line_cell_in_a_copied_column_is_kept_byte_for_byte() {
+        let material = material();
+        let email = ["ada", "@", "example.com"].concat();
+        // A well-formed quoted notes cell: line breaks (LF and CRLF), an
+        // escaped pair of quotes and a comma, in a three-column table.
+        let notes = "\"Called on Monday.\r\nShe said \"\"later\"\", then hung up\n\n- follow up\"";
+        let header = "\"Customer\nemail\",Notes,Id";
+        let csv = format!("{header}\n{email},{notes},7\n{email},plain,8\n");
+        let opts = positional(vec![(0, Some(Kind::Email))], false);
+        let mut out = Vec::new();
+        let result =
+            run_table(csv.as_bytes(), Some(&mut out), &opts, Some(&material), None).unwrap();
+        assert_eq!(result.meta.rows_processed, 2);
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains(&email), "{text}");
+        assert!(text.starts_with(&format!("{header}\n")), "{text}");
+        assert!(text.contains(&format!(",{notes},7\n")), "{text}");
+
+        let plan = run_table(
+            csv.as_bytes(),
+            None::<&mut Vec<u8>>,
+            &positional(vec![(0, Some(Kind::Email))], true),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.copied_field_refusal, None);
+        assert_eq!(plan.meta.rows_processed, 2);
     }
 
     #[test]

@@ -1229,6 +1229,7 @@ mod tests {
             value_hash: Some(hash.clone()),
             reason: Some("fixture".into()),
             expires: None,
+            unknown: Default::default(),
         });
         let compiled = suppression::compile_allowlist(&p.allowlist).unwrap();
         assert!(
@@ -1351,6 +1352,7 @@ mod tests {
             value_hash: None,
             reason: Some("public roadmap".into()),
             expires: None,
+            unknown: Default::default(),
         });
 
         let chunk = scan_text_content("docs/roadmap.md", "ProjectNebula\n", &p, false).unwrap();
