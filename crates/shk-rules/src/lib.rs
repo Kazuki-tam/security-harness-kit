@@ -159,15 +159,20 @@ pub fn private_key_block_ranges(content: &str) -> Vec<std::ops::Range<usize>> {
 
 /// End of a private key block whose header ends at `header_end` and that has
 /// no footer. The block always covers the rest of the header's line. When
-/// nothing but whitespace follows the header on that line, it also covers the
-/// following lines for as long as they look like armor body: blank lines,
-/// armor header lines (`Proc-Type: …`, `Comment: …`) and lines made of base64
-/// characters only. Trailing blank lines are not part of the block.
+/// nothing but whitespace or line decoration (see [`strip_line_decoration`])
+/// follows the header on that line, it also covers the following lines for
+/// as long as they look like armor body: blank lines, armor header lines
+/// (`Proc-Type: …`, `Comment: …`), lines made of base64 characters only, and
+/// decorated lines whose remainder is a base64 run of at least
+/// [`MIN_DECORATED_BODY_LEN`] characters — a key pasted into a shell or
+/// Makefile continuation, a string concatenation or a quoted reply. Trailing
+/// blank lines are not part of the block.
 fn unterminated_key_block_end(content: &str, header_end: usize) -> usize {
     let rest = &content[header_end..];
     let header_line_len = rest.find('\n').unwrap_or(rest.len());
-    let mut end = header_end + rest[..header_line_len].trim_end().len();
-    if end > header_end {
+    let header_tail = &rest[..header_line_len];
+    let mut end = header_end + header_tail.trim_end().len();
+    if !strip_line_decoration(header_tail).is_empty() {
         return end;
     }
     let mut line_start = header_end + header_line_len;
@@ -179,10 +184,16 @@ fn unterminated_key_block_end(content: &str, header_end: usize) -> usize {
             .unwrap_or(content.len() - line_start);
         let raw = &content[line_start..line_start + line_len];
         let line = raw.trim();
-        if line.is_empty() {
-            // Kept only if more armor body follows.
+        let body = strip_line_decoration(raw);
+        if body.is_empty() {
+            // Blank or decoration only: kept only if more armor body follows.
         } else if is_armor_body_line(line) {
             end = line_start + raw.trim_end().len();
+        } else if body.len() >= MIN_DECORATED_BODY_LEN && is_base64_text(body) {
+            // `body` is a subslice of `raw`: stop right after it, leaving the
+            // closing quote or continuation mark alone.
+            let body_start = body.as_ptr() as usize - raw.as_ptr() as usize;
+            end = line_start + body_start + body.len();
         } else {
             break;
         }
@@ -207,8 +218,37 @@ fn is_armor_body_line(line: &str) -> bool {
     if let Some((key, _)) = line.split_once(':') {
         return ARMOR_HEADER_KEYS.contains(&key.trim_end());
     }
-    line.bytes()
+    is_base64_text(line)
+}
+
+fn is_base64_text(text: &str) -> bool {
+    text.bytes()
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+}
+
+/// Shortest base64 run that counts as armor body on a decorated line, so a
+/// short quoted word or an ordinary statement still ends the block.
+const MIN_DECORATED_BODY_LEN: usize = 16;
+
+/// `line` without the decoration that surrounds key material embedded in
+/// other text: leading whitespace, `>` quote markers, `+` and quotes; and
+/// trailing whitespace, quotes, `\`, `,`, `+`, `;` and escaped line breaks
+/// (`\n`, `\r`), in any combination. The result is a subslice of `line`.
+fn strip_line_decoration(line: &str) -> &str {
+    let mut body = line
+        .trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, '>' | '+' | '"' | '\''));
+    loop {
+        let trimmed = body.trim_end();
+        let trimmed = trimmed
+            .strip_suffix("\\n")
+            .or_else(|| trimmed.strip_suffix("\\r"))
+            .or_else(|| trimmed.strip_suffix(['\\', ',', '+', ';', '"', '\'']))
+            .unwrap_or(trimmed);
+        if trimmed.len() == body.len() {
+            return body;
+        }
+        body = trimmed;
+    }
 }
 
 static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
@@ -3056,6 +3096,108 @@ jobs:
         // A bare header line followed by ordinary code covers the header only.
         let content = format!("{header}\nlet x = compute(1, 2);\n");
         assert_eq!(private_key_block_ranges(&content), vec![0..header.len()]);
+    }
+
+    /// The header and two body lines of an unterminated block.
+    fn unterminated_key_block_lines() -> (String, String, String) {
+        let block = unterminated_key_block("RSA PRIVATE KEY", 2);
+        let mut lines = block.lines().map(str::to_string);
+        (
+            lines.next().unwrap(),
+            lines.next().unwrap(),
+            lines.next().unwrap(),
+        )
+    }
+
+    /// Asserts that the single block range in `content` starts at the header
+    /// and ends right after the last occurrence of `last_body`.
+    fn assert_block_covers_decorated_body(content: &str, header: &str, last_body: &str) {
+        let start = content.find(header).unwrap();
+        let end = content.rfind(last_body).unwrap() + last_body.len();
+        let ranges = private_key_block_ranges(content);
+        assert_eq!(ranges.len(), 1, "{ranges:?}");
+        assert_eq!(ranges[0].start, start);
+        assert!(
+            ranges[0].end >= end,
+            "body left uncovered: {:?} in {content:?}",
+            ranges[0]
+        );
+        let next_line = content[end..]
+            .find('\n')
+            .map_or(content.len(), |at| end + at);
+        assert!(
+            ranges[0].end <= next_line,
+            "range runs past the body: {:?} in {content:?}",
+            ranges[0]
+        );
+    }
+
+    #[test]
+    fn unterminated_private_key_block_in_a_shell_continuation_is_covered() {
+        let (header, first, second) = unterminated_key_block_lines();
+        let content =
+            format!("KEY = {header} \\\n\t{first} \\\n\t{second}\n\nall: build\n\techo done\n");
+        assert_block_covers_decorated_body(&content, &header, &second);
+    }
+
+    #[test]
+    fn unterminated_private_key_block_in_string_concatenation_is_covered() {
+        let (header, first, second) = unterminated_key_block_lines();
+        // Trailing `+` with escaped line breaks inside the literals.
+        let content = format!(
+            "const key = \"{header}\\n\" +\n    \"{first}\\n\" +\n    \"{second}\";\nconsole.log(key.length);\n"
+        );
+        assert_block_covers_decorated_body(&content, &header, &second);
+        // Leading `+`, single quotes.
+        let content =
+            format!("key = '{header}'\n    + '{first}'\n    + '{second}';\nprint(len(key))\n");
+        assert_block_covers_decorated_body(&content, &header, &second);
+    }
+
+    #[test]
+    fn unterminated_private_key_block_in_a_quoted_list_is_covered() {
+        let (header, first, second) = unterminated_key_block_lines();
+        let content = format!(
+            "lines = [\n  \"{header}\",\n  \"{first}\",\n  \"{second}\",\n]\nprint(lines)\n"
+        );
+        assert_block_covers_decorated_body(&content, &header, &second);
+    }
+
+    #[test]
+    fn unterminated_private_key_block_behind_quote_markers_is_covered() {
+        let (header, first, second) = unterminated_key_block_lines();
+        let content = format!("> {header}\n> {first}\n>\n> {second}\n\nThanks for the report.\n");
+        assert_block_covers_decorated_body(&content, &header, &second);
+    }
+
+    #[test]
+    fn decorated_lines_that_are_not_armor_body_end_the_block() {
+        let (header, first, _) = unterminated_key_block_lines();
+        // Short quoted strings and ordinary statements are not key material.
+        for tail in [
+            "    \"short\",\n    \"values\",\n",
+            "    + offset;\n",
+            "> thanks, will check\n",
+            "    call(a, b) \\\n",
+        ] {
+            let content = format!("x = \"{header}\" +\n{tail}");
+            let start = content.find(&header).unwrap();
+            let first_line = content.find('\n').unwrap();
+            assert_eq!(
+                private_key_block_ranges(&content),
+                vec![start..first_line],
+                "{content:?}"
+            );
+            let content = format!("x = \"{header}\" +\n    \"{first}\" +\n{tail}");
+            let end = content.find(&first).unwrap() + first.len();
+            let ranges = private_key_block_ranges(&content);
+            assert_eq!(ranges.len(), 1);
+            assert!(
+                ranges[0].end >= end && ranges[0].end <= end + 3,
+                "{:?} in {content:?}",
+                ranges[0]
+            );
+        }
     }
 
     #[test]
