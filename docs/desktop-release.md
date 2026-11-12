@@ -136,11 +136,12 @@ needs production signing secrets.
 
 Combined (`shk-vX.Y.Z`) and CLI-prefixed (`cli-vX.Y.Z`) tags publish every
 asset under that tag, but the cargo-dist-generated install channels — the
-shell/PowerShell installers, the Homebrew formula, and the npm package — embed
+shell/PowerShell installers and the Homebrew formula — embed
 download URLs that follow cargo-dist's own `vX.Y.Z` convention, because the
 workflow's `dist build` calls carry no announcement tag and cargo-dist cannot
 parse the `shk-v*` / `cli-v*` conventions at all. Without a `vX.Y.Z` release,
-all three channels 404 (this bit `shk-v0.6.1`, the first combined release).
+these channels 404 (this bit `shk-v0.6.1`, the first combined release). The
+npm packages carry the binaries themselves and do not depend on the mirror.
 
 For a combined or `cli-v*` release, the published-channel verification job
 intentionally fails until the required mirror exists. After the publish jobs
@@ -155,10 +156,10 @@ checksums, creates the `vX.Y.Z` tag at the same commit, and publishes a
 non-latest mirror release with byte-identical assets (so the SHA-256 values in
 the already-published Homebrew formula still match). It temporarily disables
 the Release workflow while the tag is created — a `v*` tag push would
-otherwise re-trigger it and fail on the duplicate npm publish — and re-enables
+otherwise re-trigger it and publish a duplicate CLI release — and re-enables
 it on exit. Before returning, it also verifies the published installer,
 Homebrew, and npm channels against the mirror tag, commit, embedded download
-URLs, and archive checksums.
+URLs, archive checksums, and the binaries inside the npm packages.
 
 All CLI-producing tags run the same published-channel verification in the
 release workflow after Homebrew and npm publishing. To rerun it manually:
@@ -171,6 +172,52 @@ This is a maintainer-side step by design: the "Protect release tags" ruleset
 only lets repository admins create `v*` refs, so the workflow's own
 `GITHUB_TOKEN` cannot create the mirror tag from CI. Plain `vX.Y.Z` CLI
 releases need no mirror.
+
+## npm packages
+
+CLI releases publish six npm packages from `release.yml`: the main
+`security-harness-kit` package and one `security-harness-kit-<os>-<cpu>`
+package per cargo-dist target (`darwin-arm64`, `darwin-x64`, `linux-arm64`,
+`linux-x64`, `win32-x64`). cargo-dist's own npm installer is not used, because
+it downloads the binary at install time and ships an `npm-shrinkwrap.json` for
+its runtime dependencies.
+
+- `build-npm-packages.sh` runs in the `build installers` job. It checks every
+  `shk-cli-<target>` archive against its `.sha256` file, takes the binary out
+  of it, and packs it with `os` / `cpu` / `libc` fields. Each platform
+  `package.json` records the archive and binary SHA-256 in `shkBinary`. The
+  main package holds only the launcher (`packaging/npm/shk.js`) and pins every
+  platform package to the release version in `optionalDependencies`.
+- `verify-npm-packages.sh` then requires an exact file list for every tarball
+  (so no shrinkwrap or lockfile can be added), no lifecycle scripts, no
+  dependencies, and a binary that is byte-identical to the one in the release
+  archive. The same check runs again on the tarballs fetched back from the
+  registry in the `verify published CLI channels` job.
+- `publish-npm-packages.sh` publishes the platform packages first and the main
+  package last, after every platform package is visible on the registry. It
+  skips versions that already exist, so a failed job can be rerun.
+- The tarballs are also attached to the GitHub release and covered by the
+  build provenance attestation.
+
+The target list lives in `shk_npm_platforms` in
+`.github/scripts/release/common.sh`; `test.sh` fails when it differs from
+`targets` in `dist-workspace.toml`.
+
+### One-time setup for a new platform package
+
+Publishing uses npm trusted publishing (OIDC), which is configured per package
+on npmjs.com and can only be configured for a package that already exists.
+Before the first release that includes a new package name, a maintainer with
+publish rights must:
+
+1. Publish a placeholder version of that name by hand, for example `0.0.0`
+   with only a `package.json` and a README, and deprecate it.
+2. Open the package settings on npmjs.com and add a trusted publisher:
+   repository `Kazuki-tam/security-harness-kit`, workflow `release.yml`, and
+   the same environment setting as `security-harness-kit`.
+
+Until this is done for all five platform packages, the `publish npm packages`
+job fails on the first missing one and does not publish the main package.
 
 ## Release Checklist
 
@@ -196,9 +243,9 @@ releases need no mirror.
    names back the website's download links; unsigned releases do not update
    them.
 6. For `shk-vX.Y.Z` (or `cli-vX.Y.Z`) releases, run the
-   [CLI mirror](#combined-releases-and-the-cli-mirror) so the installers,
-   Homebrew formula, and npm package resolve; the mirror command now verifies
-   all three published channels before it succeeds.
+   [CLI mirror](#combined-releases-and-the-cli-mirror) so the installers
+   and Homebrew formula resolve; the mirror command verifies all three
+   published channels, npm included, before it succeeds.
 
 ### Unsigned release checklist
 

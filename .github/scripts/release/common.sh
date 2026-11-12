@@ -301,3 +301,107 @@ Machine-readable desktop release metadata is in \`shk-desktop-latest.json\`.
 Tauri updater metadata is published as \`latest.json\` and mirrored to the \`desktop-latest\` release.
 EOF
 }
+
+# npm distribution: a dependency-free main package plus one package per
+# cargo-dist target holding the prebuilt binary. The main package lists every
+# platform package in `optionalDependencies`; npm installs the one whose
+# `os` / `cpu` / `libc` fields match the host.
+readonly SHK_NPM_PACKAGE="security-harness-kit"
+
+# One line per target: <rust-target> <npm-os> <npm-cpu> <npm-libc|-> <binary>.
+# Keep in sync with `targets` in dist-workspace.toml (test.sh enforces it).
+shk_npm_platforms() {
+  cat <<'PLATFORMS'
+aarch64-apple-darwin darwin arm64 - shk
+x86_64-apple-darwin darwin x64 - shk
+aarch64-unknown-linux-gnu linux arm64 glibc shk
+x86_64-unknown-linux-gnu linux x64 glibc shk
+x86_64-pc-windows-msvc win32 x64 - shk.exe
+PLATFORMS
+}
+
+shk_npm_platform_package() {
+  local os="$1"
+  local cpu="$2"
+  printf '%s-%s-%s' "$SHK_NPM_PACKAGE" "$os" "$cpu"
+}
+
+# Platform package names first, the main package last. Publishing follows this
+# order so the main package never references an unpublished dependency.
+shk_npm_package_names() {
+  local target os cpu libc binary
+  while read -r target os cpu libc binary; do
+    shk_npm_platform_package "$os" "$cpu"
+    printf '\n'
+  done < <(shk_npm_platforms)
+  printf '%s\n' "$SHK_NPM_PACKAGE"
+}
+
+shk_sha256_of() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{ print $1 }'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{ print $1 }'
+  else
+    shk_error "sha256sum or shasum is required"
+    return 1
+  fi
+}
+
+# Print the name of the cargo-dist archive for a target.
+shk_cli_archive_name() {
+  local target="$1"
+  case "$target" in
+    *-windows-*) printf 'shk-cli-%s.zip' "$target" ;;
+    *) printf 'shk-cli-%s.tar.xz' "$target" ;;
+  esac
+}
+
+# Extract the single `shk` / `shk.exe` entry of a cargo-dist archive to <dest>
+# without unpacking any other archive path.
+shk_extract_cli_binary() {
+  local archive="$1"
+  local binary="$2"
+  local dest="$3"
+  local entries entry count
+  case "$archive" in
+    *.zip) entries="$(unzip -Z1 "$archive")" ;;
+    *) entries="$(tar -tf "$archive")" ;;
+  esac
+  entries="$(awk -F/ -v binary="$binary" '$NF == binary' <<<"$entries")"
+  count="$(grep -c . <<<"$entries" || true)"
+  if [[ "$count" -ne 1 ]]; then
+    shk_error "expected exactly one ${binary} in $(basename "$archive"), found ${count}"
+    return 1
+  fi
+  entry="$entries"
+  if [[ ! "$entry" =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$ || "$entry" == *..* ]]; then
+    shk_error "unsafe ${binary} path in $(basename "$archive"): ${entry}"
+    return 1
+  fi
+  case "$archive" in
+    *.zip) unzip -p "$archive" "$entry" > "$dest" ;;
+    *) tar -xOf "$archive" "$entry" > "$dest" ;;
+  esac
+  if [[ ! -s "$dest" ]]; then
+    shk_error "extracted ${binary} from $(basename "$archive") is empty"
+    return 1
+  fi
+}
+
+shk_npm_release_notes() {
+  local version="$1"
+  cat <<EOF
+
+## Install with npm
+
+\`\`\`sh
+npm install -g ${SHK_NPM_PACKAGE}@${version}
+\`\`\`
+
+The npm package has no dependencies and no install scripts. It selects one of
+the \`${SHK_NPM_PACKAGE}-<os>-<cpu>\` packages, which carry the same binaries
+as the archives attached to this release.
+EOF
+}

@@ -14,11 +14,9 @@ if [[ ! -d "$assets_dir" ]]; then
   exit 1
 fi
 assets_dir="$(cd "$assets_dir" && pwd)"
-workdir="$(mktemp -d)"
-trap 'rm -rf "$workdir"' EXIT
 shopt -s nullglob
 
-for command in grep jq tar; do
+for command in grep jq; do
   if ! command -v "$command" >/dev/null 2>&1; then
     shk_error "${command} is required to verify CLI channel artifacts"
     exit 1
@@ -129,47 +127,8 @@ if [[ "${#formulas[@]}" -ne 1 ]]; then
 fi
 verify_download_tag "Homebrew formula" "${formulas[0]}"
 
-npm_packages=("$assets_dir"/*-npm-package.tar.gz "$assets_dir"/*.tgz)
-if [[ "${#npm_packages[@]}" -ne 1 ]]; then
-  shk_error "expected exactly one npm package in ${assets_dir}"
-  exit 1
-fi
-npm_package="${npm_packages[0]}"
-archive_entries="$(tar -tzf "$npm_package")"
-if grep -E -q '(^/|(^|/)\.\.(/|$))' <<<"$archive_entries"; then
-  shk_error "npm package contains an unsafe archive path"
-  exit 1
-fi
-archive_listing="$(tar -tvzf "$npm_package")"
-if awk '$1 !~ /^[-d]/ { unsafe = 1 } END { exit unsafe ? 0 : 1 }' <<<"$archive_listing"; then
-  shk_error "npm package contains a link or special archive entry"
-  exit 1
-fi
-package_json_path="$(
-  printf '%s\n' "$archive_entries" \
-    | awk -F/ 'NF == 2 && $2 == "package.json" && path == "" { path = $0 } END { print path }'
-)"
-if [[ -z "$package_json_path" ]]; then
-  shk_error "npm package does not contain a top-level package.json"
-  exit 1
-fi
-package_json="$(tar -xzOf "$npm_package" "$package_json_path")"
-package_name="$(jq -r '.name // empty' <<<"$package_json")"
-package_version="$(jq -r '.version // empty' <<<"$package_json")"
-if [[ "$package_name" != "security-harness-kit" || "$package_version" != "$version" ]]; then
-  shk_error "npm package identity mismatch: expected security-harness-kit@${version}"
-  exit 1
-fi
-npm_content="$workdir/npm-content.txt"
-if ! (
-  # Avoid extracting archive paths and cap the combined text inspected from a
-  # compromised or malformed registry package at 10 MiB (ulimit uses 512-byte blocks).
-  ulimit -f 20480
-  tar -xzOf "$npm_package" > "$npm_content"
-); then
-  shk_error "npm package content exceeds the safe inspection limit or is unreadable"
-  exit 1
-fi
-verify_download_tag "npm package" "$npm_content"
+# The npm packages embed no download URL: they carry the binaries themselves,
+# so they are checked against the archives verified above instead.
+"${ROOT}/.github/scripts/release/verify-npm-packages.sh" "$assets_dir" "$version"
 
 echo "CLI channel artifacts verified for v${version}"
