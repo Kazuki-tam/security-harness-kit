@@ -1122,15 +1122,7 @@ pub fn has_managed_ai_hooks(root: &Path) -> bool {
 
 pub fn has_shk_pre_commit(root: &Path) -> bool {
     git::discover_repo_root(root)
-        .as_ref()
-        .map(|r| r.join(".git/hooks/pre-commit"))
-        .map(|p| {
-            p.is_file()
-                && fs::read_to_string(&p)
-                    .unwrap_or_default()
-                    .contains("shk scan --staged")
-        })
-        .unwrap_or(false)
+        .is_some_and(|repo_root| crate::hooks::has_shk_pre_commit(&repo_root))
 }
 
 pub fn collect_shk_executable_status() -> ShkExecutableStatus {

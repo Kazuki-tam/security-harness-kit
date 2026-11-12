@@ -2377,7 +2377,7 @@ fn has_all_managed_ai_hooks(statuses: &[AiHookToolStatus]) -> bool {
 }
 
 fn build_hooks_status(root: &Path, git_root: Option<&Path>) -> HooksStatus {
-    let pre_commit_path = git_root.map(|r| r.join(".git/hooks/pre-commit"));
+    let pre_commit_path = git_root.map(crate::hooks::pre_commit_hook_path);
     let pre_commit_installed = has_shk_pre_commit(root);
     HooksStatus {
         pre_commit: PreCommitStatus {
