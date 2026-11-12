@@ -135,13 +135,17 @@ pub(crate) fn check_latest_version() -> Result<VersionCheck> {
 }
 
 fn build_version_check(current: &'static str, latest_tag: String) -> VersionCheck {
-    let status = compare_versions(current, &latest_tag)
-        .map(|ordering| match ordering {
+    let status = match (parse_version(current), parse_version(&latest_tag)) {
+        (Some(local), Some(latest)) => match local.cmp(&latest) {
+            // A prerelease is only an update for an install that is itself a
+            // prerelease; stable installs are not told to move to an rc.
+            Ordering::Less if latest.pre.is_some() && local.pre.is_none() => VersionStatus::Current,
             Ordering::Less => VersionStatus::UpdateAvailable,
             Ordering::Equal => VersionStatus::Current,
             Ordering::Greater => VersionStatus::LocalNewer,
-        })
-        .unwrap_or(VersionStatus::Unknown);
+        },
+        _ => VersionStatus::Unknown,
+    };
 
     VersionCheck {
         current,
@@ -186,30 +190,93 @@ fn env_latest_release_tag(raw: Option<&str>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+#[cfg(test)]
 fn compare_versions(current: &str, latest_tag: &str) -> Option<Ordering> {
     let current = parse_version(current)?;
     let latest = parse_version(latest_tag)?;
     Some(current.cmp(&latest))
 }
 
-fn parse_version(input: &str) -> Option<Vec<u64>> {
-    let core = input
-        .trim()
-        .trim_start_matches('v')
-        .split(['-', '+'])
-        .next()?;
-    let mut parts = core
+/// Release tag prefixes that carry a CLI build (see
+/// `.github/scripts/release/resolve-target.sh`): `shk-vX.Y.Z` (CLI + desktop),
+/// `cli-vX.Y.Z`, and `vX.Y.Z`. `desktop-v*` tags are desktop-only and are
+/// deliberately not treated as a CLI version.
+const CLI_TAG_PREFIXES: &[&str] = &["shk-v", "cli-v", "v"];
+
+/// One dot-separated prerelease identifier, ordered as SemVer specifies:
+/// numeric identifiers sort before alphanumeric ones.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum PrereleaseIdentifier {
+    Numeric(u64),
+    Text(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedVersion {
+    core: Vec<u64>,
+    /// `None` for a final release.
+    pre: Option<Vec<PrereleaseIdentifier>>,
+}
+
+impl Ord for ParsedVersion {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.core
+            .cmp(&other.core)
+            .then_with(|| match (&self.pre, &other.pre) {
+                (None, None) => Ordering::Equal,
+                // A prerelease is older than its final release.
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (Some(a), Some(b)) => a.cmp(b),
+            })
+    }
+}
+
+impl PartialOrd for ParsedVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn parse_version(input: &str) -> Option<ParsedVersion> {
+    let input = input.trim();
+    let version = CLI_TAG_PREFIXES
+        .iter()
+        .find_map(|prefix| input.strip_prefix(prefix))
+        .unwrap_or(input);
+    // Build metadata does not take part in precedence.
+    let version = version
+        .split_once('+')
+        .map_or(version, |(before, _)| before);
+    let (core, pre) = match version.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (version, None),
+    };
+    let mut core = core
         .split('.')
         .map(str::parse::<u64>)
         .collect::<Result<Vec<_>, _>>()
         .ok()?;
-    if parts.is_empty() {
-        return None;
+    while core.len() < 3 {
+        core.push(0);
     }
-    while parts.len() < 3 {
-        parts.push(0);
-    }
-    Some(parts)
+    let pre = match pre {
+        None => None,
+        Some(pre) => Some(
+            pre.split('.')
+                .map(|identifier| {
+                    if identifier.is_empty() {
+                        None
+                    } else if let Ok(number) = identifier.parse::<u64>() {
+                        Some(PrereleaseIdentifier::Numeric(number))
+                    } else {
+                        Some(PrereleaseIdentifier::Text(identifier.to_string()))
+                    }
+                })
+                .collect::<Option<Vec<_>>>()?,
+        ),
+    };
+    Some(ParsedVersion { core, pre })
 }
 
 fn current_version() -> &'static str {
@@ -225,11 +292,96 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_version_normalizes_prerelease_and_short_forms() {
-        assert_eq!(parse_version("v1.2.3"), Some(vec![1, 2, 3]));
-        assert_eq!(parse_version("1.2"), Some(vec![1, 2, 0]));
-        assert_eq!(parse_version("1.2.3-beta"), Some(vec![1, 2, 3]));
+    fn parse_version_normalizes_short_forms_and_keeps_prerelease() {
+        let core = |input: &str| parse_version(input).map(|version| version.core);
+        assert_eq!(core("v1.2.3"), Some(vec![1, 2, 3]));
+        assert_eq!(core("1.2"), Some(vec![1, 2, 0]));
+        assert_eq!(core("1.2.3-beta"), Some(vec![1, 2, 3]));
+        assert_eq!(core("1.2.3+build.5"), Some(vec![1, 2, 3]));
+        assert!(parse_version("1.2.3").is_some_and(|v| v.pre.is_none()));
+        assert!(parse_version("1.2.3-beta").is_some_and(|v| v.pre.is_some()));
         assert_eq!(parse_version("not-a-version"), None);
+        assert_eq!(parse_version("1.2.3-"), None);
+    }
+
+    #[test]
+    fn release_tag_prefixes_are_stripped() {
+        // Tags that carry a CLI build: vX.Y.Z, cli-vX.Y.Z, shk-vX.Y.Z.
+        for tag in ["v1.2.4", "cli-v1.2.4", "shk-v1.2.4"] {
+            assert_eq!(
+                compare_versions("1.2.3", tag),
+                Some(Ordering::Less),
+                "{tag}"
+            );
+            assert_eq!(
+                compare_versions("1.2.4", tag),
+                Some(Ordering::Equal),
+                "{tag}"
+            );
+            assert_eq!(
+                build_version_check("1.2.3", tag.into()).status().as_str(),
+                "update_available",
+                "{tag}"
+            );
+        }
+        // A desktop-only tag says nothing about the CLI version.
+        assert_eq!(compare_versions("1.2.3", "desktop-v1.2.4"), None);
+        assert_eq!(
+            build_version_check("1.2.3", "desktop-v1.2.4".into())
+                .status()
+                .as_str(),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn prerelease_orders_before_its_final() {
+        assert_eq!(
+            compare_versions("1.2.3-rc.1", "v1.2.3"),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_versions("1.2.3", "v1.2.3-rc.1"),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            compare_versions("1.2.3-rc.1", "v1.2.3-rc.2"),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_versions("1.2.3-rc.2", "v1.2.3-rc.10"),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_versions("1.2.3-alpha", "v1.2.3-alpha.1"),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_versions("1.2.3-1", "v1.2.3-alpha"),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_versions("1.2.3-rc.1+build.1", "v1.2.3-rc.1+build.2"),
+            Some(Ordering::Equal)
+        );
+    }
+
+    #[test]
+    fn prerelease_is_not_announced_to_stable_users() {
+        // An rc of the installed release is older, not "current".
+        let older = build_version_check("1.2.3", "v1.2.3-rc.1".into());
+        assert_eq!(older.status().as_str(), "local_newer");
+
+        // A newer prerelease is not offered as an update to a stable install.
+        let stable = build_version_check("1.2.3", "v1.3.0-rc.1".into());
+        assert_eq!(stable.status().as_str(), "current");
+        assert_eq!(stable.status().update_available(), Some(false));
+
+        // A prerelease install still learns about the final and later rcs.
+        let rc_to_final = build_version_check("1.3.0-rc.1", "v1.3.0".into());
+        assert_eq!(rc_to_final.status().as_str(), "update_available");
+        let rc_to_rc = build_version_check("1.3.0-rc.1", "shk-v1.3.0-rc.2".into());
+        assert_eq!(rc_to_rc.status().as_str(), "update_available");
     }
 
     #[test]
