@@ -38,6 +38,19 @@ const SHELL_HISTORY_PATH_PATTERNS: &[&str] = &[
     "**/powershell/psreadline/*_history.txt",
 ];
 
+/// Text a secret path always holds, in lower case: every pattern above and
+/// every direct check in `is_secret_path` contains one of these (checked by
+/// a test). Arguments without any are ruled out before the patterns run.
+const SECRET_PATH_MARKERS: &[&str] = &[
+    ".env",
+    "token",
+    "key",
+    "secret",
+    "password",
+    "credential",
+    "history",
+];
+
 // This intentionally covers common direct readers and filters, not every
 // possible interpreter or shell composition. Custom loaders remain tunable
 // through `[action_guard].deny` and are documented as a guard limitation.
@@ -476,15 +489,17 @@ pub fn detect_dangerous_action_with_config(
     }
 
     // One budget for the whole payload, so nested re-parsing stays bounded no
-    // matter how many candidate strings the payload carries.
-    let reparse_budget = Cell::new(MAX_NESTED_COMMAND_REPARSES);
-    for candidate in candidate_command_strings(&v) {
+    // matter how many candidate strings the payload carries or how many ways
+    // each of them is read.
+    let candidates = candidate_command_strings(&v);
+    let budget = ScanBudget::for_payload(candidates.iter().map(|c| c.text.len()).sum());
+    for candidate in candidates {
         let matched = detect_candidate_command(
             &candidate.text,
             candidate.command_typed,
             profile,
             config,
-            &reparse_budget,
+            &budget,
         );
         if matched.is_some() {
             return Ok(matched);
@@ -951,10 +966,73 @@ const MAX_AMBIGUOUS_COMMAND_STARTS: usize = 8;
 /// single pass. Words that cannot start a guarded command are not counted.
 const MAX_EXAMINED_COMMAND_STARTS: usize = 256;
 
-/// Text examined behind ambiguous wrappers per candidate command string, in
-/// bytes. Every possible command start is examined together with all words
-/// after it, so the work grows with the product of the two.
-const MAX_EXAMINED_COMMAND_BYTES: usize = 16 * 1024 * 1024;
+/// Text examined behind ambiguous wrappers per hook payload, in bytes. Every
+/// possible command start is examined together with all words after it, so
+/// the work grows with the product of the two.
+const MAX_FAN_OUT_BYTES: usize = 1024 * 1024;
+
+/// Text re-examined per hook payload, in bytes: everything scanned again
+/// after the first pass over a candidate string. That is the text behind
+/// ambiguous wrappers and each nested command (`bash -c …`, a substitution,
+/// what a wrapper runs).
+const MAX_EXAMINED_COMMAND_BYTES: usize = 1024 * 1024;
+
+/// A long payload may re-examine this many times its own length instead. A
+/// script nests most of its text a level or two deep (`if …; then …`,
+/// `FOO=1 …`, `$(…)`) under every reading.
+const EXAMINED_BYTES_PER_PAYLOAD_BYTE: usize = 4;
+
+/// Work left for one hook payload, shared by all of its candidate command
+/// strings and all readings of them.
+struct ScanBudget {
+    /// Ambiguous wrapper re-parses.
+    reparses: Cell<usize>,
+    /// Bytes of text that may still be re-examined.
+    examined_bytes: Cell<usize>,
+    /// Bytes of text that may still be examined behind ambiguous wrappers.
+    fan_out_bytes: Cell<usize>,
+}
+
+impl ScanBudget {
+    /// The budget for a payload whose candidate strings hold `payload_bytes`.
+    fn for_payload(payload_bytes: usize) -> Self {
+        Self {
+            reparses: Cell::new(MAX_NESTED_COMMAND_REPARSES),
+            examined_bytes: Cell::new(
+                MAX_EXAMINED_COMMAND_BYTES
+                    .max(payload_bytes.saturating_mul(EXAMINED_BYTES_PER_PAYLOAD_BYTE)),
+            ),
+            fan_out_bytes: Cell::new(MAX_FAN_OUT_BYTES),
+        }
+    }
+
+    /// Charges one ambiguous wrapper re-parse. False when none is left.
+    fn charge_reparse(&self) -> bool {
+        let Some(left) = self.reparses.get().checked_sub(1) else {
+            return false;
+        };
+        self.reparses.set(left);
+        true
+    }
+
+    /// Charges text that is about to be examined again. False when that is
+    /// more than the payload has left; nothing is left afterwards.
+    fn charge_examined(&self, bytes: usize) -> bool {
+        Self::charge_bytes(&self.examined_bytes, bytes)
+    }
+
+    /// Charges text that is about to be examined as one possible command
+    /// behind an ambiguous wrapper, on top of `charge_examined`.
+    fn charge_fan_out(&self, bytes: usize) -> bool {
+        Self::charge_bytes(&self.fan_out_bytes, bytes)
+    }
+
+    fn charge_bytes(left: &Cell<usize>, bytes: usize) -> bool {
+        let rest = left.get().checked_sub(bytes);
+        left.set(rest.unwrap_or(0));
+        rest.is_some()
+    }
+}
 
 /// How an unquoted `#` is read.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -969,9 +1047,15 @@ enum CommentMode {
     Eager,
 }
 
-/// One way of reading comments, plus what was seen while reading that way.
+/// One way of reading comments and quotes, plus what was seen while reading
+/// that way.
 struct CommentReading {
     mode: CommentMode,
+    /// `$'…'` is ANSI-C quoting, as in bash, zsh and ksh: a backslash escapes
+    /// the next character, so `\'` does not close the string. Otherwise the
+    /// `$` is literal and `'…'` a plain single-quoted string that ends at the
+    /// next quote, as in dash and other shells without ANSI-C quoting.
+    ansi_c: bool,
     /// A comment was dropped.
     dropped: Cell<bool>,
     /// A `#` that `Eager` reads as a comment was kept as word text.
@@ -979,11 +1063,22 @@ struct CommentReading {
 }
 
 impl CommentReading {
-    fn new(mode: CommentMode) -> Self {
+    fn new(mode: CommentMode, ansi_c: bool) -> Self {
         Self {
             mode,
+            ansi_c,
             dropped: Cell::new(false),
             kept_ambiguous: Cell::new(false),
+        }
+    }
+
+    /// The text of `segment` with ANSI-C quoted strings written out, where
+    /// this reading has them.
+    fn decoded(&self, segment: &str) -> String {
+        if self.ansi_c {
+            decode_ansi_c_quotes(segment)
+        } else {
+            segment.to_string()
         }
     }
 }
@@ -996,46 +1091,54 @@ impl CommentReading {
 /// each other: comments dropped where one clearly starts, dropped wherever
 /// one could start, and not dropped at all. Most commands hold no `#` and are
 /// read once.
+///
+/// Likewise `$'…'` is read both ways shells read it: which shell runs the
+/// text (`sh` is dash on many systems) is not known, and where the string
+/// ends decides what runs after it.
 fn detect_candidate_command(
     text: &str,
     command_typed: bool,
     profile: ActionGuardProfile,
     config: &ActionGuardConfig,
-    reparse_budget: &Cell<usize>,
+    budget: &ScanBudget,
 ) -> Option<ActionGuardMatch> {
-    let budget = reparse_budget.get();
-    let mut budget_left = budget;
-    let mut pending = vec![CommentMode::Words];
+    let reparses = budget.reparses.get();
+    let mut reparses_left = reparses;
+    // Taken from the end: the ANSI-C readings come first.
+    let mut pending = Vec::new();
+    if text.contains("$'") {
+        pending.push((CommentMode::Words, false));
+    }
+    pending.push((CommentMode::Words, true));
     let mut matched = None;
-    while let Some(mode) = pending.pop() {
-        // Every reading gets the same budget; the payload is charged for the
-        // most expensive one.
-        reparse_budget.set(budget);
+    while let Some((mode, ansi_c)) = pending.pop() {
+        // Every reading gets the same re-parses; the payload is charged for
+        // the most expensive one. Examined text is charged for all of them.
+        budget.reparses.set(reparses);
         let scan = CommandScan {
             profile,
             config,
             unwrap_prefixes: command_typed,
-            reparse_budget,
-            comments: CommentReading::new(mode),
+            budget,
+            comments: CommentReading::new(mode, ansi_c),
             fan_out: RefCell::default(),
-            examined_bytes: Cell::new(0),
         };
         matched = detect_command(text, &scan, 0, false);
-        budget_left = budget_left.min(reparse_budget.get());
+        reparses_left = reparses_left.min(budget.reparses.get());
         if matched.is_some() {
             break;
         }
         if mode == CommentMode::Words {
             // The other readings differ only where this one met a `#`.
             if scan.comments.dropped.get() {
-                pending.push(CommentMode::Ignored);
+                pending.push((CommentMode::Ignored, ansi_c));
             }
             if scan.comments.kept_ambiguous.get() {
-                pending.push(CommentMode::Eager);
+                pending.push((CommentMode::Eager, ansi_c));
             }
         }
     }
-    reparse_budget.set(budget_left);
+    budget.reparses.set(reparses_left);
     matched
 }
 
@@ -1074,14 +1177,16 @@ struct CommandScan<'a> {
     /// to be shell commands: in file bodies and prose a leading `if` or `{`
     /// says nothing about what runs.
     unwrap_prefixes: bool,
-    /// Ambiguous wrapper re-parses left for the payload.
-    reparse_budget: &'a Cell<usize>,
+    /// Work left for the payload.
+    budget: &'a ScanBudget,
     comments: CommentReading,
     fan_out: RefCell<FanOutMemo>,
-    /// Bytes of text examined behind ambiguous wrappers so far.
-    examined_bytes: Cell<usize>,
 }
 
+/// The fail-closed answer when a payload needs more analysis than its budget
+/// allows. Ordinary commands stay far below it; what exceeds it is a wrapper
+/// with unrecognised options in front of a long word list, where every word
+/// may start the command, or text nested many levels deep.
 fn too_many_words_after_wrapper() -> ActionGuardMatch {
     guard_match(
         ActionCategory::OpaqueExecution,
@@ -1094,13 +1199,15 @@ impl CommandScan<'_> {
     /// Scans the commands one wrapper may run: `texts` as given, and the
     /// suffixes of `base` that begin at `starts` (byte offset and word).
     ///
-    /// A single command is free: it is shorter than the text it was unwrapped
-    /// from. Several possible commands come from a wrapper whose options are
-    /// not recognised, which makes every later word a possible command start.
-    /// The first few are re-parsed in full and charged to the payload's
-    /// budget. The rest get one pass each, or none when the word cannot start
-    /// a guarded command, and the scan fails closed once too many needed one
-    /// or too much text was examined.
+    /// A single command costs no re-parse: it is shorter than the text it was
+    /// unwrapped from. Several possible commands come from a wrapper whose
+    /// options are not recognised, which makes every later word a possible
+    /// command start. A word that cannot start a guarded command is skipped.
+    /// Of the others, those among the first few starts are re-parsed in full
+    /// and charged to the payload's re-parses; the rest get one pass each.
+    /// The scan fails closed once too many needed a pass or the passes cover
+    /// too much text. Every pass, here and in anything nested, is also
+    /// charged to the payload's examined text by `detect_command`.
     fn detect_wrapped(
         &self,
         texts: &[String],
@@ -1114,18 +1221,16 @@ impl CommandScan<'_> {
             // Text of its own (`bash -c …`, `eval …`) has not been scanned by
             // the enclosing segment, so it is always read in full.
             ([only], []) => return detect_command(only, self, depth, false),
-            ([], [(start, _)]) => return detect_command(&base[*start..], self, depth, shallow),
+            ([], [(start, _)]) => {
+                let (start, depth) = self.peel_plain_wrappers(base, *start, depth)?;
+                return detect_command(&base[start..], self, depth, shallow);
+            }
             // A shallow pass does not fan out again.
             _ if shallow => return Some(too_many_words_after_wrapper()),
             _ => {}
         }
-        let charge = || {
-            let left = self.reparse_budget.get().checked_sub(1)?;
-            self.reparse_budget.set(left);
-            Some(())
-        };
         for text in texts {
-            if charge().is_none() {
+            if !self.budget.charge_reparse() {
                 return Some(too_many_words_after_wrapper());
             }
             if let Some(matched) = detect_command(text, self, depth, false) {
@@ -1152,21 +1257,17 @@ impl CommandScan<'_> {
         for (index, (start, word)) in starts.iter().enumerate() {
             let candidate = &base[*start..];
             let full = index < MAX_AMBIGUOUS_COMMAND_STARTS;
-            if !full {
-                let screen = screen.get_or_insert_with(|| PlainTailScreen::new(base, *start, self));
-                if !screen.may_be_flagged(word, base, *start) {
-                    continue;
-                }
+            let screen = screen.get_or_insert_with(|| PlainTailScreen::new(base, *start, self));
+            if !screen.may_be_flagged(word, base, *start) {
+                continue;
             }
             if !first_visit(candidate.len(), full) {
                 continue;
             }
             examined += 1;
-            let examined_bytes = self.examined_bytes.get().saturating_add(candidate.len());
-            self.examined_bytes.set(examined_bytes);
             if examined > MAX_EXAMINED_COMMAND_STARTS
-                || examined_bytes > MAX_EXAMINED_COMMAND_BYTES
-                || (full && charge().is_none())
+                || !self.budget.charge_fan_out(candidate.len())
+                || (full && !self.budget.charge_reparse())
             {
                 return Some(too_many_words_after_wrapper());
             }
@@ -1177,9 +1278,84 @@ impl CommandScan<'_> {
         None
     }
 
+    /// Skips the wrappers a plainly written command starts with (`time nice
+    /// nohup make …`), each of which runs exactly the command after it.
+    /// Returns where in `base` the command behind them starts and the depth
+    /// it runs at, or `None` when a wrapper is left with nothing to run.
+    ///
+    /// Scanning the text once per wrapper arrives at the same place, but
+    /// reads all the words behind the wrappers every time. A wrapper is only
+    /// skipped when scanning it could report nothing of its own: the text is
+    /// bare words, the wrapper is not flagged itself (`sudo`, `env`), and no
+    /// policy entry could match the command that starts with it. Anything
+    /// else is left to `detect_command`.
+    fn peel_plain_wrappers(
+        &self,
+        base: &str,
+        start: usize,
+        depth: usize,
+    ) -> Option<(usize, usize)> {
+        let unpeeled = Some((start, depth));
+        let tail = &base[start..];
+        let first = tail.split(' ').next().unwrap_or_default();
+        if !self.config.allow.is_empty()
+            || !self.config.deny.is_empty()
+            || !self.skippable_wrapper(first)
+            || !plainly_spaced_words(tail)
+        {
+            return unpeeled;
+        }
+        let words = tail.split(' ').collect::<Vec<_>>();
+        let (mut index, mut offset, mut depth) = (0, start, depth);
+        while depth < MAX_NESTED_COMMAND_DEPTH && self.skippable_wrapper(words[index]) {
+            let rest = &words[index..];
+            let name = command_basename(rest[0]);
+            let starts = if matches!(name, "command" | "exec" | "nohup") {
+                wrapper_command_starts(name, rest)
+            } else {
+                prefixed_command_starts(rest)
+            };
+            let mut starts = starts.into_iter().filter(|next| *next < rest.len());
+            match (starts.next(), starts.next()) {
+                (None, _) => return None,
+                (Some(next), None) => {
+                    offset += rest[..next]
+                        .iter()
+                        .map(|word| word.len() + 1)
+                        .sum::<usize>();
+                    index += next;
+                    depth += 1;
+                }
+                // Ambiguous: every later word may start the command.
+                _ => break,
+            }
+        }
+        Some((offset, depth))
+    }
+
+    /// True for a bare word that only runs the command after it: nothing
+    /// flags the wrapper itself, whatever its arguments are.
+    fn skippable_wrapper(&self, word: &str) -> bool {
+        // The built-in checks split words at these.
+        if word.contains([',', '=']) {
+            return false;
+        }
+        let name = command_basename(word);
+        matches!(name, "command" | "exec" | "nohup")
+            || (self.unwrap_prefixes
+                && (SHELL_RESERVED_PREFIX_WORDS.contains(&word)
+                    || matches!(word, "function" | "coproc")
+                    || (EXEC_WRAPPER_COMMANDS.contains(&name)
+                        && !PRIVILEGE_SYSTEM_COMMANDS.contains(&name))))
+    }
+
     /// With comments left in, a trailing comment is part of its segment and
     /// an allow entry for the command itself would no longer match it. Such an
-    /// entry keeps applying to the command the segment starts with.
+    /// entry keeps applying when the segment is that one command followed by
+    /// its comment. A segment that holds more is not exempted as a whole:
+    /// neither one whose comment-aware reading goes on after the comment
+    /// (`ls # it's <newline> other`), nor one that only gets to the allowed
+    /// command behind a comment (`# note \<newline> ls`).
     fn allowed_without_its_comment(&self, raw_segment: &str) -> bool {
         if self.comments.mode != CommentMode::Ignored
             || self.config.allow.is_empty()
@@ -1187,23 +1363,46 @@ impl CommandScan<'_> {
         {
             return false;
         }
-        let reading = CommentReading::new(CommentMode::Words);
-        let Some(command) = shell_command_segments(raw_segment, &reading)
-            .into_iter()
-            .next()
-        else {
+        let reading = CommentReading::new(CommentMode::Words, self.comments.ansi_c);
+        let segments = shell_command_segments(raw_segment, &reading);
+        let [command] = segments.as_slice() else {
             return false;
         };
         reading.dropped.get()
-            && [decode_ansi_c_quotes(&command), command]
+            && raw_segment.starts_with(command.as_str())
+            && [reading.decoded(command), command.clone()]
                 .iter()
                 .any(|form| action_allowed(&format!("Bash({form})"), &self.config.allow))
     }
 }
 
+/// Characters that make a word list more than bare words: quoting, escapes,
+/// expansions, redirections and operators change which word is the command,
+/// and comments and line breaks change where it ends.
+const SHELL_SPECIAL_CHARS: [char; 14] = [
+    '\'', '"', '\\', '`', '$', '<', '>', ';', '|', '&', '(', ')', '#', '\n',
+];
+
+/// True when `text` is bare lower-case words with one space between them, so
+/// that every way the guard splits, normalises or re-joins it yields the same
+/// words and the text behind any word is the text itself from there on.
+fn plainly_spaced_words(text: &str) -> bool {
+    !text.starts_with(' ')
+        && !text.ends_with(' ')
+        && !text.contains("  ")
+        && !text.contains(|ch: char| {
+            (ch.is_whitespace() && ch != ' ')
+                || ch.is_ascii_uppercase()
+                || SHELL_SPECIAL_CHARS.contains(&ch)
+        })
+        && !text.contains("/proc/self/environ")
+        // Dropped when the text is normalised for matching.
+        && !text.ends_with(":*")
+}
+
 /// Decides without re-parsing whether a word in a plainly written word list
-/// could start a command the guard flags. Built for the words behind the
-/// first few possible command starts of an ambiguous wrapper.
+/// could start a command the guard flags. Built for the words an ambiguous
+/// wrapper may run.
 struct PlainTailScreen {
     /// The list is not plain, or a deny entry could match anything: every
     /// word has to be examined.
@@ -1221,12 +1420,9 @@ impl PlainTailScreen {
     fn new(base: &str, tail_start: usize, scan: &CommandScan<'_>) -> Self {
         let tail = &base[tail_start..];
         let mut screen = Self {
-            // Quoting, escapes, expansions, redirections and operators change
-            // which word is the command, and comments and line breaks change
-            // where it ends. Only bare words separated by blanks are screened.
-            every_word: tail.contains([
-                '\'', '"', '\\', '`', '$', '<', '>', ';', '|', '&', '(', ')', '#', '\n',
-            ]) || tail.contains("/proc/self/environ")
+            // Only bare words separated by blanks are screened.
+            every_word: tail.contains(SHELL_SPECIAL_CHARS)
+                || tail.contains("/proc/self/environ")
                 // Dropped when the text is normalised for matching.
                 || tail.trim_end().ends_with(":*"),
             unwrap_prefixes: scan.unwrap_prefixes,
@@ -1353,6 +1549,11 @@ fn detect_command(
             "shk action guard: nested shell execution exceeds the safe parsing depth",
         ));
     }
+    // Only the first pass over a candidate string is free.
+    if depth > 0 && !scan.budget.charge_examined(command.len()) {
+        return Some(too_many_words_after_wrapper());
+    }
+    let ansi_c = scan.comments.ansi_c;
     let normalized_whole = normalize_shell(command);
     let whole_action = format!("Bash({normalized_whole})");
     if compound_action_allowed(&whole_action, &config.allow) {
@@ -1368,10 +1569,10 @@ fn detect_command(
     for raw_segment in shell_command_segments(command, &scan.comments) {
         // Decode before anything lowercases or re-tokenises the text, so the
         // nested passes below see the characters the shell would run.
-        let segment = decode_ansi_c_quotes(&raw_segment);
+        let segment = scan.comments.decoded(&raw_segment);
         let normalized = normalize_shell(&segment);
         if !shallow {
-            for embedded in embedded_shell_commands(&normalized) {
+            for embedded in embedded_shell_commands(&normalized, ansi_c) {
                 if let Some(matched) = detect_command_at_depth(&embedded, scan, depth + 1) {
                     return Some(matched);
                 }
@@ -1379,7 +1580,7 @@ fn detect_command(
         }
         // The segment as written, plus the form bash actually runs once quotes
         // and backslashes are removed from the command word (`cu""rl`, `c\url`).
-        let canonical = canonical_command_segment(&segment);
+        let canonical = canonical_command_segment(&segment, ansi_c);
         let variants = std::iter::once(segment.as_str())
             .chain(canonical.as_deref())
             .collect::<Vec<_>>();
@@ -1427,8 +1628,12 @@ fn detect_command(
         // Reserved words and exec-style wrappers run the command that follows
         // them. An explicitly allowed segment (checked above) is not unwrapped.
         if scan.unwrap_prefixes {
-            let words = shell_words_unquoted(&normalized);
-            let starts = prefixed_command_starts(&words)
+            let words = shell_words_unquoted(&normalized, ansi_c);
+            let texts = words
+                .iter()
+                .map(|word| word.text.as_str())
+                .collect::<Vec<_>>();
+            let starts = prefixed_command_starts(&texts)
                 .into_iter()
                 .filter_map(|index| words.get(index))
                 .map(|word| (word.start, word.text.as_str()))
@@ -1439,7 +1644,7 @@ fn detect_command(
             }
         }
         for variant in &variants {
-            if let Some(matched) = detect_builtin_command(variant, profile) {
+            if let Some(matched) = detect_builtin_command(variant, profile, ansi_c) {
                 return Some(matched);
             }
         }
@@ -1459,9 +1664,10 @@ struct ShellWord {
 
 /// Splits a simple command into words the way a POSIX shell does: quotes and
 /// backslashes are removed, and an unquoted redirection operator starts a new
-/// word unless it follows a file-descriptor number. ANSI-C (`$'...'`) escapes
-/// are decoded.
-fn shell_words_unquoted(command: &str) -> Vec<ShellWord> {
+/// word unless it follows a file-descriptor number. With `ansi_c`, ANSI-C
+/// (`$'...'`) escapes are decoded; without, the `$` is literal text in front
+/// of a plain single-quoted string.
+fn shell_words_unquoted(command: &str, ansi_c: bool) -> Vec<ShellWord> {
     fn flush(
         words: &mut Vec<ShellWord>,
         text: &mut String,
@@ -1538,10 +1744,11 @@ fn shell_words_unquoted(command: &str) -> Vec<ShellWord> {
                 Some((_, next)) => text.push(next),
             },
             '\'' | '"' => {
-                if was_after_dollar && text.ends_with('$') {
+                let after_dollar = ansi_c && was_after_dollar;
+                if after_dollar && text.ends_with('$') {
                     text.pop();
                 }
-                open_shell_quote(&mut quote, ch, was_after_dollar);
+                open_shell_quote(&mut quote, ch, after_dollar);
             }
             '<' | '>' => {
                 if !text.is_empty()
@@ -1737,8 +1944,8 @@ fn strip_redirection_operator(word: &str) -> Option<&str> {
 /// and backslashes removed, an attached redirection split off, and leading
 /// redirections moved behind the command. Returns `None` when the segment is
 /// already in that form or the command word cannot be rewritten safely.
-fn canonical_command_segment(segment: &str) -> Option<String> {
-    let words = shell_words_unquoted(segment);
+fn canonical_command_segment(segment: &str, ansi_c: bool) -> Option<String> {
+    let words = shell_words_unquoted(segment, ansi_c);
     let mut command_index = 0;
     while let Some(word) = words.get(command_index) {
         match strip_redirection_operator(&word.text) {
@@ -1784,25 +1991,21 @@ const EXEC_WRAPPER_COMMANDS: &[&str] =
 
 /// Indexes of the words where a command may start after a shell reserved word
 /// (`then curl …`) or an exec-style wrapper (`timeout 5 curl …`).
-fn prefixed_command_starts(words: &[ShellWord]) -> Vec<usize> {
-    let Some(first) = words.first() else {
+fn prefixed_command_starts(words: &[&str]) -> Vec<usize> {
+    let Some(first) = words.first().copied() else {
         return Vec::new();
     };
-    if SHELL_RESERVED_PREFIX_WORDS.contains(&first.text.as_str()) {
+    if SHELL_RESERVED_PREFIX_WORDS.contains(&first) {
         vec![1]
-    } else if first.text == "function" {
+    } else if first == "function" {
         // `function NAME { …; }`. With `function NAME() { … }` the parentheses
         // already split the body into its own segment.
         vec![2]
-    } else if first.text == "coproc" {
+    } else if first == "coproc" {
         // `coproc COMMAND …` or `coproc NAME { …; }`.
         vec![1, 2]
     } else {
-        let texts = words
-            .iter()
-            .map(|word| word.text.as_str())
-            .collect::<Vec<_>>();
-        exec_wrapper_command_starts(command_basename(&first.text), &texts)
+        exec_wrapper_command_starts(command_basename(first), words)
     }
 }
 
@@ -1913,7 +2116,11 @@ fn exec_wrapper_command_starts(wrapper: &str, words: &[&str]) -> Vec<usize> {
     }
 }
 
-fn detect_builtin_command(command: &str, profile: ActionGuardProfile) -> Option<ActionGuardMatch> {
+fn detect_builtin_command(
+    command: &str,
+    profile: ActionGuardProfile,
+    ansi_c: bool,
+) -> Option<ActionGuardMatch> {
     let normalized = normalize_shell(command);
     let words = shell_words(&normalized);
     // Compare by basename so absolute/relative paths (`/bin/cat`,
@@ -1921,7 +2128,7 @@ fn detect_builtin_command(command: &str, profile: ActionGuardProfile) -> Option<
     let cmd = command_basename(words.first().copied().unwrap_or_default());
 
     if profile.includes(ActionCategory::SecretDumpCommand)
-        && sensitive_file_access_command(&normalized, cmd, &words)
+        && sensitive_file_access_command(&normalized, cmd, &words, ansi_c)
     {
         return Some(guard_match(
             ActionCategory::SecretDumpCommand,
@@ -1947,7 +2154,7 @@ fn detect_builtin_command(command: &str, profile: ActionGuardProfile) -> Option<
 
     if profile.includes(ActionCategory::PrivilegeSystemChange)
         && cmd == "chmod"
-        && (words.contains(&"777") || chmod_world_writable(&normalized))
+        && (words.contains(&"777") || chmod_world_writable(&normalized, ansi_c))
     {
         return Some(guard_match(
             ActionCategory::PrivilegeSystemChange,
@@ -2019,7 +2226,7 @@ fn shell_command_segments(command: &str, comments: &CommentReading) -> Vec<Strin
             continue;
         }
         if matches!(ch, '\'' | '"') {
-            open_shell_quote(&mut quote, ch, was_after_dollar);
+            open_shell_quote(&mut quote, ch, comments.ansi_c && was_after_dollar);
             continue;
         }
         // `$$` is the PID parameter: a quote after it is a plain quote.
@@ -2065,7 +2272,7 @@ fn command_without_heredoc_bodies(command: &str, comments: &CommentReading) -> S
                 pending.pop_front();
                 filtered.push('\n');
             } else if delimiter.expand_body {
-                for embedded in embedded_shell_commands(line) {
+                for embedded in embedded_shell_commands(line, comments.ansi_c) {
                     filtered.push(';');
                     filtered.push_str(&embedded);
                 }
@@ -2158,7 +2365,8 @@ fn heredoc_delimiters(
             continue;
         }
         if matches!(ch, '\'' | '"') {
-            open_shell_quote(&mut state.quote, ch, quote_follows_dollar(&chars, index));
+            let after_dollar = comments.ansi_c && quote_follows_dollar(&chars, index);
+            open_shell_quote(&mut state.quote, ch, after_dollar);
             state.mid_word = true;
             state.mid_word_after_parenthesis = true;
             index += 1;
@@ -2492,12 +2700,13 @@ fn nested_command_payloads(raw_command: &str, command: &str, words: &[String]) -
     NestedCommands::default()
 }
 
-fn wrapper_command_starts(command: &str, words: &[String]) -> Vec<usize> {
+fn wrapper_command_starts<S: AsRef<str>>(command: &str, words: &[S]) -> Vec<usize> {
     if command == "command"
         && words
             .iter()
             .skip(1)
-            .take_while(|word| word.as_str() != "--" && word.starts_with('-'))
+            .map(AsRef::as_ref)
+            .take_while(|word| *word != "--" && word.starts_with('-'))
             .any(|word| word[1..].chars().any(|option| matches!(option, 'v' | 'V')))
     {
         // `command -v` / `command -V` query how a name would resolve; they do
@@ -2506,7 +2715,7 @@ fn wrapper_command_starts(command: &str, words: &[String]) -> Vec<usize> {
     }
     let mut index = 1;
     while index < words.len() {
-        let word = &words[index];
+        let word = words[index].as_ref();
         if word == "--" {
             return (index + 1 < words.len())
                 .then_some(vec![index + 1])
@@ -2631,9 +2840,12 @@ fn known_flag_only_env_option(word: &str) -> bool {
         || word.starts_with("--ignore-signal=")
 }
 
-fn ambiguous_command_starts(words: &[String], start: usize) -> Vec<usize> {
+fn ambiguous_command_starts<S: AsRef<str>>(words: &[S], start: usize) -> Vec<usize> {
     (start..words.len())
-        .filter(|index| !words[*index].starts_with('-') && !is_env_assignment(&words[*index]))
+        .filter(|index| {
+            let word = words[*index].as_ref();
+            !word.starts_with('-') && !is_env_assignment(word)
+        })
         .collect()
 }
 
@@ -2662,7 +2874,7 @@ fn join_shell_tokens_for_reparse(words: &[String]) -> (String, Vec<usize>) {
     (joined, offsets)
 }
 
-fn embedded_shell_commands(command: &str) -> Vec<String> {
+fn embedded_shell_commands(command: &str, ansi_c: bool) -> Vec<String> {
     let chars = command.char_indices().collect::<Vec<_>>();
     let mut commands = Vec::new();
     let mut index = 0;
@@ -2670,6 +2882,9 @@ fn embedded_shell_commands(command: &str) -> Vec<String> {
     // literal text; only single and ANSI-C quotes make them inert.
     let mut quote = None;
     let mut escaped = false;
+    // Built for the first `$(`: looking for the end of each substitution on
+    // its own would read the rest of the text once per unclosed `$(`.
+    let mut closing_parentheses = None;
 
     while index < chars.len() {
         let (_, ch) = chars[index];
@@ -2684,7 +2899,8 @@ fn embedded_shell_commands(command: &str) -> Vec<String> {
             continue;
         }
         if matches!(ch, '\'' | '"') {
-            open_shell_quote(&mut quote, ch, quote_follows_dollar(&chars, index));
+            let after_dollar = ansi_c && quote_follows_dollar(&chars, index);
+            open_shell_quote(&mut quote, ch, after_dollar);
             index += 1;
             continue;
         }
@@ -2706,22 +2922,8 @@ fn embedded_shell_commands(command: &str) -> Vec<String> {
         }
         if ch == '$' && chars.get(index + 1).map(|(_, next)| *next) == Some('(') {
             let start_index = index + 2;
-            let mut depth = 1usize;
-            let mut end_index = None;
-            for (candidate_index, (_, candidate)) in chars.iter().enumerate().skip(start_index) {
-                match candidate {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end_index = Some(candidate_index);
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if let Some(end_index) = end_index {
+            let closing = closing_parentheses.get_or_insert_with(|| closing_parentheses_of(&chars));
+            if let Some(end_index) = closing[index + 1] {
                 let start = chars
                     .get(start_index)
                     .map(|(offset, _)| *offset)
@@ -2734,6 +2936,26 @@ fn embedded_shell_commands(command: &str) -> Vec<String> {
         index += 1;
     }
     commands
+}
+
+/// For every `(`, the index of the `)` that closes it when each parenthesis
+/// after it counts, quoted or not. `None` for one that stays open and for
+/// every other character.
+fn closing_parentheses_of(chars: &[(usize, char)]) -> Vec<Option<usize>> {
+    let mut closing = vec![None; chars.len()];
+    let mut open = Vec::new();
+    for (index, (_, ch)) in chars.iter().enumerate() {
+        match ch {
+            '(' => open.push(index),
+            ')' => {
+                if let Some(opened) = open.pop() {
+                    closing[opened] = Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    closing
 }
 
 fn action_allowed(action: &str, allow: &[String]) -> bool {
@@ -2777,7 +2999,7 @@ fn normalize_action_pattern(raw: &str) -> String {
     }
 }
 
-fn sensitive_file_access_command(command: &str, cmd: &str, words: &[&str]) -> bool {
+fn sensitive_file_access_command(command: &str, cmd: &str, words: &[&str], ansi_c: bool) -> bool {
     if !SENSITIVE_FILE_ACCESS_COMMANDS.contains(&cmd) {
         return false;
     }
@@ -2789,15 +3011,18 @@ fn sensitive_file_access_command(command: &str, cmd: &str, words: &[&str]) -> bo
             .iter()
             .skip(1)
             .any(|word| is_secret_argument(word))
-        || shell_words_unquoted(command).iter().skip(1).any(|word| {
-            // These words end where an attached redirection starts
-            // (`.env>/dev/null`), and know whether a glob is unquoted.
-            is_secret_argument(&word.text)
-                || (word.glob
-                    && dotenv_glob_word(
-                        strip_redirection_operator(&word.text).unwrap_or(&word.text),
-                    ))
-        })
+        || shell_words_unquoted(command, ansi_c)
+            .iter()
+            .skip(1)
+            .any(|word| {
+                // These words end where an attached redirection starts
+                // (`.env>/dev/null`), and know whether a glob is unquoted.
+                is_secret_argument(&word.text)
+                    || (word.glob
+                        && dotenv_glob_word(
+                            strip_redirection_operator(&word.text).unwrap_or(&word.text),
+                        ))
+            })
 }
 
 fn environment_dump_command(command: &str, words: &[&str]) -> bool {
@@ -3022,8 +3247,8 @@ fn destructive_rm_target(target: &str) -> bool {
 
 /// `chmod` mode words that grant read, write and execute to everyone: octal
 /// `777` with any leading zeros (or special bits), `a+rwx`, `ugo=rwx`, ….
-fn chmod_world_writable(command: &str) -> bool {
-    shell_words_unquoted(command)
+fn chmod_world_writable(command: &str, ansi_c: bool) -> bool {
+    shell_words_unquoted(command, ansi_c)
         .iter()
         .skip(1)
         .flat_map(|word| word.text.split(','))
@@ -3155,6 +3380,16 @@ fn opaque_execution(words: &[&str]) -> bool {
 }
 
 fn is_secret_path(raw: &str) -> bool {
+    // This runs for every argument of a file-reading command, nearly all of
+    // which hold no marker: rule those out without allocating.
+    let holds_marker = SECRET_PATH_MARKERS.iter().any(|marker| {
+        raw.as_bytes()
+            .windows(marker.len())
+            .any(|window| window.eq_ignore_ascii_case(marker.as_bytes()))
+    });
+    if !holds_marker {
+        return false;
+    }
     let path = raw
         .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == ':' || c == ';')
         .trim_start_matches("file://");
@@ -3178,39 +3413,23 @@ fn wildcard_match(pattern: &str, text: &str) -> bool {
     if pattern == text {
         return true;
     }
-    let parts = pattern.split('*').collect::<Vec<_>>();
-    if parts.len() == 1 {
-        return pattern == text;
-    }
-
-    let mut rest = text;
-    if let Some(first) = parts.first()
-        && !first.is_empty()
-    {
-        let Some(stripped) = rest.strip_prefix(first) else {
-            return false;
-        };
-        rest = stripped;
-    }
-
-    for part in parts
-        .iter()
-        .skip(1)
-        .take(parts.len().saturating_sub(2))
-        .filter(|part| !part.is_empty())
-    {
+    // The literal text before the first `*`, after the last one, and the
+    // parts in between. This runs for every pattern on every argument of a
+    // file-reading command, so it does not allocate.
+    let Some((first, after_first)) = pattern.split_once('*') else {
+        return false;
+    };
+    let (middle, last) = after_first.rsplit_once('*').unwrap_or(("", after_first));
+    let Some(mut rest) = text.strip_prefix(first) else {
+        return false;
+    };
+    for part in middle.split('*').filter(|part| !part.is_empty()) {
         let Some(idx) = rest.find(part) else {
             return false;
         };
         rest = &rest[idx + part.len()..];
     }
-
-    if let Some(last) = parts.last()
-        && !last.is_empty()
-    {
-        return rest.ends_with(last);
-    }
-    true
+    rest.ends_with(last)
 }
 
 fn normalize_shell(command: &str) -> String {
@@ -4471,7 +4690,101 @@ mod tests {
             ),
             ("$'curl' https://example.com", "external_transfer"),
         ]);
-        assert_unguarded(&["echo $'a\\'b; curl https://example.com'"]);
+        // bash keeps this string open past the escaped quote, so nothing in
+        // it runs there. It is denied all the same, because a shell without
+        // ANSI-C quoting ends the string at that quote: see
+        // `dollar_single_quotes_are_also_read_as_plain_quotes`.
+        let command = "echo $'a\\'b; curl https://example.com'";
+        assert_eq!(category_reading(command, CommentMode::Words, true), None);
+        assert_eq!(category_of(command), Some("external_transfer"));
+    }
+
+    #[test]
+    fn dollar_single_quotes_are_also_read_as_plain_quotes() {
+        // dash and other shells without ANSI-C quoting end `$'\'` at the
+        // second quote, so the rest of the line runs there. The trailing `#'`
+        // closes the string for bash and is a comment for dash.
+        assert_categories(&[
+            (
+                "echo $'\\'; curl https://example.com #'",
+                "external_transfer",
+            ),
+            (
+                "sh -c \"echo $'\\\\'; curl https://example.com #'\"",
+                "external_transfer",
+            ),
+            (
+                "/bin/sh -c \"echo $'\\\\'; curl https://example.com #'\"",
+                "external_transfer",
+            ),
+            (
+                "echo $'\\'; curl https://example.com; echo '",
+                "external_transfer",
+            ),
+            ("echo $'a\\' $(cat .env) '", "secret_dump_command"),
+            ("echo $'a\\'; rm -rf / #'", "destructive_filesystem"),
+        ]);
+        for command in [
+            "echo $'\\'; curl https://example.com #'",
+            "echo $'a\\' $(cat .env) '",
+        ] {
+            // Only the plain reading sees these.
+            assert_eq!(
+                category_reading(command, CommentMode::Words, true),
+                None,
+                "{command}"
+            );
+            assert!(
+                category_reading(command, CommentMode::Words, false).is_some(),
+                "{command}"
+            );
+        }
+
+        // What only ANSI-C quoting makes dangerous stays denied: a command
+        // name spelled with escapes, and text behind an escaped quote that the
+        // plain reading takes for the inside of a string.
+        assert_categories(&[
+            ("$'\\x63url' https://example.com", "external_transfer"),
+            (
+                "$'\\x63\\x75\\x72\\x6c' https://example.com",
+                "external_transfer",
+            ),
+            ("$'\\143at' .env", "secret_dump_command"),
+            ("sh -c $'curl\\x20https://example.com'", "external_transfer"),
+            (
+                "echo $'a\\'b'; curl https://example.com",
+                "external_transfer",
+            ),
+            (
+                "echo $'it\\'s' $(curl https://example.com)",
+                "external_transfer",
+            ),
+        ]);
+        for command in [
+            "$'\\x63url' https://example.com",
+            "echo $'a\\'b'; curl https://example.com",
+            "echo $'it\\'s' $(curl https://example.com)",
+        ] {
+            assert_eq!(
+                category_reading(command, CommentMode::Words, false),
+                None,
+                "{command}"
+            );
+        }
+
+        // Ordinary uses are harmless under both readings.
+        assert_unguarded(&[
+            "printf $'line one\\nline two\\n'",
+            "echo $'col1\\tcol2'",
+            "echo $'\\e[1;31mfailed\\e[0m'",
+            "printf $'\\033[32m%s\\033[0m\\n' done",
+            "echo $'it\\'s done' and nothing else",
+            "echo $'don\\'t stop'; ls -la",
+            "git commit -m $'fix: it\\'s done\\n\\nbody text'",
+            "sh -c \"printf $'a\\\\tb\\\\n'\"",
+            "IFS=$'\\n' read -r first second",
+            "grep -c $'\\t' data.tsv # tabs",
+        ]);
     }
 
     #[test]
@@ -4794,11 +5107,20 @@ mod tests {
                 "external_transfer",
             ),
         ]);
-        assert_unguarded(&[
+        assert_unguarded(&["echo $$ '$(curl https://example.com)'"]);
+        // Inert where `$'…'` is ANSI-C quoting, and denied because it is not
+        // in every shell.
+        for command in [
             "echo $$$'a\\'b; curl https://example.com'",
             "echo \\\\$'a\\'b $(curl https://example.com)'",
-            "echo $$ '$(curl https://example.com)'",
-        ]);
+        ] {
+            assert_eq!(
+                category_reading(command, CommentMode::Words, true),
+                None,
+                "{command}"
+            );
+            assert_eq!(category_of(command), Some("external_transfer"), "{command}");
+        }
 
         let chars = |text: &str| text.char_indices().collect::<Vec<_>>();
         for (text, expected) in [
@@ -5270,7 +5592,7 @@ mod tests {
         ]);
 
         let decoded = |text: &str| {
-            shell_words_unquoted(text)
+            shell_words_unquoted(text, true)
                 .into_iter()
                 .map(|word| word.text)
                 .collect::<Vec<_>>()
@@ -5394,6 +5716,45 @@ mod tests {
         }
         assert!(is_secret_path("Config/API_TOKEN.txt"));
         assert!(is_secret_path("C:\\Users\\me\\.ZSH_HISTORY"));
+    }
+
+    #[test]
+    fn secret_path_markers_cover_every_pattern() {
+        // A path can only match a pattern when it holds each literal part of
+        // it, so a marker inside one part is enough.
+        for pattern in SECRET_PATH_PATTERNS
+            .iter()
+            .chain(SHELL_HISTORY_PATH_PATTERNS)
+        {
+            assert!(
+                pattern
+                    .split('*')
+                    .any(|part| contains_any(part, SECRET_PATH_MARKERS)),
+                "{pattern}"
+            );
+        }
+        for marker in SECRET_PATH_MARKERS {
+            assert_eq!(*marker, marker.to_ascii_lowercase());
+            // The marker test runs on the argument as written: before its
+            // quotes, a trailing `:` or `;` and a `file://` prefix are
+            // trimmed and before backslashes become slashes.
+            assert!(
+                !marker.contains(['/', '\\', '"', '\'', '`', ':', ';']),
+                "{marker}"
+            );
+        }
+        // The paths the direct checks accept.
+        for path in [
+            "app/.env",
+            "app/.env.local",
+            "app/tokens",
+            "app/tokens/a.json",
+            "APP\\TOKENS\\A.JSON",
+            "\"app/.ENV\"",
+            "file://.env",
+        ] {
+            assert!(is_secret_path(path), "{path}");
+        }
     }
 
     #[test]
@@ -5541,9 +5902,9 @@ mod tests {
         for command in [
             TRANSFER.to_string(),
             format!("{TRANSFER} # fetch the page"),
-            format!("{TRANSFER} # it's fine\necho done"),
             format!("echo start # note; {TRANSFER}"),
             format!("echo start; {TRANSFER} # it's \"quoted\""),
+            format!("{TRANSFER} # first\necho done # second"),
         ] {
             assert_eq!(category(&command), None, "{command}");
         }
@@ -5552,9 +5913,43 @@ mod tests {
             format!("{TRANSFER}/other # note"),
             format!("echo hi # note; {TRANSFER}/other"),
             format!("{TRANSFER} -d @notes.txt # upload"),
+            // As written, the apostrophe in the comment opens a string that
+            // takes the next line with it: the segment is more than the
+            // allowed command and its comment, so it is not exempted.
+            format!("{TRANSFER} # it's fine\necho done"),
         ] {
             assert_eq!(category(&command), Some("external_transfer"), "{command}");
         }
+    }
+
+    #[test]
+    fn comment_exemption_needs_the_allowed_command_in_front() {
+        let config = ActionGuardConfig {
+            allow: vec!["Bash(echo *)".to_string()],
+            ..ActionGuardConfig::default()
+        };
+        let category = |command: &str| {
+            detect_dangerous_action_with_config(&bash_payload(command), &config)
+                .unwrap()
+                .map(|matched| matched.category)
+        };
+        // As written these are one segment each: the line break is escaped.
+        // Read with comments, the segment is `echo a`, which the entry allows.
+        // That must not exempt the text in front of it.
+        for command in [
+            format!("#\\{TRANSFER} \\\necho a"),
+            format!("#\\{TRANSFER} \\\necho a 2>&1# c'"),
+        ] {
+            assert_eq!(category(&command), Some("external_transfer"), "{command}");
+            // As without the entry.
+            assert_eq!(
+                category_of(&command),
+                Some("external_transfer"),
+                "{command}"
+            );
+        }
+        assert_eq!(category("echo a # note"), None);
+        assert_eq!(category("echo a # it's (fine)"), None);
     }
 
     fn harmless_words(count: usize) -> String {
@@ -5765,16 +6160,20 @@ mod tests {
     }
 
     fn category_reading_comments(command: &str, mode: CommentMode) -> Option<&'static str> {
+        category_reading(command, mode, true)
+    }
+
+    /// The verdict of a single reading of a command.
+    fn category_reading(command: &str, mode: CommentMode, ansi_c: bool) -> Option<&'static str> {
         let config = ActionGuardConfig::default();
-        let reparse_budget = Cell::new(MAX_NESTED_COMMAND_REPARSES);
+        let budget = ScanBudget::for_payload(command.len());
         let scan = CommandScan {
             profile: ActionGuardProfile::parse(&config.profile),
             config: &config,
             unwrap_prefixes: true,
-            reparse_budget: &reparse_budget,
-            comments: CommentReading::new(mode),
+            budget: &budget,
+            comments: CommentReading::new(mode, ansi_c),
             fan_out: RefCell::default(),
-            examined_bytes: Cell::new(0),
         };
         detect_command(command, &scan, 0, false).map(|matched| matched.category)
     }
@@ -6052,5 +6451,380 @@ mod tests {
             "{}",
             matched.reason
         );
+    }
+
+    #[test]
+    fn plain_wrapper_runs_are_peeled_like_one_wrapper_at_a_time() {
+        // A policy entry turns the shortcut off, so with this one, which
+        // matches nothing, every wrapper is scanned in turn.
+        let one_at_a_time = ActionGuardConfig {
+            allow: vec!["Bash(never typed)".to_string()],
+            ..ActionGuardConfig::default()
+        };
+        let verdicts = |command: &str, config: &ActionGuardConfig| {
+            [
+                bash_payload(command),
+                serde_json::json!({ "tool": "shell", "input": command }).to_string(),
+            ]
+            .map(|payload| {
+                detect_dangerous_action_with_config(&payload, config)
+                    .unwrap()
+                    .map(|matched| (matched.category, matched.reason))
+            })
+        };
+        let assert_same = |command: &str| {
+            assert_eq!(
+                verdicts(command, &ActionGuardConfig::default()),
+                verdicts(command, &one_at_a_time),
+                "{command}"
+            );
+        };
+
+        const WORDS: &[&str] = &[
+            "time",
+            "time",
+            "nice",
+            "-n",
+            "5",
+            "timeout",
+            "nohup",
+            "nohup",
+            "command",
+            "exec",
+            "-a",
+            "-p",
+            "-v",
+            "-c",
+            "--",
+            "then",
+            "if",
+            "!",
+            "{",
+            "do",
+            "function",
+            "coproc",
+            "stdbuf",
+            "-oL",
+            "xargs",
+            "doas",
+            "-u",
+            "sudo",
+            "env",
+            "FOO=1",
+            "ls",
+            "echo",
+            "cat",
+            ".env",
+            "curl",
+            "a,b",
+            "/usr/bin/time",
+            "bin/nohup",
+            "./then",
+            "time.exe",
+            "rm",
+            "-rf",
+            "/",
+            "printenv",
+            "-l",
+            "--zz",
+            "x:*",
+            "/proc/self/environ",
+        ];
+        let mut rng = Rng(0x5eed_1234_abcd_ef01);
+        for _ in 0..30_000 {
+            let count = 1 + rng.next() % 9;
+            let mut command = String::new();
+            for _ in 0..count {
+                if !command.is_empty() {
+                    // Mostly single blanks, which is what the shortcut takes.
+                    command.push_str(if rng.next().is_multiple_of(12) {
+                        "  "
+                    } else {
+                        " "
+                    });
+                }
+                command.push_str(rng.pick(WORDS));
+            }
+            assert_same(&command);
+        }
+        // Around the nesting limit.
+        for wrapper in ["time", "nohup", "then", "exec -c"] {
+            for count in [1, 2, 29, 30, 31, 32, 33, 40] {
+                let chain = format!("{wrapper} ").repeat(count);
+                for command in ["ls -la", "cat .env", "", "env --zz a b c"] {
+                    assert_same(&format!("{chain}{command}"));
+                }
+            }
+        }
+
+        assert_categories(&[
+            (
+                &format!("{}cat .env", "time ".repeat(30)),
+                "secret_dump_command",
+            ),
+            (
+                &format!("time nice -n 5 nohup command -p exec -c {TRANSFER}"),
+                "external_transfer",
+            ),
+            (&format!("{}ls", "nohup ".repeat(40)), "opaque_execution"),
+        ]);
+        assert_unguarded(&[
+            &format!("{}ls -la", "time ".repeat(30)),
+            "time nice -n 5 nohup command -p exec -c make test",
+            // `command -v` runs nothing.
+            &format!("time nohup command -v {TRANSFER}"),
+        ]);
+    }
+
+    #[test]
+    fn long_wrapper_runs_cost_one_pass() {
+        // Each wrapper used to re-read all the words behind it.
+        let words = harmless_words(40_000);
+        for chain in [
+            "time ".repeat(30),
+            "nohup ".repeat(30),
+            "time nice nohup command exec ".repeat(6),
+        ] {
+            let command = format!("{chain}echo {words}");
+            let budget = ScanBudget::for_payload(command.len());
+            let left = budget.examined_bytes.get();
+            let matched = detect_candidate_command(
+                &command,
+                true,
+                ActionGuardProfile::Recommended,
+                &ActionGuardConfig::default(),
+                &budget,
+            );
+            assert!(matched.is_none(), "{chain}");
+            let examined = left - budget.examined_bytes.get();
+            assert!(
+                examined <= command.len(),
+                "{chain}: {examined} bytes examined again for {}",
+                command.len()
+            );
+        }
+    }
+
+    #[test]
+    fn examined_text_is_charged_to_the_whole_payload() {
+        assert_eq!(
+            ScanBudget::for_payload(100).examined_bytes.get(),
+            MAX_EXAMINED_COMMAND_BYTES
+        );
+        assert_eq!(
+            ScanBudget::for_payload(MAX_EXAMINED_COMMAND_BYTES)
+                .examined_bytes
+                .get(),
+            MAX_EXAMINED_COMMAND_BYTES * EXAMINED_BYTES_PER_PAYLOAD_BYTE
+        );
+        let budget = ScanBudget::for_payload(0);
+        assert!(budget.charge_examined(MAX_EXAMINED_COMMAND_BYTES));
+        assert!(!budget.charge_examined(1));
+        // The text behind ambiguous wrappers does not grow with the payload.
+        let budget = ScanBudget::for_payload(64 * MAX_FAN_OUT_BYTES);
+        assert!(budget.charge_fan_out(MAX_FAN_OUT_BYTES - 1));
+        assert!(!budget.charge_fan_out(2));
+        assert!(!budget.charge_fan_out(1));
+
+        // `type` may read a file, so each of these has to be looked at with
+        // the words after it: about 0.6 MiB of text in all.
+        let candidate = |tag: usize| {
+            format!(
+                "nice --zz {}",
+                format!("type name-of-some-length-{tag} ").repeat(180)
+            )
+        };
+        let payload = |count: usize| {
+            let calls = (0..count)
+                .map(|tag| serde_json::json!({ "command": candidate(tag) }))
+                .collect::<Vec<_>>();
+            serde_json::json!({ "tool": "batch", "calls": calls })
+        };
+        assert_eq!(category_of_payload(payload(1)), None);
+        // Three of them are too much for one payload, although each alone
+        // is not.
+        let matched = detect_dangerous_action(&payload(3).to_string())
+            .unwrap()
+            .expect("the payload's examined text is bounded as a whole");
+        assert_eq!(matched.category, "opaque_execution");
+        assert!(
+            matched.reason.contains("too many words"),
+            "{}",
+            matched.reason
+        );
+
+        // So are the readings of one candidate: this one is read three ways.
+        let commented = format!("{} ; echo (a)# b ; echo c # d", candidate(0));
+        assert_eq!(category_of(&candidate(0)), None);
+        assert_eq!(category_of(&commented), Some("opaque_execution"));
+    }
+
+    /// Runs the guard on a payload, checks that it answers within five
+    /// seconds, and returns the answer.
+    fn guard_within_five_seconds(
+        label: &str,
+        payload: &serde_json::Value,
+    ) -> Option<ActionGuardMatch> {
+        let stdin = payload.to_string();
+        let started = std::time::Instant::now();
+        let matched = detect_dangerous_action(&stdin).unwrap();
+        let elapsed = started.elapsed();
+        if std::env::var_os("SHK_PRINT_GUARD_TIMINGS").is_some() {
+            eprintln!("{label}: {} bytes, {elapsed:?}", stdin.len());
+        }
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "{label} took {elapsed:?}"
+        );
+        matched
+    }
+
+    #[test]
+    fn worst_case_wrapper_inputs_fail_closed_within_seconds() {
+        let command = |text: String| serde_json::json!({ "tool_input": { "command": text } });
+        let commands = |texts: Vec<String>| {
+            let calls = texts
+                .into_iter()
+                .map(|text| serde_json::json!({ "command": text }))
+                .collect::<Vec<_>>();
+            serde_json::json!({ "tool": "batch", "calls": calls })
+        };
+        // A file-reading command has every argument checked, which makes it
+        // the most expensive text to examine.
+        let reader = |options: usize| format!("cat{}", " -a".repeat(options));
+        // Groups of thirty `time` in front of a reader with many options,
+        // behind a wrapper whose option makes every word a possible command.
+        let chains = |options: usize| {
+            let group = format!("{}{}", "time ".repeat(30), reader(options));
+            format!("env --zz {} \"q\"", vec![group; 8].join(" "))
+        };
+        let readers = |count: usize, options: usize| {
+            format!("env --zz {} \"q\"", vec![reader(options); count].join(" "))
+        };
+        // Makes the guard read the command three ways.
+        let comments = " ; echo (a)# b ; echo c # d";
+        let short_chains = (0..60)
+            .map(|tag| {
+                let group = format!("{}{}", "time ".repeat(25), reader(10));
+                format!("env --zz {} \"q\" {tag}", vec![group; 9].join(" "))
+            })
+            .collect::<Vec<_>>();
+        let many_readers = (0..60)
+            .map(|tag| format!("{} {tag}", readers(250, 20)))
+            .collect::<Vec<_>>();
+
+        let cases = [
+            ("20 KB of wrapper chains", command(chains(800))),
+            ("112 KB of wrapper chains", command(chains(4_600))),
+            (
+                "112 KB of wrapper chains, three readings",
+                command(format!("{}{comments}", chains(4_600))),
+            ),
+            ("60 short wrapper chains, 87 KB", commands(short_chains)),
+            ("127 KB of file readers", command(readers(250, 168))),
+            (
+                "127 KB of file readers, three readings",
+                command(format!("{}{comments}", readers(250, 168))),
+            ),
+            (
+                "60 commands of file readers, 961 KB",
+                commands(many_readers),
+            ),
+            (
+                "1 MiB of one guarded word",
+                command(format!("env --zz {}", vec!["cat"; 262_000].join(" "))),
+            ),
+        ];
+        for (label, payload) in &cases {
+            let matched = guard_within_five_seconds(label, payload)
+                .unwrap_or_else(|| panic!("{label} must fail closed"));
+            assert_eq!(matched.category, "opaque_execution", "{label}");
+            assert!(
+                matched.reason.contains("unrecognised options")
+                    && matched.reason.contains("too many words"),
+                "{label}: {}",
+                matched.reason
+            );
+        }
+
+        // The same sizes without anything to examine twice are allowed.
+        let plain = [
+            (
+                "1 MiB of plain words",
+                command(format!("env --zz {}", vec!["ab"; 349_000].join(" "))),
+            ),
+            (
+                "60 commands of plain words, 969 KB",
+                commands(
+                    (0..60)
+                        .map(|tag| format!("env --zz {} {tag}", harmless_words(1_900)))
+                        .collect(),
+                ),
+            ),
+            (
+                "1 MiB of one file reader's options",
+                command(format!("time -p {}", reader(349_000))),
+            ),
+        ];
+        for (label, payload) in &plain {
+            assert_eq!(
+                guard_within_five_seconds(label, payload).map(|matched| matched.reason),
+                None,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn closing_parentheses_match_a_scan_from_each_opening_one() {
+        // The end of a substitution used to be looked for from each `$(` on.
+        let scan_from = |chars: &[(usize, char)], opened: usize| {
+            let mut depth = 1usize;
+            for (index, (_, ch)) in chars.iter().enumerate().skip(opened + 1) {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(index);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        };
+        let mut rng = Rng(0x0dd_ba11_5eed);
+        for _ in 0..5_000 {
+            let text = (0..rng.next() % 24)
+                .map(|_| rng.pick(&["(", "(", ")", ")", "$(", "a", " ", "'", "\"", "é"]))
+                .collect::<String>();
+            let chars = text.char_indices().collect::<Vec<_>>();
+            let closing = closing_parentheses_of(&chars);
+            for (index, (_, ch)) in chars.iter().enumerate() {
+                let expected = (*ch == '(').then(|| scan_from(&chars, index)).flatten();
+                assert_eq!(closing[index], expected, "{text} at {index}");
+            }
+        }
+
+        assert_eq!(
+            embedded_shell_commands("a $(b $(c) d) \"$(e (f)) $(g\" $(h)", true),
+            ["b $(c) d", "e (f)", "h"]
+        );
+    }
+
+    #[test]
+    fn unclosed_substitutions_are_scanned_once() {
+        let unclosed = format!("echo \"{}", "$(".repeat(400_000));
+        let nested = format!(
+            "echo \"{}{}\"",
+            "$(echo ".repeat(100_000),
+            ")".repeat(100_000)
+        );
+        for (label, text) in [("unclosed", unclosed), ("nested", nested)] {
+            let payload = serde_json::json!({ "tool_input": { "command": text } });
+            let matched = guard_within_five_seconds(label, &payload);
+            assert_eq!(matched.map(|matched| matched.category), None, "{label}");
+        }
     }
 }
