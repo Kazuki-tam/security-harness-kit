@@ -1243,10 +1243,19 @@ fn print_workflow_status(statuses: &[workflow_hardening::WorkflowFileStatus]) {
     println!("workflows: actions/checkout steps missing persist-credentials: false:");
     for status in statuses {
         for step in status.findings() {
-            println!("  - {}:{}", status.relative_path, step.line);
+            if step.manual_fix {
+                println!(
+                    "  - {}:{} (flow-style `with: {{ ... }}`; add persist-credentials: false by hand)",
+                    status.relative_path, step.line
+                );
+            } else {
+                println!("  - {}:{}", status.relative_path, step.line);
+            }
         }
     }
-    println!("  fix with `shk doctor workflows --fix`");
+    println!(
+        "  fix with `shk doctor workflows --fix` (flow-style `with:` steps are not rewritten automatically)"
+    );
 }
 
 struct DoctorReport {
