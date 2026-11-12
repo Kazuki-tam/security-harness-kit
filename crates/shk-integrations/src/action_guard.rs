@@ -3,7 +3,7 @@
 use crate::hook_payload::parse_hook_payload;
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashSet};
 
 const SECRET_PATH_PATTERNS: &[&str] = &[
@@ -484,6 +484,7 @@ pub fn detect_dangerous_action_with_config(
             config,
             unwrap_prefixes: candidate.command_typed,
             reparse_budget: &reparse_budget,
+            shallow_checked: RefCell::default(),
         };
         if let Some(matched) = detect_command_at_depth(&candidate.text, &scan, 0) {
             return Ok(Some(matched));
@@ -935,11 +936,16 @@ fn push_string_values(v: &Value, acc: &mut Vec<String>) {
 
 const MAX_NESTED_COMMAND_DEPTH: usize = 32;
 
-/// Wrapper re-parses (`sudo …`, `env …`, `then …`) allowed per hook payload.
-/// A wrapper with an unrecognised option makes every later word a possible
+/// Ambiguous wrapper re-parses allowed per hook payload. A wrapper with an
+/// unrecognised option (`nice --zz …`) makes every later word a possible
 /// command start, so a chain of them fans out exponentially; real commands
-/// need a handful.
+/// need a handful. A wrapper that yields exactly one command (`sudo …`,
+/// `env …`, `then …`) is not counted here: it only consumes input.
 const MAX_NESTED_COMMAND_REPARSES: usize = 512;
+
+/// Possible command starts re-parsed in full per ambiguous wrapper. Later ones
+/// get a single pass that does not unwrap further.
+const MAX_AMBIGUOUS_COMMAND_STARTS: usize = 8;
 
 /// Settings and shared state for scanning one candidate command string.
 struct CommandScan<'a> {
@@ -949,22 +955,48 @@ struct CommandScan<'a> {
     /// to be shell commands: in file bodies and prose a leading `if` or `{`
     /// says nothing about what runs.
     unwrap_prefixes: bool,
-    /// Wrapper re-parses left for the payload.
+    /// Ambiguous wrapper re-parses left for the payload.
     reparse_budget: &'a Cell<usize>,
+    /// Commands already given a shallow pass. Nested wrappers share their
+    /// tail, so each of them would otherwise repeat the same passes.
+    shallow_checked: RefCell<HashSet<String>>,
 }
 
 impl CommandScan<'_> {
-    /// Scans the command a wrapper runs, failing closed once the payload's
-    /// re-parse budget is spent.
-    fn detect_wrapped(&self, command: &str, depth: usize) -> Option<ActionGuardMatch> {
-        let Some(left) = self.reparse_budget.get().checked_sub(1) else {
-            return Some(guard_match(
+    /// Scans the commands one wrapper may run. A single command is free: it
+    /// is shorter than the text it was unwrapped from. Several possible
+    /// commands are charged, failing closed once the payload's budget is spent.
+    fn detect_wrapped(
+        &self,
+        payloads: &[String],
+        depth: usize,
+        shallow: bool,
+    ) -> Option<ActionGuardMatch> {
+        let over_budget = || {
+            Some(guard_match(
                 ActionCategory::OpaqueExecution,
                 "shk action guard: nested shell execution exceeds the safe parsing budget",
-            ));
+            ))
         };
-        self.reparse_budget.set(left);
-        detect_command_at_depth(command, self, depth)
+        match payloads {
+            [] => None,
+            // A shallow pass does not unwrap, so a wrapper in it is opaque.
+            _ if shallow => over_budget(),
+            [only] => detect_command(only, self, depth, false),
+            _ => payloads.iter().enumerate().find_map(|(index, payload)| {
+                if index >= MAX_AMBIGUOUS_COMMAND_STARTS {
+                    let first_pass = self.shallow_checked.borrow_mut().insert(payload.clone());
+                    return first_pass
+                        .then(|| detect_command(payload, self, depth, true))
+                        .flatten();
+                }
+                let Some(left) = self.reparse_budget.get().checked_sub(1) else {
+                    return over_budget();
+                };
+                self.reparse_budget.set(left);
+                detect_command(payload, self, depth, false)
+            }),
+        }
     }
 }
 
@@ -972,6 +1004,19 @@ fn detect_command_at_depth(
     command: &str,
     scan: &CommandScan<'_>,
     depth: usize,
+) -> Option<ActionGuardMatch> {
+    detect_command(command, scan, depth, false)
+}
+
+/// `shallow` checks the command as written without unwrapping it: a wrapper,
+/// reserved word or other construct that would need a nested re-parse is
+/// denied as opaque instead. Substitutions are skipped, because the enclosing
+/// segment has already scanned them.
+fn detect_command(
+    command: &str,
+    scan: &CommandScan<'_>,
+    depth: usize,
+    shallow: bool,
 ) -> Option<ActionGuardMatch> {
     let (profile, config) = (scan.profile, scan.config);
     if depth >= MAX_NESTED_COMMAND_DEPTH {
@@ -992,14 +1037,16 @@ fn detect_command_at_depth(
         ));
     }
 
-    for segment in shell_command_segments(command) {
+    for raw_segment in shell_command_segments(command) {
         // Decode before anything lowercases or re-tokenises the text, so the
         // nested passes below see the characters the shell would run.
-        let segment = decode_ansi_c_quotes(&segment);
+        let segment = decode_ansi_c_quotes(&raw_segment);
         let normalized = normalize_shell(&segment);
-        for embedded in embedded_shell_commands(&normalized) {
-            if let Some(matched) = detect_command_at_depth(&embedded, scan, depth + 1) {
-                return Some(matched);
+        if !shallow {
+            for embedded in embedded_shell_commands(&normalized) {
+                if let Some(matched) = detect_command_at_depth(&embedded, scan, depth + 1) {
+                    return Some(matched);
+                }
             }
         }
         // The segment as written, plus the form bash actually runs once quotes
@@ -1013,17 +1060,21 @@ fn detect_command_at_depth(
             let words = shell_tokens(&normalized);
             let raw_command = words.first().map(String::as_str).unwrap_or_default();
             let command_name = command_basename(raw_command);
-            for nested in nested_command_payloads(raw_command, command_name, &words) {
-                if let Some(matched) = scan.detect_wrapped(&nested, depth + 1) {
-                    return Some(matched);
-                }
+            let nested = nested_command_payloads(raw_command, command_name, &words);
+            if let Some(matched) = scan.detect_wrapped(&nested, depth + 1, shallow) {
+                return Some(matched);
             }
         }
-        let action = format!("Bash({segment})");
-        if action_allowed(&action, &config.allow) {
+        // Policy entries may spell ANSI-C quoting (`$'…'`) as typed or as the
+        // text it denotes, so both forms of the segment are matched.
+        let typed = (raw_segment != segment).then_some(raw_segment.as_str());
+        if std::iter::once(segment.as_str())
+            .chain(typed)
+            .any(|form| action_allowed(&format!("Bash({form})"), &config.allow))
+        {
             continue;
         }
-        for variant in &variants {
+        for variant in variants.iter().copied().chain(typed) {
             let action = format!("Bash({variant})");
             if action_denied(&action, &config.deny) {
                 return Some(guard_match(
@@ -1035,10 +1086,9 @@ fn detect_command_at_depth(
         // Reserved words and exec-style wrappers run the command that follows
         // them. An explicitly allowed segment (checked above) is not unwrapped.
         if scan.unwrap_prefixes {
-            for nested in prefixed_command_payloads(&normalized) {
-                if let Some(matched) = scan.detect_wrapped(&nested, depth + 1) {
-                    return Some(matched);
-                }
+            let nested = prefixed_command_payloads(&normalized);
+            if let Some(matched) = scan.detect_wrapped(&nested, depth + 1, shallow) {
+                return Some(matched);
             }
         }
         for variant in &variants {
@@ -1773,9 +1823,11 @@ fn heredoc_delimiters(
             }
         }
         // Whitespace and control operators end a word; anything else is (or
-        // continues) one.
-        state.mid_word = state.quote.is_some()
-            || !(ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | '(' | ')'));
+        // continues) one. A parenthesis may close a substitution, extglob or
+        // glob qualifier inside a word (`$(date)#`), so it never ends one:
+        // text after it is then scanned instead of dropped as a comment.
+        state.mid_word =
+            state.quote.is_some() || !(ch.is_whitespace() || matches!(ch, ';' | '|' | '&'));
         if state.quote.is_none()
             && let Some(end) = shell_arithmetic_end(&chars, index)
         {
@@ -4477,6 +4529,161 @@ mod tests {
         // Many independent wrapped commands stay below it as well.
         let many = "timeout 5 make test\n".repeat(50);
         assert_eq!(category_of(&many), None);
+
+        // A short chain in front of many plain words: every wrapper re-checks
+        // the same tail, which has to stay cheap.
+        let words = (0..600)
+            .map(|n| format!("word{n}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let command = format!("{}{words}", "nice --zz ".repeat(7));
+        let category = assert_finishes_quickly("wide tail", || category_of(&command));
+        assert_eq!(category, None);
+    }
+
+    /// Large but ordinary inputs whose lines each peel to one nested command.
+    fn large_linear_inputs() -> Vec<(&'static str, String)> {
+        let lines = |count: usize, line: fn(usize) -> String| {
+            (0..count).map(line).collect::<Vec<_>>().join("\n")
+        };
+        let words = (0..600)
+            .map(|n| format!("word{n}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        vec![
+            (
+                "assignment lines",
+                lines(600, |n| format!("name{n}=value{n} more words")),
+            ),
+            (
+                "makefile variables",
+                lines(600, |n| format!("OBJ_{n}=build/file_{n}.o lib/util_{n}.o")),
+            ),
+            (
+                "if blocks",
+                lines(180, |n| {
+                    format!("if ! ./check --step {n}; then echo \"step {n} failed\"; fi")
+                }),
+            ),
+            ("env prefixes", lines(520, |n| format!("VAR={n} ./run.sh"))),
+            (
+                "timeout wrappers",
+                lines(600, |n| format!("timeout 5 make test{n}")),
+            ),
+            ("unknown wrapper option", format!("nice --zz echo {words}")),
+            ("xargs arguments", format!("xargs -r echo {words}")),
+        ]
+    }
+
+    #[test]
+    fn large_linear_inputs_stay_within_the_reparse_budget() {
+        for (label, text) in large_linear_inputs() {
+            let category = assert_finishes_quickly(label, || category_of(&text));
+            assert_eq!(category, None, "command: {label}");
+            let category = assert_finishes_quickly(label, || {
+                category_of_payload(serde_json::json!({ "tool": "write", "input": text }))
+            });
+            assert_eq!(category, None, "generic key: {label}");
+        }
+    }
+
+    #[test]
+    fn commands_past_the_fan_out_bound_are_still_checked() {
+        // Every option of `xargs` is unknown to the guard, so each later word
+        // may start the command; the ninth candidate is not re-parsed.
+        let prefix = "xargs -a list -E x -L 1 -n 1 -P 1 -s 1000 -d , -I {}";
+        assert_categories(&[
+            (
+                &format!("{prefix} curl https://example.com"),
+                "external_transfer",
+            ),
+            (
+                &format!("{prefix} cu\"\"rl https://example.com"),
+                "external_transfer",
+            ),
+            (&format!("{prefix} rm -rf /"), "destructive_filesystem"),
+            // A wrapper there would need a re-parse of its own: fail closed.
+            (
+                &format!("{prefix} env -z curl https://example.com"),
+                "opaque_execution",
+            ),
+            (
+                &format!("{prefix} timeout 5 curl https://example.com"),
+                "opaque_execution",
+            ),
+        ]);
+        assert_unguarded(&[&format!("{prefix} echo done")]);
+    }
+
+    #[test]
+    fn hash_after_closing_parenthesis_is_not_a_comment() {
+        assert_categories(&[
+            (
+                "echo $(date)#; curl https://example.com",
+                "external_transfer",
+            ),
+            (
+                "stamp=$(date)#; curl https://example.com",
+                "external_transfer",
+            ),
+            (
+                "cat <(date)#; curl https://example.com",
+                "external_transfer",
+            ),
+        ]);
+        // After a space the `#` starts a comment, which is not scanned.
+        assert_unguarded(&[
+            "( make test ) # then curl https://example.com",
+            "echo $(date) # curl https://example.com",
+        ]);
+    }
+
+    #[test]
+    fn policy_entries_with_ansi_c_quotes_match_inside_compound_commands() {
+        let transfer = "curl -d $'a\\tb' http://localhost:3000/hook";
+        let compound = bash_payload(&format!("cd app && {transfer}"));
+        assert_eq!(
+            detect_dangerous_action(&compound)
+                .unwrap()
+                .unwrap()
+                .category,
+            "external_transfer"
+        );
+        let allowed = ActionGuardConfig {
+            allow: vec![format!("Bash({transfer})")],
+            ..ActionGuardConfig::default()
+        };
+        assert!(
+            detect_dangerous_action_with_config(&compound, &allowed)
+                .unwrap()
+                .is_none()
+        );
+
+        let denied = ActionGuardConfig {
+            deny: vec!["Bash(deploy --note $'release\\n':*)".to_string()],
+            ..ActionGuardConfig::default()
+        };
+        let compound = bash_payload("cd app && deploy --note $'release\\n' --prod");
+        assert_eq!(
+            detect_dangerous_action_with_config(&compound, &denied)
+                .unwrap()
+                .unwrap()
+                .category,
+            "custom_policy"
+        );
+        // Entries written in decoded form keep matching.
+        let decoded = ActionGuardConfig {
+            deny: vec!["Bash(deploy --note 'release':*)".to_string()],
+            ..ActionGuardConfig::default()
+        };
+        let compound = bash_payload("cd app && deploy --note $'rel\\x65ase' --prod");
+        assert_eq!(
+            detect_dangerous_action_with_config(&compound, &decoded)
+                .unwrap()
+                .unwrap()
+                .category,
+            "custom_policy"
+        );
     }
 
     #[test]
@@ -4710,10 +4917,15 @@ mod tests {
             "node scripts/build.mjs --mode=production",
         ];
         assert!(commands.len() >= 30);
+        // Long scripts and argument lists, generated instead of spelled out.
+        let large = large_linear_inputs();
+        let commands = commands
+            .iter()
+            .copied()
+            .chain(large.iter().map(|(_, text)| text.as_str()));
         // Report every blocked command at once, not just the first.
         let denied = commands
-            .iter()
-            .filter_map(|command| category_of(command).map(|category| (*command, category)))
+            .filter_map(|command| category_of(command).map(|category| (command, category)))
             .collect::<Vec<_>>();
         assert!(denied.is_empty(), "{denied:#?}");
     }
