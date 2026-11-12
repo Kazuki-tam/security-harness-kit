@@ -61,6 +61,10 @@ pub struct CountRow {
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditRecentRow {
     pub ts: String,
+    /// Event type of the entry (`blocked`); absent for plain audit entries.
+    /// Lets consumers recognise a block without knowing every `reason`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
     pub tool: Option<String>,
     pub hook: Option<String>,
     pub reason: Option<String>,
@@ -301,6 +305,10 @@ fn to_recent_row(entry: &serde_json::Value, hide_paths: bool) -> AuditRecentRow 
             .and_then(serde_json::Value::as_str)
             .unwrap_or("-")
             .to_string(),
+        event: entry
+            .get("event")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
         tool: entry
             .get("tool")
             .and_then(serde_json::Value::as_str)
@@ -700,5 +708,40 @@ mod tests {
         assert!(row.kinds.is_none());
         assert!(row.suppressed_total.is_none());
         assert!(row.deduplicated_total.is_none());
+    }
+
+    #[test]
+    fn recent_rows_carry_the_event_type_for_every_blocked_reason() {
+        for reason in [
+            REASON_FINDING_THRESHOLD,
+            REASON_ACTION_GUARD,
+            crate::hook_audit_log::REASON_POLICY_ERROR,
+            crate::hook_audit_log::REASON_PAYLOAD_TOO_LARGE,
+        ] {
+            let row = to_recent_row(
+                &entry(serde_json::json!({
+                    "event":"blocked",
+                    "ts":"2026-05-23T02:31:00Z",
+                    "tool":"cursor",
+                    "hook":"pre",
+                    "reason":reason,
+                })),
+                false,
+            );
+            let json = serde_json::to_value(&row).unwrap();
+            assert_eq!(json["event"], EVENT_BLOCKED, "{reason}");
+            assert_eq!(json["reason"], reason);
+        }
+
+        let audit_row = to_recent_row(
+            &entry(serde_json::json!({
+                "ts":"2026-05-23T02:31:00Z",
+                "tool":"cursor",
+                "hook":"post",
+            })),
+            false,
+        );
+        let json = serde_json::to_value(&audit_row).unwrap();
+        assert!(json.get("event").is_none());
     }
 }

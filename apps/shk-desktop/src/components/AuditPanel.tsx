@@ -14,6 +14,7 @@ import {
   blockedBreakdowns,
   blockedRecentRows,
   blockedRowDetailFields,
+  formatActionCategory,
   formatBlockedRowSummary,
   formatAuditTimestamp,
   formatToolName,
@@ -24,7 +25,7 @@ import { useAuditLogReset } from "../hooks/useAuditLogReset";
 import { useI18n } from "../i18n";
 import { asSeverity, severityBadge, severityDot, type Severity } from "../scan";
 import type { AuditCountRow, AuditRecentRow, AuditState } from "../types";
-import { formatRelativeTime } from "../utils";
+import { formatRelativeTime, ownLabel } from "../utils";
 import { Button } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
 
@@ -179,7 +180,7 @@ function AuditPanelBody({
             <SummaryStat label={m.hookAuditEvents} value={report.summary.hook_audit_events} />
             <SummaryStat
               label={m.maxSeverity}
-              value={maxSeverity ? (m.severityLabels[maxSeverity] ?? maxSeverity) : "—"}
+              value={maxSeverity ? (ownLabel(m.severityLabels, maxSeverity) ?? maxSeverity) : "—"}
               text
             />
           </div>
@@ -291,13 +292,13 @@ function BlockedBreakdownSections({
       key: "reasons",
       title: m.reasonBreakdown,
       rows: breakdowns.reasons,
-      formatLabel: (label: string) => m.reasonLabels[label] ?? label,
+      formatLabel: (label: string) => ownLabel(m.reasonLabels, label) ?? label,
     },
     {
       key: "actionCategories",
       title: m.actionCategoryBreakdown,
       rows: breakdowns.actionCategories,
-      formatLabel: (label: string) => m.actionCategories[label] ?? label,
+      formatLabel: (label: string) => formatActionCategory(label, m.actionCategories),
     },
     {
       key: "rules",
@@ -399,7 +400,7 @@ function BlockedRowCard({
     row.reason === "finding_threshold" && row.max_severity
       ? asSeverity(row.max_severity)
       : undefined;
-  const reasonLabel = row.reason ? (m.reasonLabels[row.reason] ?? row.reason) : "—";
+  const reasonLabel = row.reason ? (ownLabel(m.reasonLabels, row.reason) ?? row.reason) : "—";
   const toolLabel = formatToolName(row.tool, m.toolNames);
   const showOpenFindings = rowLinksToFindings(row) && Boolean(onOpenFindings);
   const whenLabel = formatAuditTimestamp(row.ts, locale);
@@ -418,7 +419,7 @@ function BlockedRowCard({
                   className={`h-1.5 w-1.5 rounded-full ${severityDot[severity]}`}
                   aria-hidden="true"
                 />
-                {m.severityLabels[severity] ?? severity}
+                {ownLabel(m.severityLabels, severity) ?? severity}
               </span>
             )}
             <span className="text-[12px] font-medium text-white">{reasonLabel}</span>

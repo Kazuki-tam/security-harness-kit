@@ -7,15 +7,36 @@ import type {
   AuditState,
 } from "./types";
 import { fetchAuditReport } from "./project";
+import { ownLabel } from "./utils";
 
 export const DEFAULT_AUDIT_REPORT_LIMIT = 10;
 
-export const BLOCKED_AUDIT_REASONS = new Set(["finding_threshold", "action_guard"]);
+/** Every reason the CLI writes on a `blocked` event (`hook_audit_log.rs`). */
+export const BLOCKED_AUDIT_REASONS = new Set([
+  "finding_threshold",
+  "action_guard",
+  "policy_error",
+  "payload_too_large",
+]);
 
-export type BlockedReason = "finding_threshold" | "action_guard";
+export type BlockedReason =
+  | "finding_threshold"
+  | "action_guard"
+  | "policy_error"
+  | "payload_too_large";
 
 export function isBlockedAuditReason(reason: string | undefined): reason is BlockedReason {
   return reason !== undefined && BLOCKED_AUDIT_REASONS.has(reason);
+}
+
+/**
+ * Whether a recent row is a block. The event type decides, so a reason this
+ * build has no label for is still listed; the reason is only consulted for
+ * rows that carry no event type.
+ */
+export function isBlockedAuditRow(row: AuditRecentRow): boolean {
+  if (row.event != null) return row.event === "blocked";
+  return isBlockedAuditReason(row.reason);
 }
 
 export type BlockedBreakdowns = {
@@ -47,7 +68,7 @@ export type AuditDetailLabels = {
 };
 
 export function blockedRecentRows(report: AuditReport): AuditRecentRow[] {
-  return report.recent.filter((row) => isBlockedAuditReason(row.reason));
+  return report.recent.filter(isBlockedAuditRow);
 }
 
 export function blockedBreakdowns(report: AuditReport): BlockedBreakdowns {
@@ -71,7 +92,7 @@ export function blockedRowDetailFields(
   if (row.reason) {
     fields.push({
       label: labels.detailReason,
-      value: labels.reasonLabels[row.reason] ?? row.reason,
+      value: ownLabel(labels.reasonLabels, row.reason) ?? row.reason,
     });
   }
 
@@ -83,7 +104,7 @@ export function blockedRowDetailFields(
   if (row.hook) {
     fields.push({
       label: labels.detailHook,
-      value: labels.hookLabels[row.hook] ?? row.hook,
+      value: ownLabel(labels.hookLabels, row.hook) ?? row.hook,
     });
   }
   if (row.rule_ids?.length) {
@@ -95,7 +116,7 @@ export function blockedRowDetailFields(
   if (row.kinds?.length) {
     fields.push({
       label: labels.detailKinds,
-      value: row.kinds.map((kind) => labels.kindLabels[kind] ?? kind).join(", "),
+      value: row.kinds.map((kind) => ownLabel(labels.kindLabels, kind) ?? kind).join(", "),
     });
   }
   if (row.suppressed_total != null) {
@@ -171,15 +192,6 @@ export function formatActionCategory(
   return ownLabel(labels, category) ?? category;
 }
 
-/**
- * Own keys only. The audit log is written by the CLI but a cloned repository
- * can ship a crafted one, and an id like `constructor` would otherwise reach
- * `Object.prototype` and yield a value React refuses to render.
- */
-function ownLabel(labels: Record<string, string>, id: string): string | undefined {
-  return Object.prototype.hasOwnProperty.call(labels, id) ? labels[id] : undefined;
-}
-
 /** Return the most actionable severity in the recent blocked rows. */
 export function highestBlockedSeverity(report: AuditReport): Severity | undefined {
   let highest: Severity | undefined;
@@ -235,6 +247,7 @@ export async function loadAuditReport(
     // The general audit report truncates all event types before the desktop
     // filters to blocked rows. Fetch a blocked-only page when newer hook audit
     // events displaced blocks, so the details affordance remains available.
+    // This re-reads the whole log, so it must only happen on displacement.
     const expectedBlockedRows = Math.min(
       data.summary.blocked_events,
       requestOptions.limit ?? DEFAULT_AUDIT_REPORT_LIMIT,
@@ -244,7 +257,8 @@ export async function loadAuditReport(
         ...requestOptions,
         reason: "blocked",
       });
-      data = { ...data, recent: blockedRecentRows(blockedData) };
+      // The backend filtered on the event type; every row of this page is a block.
+      data = { ...data, recent: blockedData.recent };
     }
 
     return { status: "done", data, loadedAt: new Date().toISOString() };

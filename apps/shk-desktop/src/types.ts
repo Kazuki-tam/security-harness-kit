@@ -220,6 +220,8 @@ export type AuditCountRow = {
 
 export type AuditRecentRow = {
   ts: string;
+  /** Event type from the log entry, e.g. `blocked`; absent for plain audit entries. */
+  event?: string;
   tool?: string;
   hook?: string;
   reason?: string;
