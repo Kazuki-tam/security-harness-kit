@@ -26,10 +26,11 @@ fn parse_expire_date(exp: &str) -> Option<chrono::NaiveDate> {
     chrono::NaiveDate::parse_from_str(exp.trim(), "%Y-%m-%d").ok()
 }
 
+/// An `expires` value that is not a `YYYY-MM-DD` date counts as expired: the
+/// entry stops suppressing (fail-safe) rather than never expiring, and the
+/// policy still loads.
 fn is_expired(exp: &str) -> bool {
-    parse_expire_date(exp)
-        .map(|d| d < chrono::Utc::now().date_naive())
-        .unwrap_or(false)
+    parse_expire_date(exp).is_none_or(|d| d < chrono::Utc::now().date_naive())
 }
 
 #[derive(Clone, Debug, Default)]
@@ -75,14 +76,33 @@ fn strip_ignore_keyword<'a>(inner: &'a str, keyword: &str) -> Option<&'a str> {
     }
 }
 
-fn rest_after_ignore_keywords(inner: &str) -> Option<&str> {
+/// Where an ignore comment points when it trails code on its own line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IgnoreTarget {
+    /// `shk-ignore`: the line carrying the comment.
+    SameLine,
+    /// `shk-ignore-next-line`: the line after the comment.
+    NextLine,
+}
+
+struct IgnoreDirective<'a> {
+    target: IgnoreTarget,
+    /// Text after the keyword (optional rule id).
+    rest: &'a str,
+}
+
+fn ignore_directive(inner: &str) -> Option<IgnoreDirective<'_>> {
     let inner = inner.trim_start();
     if let Some(rest) = strip_ignore_keyword(inner, "shk-ignore-next-line") {
-        Some(rest)
-    } else if let Some(rest) = strip_ignore_keyword(inner, "shk-ignore") {
-        Some(rest)
+        Some(IgnoreDirective {
+            target: IgnoreTarget::NextLine,
+            rest,
+        })
     } else {
-        None
+        strip_ignore_keyword(inner, "shk-ignore").map(|rest| IgnoreDirective {
+            target: IgnoreTarget::SameLine,
+            rest,
+        })
     }
 }
 
@@ -101,7 +121,9 @@ fn parse_standalone_ignore_line(trimmed_full_line: &str) -> Option<&str> {
     } else {
         html_comment_inner(tl)?
     };
-    rest_after_ignore_keywords(inner)
+    // A comment on a line of its own has nothing to suppress there, so both
+    // keywords point at the next line.
+    ignore_directive(inner).map(|directive| directive.rest)
 }
 
 fn first_rule_token(rest_after_kw: &str) -> Option<String> {
@@ -113,30 +135,30 @@ fn first_rule_token(rest_after_kw: &str) -> Option<String> {
     }
 }
 
-fn trailing_hash_ignore(trimmed_end: &str) -> Option<&str> {
+fn trailing_hash_ignore(trimmed_end: &str) -> Option<IgnoreDirective<'_>> {
     let (body, cmt) = trimmed_end.rsplit_once('#')?;
     if body.trim().is_empty() {
         return None;
     }
-    rest_after_ignore_keywords(cmt.trim())
+    ignore_directive(cmt.trim())
 }
 
-fn trailing_slash_ignore(trimmed_end: &str) -> Option<&str> {
+fn trailing_slash_ignore(trimmed_end: &str) -> Option<IgnoreDirective<'_>> {
     let idx = trimmed_end.rfind("//")?;
     let body = &trimmed_end[..idx];
     if body.trim().is_empty() {
         return None;
     }
-    rest_after_ignore_keywords(trimmed_end[idx + 2..].trim_start())
+    ignore_directive(trimmed_end[idx + 2..].trim_start())
 }
 
-fn trailing_html_ignore(trimmed_end: &str) -> Option<&str> {
+fn trailing_html_ignore(trimmed_end: &str) -> Option<IgnoreDirective<'_>> {
     let idx = trimmed_end.rfind("<!--")?;
     let body = &trimmed_end[..idx];
     if body.trim().is_empty() {
         return None;
     }
-    rest_after_ignore_keywords(html_comment_inner(&trimmed_end[idx..])?)
+    ignore_directive(html_comment_inner(&trimmed_end[idx..])?)
 }
 
 /// Parse `#`, `//`, and HTML standalone/trailing `shk-ignore` comments.
@@ -152,18 +174,15 @@ pub fn parse_inline_suppressions(content: &str) -> InlineSuppressions {
             continue;
         }
 
-        if let Some(rest_kw) = trailing_hash_ignore(trimmed_end) {
-            out.suppress_line(line_no, rest_kw);
-            continue;
-        }
-
-        if let Some(rest_kw) = trailing_slash_ignore(trimmed_end) {
-            out.suppress_line(line_no, rest_kw);
-            continue;
-        }
-
-        if let Some(rest_kw) = trailing_html_ignore(trimmed_end) {
-            out.suppress_line(line_no, rest_kw);
+        let trailing = trailing_hash_ignore(trimmed_end)
+            .or_else(|| trailing_slash_ignore(trimmed_end))
+            .or_else(|| trailing_html_ignore(trimmed_end));
+        if let Some(directive) = trailing {
+            let target_line = match directive.target {
+                IgnoreTarget::SameLine => line_no,
+                IgnoreTarget::NextLine => line_no.saturating_add(1),
+            };
+            out.suppress_line(target_line, directive.rest);
         }
     }
 
@@ -226,31 +245,55 @@ pub fn suppressed_by_allowlist(
     false
 }
 
+/// Low-severity warning findings about `[[allowlist]]` entries that do not
+/// do what they say: `policy.allowlist_expired` for an entry past its
+/// `expires` date or with an `expires` that is not a date (either way it no
+/// longer suppresses), and `policy.allowlist_unknown_key` for each key `shk`
+/// does not know, which is ignored. The unknown-key message names the key and
+/// the entry's position, never a value.
 pub fn expired_allowlist_warnings(entries: &[AllowlistEntry]) -> Vec<Finding> {
+    let warning = |rule_id: &str, message: String| Finding {
+        rule_id: rule_id.into(),
+        severity: "low".into(),
+        kind: "ignore".into(),
+        file: "shk.toml".into(),
+        line: 1,
+        column: 1,
+        message,
+        redacted_value: "[REDACTED]".into(),
+        value_hash: None,
+        confidence: 1.0,
+        context_before: vec![],
+        context_after: vec![],
+    };
     let mut out = Vec::new();
-    for e in entries {
+    for (idx, e) in entries.iter().enumerate() {
+        let number = idx + 1;
+        for key in e.unknown.keys() {
+            out.push(warning(
+                "policy.allowlist_unknown_key",
+                format!(
+                    "[[allowlist]] entry {number} has an unknown key `{key}`, which is ignored — fix a misspelled `rule_id`, `value_hash`, `path`, `reason` or `expires`, or remove the key"
+                ),
+            ));
+        }
         let Some(exp) = &e.expires else { continue };
         if !is_expired(exp) {
             continue;
         }
         let rid = e.rule_id.as_deref().unwrap_or("(any rule)");
-        out.push(Finding {
-            rule_id: "policy.allowlist_expired".into(),
-            severity: "low".into(),
-            kind: "ignore".into(),
-            file: "shk.toml".into(),
-            line: 1,
-            column: 1,
-            message: format!(
+        let message = if parse_expire_date(exp).is_some() {
+            format!(
                 "Expired [[allowlist]] entry (rule_id={rid}, path={}, expires={exp}) — remove or update",
                 e.path
-            ),
-            redacted_value: "[REDACTED]".into(),
-            value_hash: None,
-            confidence: 1.0,
-            context_before: vec![],
-            context_after: vec![],
-        });
+            )
+        } else {
+            format!(
+                "[[allowlist]] entry {number} (rule_id={rid}, path={}) has an `expires` value that could not be parsed as a YYYY-MM-DD date; the entry is treated as expired and no longer suppresses — fix the date or remove the entry",
+                e.path
+            )
+        };
+        out.push(warning("policy.allowlist_expired", message));
     }
     out
 }
@@ -319,6 +362,7 @@ mod tests {
             value_hash: None,
             reason: None,
             expires: None,
+            unknown: Default::default(),
         }];
         let compiled = compile_allowlist(&entries).unwrap();
         assert!(suppressed_by_allowlist(
@@ -357,6 +401,7 @@ mod tests {
             value_hash: Some(hash),
             reason: None,
             expires: None,
+            unknown: Default::default(),
         }];
         let compiled = compile_allowlist(&entries).unwrap();
         assert!(suppressed_by_allowlist(
@@ -381,6 +426,7 @@ mod tests {
             value_hash: None,
             reason: None,
             expires: Some("2000-01-01".into()),
+            unknown: Default::default(),
         }];
         let compiled = compile_allowlist(&entries).unwrap();
         assert!(!suppressed_by_allowlist(
@@ -396,6 +442,83 @@ mod tests {
     }
 
     #[test]
+    fn unparseable_expires_is_treated_as_expired_and_warns() {
+        use crate::policy::AllowlistEntry;
+
+        for bad in ["2026/12/31", "next year", "2026-13-01", ""] {
+            let entries = vec![AllowlistEntry {
+                rule_id: Some("pii.email".into()),
+                path: "**".into(),
+                value_hash: None,
+                reason: None,
+                expires: Some(bad.into()),
+                unknown: Default::default(),
+            }];
+            let compiled = compile_allowlist(&entries).unwrap();
+            assert!(
+                !suppressed_by_allowlist("a.txt", "pii.email", "value", &entries, &compiled),
+                "{bad}"
+            );
+            let warnings = expired_allowlist_warnings(&entries);
+            assert_eq!(warnings.len(), 1, "{bad}");
+            assert_eq!(warnings[0].rule_id, "policy.allowlist_expired");
+            assert_eq!(warnings[0].severity, "low");
+            let message = &warnings[0].message;
+            assert!(message.contains("could not be parsed"), "{message}");
+            assert!(message.contains("entry 1"), "{message}");
+            assert!(bad.is_empty() || !message.contains(bad), "{message}");
+        }
+    }
+
+    #[test]
+    fn unknown_allowlist_keys_warn_by_name_without_values() {
+        use crate::policy::AllowlistEntry;
+
+        let entry = |unknown: &[(&str, &str)]| AllowlistEntry {
+            rule_id: Some("pii.email".into()),
+            path: "docs/**".into(),
+            value_hash: None,
+            reason: None,
+            expires: None,
+            unknown: unknown
+                .iter()
+                .map(|(key, value)| (key.to_string(), toml::Value::String(value.to_string())))
+                .collect(),
+        };
+        let entries = vec![
+            entry(&[]),
+            entry(&[("owner", "platform-team"), ("ticket", "SEC-1234")]),
+        ];
+        // The entry still suppresses: only the unknown keys are ignored.
+        let compiled = compile_allowlist(&entries).unwrap();
+        assert!(suppressed_by_allowlist(
+            "docs/a.md",
+            "pii.email",
+            "value",
+            &entries[1..],
+            &compiled[1..],
+        ));
+        let warnings = expired_allowlist_warnings(&entries);
+        assert_eq!(warnings.len(), 2);
+        for (warning, key) in warnings.iter().zip(["owner", "ticket"]) {
+            assert_eq!(warning.rule_id, "policy.allowlist_unknown_key");
+            assert_eq!(warning.severity, "low");
+            assert_eq!(warning.file, "shk.toml");
+            assert!(warning.message.contains("entry 2"), "{}", warning.message);
+            assert!(
+                warning.message.contains(&format!("`{key}`")),
+                "{}",
+                warning.message
+            );
+            assert!(
+                !warning.message.contains("platform-team") && !warning.message.contains("SEC-1234"),
+                "{}",
+                warning.message
+            );
+        }
+    }
+
+    #[test]
     fn compile_allowlist_rejects_invalid_glob() {
         use crate::policy::AllowlistEntry;
 
@@ -405,6 +528,7 @@ mod tests {
             value_hash: None,
             reason: None,
             expires: None,
+            unknown: Default::default(),
         }];
         assert!(compile_allowlist(&entries).is_err());
     }
@@ -418,5 +542,25 @@ mod tests {
         assert!(ig_hash.is_suppressed(1, "secret.foo"));
         assert!(ig_slash.is_suppressed(2, "pii.email"));
         assert!(!ig_slash.is_suppressed(1, "pii.email"));
+    }
+
+    #[test]
+    fn trailing_next_line_comment_suppresses_the_following_line() {
+        for src in [
+            "x = 1 # shk-ignore-next-line pii.email\nnext\n",
+            "x = 1 // shk-ignore-next-line pii.email\nnext\n",
+            "x = 1 <!-- shk-ignore-next-line pii.email -->\nnext\n",
+        ] {
+            let ig = parse_inline_suppressions(src);
+            assert!(ig.is_suppressed(2, "pii.email"), "{src}");
+            assert!(!ig.is_suppressed(1, "pii.email"), "{src}");
+        }
+    }
+
+    #[test]
+    fn standalone_ignore_comment_still_targets_the_next_line() {
+        let ig = parse_inline_suppressions("// shk-ignore pii.email\nnext\n");
+        assert!(ig.is_suppressed(2, "pii.email"));
+        assert!(!ig.is_suppressed(1, "pii.email"));
     }
 }

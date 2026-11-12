@@ -109,7 +109,12 @@ impl<'a> TokenIndex<'a> {
                 if entry.originals.len() > 1 {
                     ambiguous.insert(entry.token.as_str());
                 }
-                previous = entry.originals[0].chars().next_back();
+                // The boundary check looks at the pseudonymized input, where a
+                // token just ended; the restored original is not part of it.
+                // `match_at` only accepted this token because what follows is
+                // not token-like or is itself a known token, so an adjacent
+                // token may start right here.
+                previous = None;
                 continue;
             }
             let ch = remaining.chars().next().expect("nonempty input");
@@ -345,6 +350,29 @@ mod tests {
         let (table, count, _) = restore_table("a,b\r\nemail_abcd,x\r\n", &doc, b',').unwrap();
         assert_eq!(table, "a,b\r\nada,x\r\n");
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn restore_replaces_directly_adjacent_tokens() {
+        let entry = |token: &str, original: &str| RestoreMapEntry {
+            token: token.into(),
+            kind: "name".into(),
+            originals: vec![original.into()],
+        };
+        let doc = RestoreMapDocument {
+            entries: vec![entry("name_abcd", "ada"), entry("name_efgh", "bob")],
+            ..Default::default()
+        };
+        // The first original ends in a letter; that must not hide the next token.
+        assert_eq!(
+            restore_text("name_abcdname_efgh name_efghname_abcdname_efgh", &doc),
+            ("adabob bobadabob".into(), 5, 0)
+        );
+        // Text after a restored original is still scanned as usual.
+        assert_eq!(
+            restore_text("name_abcd_x name_abcd", &doc),
+            ("ada_x ada".into(), 2, 0)
+        );
     }
 
     #[test]

@@ -219,6 +219,62 @@ fn scan_detects_docx_content() {
 }
 
 #[test]
+fn scan_loads_policy_with_annotated_or_undated_allowlist_entries_and_warns() {
+    let dir = tempfile::tempdir().unwrap();
+    // Entry 1 carries annotation keys; entry 2 has a date in another format.
+    write_policy(
+        dir.path(),
+        r#"[[allowlist]]
+rule_id = "secret.openai_api_key"
+path = "kept.txt"
+owner = "platform-team"
+ticket = "SEC-1234"
+
+[[allowlist]]
+rule_id = "secret.openai_api_key"
+path = "stale.txt"
+expires = "2099/12/31"
+"#,
+    );
+    let secret = synthetic_openai_key('b');
+    fs::write(dir.path().join("kept.txt"), format!("{secret}\n")).unwrap();
+    fs::write(dir.path().join("stale.txt"), format!("{secret}\n")).unwrap();
+
+    let res = scan_path(dir.path(), default_scan_options()).expect("policy still loads");
+
+    // The annotated entry still suppresses; the undated one no longer does.
+    assert!(!has_finding(&res, "secret.openai_api_key", "kept.txt"));
+    assert!(has_finding(&res, "secret.openai_api_key", "stale.txt"));
+    let warnings: Vec<_> = res
+        .findings
+        .iter()
+        .filter(|f| f.rule_id.starts_with("policy.allowlist_"))
+        .collect();
+    let ids: Vec<&str> = warnings.iter().map(|f| f.rule_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            "policy.allowlist_unknown_key",
+            "policy.allowlist_unknown_key",
+            "policy.allowlist_expired"
+        ]
+    );
+    for warning in &warnings {
+        assert_eq!(warning.severity, "low");
+        assert_eq!(warning.file, "shk.toml");
+        assert!(
+            !warning.message.contains("platform-team")
+                && !warning.message.contains("SEC-1234")
+                && !warning.message.contains("2099/12/31"),
+            "{}",
+            warning.message
+        );
+    }
+    assert!(warnings[0].message.contains("entry 1") && warnings[0].message.contains("`owner`"));
+    assert!(warnings[2].message.contains("could not be parsed"));
+}
+
+#[test]
 fn scan_allows_office_entry_path_suppression() {
     let dir = tempfile::tempdir().unwrap();
     write_policy(

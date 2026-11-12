@@ -81,8 +81,9 @@ export function CloneRepositoryModal({ open, onClose, onClone }: Props) {
     try {
       const completed = await onClone(remoteUrl.trim());
       if (completed) onClose();
-    } catch {
-      setError(m.failed);
+    } catch (cause) {
+      const detail = (cause instanceof Error ? cause.message : String(cause)).trim();
+      setError(detail ? `${m.failed}: ${detail}` : m.failed);
     } finally {
       setCloning(false);
     }
@@ -151,7 +152,7 @@ export function CloneRepositoryModal({ open, onClose, onClone }: Props) {
           {error && (
             <div
               role="alert"
-              className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] leading-relaxed text-red-200"
+              className="max-h-40 overflow-y-auto rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] leading-relaxed break-words whitespace-pre-wrap text-red-200"
             >
               {error}
             </div>

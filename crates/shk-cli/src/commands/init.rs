@@ -1,5 +1,5 @@
 use crate::args::AiTool;
-use crate::commands::skills::SkillTool;
+use crate::commands::skills::{ExistingSkill, SkillTool};
 use crate::{hooks, npm_hardening, policy_cmd, safety};
 use anyhow::Result;
 use dialoguer::{Confirm, MultiSelect, Select, theme::ColorfulTheme};
@@ -160,8 +160,15 @@ pub fn run(cwd: &Path, args: InitArgs) -> Result<()> {
         match repo_root.as_deref() {
             Some(root) if prompt.confirm("Install Git pre-commit hook?", true)? => {
                 safety::require_project_policy(cwd, "init git hook setup")?;
-                hooks::install_pre_commit(root)?;
-                println!("Installed pre-commit hook under {}", root.display());
+                match hooks::install_pre_commit(root) {
+                    Ok(()) => println!("Installed pre-commit hook under {}", root.display()),
+                    // Hooks managed elsewhere must not stop the AI hook and
+                    // skill setup that follows.
+                    Err(err) if err.is::<hooks::HooksDirManagedElsewhere>() => {
+                        eprintln!("warning: skipped Git pre-commit hook: {err}");
+                    }
+                    Err(err) => return Err(err),
+                }
             }
             Some(_) => println!("Skipped Git pre-commit hook"),
             None => println!("Skipped Git pre-commit hook (not a Git repository)"),
@@ -207,7 +214,12 @@ pub fn run(cwd: &Path, args: InitArgs) -> Result<()> {
             &skill_tools_for(&tools),
             args.global,
             false,
-            args.force,
+            // Re-running init must not fail on, or clobber, an installed skill.
+            if args.force {
+                ExistingSkill::Overwrite
+            } else {
+                ExistingSkill::Keep
+            },
         )? {
             println!("{line}");
         }

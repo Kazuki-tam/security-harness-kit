@@ -45,7 +45,7 @@ pub fn run_text(
     };
     // Resolve every span against the original input before changing any offsets.
     let line_starts = line_starts(input);
-    let mut matches: Vec<_> = scan_content(input, "input.txt", &cfg)
+    let mut matches: Vec<((usize, usize), &'static str)> = scan_content(input, "input.txt", &cfg)
         .into_iter()
         .filter_map(|item| {
             find_match_span(
@@ -55,13 +55,24 @@ pub fn run_text(
                 item.column,
                 &item.matched_text,
             )
-            .map(|span| (span, item))
+            .map(|span| (span, item.rule_id))
         })
         .collect();
+    // The Japanese name rule stops at the first space, so `氏名: 山田 太郎`
+    // matches the family name only. Offer the span that also covers the given
+    // name as a second candidate: it is wider, so it is tried first, and the
+    // rule's own span remains as the fallback when the wider one collides
+    // with another match.
+    let with_given_name: Vec<_> = matches
+        .iter()
+        .filter(|(_, rule_id)| *rule_id == "pii.ja.name")
+        .filter_map(|(span, rule_id)| Some((extend_over_given_name(input, *span)?, *rule_id)))
+        .collect();
+    matches.extend(with_given_name);
     // Prefer secret redaction over overlapping PII, then the widest match.
-    matches.sort_by_key(|(span, item)| {
+    matches.sort_by_key(|(span, rule_id)| {
         (
-            !item.rule_id.starts_with("secret."),
+            !rule_id.starts_with("secret."),
             std::cmp::Reverse(span.1 - span.0),
             span.0,
         )
@@ -73,22 +84,26 @@ pub fn run_text(
     let mut used_spans: BTreeMap<usize, usize> = BTreeMap::new();
 
     let mut edits = Vec::new();
-    for (span, item) in matches {
+    for (span, rule_id) in matches {
         if overlaps(&used_spans, span) {
             continue;
         }
-        let replacement = if item.rule_id.starts_with("secret.") {
+        let matched = &input[span.0..span.1];
+        let replacement = if rule_id.starts_with("secret.") {
             "[REDACTED]".to_string()
-        } else if let Some(kind) = resolve_rule_kind(item.rule_id, &options.rule_overrides)
+        } else if let Some(kind) = resolve_rule_kind(rule_id, &options.rule_overrides)
             .map_err(|err| anyhow::anyhow!(err))?
         {
             // Name rules match `氏名: 山田太郎` / `Name: Ada Lovelace` with the
-            // label; keep the label in place and tokenize only the name so the
-            // token equals the table-mode token for the same person.
-            let (label, value) = if matches!(kind, Kind::Name) {
-                split_name_label(&item.matched_text)
+            // label; keep the label (and a trailing honorific) in place and
+            // tokenize only the name so the token equals the table-mode token
+            // for the same person.
+            let (label, value, suffix) = if matches!(kind, Kind::Name) {
+                let (label, name) = split_name_label(matched);
+                let (name, suffix) = split_honorific(name);
+                (label, name, suffix)
             } else {
-                ("", item.matched_text.as_str())
+                ("", matched, "")
             };
             let action = apply_cell(
                 &kind,
@@ -107,7 +122,7 @@ pub fn run_text(
                 }
                 CellAction::Keep => {}
             }
-            format!("{label}{}", replacement_text(&action, value))
+            format!("{label}{}{suffix}", replacement_text(&action, value))
         } else {
             "[REDACTED]".to_string()
         };
@@ -205,6 +220,95 @@ fn split_name_label(matched: &str) -> (&str, &str) {
             .map(char::len_utf8)
             .sum::<usize>();
     matched.split_at(name_start)
+}
+
+/// Honorifics that follow a Japanese name without a space.
+const HONORIFICS: &[&str] = &["様", "さま", "さん", "くん", "ちゃん"];
+
+/// Words that start the next field of a form rather than a given name.
+const FIELD_LABELS: &[&str] = &[
+    "氏名",
+    "名前",
+    "フリガナ",
+    "ふりがな",
+    "住所",
+    "年齢",
+    "性別",
+    "生年月日",
+    "電話",
+    "携帯",
+    "メール",
+    "連絡先",
+    "郵便番号",
+    "会社",
+    "勤務先",
+    "所属",
+    "部署",
+    "役職",
+    "職業",
+    "国籍",
+    "担当",
+    "番号",
+    "備考",
+];
+
+/// Split a trailing honorific off a name (`山田太郎様` -> `山田太郎`, `様`).
+/// Only at the very end, and never down to a single character, so a name
+/// that merely contains one of these is left whole.
+fn split_honorific(name: &str) -> (&str, &str) {
+    HONORIFICS
+        .iter()
+        .find_map(|honorific| {
+            let bare = name.strip_suffix(honorific)?;
+            (bare.chars().count() >= 2).then(|| name.split_at(bare.len()))
+        })
+        .unwrap_or((name, ""))
+}
+
+fn is_japanese_name_char(ch: char) -> bool {
+    matches!(ch,
+        '\u{3005}'
+        | '\u{3040}'..='\u{30ff}'
+        | '\u{3400}'..='\u{4dbf}'
+        | '\u{4e00}'..='\u{9fff}'
+        | '\u{f900}'..='\u{faff}'
+        | '\u{20000}'..='\u{2ffff}')
+}
+
+/// For a Japanese name match that ends at a single space, the span that also
+/// covers the word after it (`氏名: 山田` + ` 太郎`). `None` when what follows
+/// is not a plausible given name: nothing, more than twelve characters, the
+/// label of the next field, or a name that already ended with an honorific.
+fn extend_over_given_name(input: &str, span: (usize, usize)) -> Option<(usize, usize)> {
+    let name = split_name_label(&input[span.0..span.1]).1;
+    if name.is_empty() || !split_honorific(name).1.is_empty() {
+        return None;
+    }
+    let rest = &input[span.1..];
+    let separator = rest
+        .chars()
+        .next()
+        .filter(|ch| matches!(ch, ' ' | '\u{3000}'))?;
+    let after = &rest[separator.len_utf8()..];
+    let given: &str = {
+        let end = after
+            .char_indices()
+            .find(|(_, ch)| !is_japanese_name_char(*ch))
+            .map_or(after.len(), |(index, _)| index);
+        &after[..end]
+    };
+    let length = given.chars().count();
+    if length == 0 || length > 12 || FIELD_LABELS.iter().any(|label| given.starts_with(label)) {
+        return None;
+    }
+    // `山田 役割: …`: a word followed by a separator is a label, whatever it says.
+    if after[given.len()..]
+        .trim_start_matches([' ', '\u{3000}', '\t'])
+        .starts_with([':', '：'])
+    {
+        return None;
+    }
+    Some((span.0, span.1 + separator.len_utf8() + given.len()))
 }
 
 /// Byte offset at which each 1-based line begins.
@@ -425,6 +529,87 @@ mod tests {
         assert_eq!(split_name_label("氏名　山田太郎"), ("氏名　", "山田太郎"));
         assert_eq!(split_name_label("by Ada Lovelace"), ("by ", "Ada Lovelace"));
         assert_eq!(split_name_label("山田太郎"), ("", "山田太郎"));
+    }
+
+    #[test]
+    fn japanese_names_are_tokenized_on_the_span_a_table_cell_would_hold() {
+        let material = material();
+        let cell = |name: &str| {
+            replacement_text(
+                &apply_cell(
+                    &Kind::Name,
+                    name,
+                    &material,
+                    NormalizeSettings::default(),
+                    64,
+                    None,
+                )
+                .unwrap(),
+                name,
+            )
+        };
+        let run = |input: &str| {
+            run_text(input, Some(&material), &options(), None)
+                .unwrap()
+                .output
+        };
+        let spaced = cell("山田 太郎");
+        let joined = cell("山田太郎");
+        assert_eq!(spaced, cell("山田　太郎"));
+        assert_ne!(spaced, joined);
+
+        // Family and given name separated by a space are one name.
+        assert_eq!(run("氏名: 山田 太郎"), format!("氏名: {spaced}"));
+        assert_eq!(
+            run("氏名：山田　太郎\n次の行"),
+            format!("氏名：{spaced}\n次の行")
+        );
+        // A trailing honorific is not part of the name.
+        assert_eq!(run("氏名: 山田太郎様"), format!("氏名: {joined}様"));
+        assert_eq!(run("名前：山田 太郎さん"), format!("名前：{spaced}さん"));
+        // The next field's label is not swallowed.
+        assert_eq!(
+            run("氏名: 山田太郎 住所: 未記入"),
+            format!("氏名: {joined} 住所: 未記入")
+        );
+        assert_eq!(
+            run("氏名 山田太郎 年齢 30"),
+            format!("氏名 {joined} 年齢 30")
+        );
+        assert_eq!(split_honorific("山田太郎"), ("山田太郎", ""));
+        assert_eq!(split_honorific("さん"), ("さん", ""));
+    }
+
+    #[test]
+    fn japanese_name_followed_by_a_particle_still_differs_from_table_mode() {
+        // Known gap: the name rule has no word boundary, so kana that follow
+        // the name without a space (a particle after an honorific, a copula)
+        // are matched as part of it. Nothing stays raw, but the token is not
+        // the one table mode derives for the bare name.
+        let material = material();
+        let output = run_text(
+            "氏名: 山田太郎さんは欠席",
+            Some(&material),
+            &options(),
+            None,
+        )
+        .unwrap()
+        .output;
+        let bare = replacement_text(
+            &apply_cell(
+                &Kind::Name,
+                "山田太郎",
+                &material,
+                NormalizeSettings::default(),
+                64,
+                None,
+            )
+            .unwrap(),
+            "山田太郎",
+        );
+        assert!(output.starts_with("氏名: name_"), "{output}");
+        assert!(!output.contains("山田"), "{output}");
+        assert!(!output.contains(&bare), "{output}");
     }
 
     #[test]

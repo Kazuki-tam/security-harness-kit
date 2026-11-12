@@ -17,6 +17,28 @@ fn shk_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_shk"))
 }
 
+/// Points git (run directly or by `shk`) at an empty global config and no
+/// system config, so a developer's `core.hooksPath` or similar cannot leak
+/// into temp repositories or have tests write into real hook directories.
+fn isolate_git_config(cmd: &mut Command) {
+    static EMPTY: std::sync::OnceLock<tempfile::NamedTempFile> = std::sync::OnceLock::new();
+    let empty = EMPTY.get_or_init(|| tempfile::NamedTempFile::new().expect("empty git config"));
+    cmd.env("GIT_CONFIG_GLOBAL", empty.path())
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+}
+
+fn shk_cmd() -> Command {
+    let mut cmd = Command::new(shk_bin());
+    isolate_git_config(&mut cmd);
+    cmd
+}
+
+fn git_cmd() -> Command {
+    let mut cmd = Command::new("git");
+    isolate_git_config(&mut cmd);
+    cmd
+}
+
 fn canonical_path_text(path: &Path) -> String {
     std::fs::canonicalize(path)
         .unwrap_or_else(|_| path.to_path_buf())
@@ -55,7 +77,7 @@ fn synthetic_openai_key(seed: char) -> String {
 }
 
 fn init_git_repo(dir: &Path) {
-    let init = Command::new("git")
+    let init = git_cmd()
         .args(["init"])
         .current_dir(dir)
         .output()
@@ -69,7 +91,7 @@ fn init_git_repo(dir: &Path) {
 }
 
 fn git_commit_all(dir: &Path, message: &str) {
-    let add = Command::new("git")
+    let add = git_cmd()
         .args(["add", "-A"])
         .current_dir(dir)
         .output()
@@ -81,7 +103,7 @@ fn git_commit_all(dir: &Path, message: &str) {
         String::from_utf8_lossy(&add.stderr)
     );
 
-    let commit = Command::new("git")
+    let commit = git_cmd()
         .args([
             "-c",
             "user.name=shk test",
@@ -107,7 +129,7 @@ fn scan_basic_fixture() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("fixtures/basic");
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "scan",
             &root.display().to_string(),
@@ -143,7 +165,7 @@ fn scan_sarif_outputs_code_scanning_shape() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("fixtures/basic");
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "scan",
             &root.display().to_string(),
@@ -194,7 +216,7 @@ fn scan_sarif_audit_without_hook_mode_never_blocks() {
     std::fs::write(dir.path().join("finding.txt"), synthetic_openai_key('z'))
         .expect("write fixture");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "scan",
             &dir.path().display().to_string(),
@@ -224,7 +246,7 @@ fn mcp_audit_reports_exit_codes_and_machine_output() {
         r#"{"mcpServers":{"safe":{"command":"npx","args":["@scope/pkg@1.2.3"]}}}"#,
     )
     .expect("write safe MCP config");
-    let safe_out = Command::new(shk_bin())
+    let safe_out = shk_cmd()
         .args(["mcp", "audit", &safe.path().display().to_string()])
         .output()
         .expect("run safe MCP audit");
@@ -240,7 +262,7 @@ fn mcp_audit_reports_exit_codes_and_machine_output() {
         r#"{"mcpServers":{"filesystem":{"command":"npx","args":["@modelcontextprotocol/server-filesystem@1.2.3","/"]}}}"#,
     )
     .expect("write risky MCP config");
-    let json_out = Command::new(shk_bin())
+    let json_out = shk_cmd()
         .args([
             "mcp",
             "audit",
@@ -262,7 +284,7 @@ fn mcp_audit_reports_exit_codes_and_machine_output() {
     );
     assert_eq!(report["summary"]["by_severity"]["high"], 1);
 
-    let sarif_out = Command::new(shk_bin())
+    let sarif_out = shk_cmd()
         .args([
             "mcp",
             "audit",
@@ -304,7 +326,7 @@ fn mcp_audit_never_prints_literal_secrets() {
     .expect("write MCP config");
 
     for format in ["--json", "--sarif"] {
-        let out = Command::new(shk_bin())
+        let out = shk_cmd()
             .args(["mcp", "audit", &dir.path().display().to_string(), format])
             .output()
             .expect("run MCP audit");
@@ -318,7 +340,7 @@ fn mcp_audit_never_prints_literal_secrets() {
 fn mcp_audit_parse_failure_is_a_nonfatal_finding() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join(".mcp.json"), "{broken").expect("write broken config");
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["mcp", "audit", &dir.path().display().to_string(), "--json"])
         .output()
         .expect("run MCP audit");
@@ -330,7 +352,7 @@ fn mcp_audit_parse_failure_is_a_nonfatal_finding() {
 #[test]
 fn mcp_audit_runtime_errors_exit_two() {
     let missing = tempfile::tempdir().expect("tempdir").path().join("missing");
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["mcp", "audit", &missing.display().to_string()])
         .output()
         .expect("run MCP audit");
@@ -346,7 +368,7 @@ fn mcp_audit_runtime_errors_exit_two() {
     )
     .expect("write MCP config");
     std::fs::write(dir.path().join("shk.toml"), "[scan").expect("write invalid policy");
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["mcp", "audit", &dir.path().display().to_string()])
         .output()
         .expect("run MCP audit");
@@ -358,7 +380,7 @@ fn mcp_audit_runtime_errors_exit_two() {
 
 #[test]
 fn scan_with_value_hash_requires_machine_output() {
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--with-value-hash"])
         .output()
         .expect("run scan with invalid value hash mode");
@@ -380,7 +402,7 @@ fn scan_changed_since_limits_scan_to_changed_files() {
     std::fs::write(tmp.path().join("new.txt"), synthetic_openai_key('b')).expect("write new");
     git_commit_all(tmp.path(), "add new");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "scan",
             ".",
@@ -411,7 +433,7 @@ fn scan_changed_since_allows_missing_path_as_repo_hint() {
     std::fs::write(tmp.path().join("README.md"), "clean\n").expect("write readme");
     git_commit_all(tmp.path(), "initial");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "scan",
             "does-not-exist",
@@ -447,7 +469,7 @@ fn scan_changed_since_does_not_follow_symlinks_by_default() {
     std::os::unix::fs::symlink(&outside, tmp.path().join("linked.txt")).expect("symlink");
     git_commit_all(tmp.path(), "add symlink");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "scan",
             ".",
@@ -483,7 +505,7 @@ fn allowlist_suggest_prints_safe_toml_from_scan_json() {
     let secret = synthetic_openai_key('c');
     std::fs::write(tmp.path().join("demo.env"), format!("TOKEN={secret}\n")).expect("write demo");
     let report = tmp.path().join("report.json");
-    let scan = Command::new(shk_bin())
+    let scan = shk_cmd()
         .args([
             "scan",
             ".",
@@ -502,7 +524,7 @@ fn allowlist_suggest_prints_safe_toml_from_scan_json() {
     );
     std::fs::write(&report, &scan.stdout).expect("write report");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "allowlist",
             "suggest",
@@ -535,7 +557,7 @@ fn scan_json_reports_ai_context_findings() {
     )
     .expect("write prompt");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--json", "--fail-on", "critical"])
         .current_dir(tmp.path())
         .output()
@@ -578,7 +600,7 @@ fn hook_audit_mode_logs_findings_but_exits_zero() {
     }))
     .expect("hook payload");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "cursor", "--audit"])
         .current_dir(tmp.path())
         .stdin(std::process::Stdio::piped())
@@ -612,7 +634,7 @@ fn mask_stdin_fixture() {
         .join("../..")
         .join("fixtures/pii.txt");
     let data = std::fs::read_to_string(&fixture).unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["mask", "--json"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -634,7 +656,7 @@ fn mask_partial_redaction_json_preserves_edges() {
 
     // not real credential: synthetic detector fixture value only
     let secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["mask", "--json", "--redaction", "partial"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -670,7 +692,7 @@ fn mask_partial_redaction_json_preserves_edges() {
 fn mask_min_severity_filters_lower_risk_findings() {
     use std::io::Write;
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["mask", "--json", "--min-severity", "high"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -698,7 +720,7 @@ fn mask_binary_stdin_passes_through() {
     use std::io::Write;
 
     let data = b"abc\0def".to_vec();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["mask"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -719,7 +741,7 @@ fn mask_docx_requires_output() {
     let secret = synthetic_openai_key('a');
     create_minimal_docx(&input, &secret);
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["mask", input.to_str().unwrap()])
         .current_dir(dir.path())
         .output()
@@ -742,7 +764,7 @@ fn mask_docx_writes_redacted_output() {
     let secret = synthetic_openai_key('a');
     create_minimal_docx(&input, &format!("token={secret}"));
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "mask",
             input.to_str().unwrap(),
@@ -782,7 +804,7 @@ fn mask_xlsx_writes_redacted_output() {
     let inline_secret = synthetic_openai_key('b');
     create_minimal_xlsx(&input, &shared_secret, &inline_secret);
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "mask",
             input.to_str().unwrap(),
@@ -821,7 +843,7 @@ fn mask_pptx_writes_redacted_output() {
     let secret = synthetic_openai_key('a');
     create_minimal_pptx(&input, &secret);
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "mask",
             input.to_str().unwrap(),
@@ -949,7 +971,7 @@ fn mask_hook_mode_cursor_returns_masked_content() {
         "prompt": format!("please inspect this token: {secret}")
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["mask", "--hook-mode", "cursor"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -988,7 +1010,7 @@ fn mask_hook_mode_masks_file_segments_without_headings() {
         "prompt": format!("also check {prompt_secret}")
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .current_dir(dir.path())
         .args(["mask", "--hook-mode", "cursor"])
         .stdin(std::process::Stdio::piped())
@@ -1020,7 +1042,7 @@ fn mask_hook_mode_clean_payload_does_not_echo_content() {
         "prompt": clean
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["mask", "--hook-mode", "cursor"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1048,7 +1070,7 @@ fn mask_hook_mode_clean_payload_does_not_echo_content() {
 
 #[test]
 fn ci_init_github_dry_run_prints_workflow() {
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["ci", "init", "github", "--dry-run"])
         .output()
         .expect("ci init github dry-run");
@@ -1083,7 +1105,7 @@ fn ci_init_github_dry_run_prints_workflow() {
 fn ci_init_github_writes_workflow_and_refuses_overwrite() {
     let tmp = tempfile::tempdir().expect("tempdir");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["ci", "init", "github"])
         .current_dir(tmp.path())
         .output()
@@ -1101,7 +1123,7 @@ fn ci_init_github_writes_workflow_and_refuses_overwrite() {
     assert!(workflow.contains("permissions:\n  contents: read"));
     assert!(workflow.contains("cancel-in-progress: true"));
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["ci", "init", "github"])
         .current_dir(tmp.path())
         .output()
@@ -1128,7 +1150,7 @@ fn doctor_workflows_reports_and_fixes_missing_persist_credentials() {
     )
     .expect("write workflow");
 
-    let report = Command::new(shk_bin())
+    let report = shk_cmd()
         .args(["doctor", "workflows"])
         .current_dir(tmp.path())
         .output()
@@ -1137,7 +1159,7 @@ fn doctor_workflows_reports_and_fixes_missing_persist_credentials() {
     let stdout = String::from_utf8_lossy(&report.stdout);
     assert!(stdout.contains(".github/workflows/ci.yml:7"), "{stdout}");
 
-    let fixed = Command::new(shk_bin())
+    let fixed = shk_cmd()
         .args(["doctor", "workflows", "--fix"])
         .current_dir(tmp.path())
         .output()
@@ -1155,7 +1177,7 @@ fn doctor_workflows_reports_and_fixes_missing_persist_credentials() {
         "{contents}"
     );
 
-    let recheck = Command::new(shk_bin())
+    let recheck = shk_cmd()
         .args(["doctor", "workflows"])
         .current_dir(tmp.path())
         .output()
@@ -1178,7 +1200,7 @@ fn doctor_workflows_fix_requires_project_policy() {
     )
     .expect("write workflow");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "workflows", "--fix"])
         .current_dir(tmp.path())
         .output()
@@ -1194,7 +1216,7 @@ fn doctor_workflows_fix_requires_project_policy() {
 
 #[test]
 fn ci_init_github_rejects_invalid_fail_on_at_clap_layer() {
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["ci", "init", "github", "--dry-run", "--fail-on", "bogus"])
         .output()
         .expect("ci init github invalid fail-on");
@@ -1206,7 +1228,7 @@ fn ci_init_github_rejects_invalid_fail_on_at_clap_layer() {
 
 #[test]
 fn ci_init_github_rejects_unsafe_shk_version() {
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "ci",
             "init",
@@ -1225,7 +1247,7 @@ fn ci_init_github_rejects_unsafe_shk_version() {
 
 #[test]
 fn ci_init_github_warns_when_audit_combined_with_fail_on() {
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "ci",
             "init",
@@ -1270,7 +1292,7 @@ fn mask_hook_mode_claude_post_returns_replacement_output() {
         }
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["mask", "--hook-mode", "claude-code", "--post"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
@@ -1305,7 +1327,7 @@ fn scan_json_reports_suppressed_and_deduplicated_fields() {
     let dir = tempfile::tempdir().unwrap();
     let secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
     std::fs::write(dir.path().join("dupe.txt"), format!("{secret}\n{secret}\n")).unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "scan",
             &dir.path().display().to_string(),
@@ -1330,7 +1352,7 @@ fn scan_human_output_hides_skip_details_by_default() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("blob.dat"), b"abc\0def").unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "scan",
             &dir.path().display().to_string(),
@@ -1359,7 +1381,7 @@ fn scan_verbose_human_output_shows_skip_details() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("blob.dat"), b"abc\0def").unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "scan",
             &dir.path().display().to_string(),
@@ -1400,7 +1422,7 @@ message = "Internal confidential term detected"
     .unwrap();
     std::fs::write(dir.path().join("notes.txt"), "launch ProjectNebula\n").unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--json", "--fail-on", "critical"])
         .current_dir(dir.path())
         .output()
@@ -1443,7 +1465,7 @@ kind = "internal"
     std::fs::write(dir.path().join("src/notes.txt"), "launch ProjectNebula\n").unwrap();
 
     // Run from the subdirectory; --project-root must pull in the root shk.toml.
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "--project-root",
             &dir.path().display().to_string(),
@@ -1483,7 +1505,7 @@ fn scan_includes_hidden_files_but_not_git_dir() {
     std::fs::create_dir(dir.path().join(".git")).unwrap();
     std::fs::write(dir.path().join(".git/config"), "[core]\n").unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--json", "--fail-on", "critical"])
         .current_dir(dir.path())
         .output()
@@ -1511,7 +1533,7 @@ fn scan_includes_hidden_files_but_not_git_dir() {
 fn project_root_flag_rejects_missing_directory() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("does-not-exist");
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "--project-root",
             &missing.display().to_string(),
@@ -1547,7 +1569,7 @@ kind = "internal"
     .unwrap();
     std::fs::write(dir.path().join("src/notes.txt"), "launch ProjectNebula\n").unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", "src", "--json", "--fail-on", "critical"])
         .current_dir(dir.path())
         .output()
@@ -1571,7 +1593,7 @@ kind = "internal"
 
 #[test]
 fn scan_rejects_invalid_fail_on() {
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--fail-on", "critcal"])
         .output()
         .expect("scan invalid fail-on");
@@ -1588,7 +1610,7 @@ fn scan_rejects_invalid_fail_on() {
 fn scan_missing_target_exits_2() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("does-not-exist.txt");
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", missing.to_str().unwrap(), "--json"])
         .current_dir(dir.path())
         .output()
@@ -1614,14 +1636,14 @@ fn scan_staged_rejects_oversized_blob_before_content_scan() {
     )
     .expect("write policy");
     std::fs::write(tmp.path().join("large.txt"), b"123456789").expect("write large blob");
-    let add = Command::new("git")
+    let add = git_cmd()
         .args(["add", "shk.toml", "large.txt"])
         .current_dir(tmp.path())
         .output()
         .expect("git add");
     assert!(add.status.success());
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", "--staged", "--json", "--fail-on", "critical"])
         .current_dir(tmp.path())
         .output()
@@ -1643,7 +1665,7 @@ fn scan_staged_rejects_oversized_blob_before_content_scan() {
 #[test]
 fn scan_staged_outside_git_exits_2() {
     let dir = tempfile::tempdir().unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", "--staged"])
         .current_dir(dir.path())
         .output()
@@ -1665,7 +1687,7 @@ fn scan_staged_outside_git_exits_2() {
 #[test]
 fn scan_staged_reads_index_not_worktree() {
     let dir = tempfile::tempdir().unwrap();
-    let init = Command::new("git")
+    let init = git_cmd()
         .args(["init"])
         .current_dir(dir.path())
         .output()
@@ -1683,14 +1705,14 @@ fn scan_staged_reads_index_not_worktree() {
         "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
     )
     .unwrap();
-    Command::new("git")
+    git_cmd()
         .args(["add", "secret.txt"])
         .current_dir(dir.path())
         .output()
         .expect("git add");
     std::fs::write(&path, "clean worktree\n").unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", "--staged", "--json"])
         .current_dir(dir.path())
         .output()
@@ -1726,7 +1748,7 @@ fn scan_staged_respects_policy_exclude() {
     std::fs::create_dir(dir.path().join("vendor")).unwrap();
     let secret = synthetic_openai_key('d');
     std::fs::write(dir.path().join("vendor/secret.txt"), format!("{secret}\n")).unwrap();
-    let add = Command::new("git")
+    let add = git_cmd()
         .args(["add", "vendor/secret.txt"])
         .current_dir(dir.path())
         .output()
@@ -1738,7 +1760,7 @@ fn scan_staged_respects_policy_exclude() {
         String::from_utf8_lossy(&add.stderr)
     );
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", "--staged", "--json"])
         .current_dir(dir.path())
         .output()
@@ -1767,7 +1789,7 @@ fn scan_staged_skips_submodule_gitlink_entries() {
         "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
     )
     .unwrap();
-    Command::new("git")
+    git_cmd()
         .args(["add", "secret.txt"])
         .current_dir(dir.path())
         .output()
@@ -1775,7 +1797,7 @@ fn scan_staged_skips_submodule_gitlink_entries() {
     // Stage a gitlink (submodule bump) without needing a real submodule. The
     // referenced commit does not exist in this repository's object database,
     // mirroring how submodule commits are unreadable from the superproject.
-    let stage_gitlink = Command::new("git")
+    let stage_gitlink = git_cmd()
         .args([
             "update-index",
             "--add",
@@ -1792,7 +1814,7 @@ fn scan_staged_skips_submodule_gitlink_entries() {
         String::from_utf8_lossy(&stage_gitlink.stderr)
     );
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", "--staged", "--json"])
         .current_dir(dir.path())
         .output()
@@ -1841,7 +1863,7 @@ fn scan_git_history_detects_removed_secret() {
     std::fs::remove_file(dir.path().join("secret.txt")).unwrap();
     git_commit_all(dir.path(), "remove secret fixture");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", "--git-history", "--json"])
         .current_dir(dir.path())
         .output()
@@ -1893,7 +1915,7 @@ fn scan_git_history_handles_large_candidate_sets_without_deadlock() {
     }
     git_commit_all(dir.path(), "add many files");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", "--git-history", "--json"])
         .current_dir(dir.path())
         .output()
@@ -1920,7 +1942,7 @@ fn scan_git_history_scans_duplicate_blob_once() {
     std::fs::write(dir.path().join("b.txt"), format!("{secret}\n")).unwrap();
     git_commit_all(dir.path(), "add duplicate blob fixture");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", "--git-history", "--json", "--fail-on", "critical"])
         .current_dir(dir.path())
         .output()
@@ -1951,7 +1973,7 @@ fn scan_git_history_labels_binary_skip_with_commit_path() {
     std::fs::write(dir.path().join("blob.dat"), b"abc\0def").unwrap();
     git_commit_all(dir.path(), "add binary fixture");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", "--git-history", "--json", "--fail-on", "critical"])
         .current_dir(dir.path())
         .output()
@@ -1978,7 +2000,7 @@ fn scan_git_history_labels_binary_skip_with_commit_path() {
 fn scan_git_history_outside_git_exits_2() {
     let dir = tempfile::tempdir().unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", "--git-history"])
         .current_dir(dir.path())
         .output()
@@ -2014,7 +2036,7 @@ fn scan_git_history_respects_policy_exclude() {
     std::fs::write(dir.path().join("kept/clean.txt"), "nothing sensitive\n").unwrap();
     git_commit_all(dir.path(), "add excluded history fixture");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", "--git-history", "--json", "--fail-on", "critical"])
         .current_dir(dir.path())
         .output()
@@ -2050,7 +2072,7 @@ fn scan_git_history_works_from_repo_subdirectory() {
     .unwrap();
     git_commit_all(dir.path(), "add nested history fixture");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", "--git-history", "--json"])
         .current_dir(dir.path().join("src"))
         .output()
@@ -2086,7 +2108,7 @@ fn scan_git_history_handles_hex_looking_paths() {
     .unwrap();
     git_commit_all(dir.path(), "add hex-looking path fixture");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", "--git-history", "--json"])
         .current_dir(dir.path())
         .output()
@@ -2121,7 +2143,7 @@ fn scan_git_history_preview_json_reports_candidate_counts() {
     .unwrap();
     git_commit_all(dir.path(), "add preview fixture");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", "--git-history", "--preview", "--json"])
         .current_dir(dir.path())
         .output()
@@ -2174,7 +2196,7 @@ fn scan_git_history_ref_limits_scanned_commits() {
     std::fs::write(&path, "clean now\n").unwrap();
     git_commit_all(dir.path(), "remove old secret fixture");
 
-    let all = Command::new(shk_bin())
+    let all = shk_cmd()
         .args(["scan", "--git-history", "--json"])
         .current_dir(dir.path())
         .output()
@@ -2187,7 +2209,7 @@ fn scan_git_history_ref_limits_scanned_commits() {
         String::from_utf8_lossy(&all.stderr)
     );
 
-    let latest_only = Command::new(shk_bin())
+    let latest_only = shk_cmd()
         .args([
             "scan",
             "--git-history",
@@ -2224,7 +2246,7 @@ fn scan_git_history_rejects_since_that_looks_like_option() {
     std::fs::write(dir.path().join("clean.txt"), "nothing sensitive\n").unwrap();
     git_commit_all(dir.path(), "add clean fixture");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", "--git-history", "--preview", "--since=-bad"])
         .current_dir(dir.path())
         .output()
@@ -2246,7 +2268,7 @@ fn scan_git_history_rejects_since_that_looks_like_option() {
 #[test]
 fn scan_staged_works_from_repo_subdirectory() {
     let dir = tempfile::tempdir().unwrap();
-    let init = Command::new("git")
+    let init = git_cmd()
         .args(["init"])
         .current_dir(dir.path())
         .output()
@@ -2264,13 +2286,13 @@ fn scan_staged_works_from_repo_subdirectory() {
         "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
     )
     .unwrap();
-    Command::new("git")
+    git_cmd()
         .args(["add", "src/secret.txt"])
         .current_dir(dir.path())
         .output()
         .expect("git add");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", "--staged", "--json"])
         .current_dir(dir.path().join("src"))
         .output()
@@ -2288,7 +2310,7 @@ fn scan_staged_works_from_repo_subdirectory() {
 #[test]
 fn hooks_install_ai_dry_run_cursor() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["hooks", "install-ai", "--tool", "cursor", "--dry-run"])
         .current_dir(&root)
         .output()
@@ -2314,7 +2336,7 @@ fn hooks_install_ai_claude_apply_deny_merges_without_duplicates() {
     .unwrap();
 
     for _ in 0..2 {
-        let out = Command::new(shk_bin())
+        let out = shk_cmd()
             .args([
                 "hooks",
                 "install-ai",
@@ -2397,7 +2419,7 @@ fn hooks_install_ai_claude_apply_deny_accepts_equivalent_entries() {
     )
     .unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "hooks",
             "install-ai",
@@ -2442,7 +2464,7 @@ fn hooks_install_ai_codex_is_idempotent() {
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
 
     for _ in 0..2 {
-        let out = Command::new(shk_bin())
+        let out = shk_cmd()
             .args(["hooks", "install-ai", "--tool", "codex"])
             .current_dir(dir.path())
             .output()
@@ -2485,7 +2507,7 @@ approval_policy = "never"
     )
     .unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["hooks", "install-ai", "--tool", "codex", "--apply-sandbox"])
         .current_dir(dir.path())
         .output()
@@ -2513,7 +2535,7 @@ fn hooks_install_ai_codex_includes_permission_request() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["hooks", "install-ai", "--tool", "codex"])
         .current_dir(dir.path())
         .output()
@@ -2561,7 +2583,7 @@ fn hook_mode_cursor_blocks_with_exit_2() {
         "file_path": fixture.to_str().unwrap(),
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "cursor"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
@@ -2595,7 +2617,7 @@ fn hooks_install_ai_antigravity_writes_managed_pre_and_post_hooks() {
     .unwrap();
 
     for _ in 0..2 {
-        let out = Command::new(shk_bin())
+        let out = shk_cmd()
             .args([
                 "hooks",
                 "install-ai",
@@ -2677,7 +2699,7 @@ fn hooks_install_ai_antigravity_apply_deny_prints_permission_guidance() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "hooks",
             "install-ai",
@@ -2724,7 +2746,7 @@ fn hook_mode_antigravity_blocks_dangerous_command_line() {
         "stepIdx": 1
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "antigravity"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
@@ -2766,7 +2788,7 @@ fn hook_mode_antigravity_allows_clean_command() {
         "stepIdx": 1
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "antigravity"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
@@ -2791,7 +2813,7 @@ fn hook_mode_antigravity_allows_clean_command() {
 #[test]
 fn skills_install_antigravity_project_uses_agents_dir() {
     let dir = tempfile::tempdir().unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["skills", "install", "--tool", "antigravity"])
         .current_dir(dir.path())
         .output()
@@ -2817,7 +2839,7 @@ fn hooks_install_ai_copilot_writes_github_hooks_file() {
     .unwrap();
 
     for _ in 0..2 {
-        let out = Command::new(shk_bin())
+        let out = shk_cmd()
             .args(["hooks", "install-ai", "--tool", "copilot"])
             .current_dir(dir.path())
             .output()
@@ -2872,7 +2894,7 @@ fn hook_mode_copilot_pre_tool_deny_exits_zero_with_permission_decision() {
         }
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "copilot"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
@@ -2917,7 +2939,7 @@ fn hook_mode_copilot_cli_stringified_tool_args_are_scanned_and_guarded() {
         })
         .to_string();
         let out = output_with_stdin(
-            Command::new(shk_bin())
+            shk_cmd()
                 .args(["scan", ".", "--hook-mode", "copilot"])
                 .current_dir(repo.path()),
             &stdin,
@@ -2961,7 +2983,7 @@ fn hook_mode_codex_permission_request_uses_decision_shape() {
         }
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "codex"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
@@ -3007,7 +3029,7 @@ fn hook_mode_codex_permission_request_clean_does_not_auto_allow() {
         }
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "codex"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
@@ -3040,7 +3062,7 @@ fn hook_mode_claude_blocks_db_mutation_action() {
         }
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "claude-code"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
@@ -3074,7 +3096,7 @@ fn hook_mode_claude_blocks_shell_history_reads() {
         }
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "claude-code"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
@@ -3108,7 +3130,7 @@ fn hook_mode_claude_allows_db_select_action() {
         }
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "claude-code"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
@@ -3137,7 +3159,7 @@ fn hook_mode_claude_user_prompt_blocks_medium_pii() {
         "prompt": "Please use customer email admin@example.com in the demo"
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", "--hook-mode", "claude-code", "--fail-on", "medium"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
@@ -3188,7 +3210,7 @@ fn hook_mode_codex_user_prompt_blocks_medium_pii() {
         "prompt": "Please use customer email admin@example.com in the demo"
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "codex", "--fail-on", "medium"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
@@ -3242,7 +3264,7 @@ allow = ["Bash(psql:*)"]
         }
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "claude-code"])
         .current_dir(dir.path())
         .stdin(std::process::Stdio::piped())
@@ -3278,7 +3300,7 @@ fn hook_mode_invalid_action_guard_policy_fails_closed() {
         "tool_input": { "command": "echo safe" }
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "claude-code"])
         .current_dir(dir.path())
         .stdin(std::process::Stdio::piped())
@@ -3310,6 +3332,160 @@ fn hook_mode_invalid_action_guard_policy_fails_closed() {
     assert!(!reason.contains("definitely-not-a-boolean"), "{stdout}");
 }
 
+fn hook_mode_output_in(dir: &Path, extra_args: &[&str], stdin: &str) -> std::process::Output {
+    let mut args = vec!["scan", ".", "--hook-mode"];
+    args.extend_from_slice(extra_args);
+    output_with_stdin(shk_cmd().args(args).current_dir(dir), stdin)
+}
+
+#[test]
+fn hook_mode_blocking_pre_hook_internal_errors_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    // Marker text stands in for payload content that must not be echoed back.
+    for stdin in ["", "   \n", "not json: payload-marker-text"] {
+        let out = hook_mode_output_in(dir.path(), &["claude-code"], stdin);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{stdin:?}: {}",
+            output_log(&out)
+        );
+        let stdout: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|err| panic!("{stdin:?}: {err}: {}", output_log(&out)));
+        assert_eq!(
+            stdout["hookSpecificOutput"]["permissionDecision"], "deny",
+            "{stdin:?}: {stdout}"
+        );
+        let reason = stdout["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            reason.starts_with("shk internal error: "),
+            "{stdin:?}: {stdout}"
+        );
+        assert!(!reason.contains("payload-marker-text"), "{stdout}");
+    }
+
+    // Tools whose deny contract is exit 0 plus a JSON decision keep it.
+    let out = hook_mode_output_in(dir.path(), &["copilot"], "not json");
+    assert_eq!(out.status.code(), Some(0), "{}", output_log(&out));
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(stdout["permissionDecision"], "deny", "{stdout}");
+
+    // Tools that read the deny reason from stderr get it there.
+    let out = hook_mode_output_in(dir.path(), &["windsurf"], "not json");
+    assert_eq!(out.status.code(), Some(2), "{}", output_log(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("shk internal error: "),
+        "{}",
+        output_log(&out)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn hook_mode_internal_error_keeps_paths_out_of_stdout_and_stderr() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("unreadable-notes.txt");
+    std::fs::write(&file, "plain text\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&file).is_ok() {
+        // Running as root: the file cannot be made unreadable.
+        return;
+    }
+    let stdin = serde_json::json!({
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": file.to_string_lossy(),
+            "old_string": "plain",
+            "new_string": "simple"
+        }
+    })
+    .to_string();
+    let canonical_dir = std::fs::canonicalize(dir.path()).unwrap();
+
+    for tool in ["claude-code", "codex"] {
+        let out = hook_mode_output_in(dir.path(), &[tool], &stdin);
+        assert_eq!(out.status.code(), Some(2), "{tool}: {}", output_log(&out));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stdout.contains("shk internal error: hook payload could not be read"),
+            "{tool}: {}",
+            output_log(&out)
+        );
+        // The sanitised reason reaches stderr exactly once, without the cause
+        // chain that names the file.
+        assert_eq!(
+            stderr.matches("shk internal error: ").count(),
+            1,
+            "{tool}: {}",
+            output_log(&out)
+        );
+        for text in [&stdout, &stderr] {
+            for leaked in [
+                "unreadable-notes.txt".to_string(),
+                dir.path().to_string_lossy().into_owned(),
+                canonical_dir.to_string_lossy().into_owned(),
+                "read scanned file".to_string(),
+            ] {
+                assert!(!text.contains(&leaked), "{tool}: {}", output_log(&out));
+            }
+        }
+    }
+}
+
+#[test]
+fn hook_mode_claude_user_prompt_internal_error_blocks_with_exit_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("shk.toml"),
+        "[rules]\nsecrets = definitely-not-a-boolean\n",
+    )
+    .unwrap();
+    let stdin = serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "please summarise the meeting notes"
+    })
+    .to_string();
+    let out = hook_mode_output_in(dir.path(), &["claude-code"], &stdin);
+    assert_eq!(out.status.code(), Some(0), "{}", output_log(&out));
+    let stdout: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|err| panic!("{err}: {}", output_log(&out)));
+    assert_eq!(stdout["decision"], "block", "{stdout}");
+    let reason = stdout["reason"].as_str().unwrap_or_default();
+    assert!(reason.starts_with("shk internal error: "), "{stdout}");
+    assert!(!reason.contains("meeting notes"), "{stdout}");
+}
+
+#[test]
+fn hook_mode_audit_and_post_hooks_never_block_on_internal_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    for extra in [
+        &["claude-code", "--post"][..],
+        &["cursor", "--post"][..],
+        &["claude-code", "--audit"][..],
+    ] {
+        for stdin in ["", "not json"] {
+            let out = hook_mode_output_in(dir.path(), extra, stdin);
+            assert_ne!(
+                out.status.code(),
+                Some(2),
+                "{extra:?} {stdin:?}: {}",
+                output_log(&out)
+            );
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                !stdout.contains("deny") && !stdout.contains("block"),
+                "{extra:?} {stdin:?}: {}",
+                output_log(&out)
+            );
+        }
+    }
+}
+
 #[test]
 fn hook_mode_ignores_invalid_policy_from_untrusted_payload_path() {
     use std::io::Write;
@@ -3335,7 +3511,7 @@ fn hook_mode_ignores_invalid_policy_from_untrusted_payload_path() {
         }
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "claude-code"])
         .current_dir(trusted.path())
         .stdin(std::process::Stdio::piped())
@@ -3387,7 +3563,7 @@ allow = ["Write(*/tests/*.rs)"]
     .unwrap();
 
     let run_from_outside = || {
-        Command::new(shk_bin())
+        shk_cmd()
             .args(["scan", ".", "--hook-mode", "claude-code"])
             .current_dir(outside_cwd.path())
             .stdin(std::process::Stdio::piped())
@@ -3413,7 +3589,7 @@ allow = ["Write(*/tests/*.rs)"]
 
     // Project-installed hooks embed this explicit root. Unlike payload hints,
     // that installer-owned argument is trusted and may apply project allows.
-    let trusted = Command::new(shk_bin())
+    let trusted = shk_cmd()
         .args([
             "scan",
             repo.path().to_str().unwrap(),
@@ -3471,7 +3647,7 @@ fn hook_mode_payload_target_cannot_replace_content_scan_policy_or_audit_root() {
     })
     .to_string();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "claude-code"])
         .current_dir(outside_cwd.path())
         .stdin(std::process::Stdio::piped())
@@ -3517,7 +3693,7 @@ fn hook_mode_payload_cwd_cannot_redirect_relative_file_scan() {
     })
     .to_string();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "claude-code"])
         .current_dir(repo.path())
         .stdin(std::process::Stdio::piped())
@@ -3559,7 +3735,7 @@ fn hook_mode_path_allowlist_covers_only_text_bound_for_that_path() {
         })
         .to_string();
         output_with_stdin(
-            Command::new(shk_bin())
+            shk_cmd()
                 .args(["scan", ".", "--hook-mode", "claude-code", "--log-blocked"])
                 .current_dir(repo.path()),
             &stdin,
@@ -3606,7 +3782,7 @@ fn hook_mode_claude_edit_scans_the_edited_file() {
         })
         .to_string();
         let out = output_with_stdin(
-            Command::new(shk_bin())
+            shk_cmd()
                 .args(["scan", ".", "--hook-mode", "claude-code"])
                 .current_dir(repo.path()),
             &stdin,
@@ -3648,7 +3824,7 @@ fn hook_mode_ignores_file_paths_outside_repo_root() {
         "file_path": outside.path().to_str().unwrap(),
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "cursor"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
@@ -3687,7 +3863,7 @@ fn hook_mode_audit_creates_audit_log_in_isolated_tmp() {
         "file_path": fpath.to_str().unwrap(),
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "cursor", "--audit"])
         .current_dir(repo)
         .stdin(std::process::Stdio::piped())
@@ -3739,7 +3915,7 @@ fn hook_mode_log_blocked_writes_metadata_on_block() {
         "file_path": fpath.to_str().unwrap(),
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "cursor", "--log-blocked"])
         .current_dir(repo)
         .stdin(std::process::Stdio::piped())
@@ -3799,7 +3975,7 @@ fn hook_mode_log_blocked_append_failure_still_blocks() {
         "file_path": fpath.to_str().unwrap(),
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "cursor", "--log-blocked"])
         .current_dir(repo)
         .stdin(std::process::Stdio::piped())
@@ -3842,7 +4018,7 @@ fn hook_mode_log_blocked_action_guard_writes_category_only() {
         }
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "codex", "--log-blocked"])
         .current_dir(repo)
         .stdin(std::process::Stdio::piped())
@@ -3891,7 +4067,7 @@ fn run_nested_claude_hook(
         "tool_input": { "command": command }
     }))
     .unwrap();
-    let mut cmd = Command::new(shk_bin());
+    let mut cmd = shk_cmd();
     cmd.args(args).current_dir(worktree);
     match project_dir_env {
         Some(dir) => cmd.env("CLAUDE_PROJECT_DIR", dir),
@@ -3932,7 +4108,7 @@ fn hook_mode_matches_project_path_allowlist_inside_a_linked_worktree() {
     .unwrap();
     git_commit_all(project.path(), "policy");
     let worktree = project.path().join(".claude/worktrees/wt");
-    let add = Command::new("git")
+    let add = git_cmd()
         .args(["worktree", "add", "-q", "--detach"])
         .arg(&worktree)
         .current_dir(project.path())
@@ -3965,7 +4141,7 @@ fn hook_mode_matches_project_path_allowlist_inside_a_linked_worktree() {
         })
         .to_string();
         output_with_stdin(
-            Command::new(shk_bin())
+            shk_cmd()
                 .args(["scan", ".", "--hook-mode", "claude-code", "--log-blocked"])
                 .current_dir(project.path())
                 .env("CLAUDE_PROJECT_DIR", project.path()),
@@ -4112,7 +4288,7 @@ fn hooks_install_ai_log_blocked_injects_flag() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir = tempfile::tempdir_in(&root).unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["hooks", "install-ai", "--tool", "cursor", "--log-blocked"])
         .current_dir(dir.path())
         .output()
@@ -4159,7 +4335,7 @@ fn hook_mode_block_without_log_blocked_skips_audit_log() {
         "file_path": fpath.to_str().unwrap(),
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "cursor"])
         .current_dir(repo)
         .stdin(std::process::Stdio::piped())
@@ -4189,7 +4365,7 @@ fn hook_mode_log_blocked_requires_policy() {
         "file_path": fpath.to_str().unwrap(),
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "cursor", "--log-blocked"])
         .current_dir(repo)
         .stdin(std::process::Stdio::piped())
@@ -4223,7 +4399,7 @@ fn hook_mode_log_blocked_user_prompt_writes_log() {
         "prompt": "Please use customer email admin@example.com in the demo"
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "scan",
             ".",
@@ -4272,7 +4448,7 @@ fn hook_mode_log_blocked_appends_multiple_entries() {
     .unwrap();
 
     for _ in 0..2 {
-        let out = Command::new(shk_bin())
+        let out = shk_cmd()
             .args(["scan", ".", "--hook-mode", "cursor", "--log-blocked"])
             .current_dir(repo)
             .stdin(std::process::Stdio::piped())
@@ -4297,7 +4473,7 @@ fn hooks_install_ai_claude_log_blocked_injects_flag() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir = tempfile::tempdir_in(&root).unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "hooks",
             "install-ai",
@@ -4322,7 +4498,7 @@ fn hooks_install_ai_codex_log_blocked_injects_flag() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir = tempfile::tempdir_in(&root).unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["hooks", "install-ai", "--tool", "codex", "--log-blocked"])
         .current_dir(dir.path())
         .output()
@@ -4339,7 +4515,7 @@ fn hooks_install_ai_codex_log_blocked_injects_flag() {
 #[test]
 fn audit_reports_empty_log_helpfully() {
     let dir = tempfile::tempdir().unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["audit"])
         .current_dir(dir.path())
         .output()
@@ -4370,7 +4546,7 @@ fn audit_json_reports_blocked_metadata() {
         "file_path": fpath.to_str().unwrap(),
     }))
     .unwrap();
-    let block = Command::new(shk_bin())
+    let block = shk_cmd()
         .args(["scan", ".", "--hook-mode", "cursor", "--log-blocked"])
         .current_dir(repo)
         .stdin(std::process::Stdio::piped())
@@ -4384,7 +4560,7 @@ fn audit_json_reports_blocked_metadata() {
         .expect("log-blocked hook");
     assert_eq!(block.status.code(), Some(2));
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["audit", "--json", "--reason", "finding-threshold"])
         .current_dir(repo)
         .output()
@@ -4423,7 +4599,7 @@ fn audit_from_git_subdir_reads_repo_root_log() {
         "file_path": fpath.to_str().unwrap(),
     }))
     .unwrap();
-    let block = Command::new(shk_bin())
+    let block = shk_cmd()
         .args(["scan", ".", "--hook-mode", "cursor", "--log-blocked"])
         .current_dir(repo.join("nested"))
         .stdin(std::process::Stdio::piped())
@@ -4438,7 +4614,7 @@ fn audit_from_git_subdir_reads_repo_root_log() {
     assert_eq!(block.status.code(), Some(2));
     assert!(repo.join(".shk/audit.log").is_file());
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["audit", "--json"])
         .current_dir(repo.join("nested"))
         .output()
@@ -4475,7 +4651,7 @@ fn audit_human_shows_recent_blocked_event() {
         }
     }))
     .unwrap();
-    Command::new(shk_bin())
+    shk_cmd()
         .args(["scan", ".", "--hook-mode", "codex", "--log-blocked"])
         .current_dir(repo)
         .stdin(std::process::Stdio::piped())
@@ -4488,7 +4664,7 @@ fn audit_human_shows_recent_blocked_event() {
         })
         .expect("log-blocked guard");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["audit", "--reason", "action-guard"])
         .current_dir(repo)
         .output()
@@ -4513,7 +4689,7 @@ fn hook_mode_post_warns_but_exits_0() {
         "content": format!("tool returned token {secret}"),
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "cursor", "--post"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
@@ -4551,7 +4727,7 @@ fn hook_mode_antigravity_post_log_blocked_writes_audit_and_empty_stdout() {
     }))
     .unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "scan",
             ".",
@@ -4599,7 +4775,7 @@ fn hook_mode_antigravity_post_audit_stays_non_blocking_when_log_write_fails() {
     }))
     .unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "scan",
             ".",
@@ -4637,7 +4813,7 @@ fn hook_mode_antigravity_post_audit_stays_non_blocking_when_log_write_fails() {
 #[test]
 fn init_creates_project_policy() {
     let dir = tempfile::tempdir().unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["init"])
         .current_dir(dir.path())
         .output()
@@ -4653,7 +4829,7 @@ fn init_creates_project_policy() {
 #[test]
 fn init_strict_with_piped_stdin_keeps_policy_only_behavior() {
     let dir = tempfile::tempdir().unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["init", "--strict"])
         .current_dir(dir.path())
         .stdin(std::process::Stdio::piped())
@@ -4681,7 +4857,7 @@ fn init_strict_with_piped_stdin_keeps_policy_only_behavior() {
 #[test]
 fn init_interactive_retries_invalid_tool_input() {
     let dir = tempfile::tempdir().unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["init", "--no-ai-hooks", "--no-skills"])
         .current_dir(dir.path())
         .stdin(std::process::Stdio::piped())
@@ -4709,7 +4885,7 @@ fn init_interactive_retries_invalid_tool_input() {
 #[test]
 fn init_yes_sets_up_selected_ai_tool_and_skill() {
     let dir = tempfile::tempdir().unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "init",
             "--yes",
@@ -4745,6 +4921,140 @@ fn init_yes_sets_up_selected_ai_tool_and_skill() {
 }
 
 #[test]
+fn init_yes_continues_when_git_hooks_are_managed_elsewhere() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    let config = git_cmd()
+        .args(["config", "core.hooksPath", ".githooks"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git config");
+    assert!(config.status.success(), "{}", output_log(&config));
+    std::fs::create_dir(dir.path().join(".githooks")).unwrap();
+
+    let out = shk_cmd()
+        .args(["init", "--yes", "--tool", "codex", "--audit"])
+        .current_dir(dir.path())
+        .output()
+        .expect("init --yes");
+
+    assert!(out.status.success(), "{}", output_log(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("warning: skipped Git pre-commit hook"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(".githooks"), "{stderr}");
+    assert!(stderr.contains("shk scan --staged"), "{stderr}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("Installed pre-commit hook"), "{stdout}");
+    assert!(!dir.path().join(".githooks/pre-commit").exists());
+    assert!(!dir.path().join(".git/hooks/pre-commit").exists());
+    // The steps after the Git hook still ran.
+    assert!(dir.path().join(".codex/config.toml").is_file());
+    assert!(dir.path().join(".agents/skills/shk/SKILL.md").is_file());
+
+    // `shk hooks install` reports the same outcome as an error.
+    let install = shk_cmd()
+        .args(["hooks", "install"])
+        .current_dir(dir.path())
+        .output()
+        .expect("hooks install");
+    assert!(!install.status.success(), "{}", output_log(&install));
+    let stderr = String::from_utf8_lossy(&install.stderr);
+    assert!(stderr.contains("core.hooksPath"), "{stderr}");
+    assert!(!dir.path().join(".githooks/pre-commit").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn global_opencode_install_follows_xdg_config_home_outside_home() {
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("shk.toml"), "").unwrap();
+
+    let out = shk_cmd()
+        .args(["hooks", "install-ai", "--tool", "opencode", "--global"])
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .current_dir(project.path())
+        .output()
+        .expect("hooks install-ai --global");
+
+    assert!(out.status.success(), "{}", output_log(&out));
+    let plugin = xdg.path().join("opencode/plugins/shk-security.js");
+    let body = std::fs::read_to_string(&plugin).unwrap();
+    assert!(body.contains("--hook-mode opencode"), "{body}");
+    assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn init_yes_rerun_keeps_installed_skill_and_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = || {
+        shk_cmd()
+            .args([
+                "init",
+                "--yes",
+                "--tool",
+                "codex",
+                "--audit",
+                "--no-git-hook",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .expect("init --yes")
+    };
+    let first = run();
+    assert!(first.status.success(), "{}", output_log(&first));
+    let policy = dir.path().join("shk.toml");
+    std::fs::write(&policy, "# customised by the user\n").unwrap();
+    let skill = dir.path().join(".agents/skills/shk/SKILL.md");
+    let bundled = std::fs::read_to_string(&skill).unwrap();
+
+    // Identical skill file: nothing to do, and no `--force` suggestion.
+    let second = run();
+    assert!(second.status.success(), "{}", output_log(&second));
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    assert!(stdout.contains("already up to date"), "{stdout}");
+    assert_eq!(std::fs::read_to_string(&skill).unwrap(), bundled);
+    assert_eq!(
+        std::fs::read_to_string(&policy).unwrap(),
+        "# customised by the user\n"
+    );
+
+    // A locally edited skill file is kept and reported, not overwritten.
+    std::fs::write(&skill, "edited by the user\n").unwrap();
+    let third = run();
+    assert!(third.status.success(), "{}", output_log(&third));
+    let stdout = String::from_utf8_lossy(&third.stdout);
+    assert!(stdout.contains("Skipped"), "{stdout}");
+    assert!(stdout.contains("shk skills install --force"), "{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(&skill).unwrap(),
+        "edited by the user\n"
+    );
+
+    // `--force` still replaces it.
+    let forced = shk_cmd()
+        .args([
+            "init",
+            "--yes",
+            "--force",
+            "--tool",
+            "codex",
+            "--audit",
+            "--no-git-hook",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("init --yes --force");
+    assert!(forced.status.success(), "{}", output_log(&forced));
+    assert_eq!(std::fs::read_to_string(&skill).unwrap(), bundled);
+}
+
+#[test]
 fn init_yes_applies_npm_hardening_when_package_json_exists() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("package.json"), r#"{"name":"demo"}"#).unwrap();
@@ -4754,7 +5064,7 @@ fn init_yes_applies_npm_hardening_when_package_json_exists() {
     )
     .unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "init",
             "--yes",
@@ -4788,7 +5098,7 @@ fn init_yes_can_skip_npm_hardening() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("package.json"), r#"{"name":"demo"}"#).unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "init",
             "--yes",
@@ -4819,7 +5129,7 @@ fn init_yes_can_skip_npm_hardening() {
 fn init_no_npm_hardening_is_quiet_without_package_json() {
     let dir = tempfile::tempdir().unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "init",
             "--yes",
@@ -4860,7 +5170,7 @@ fn init_yes_applies_package_manager_specific_age_gates() {
     )
     .unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "init",
             "--yes",
@@ -4897,7 +5207,7 @@ fn init_yes_applies_package_manager_specific_age_gates() {
     )
     .unwrap();
     std::fs::write(yarn_dir.path().join("yarn.lock"), "").unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "init",
             "--yes",
@@ -4924,7 +5234,7 @@ fn init_yes_applies_package_manager_specific_age_gates() {
     )
     .unwrap();
     std::fs::write(bun_dir.path().join("bun.lock"), "").unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "init",
             "--yes",
@@ -4962,7 +5272,7 @@ fn init_yes_places_npmrc_in_nested_package_project() {
     )
     .unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "init",
             "--yes",
@@ -4996,7 +5306,7 @@ fn mask_output_requires_project_policy() {
     let input = dir.path().join("input.txt");
     let output = dir.path().join("output.txt");
     std::fs::write(&input, "hello@example.com\n").unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "mask",
             input.to_str().unwrap(),
@@ -5022,7 +5332,7 @@ fn mask_output_refuses_protected_home_config() {
     std::fs::write(&input, "hello@example.com\n").unwrap();
     std::fs::write(&zshrc, "original\n").unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "mask",
             input.to_str().unwrap(),
@@ -5049,7 +5359,7 @@ fn mask_output_refuses_tilde_home_config() {
     std::fs::write(&input, "hello@example.com\n").unwrap();
     std::fs::write(&zshrc, "original\n").unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["mask", input.to_str().unwrap(), "--output", "~/.zshrc"])
         .env("HOME", home.path())
         .current_dir(project.path())
@@ -5072,7 +5382,7 @@ fn mask_output_refuses_env_files() {
     std::fs::write(&dotenv, "SECRET=original\n").unwrap();
 
     for output in [&dotenv, &dotenv_local] {
-        let out = Command::new(shk_bin())
+        let out = shk_cmd()
             .args([
                 "mask",
                 input.to_str().unwrap(),
@@ -5097,7 +5407,7 @@ fn mask_output_refuses_env_files() {
 fn hooks_install_requires_project_policy() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["hooks", "install"])
         .current_dir(dir.path())
         .output()
@@ -5114,7 +5424,7 @@ fn hooks_install_makes_existing_pre_commit_executable() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = tempfile::tempdir().unwrap();
-    let init = Command::new("git")
+    let init = git_cmd()
         .args(["init"])
         .current_dir(dir.path())
         .output()
@@ -5133,7 +5443,7 @@ fn hooks_install_makes_existing_pre_commit_executable() {
     perms.set_mode(0o600);
     std::fs::set_permissions(&hook, perms).unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["hooks", "install"])
         .current_dir(dir.path())
         .output()
@@ -5154,7 +5464,7 @@ fn doctor_env_reports_findings_without_values() {
     let dir = tempfile::tempdir().unwrap();
     let secret = "aB3dE5gH7jK9mN2pQ4rS";
     std::fs::write(dir.path().join(".env"), format!("api_key={secret}\n")).unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "env", dir.path().to_str().unwrap()])
         .output()
         .expect("doctor env");
@@ -5176,7 +5486,7 @@ fn doctor_env_reports_unsupported_secret_store_without_onepassword_diagnostics()
         "[env]\nsecret_store = \"1pasword\"\n",
     )
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "env", dir.path().to_str().unwrap()])
         .output()
         .expect("doctor env");
@@ -5199,7 +5509,7 @@ fn doctor_env_warns_for_dotenvx_private_key_file_without_dotenvx_flag() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join(".env.keys"), "PLACEHOLDER=example\n").unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "env", dir.path().to_str().unwrap()])
         .output()
         .expect("doctor env");
@@ -5222,7 +5532,7 @@ fn doctor_env_skips_dotenvx_encrypted_files() {
         "#,
     )
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "env", dir.path().to_str().unwrap()])
         .output()
         .expect("doctor env");
@@ -5251,7 +5561,7 @@ DATABASE_URL="encrypted:BE9f1wzB2Rf6Sg=="
 "#,
     )
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "env", dir.path().to_str().unwrap()])
         .output()
         .expect("doctor env");
@@ -5281,7 +5591,7 @@ fn doctor_env_warns_when_encrypted_file_contains_plaintext_values() {
         "#,
     )
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "env", dir.path().to_str().unwrap()])
         .output()
         .expect("doctor env");
@@ -5316,7 +5626,7 @@ fn doctor_version_reports_update_available_from_env() {
         .collect::<Vec<_>>();
     parts[2] += 1;
     let next_patch = format!("v{}.{}.{}", parts[0], parts[1], parts[2]);
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "version"])
         .env("SHK_UPDATE_CHECK_LATEST_TAG", &next_patch)
         .env_remove("SHK_UPDATE_CHECK_URL")
@@ -5340,7 +5650,7 @@ fn doctor_version_reports_update_available_from_env() {
 fn doctor_version_json_reports_current_status_from_env() {
     let current = env!("CARGO_PKG_VERSION");
     let latest = format!("v{current}");
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "--json", "version"])
         .env("SHK_UPDATE_CHECK_LATEST_TAG", &latest)
         .env_remove("SHK_UPDATE_CHECK_URL")
@@ -5360,7 +5670,7 @@ fn doctor_version_json_reports_current_status_from_env() {
 
 #[test]
 fn completions_bash_generates_script() {
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["completions", "bash"])
         .output()
         .expect("completions bash");
@@ -5389,7 +5699,7 @@ fn status_reports_update_available_from_env() {
         .collect::<Vec<_>>();
     parts[2] += 1;
     let next_patch = format!("v{}.{}.{}", parts[0], parts[1], parts[2]);
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .arg("status")
         .current_dir(dir.path())
         .env("SHK_UPDATE_CHECK_LATEST_TAG", &next_patch)
@@ -5417,7 +5727,7 @@ fn doctor_env_dotenvx_flags_private_key_artifacts() {
     let private_key = "DOTENV_PRIVATE_KEY=dotenvx-secret-demo-value";
     std::fs::write(dir.path().join(".env.keys"), private_key).unwrap();
     std::fs::write(dir.path().join(".env.vault"), "DOTENV_VAULT=encrypted").unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "env", dir.path().to_str().unwrap(), "--dotenvx"])
         .output()
         .expect("doctor env dotenvx");
@@ -5442,7 +5752,7 @@ fn doctor_env_dotenvx_flags_private_key_artifacts() {
 fn doctor_env_dotenvx_accepts_vault_without_keys() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join(".env.vault"), "DOTENV_VAULT=encrypted").unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "env", dir.path().to_str().unwrap(), "--dotenvx"])
         .output()
         .expect("doctor env dotenvx");
@@ -5461,7 +5771,7 @@ fn doctor_env_dotenvx_accepts_vault_without_keys() {
 
 #[test]
 fn env_dotenvx_help_is_registered() {
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["env", "dotenvx", "--help"])
         .output()
         .expect("env dotenvx help");
@@ -5478,7 +5788,7 @@ fn env_dotenvx_help_is_registered() {
 
 #[test]
 fn env_encrypt_help_documents_in_place() {
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["env", "encrypt", "--help"])
         .output()
         .expect("env encrypt help");
@@ -5495,7 +5805,7 @@ fn env_encrypt_help_documents_in_place() {
 
 #[test]
 fn env_decrypt_help_hides_encrypt_only_options() {
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["env", "decrypt", "--help"])
         .output()
         .expect("env decrypt help");
@@ -5513,7 +5823,7 @@ fn env_decrypt_help_hides_encrypt_only_options() {
 
 #[test]
 fn env_run_help_is_registered() {
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["env", "run", "--help"])
         .output()
         .expect("env run help");
@@ -5539,7 +5849,7 @@ DATABASE_URL="encrypted:BE9f1wzB2Rf6Sg=="
 "#,
     )
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .current_dir(dir.path())
         .args(["env", "run", "--", "sh", "-c", "true"])
         .output()
@@ -5552,7 +5862,7 @@ DATABASE_URL="encrypted:BE9f1wzB2Rf6Sg=="
 
 #[test]
 fn env_key_help_is_registered_without_raw_export() {
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["env", "key", "--help"])
         .output()
         .expect("env key help");
@@ -5568,7 +5878,7 @@ fn env_key_help_is_registered_without_raw_export() {
     assert!(stdout.contains("export"), "{stdout}");
     assert!(stdout.contains("migrate"), "{stdout}");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["env", "key", "delete"])
         .output()
         .expect("env key delete");
@@ -5578,7 +5888,7 @@ fn env_key_help_is_registered_without_raw_export() {
     assert!(stderr.contains("--key"), "{stderr}");
     assert!(stderr.contains("--env"), "{stderr}");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["env", "key", "export", "--help"])
         .output()
         .expect("env key export help");
@@ -5594,7 +5904,7 @@ fn env_key_help_is_registered_without_raw_export() {
 
 #[test]
 fn env_key_migrate_does_not_offer_unsafe_source_deletion() {
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["env", "key", "migrate", "--help"])
         .output()
         .expect("env key migrate help");
@@ -5607,7 +5917,7 @@ fn env_key_migrate_does_not_offer_unsafe_source_deletion() {
 
 #[test]
 fn env_dotenvx_delete_requires_explicit_target() {
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["env", "dotenvx", "delete"])
         .output()
         .expect("env dotenvx delete");
@@ -5628,7 +5938,7 @@ fn scan_detects_dotenvx_private_key_without_value() {
         format!("DOTENV_PRIVATE_KEY_PRODUCTION={secret}\n"),
     )
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "scan",
             dir.path().join(".env.keys").to_str().unwrap(),
@@ -5660,7 +5970,7 @@ fn doctor_ignore_fix_adds_extended_recommended_patterns() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
     std::fs::write(dir.path().join(".gitignore"), "node_modules/\n").unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "ignore", dir.path().to_str().unwrap(), "--fix"])
         .output()
         .expect("doctor ignore fix");
@@ -5695,7 +6005,7 @@ fn doctor_ignore_fix_accepts_equivalent_existing_patterns() {
     ]
     .join("\n");
     std::fs::write(dir.path().join(".gitignore"), &original).unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "ignore", dir.path().to_str().unwrap(), "--fix"])
         .output()
         .expect("doctor ignore fix");
@@ -5722,7 +6032,7 @@ fn doctor_ignore_reports_missing_claude_read_denies() {
         r#"{"permissions":{"deny":["Read(./.env)"]}}"#,
     )
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "ignore", dir.path().to_str().unwrap()])
         .output()
         .expect("doctor ignore");
@@ -5749,7 +6059,7 @@ fn doctor_ignore_accepts_claude_read_denies() {
         serde_json::json!({"permissions":{"deny": deny}}).to_string(),
     )
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "ignore", dir.path().to_str().unwrap()])
         .output()
         .expect("doctor ignore");
@@ -5777,7 +6087,7 @@ approval_policy = "never"
 "#,
     )
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "ignore", dir.path().to_str().unwrap()])
         .output()
         .expect("doctor ignore");
@@ -5813,7 +6123,7 @@ approval_policy = "on-request"
 "#,
     )
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "ignore", dir.path().to_str().unwrap()])
         .output()
         .expect("doctor ignore");
@@ -5840,7 +6150,7 @@ hooks = false
 "#,
     )
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "ignore", dir.path().to_str().unwrap()])
         .output()
         .expect("doctor ignore");
@@ -5871,7 +6181,7 @@ hooks = true
 "#,
     )
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "ignore", dir.path().to_str().unwrap()])
         .output()
         .expect("doctor ignore");
@@ -5902,7 +6212,7 @@ fn doctor_reports_missing_npm_hardening_for_package_json_project() {
     std::fs::write(dir.path().join("package.json"), r#"{"name":"demo"}"#).unwrap();
     std::fs::write(dir.path().join(".npmrc"), "ignore-scripts=false\n").unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor"])
         .current_dir(dir.path())
         .output()
@@ -5931,7 +6241,7 @@ fn doctor_strict_exits_one_for_advisory_warnings_without_error_prefix() {
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
     let path_dir = tempfile::tempdir().unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "--strict"])
         .env("PATH", path_dir.path())
         .current_dir(dir.path())
@@ -5951,7 +6261,7 @@ fn doctor_json_reports_strict_and_warning_summary() {
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
     let path_dir = tempfile::tempdir().unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "--json"])
         .env("PATH", path_dir.path())
         .current_dir(dir.path())
@@ -5974,7 +6284,7 @@ fn doctor_strict_json_emits_report_before_exit_one() {
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
     let path_dir = tempfile::tempdir().unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "--json", "--strict"])
         .env("PATH", path_dir.path())
         .current_dir(dir.path())
@@ -5998,14 +6308,14 @@ fn doctor_warns_when_managed_claude_pre_tool_matcher_is_outdated() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
     let path_dir = tempfile::tempdir().unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["hooks", "install-ai", "--tool", "claude-code"])
         .current_dir(dir.path())
         .output()
         .expect("install-ai claude-code");
     assert!(out.status.success(), "{out:?}");
     let doctor_json = || {
-        let out = Command::new(shk_bin())
+        let out = shk_cmd()
             .args(["doctor", "--json"])
             .env("PATH", path_dir.path())
             .current_dir(dir.path())
@@ -6044,7 +6354,7 @@ fn doctor_warns_when_managed_claude_pre_tool_matcher_is_outdated() {
         "{stale}"
     );
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .arg("doctor")
         .env("PATH", path_dir.path())
         .current_dir(dir.path())
@@ -6062,7 +6372,7 @@ fn doctor_json_emits_structured_configuration_error() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shk.toml"), "[scan").unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "--json"])
         .current_dir(dir.path())
         .output()
@@ -6091,7 +6401,7 @@ fn doctor_json_always_warns_for_dotenvx_private_key_file() {
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
     std::fs::write(dir.path().join(".env.keys"), "PLACEHOLDER=example\n").unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "--json", "--strict"])
         .current_dir(dir.path())
         .output()
@@ -6126,7 +6436,7 @@ fn doctor_json_does_not_run_onepassword_live_checks() {
     permissions.set_mode(0o755);
     std::fs::set_permissions(&op, permissions).unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "--json"])
         .env("SHK_OP_PATH", &op)
         .current_dir(dir.path())
@@ -6141,7 +6451,7 @@ fn doctor_json_does_not_run_onepassword_live_checks() {
 
 #[test]
 fn doctor_strict_rejects_subcommands_with_runtime_error_exit() {
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor", "--strict", "version"])
         .output()
         .expect("doctor --strict version");
@@ -6175,7 +6485,7 @@ fn doctor_accepts_npm_hardening_for_nested_package_json_project() {
     )
     .unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor"])
         .current_dir(dir.path())
         .output()
@@ -6216,7 +6526,7 @@ updates:
     )
     .unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["doctor"])
         .current_dir(dir.path())
         .output()
@@ -6233,7 +6543,7 @@ updates:
 #[test]
 fn skills_install_all_writes_project_skill_files() {
     let dir = tempfile::tempdir().unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["skills", "install"])
         .current_dir(dir.path())
         .output()
@@ -6289,7 +6599,7 @@ fn skills_install_all_preflights_existing_destinations() {
     std::fs::create_dir_all(agents_skill.parent().unwrap()).unwrap();
     std::fs::write(&agents_skill, "existing").unwrap();
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["skills", "install"])
         .current_dir(dir.path())
         .output()
@@ -6314,7 +6624,7 @@ fn skills_install_replaces_legacy_claude_skill_file() {
     std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
     std::fs::write(&legacy, "old flat-file skill").unwrap();
 
-    let dry = Command::new(shk_bin())
+    let dry = shk_cmd()
         .args(["skills", "install", "--tool", "claude-code", "--dry-run"])
         .current_dir(dir.path())
         .output()
@@ -6328,7 +6638,7 @@ fn skills_install_replaces_legacy_claude_skill_file() {
     assert!(dry_stdout.contains("would remove legacy"), "{dry_stdout}");
     assert!(legacy.is_file(), "dry-run must not remove the legacy file");
 
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["skills", "install", "--tool", "claude-code"])
         .current_dir(dir.path())
         .output()
@@ -6357,7 +6667,7 @@ fn hooks_install_ai_windsurf_writes_cascade_hooks_and_is_idempotent() {
     .unwrap();
 
     for _ in 0..2 {
-        let out = Command::new(shk_bin())
+        let out = shk_cmd()
             .args(["hooks", "install-ai", "--tool", "windsurf"])
             .current_dir(dir.path())
             .output()
@@ -6436,7 +6746,7 @@ fn hook_mode_windsurf_blocks_with_exit_2_and_stderr() {
         "tool_info": { "file_path": fixture.to_str().unwrap() },
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "windsurf"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
@@ -6473,7 +6783,7 @@ fn hook_mode_windsurf_user_prompt_blocks_secret_prompt() {
         },
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "windsurf"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
@@ -6505,7 +6815,7 @@ fn hook_mode_windsurf_allows_clean_prompt() {
         "tool_info": { "user_prompt": "please refactor this helper function" },
     }))
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "windsurf"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
@@ -6537,7 +6847,7 @@ fn hooks_install_ai_grok_writes_schema_clean_hooks_and_is_idempotent() {
     .unwrap();
 
     for _ in 0..2 {
-        let out = Command::new(shk_bin())
+        let out = shk_cmd()
             .args(["hooks", "install-ai", "--tool", "grok"])
             .current_dir(dir.path())
             .output()
@@ -6607,7 +6917,7 @@ fn hook_mode_grok_denies_pre_tool_use_and_blocks_user_prompt() {
         "toolInput": { "path": fixture }
     })
     .to_string();
-    let pre_out = Command::new(shk_bin())
+    let pre_out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "grok"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
@@ -6634,7 +6944,7 @@ fn hook_mode_grok_denies_pre_tool_use_and_blocks_user_prompt() {
         "prompt": "please use sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
     })
     .to_string();
-    let prompt_out = Command::new(shk_bin())
+    let prompt_out = shk_cmd()
         .args(["scan", ".", "--hook-mode", "grok"])
         .current_dir(&root)
         .stdin(std::process::Stdio::piped())
@@ -6655,7 +6965,7 @@ fn hook_mode_grok_denies_pre_tool_use_and_blocks_user_prompt() {
 #[test]
 fn skills_install_grok_uses_grok_skills_dir() {
     let dir = tempfile::tempdir().unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["skills", "install", "--tool", "grok"])
         .current_dir(dir.path())
         .output()
@@ -6671,7 +6981,7 @@ fn skills_install_grok_uses_grok_skills_dir() {
 #[test]
 fn skills_install_windsurf_uses_windsurf_skills_dir() {
     let dir = tempfile::tempdir().unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["skills", "install", "--tool", "windsurf"])
         .current_dir(dir.path())
         .output()
@@ -6692,7 +7002,7 @@ fn mask_pseudonymize_requires_output() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
     std::fs::write(dir.path().join("orders.csv"), "Email\nada@example.com\n").unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "mask",
             "orders.csv",
@@ -6730,7 +7040,7 @@ fn mask_pseudonymize_rejects_hook_mode_and_severity() {
             "--redaction" => args.extend(["--redaction", "match"]),
             _ => unreachable!(),
         }
-        let out = Command::new(shk_bin())
+        let out = shk_cmd()
             .args(&args)
             .current_dir(dir.path())
             .output()
@@ -6753,7 +7063,7 @@ fn mask_pseudonymize_dry_run_lists_columns_without_output() {
         "Email,Note\nada@example.com,keep\n",
     )
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "mask",
             "orders.csv",
@@ -6783,7 +7093,7 @@ fn mask_pseudonymize_rejects_non_utf8() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
     std::fs::write(dir.path().join("orders.csv"), [0x82, 0xa0, b'\n']).unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "mask",
             "orders.csv",
@@ -6811,7 +7121,7 @@ fn mask_pseudonymize_rejects_invalid_xlsx() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
     std::fs::write(dir.path().join("book.xlsx"), "not-a-real-xlsx").unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "mask",
             "book.xlsx",
@@ -6835,7 +7145,7 @@ fn mask_pseudonymize_text_dry_run() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
     std::fs::write(dir.path().join("notes.md"), "hello\n").unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["mask", "notes.md", "--pseudonymize", "--dry-run", "--json"])
         .current_dir(dir.path())
         .output()
@@ -6856,7 +7166,7 @@ fn mask_pseudonymize_rejects_map_without_shk_map_suffix() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
     std::fs::write(dir.path().join("notes.md"), "hello\n").unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "mask",
             "notes.md",
@@ -6882,7 +7192,7 @@ fn mask_pseudonymize_rejects_check_remaining_with_dry_run() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
     std::fs::write(dir.path().join("notes.md"), "hello\n").unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "mask",
             "notes.md",
@@ -6906,7 +7216,7 @@ fn existing_mask_without_pseudonymize_still_prints_stdout() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
     std::fs::write(dir.path().join("prompt.txt"), "hello world\n").unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["mask", "prompt.txt"])
         .current_dir(dir.path())
         .output()
@@ -6928,7 +7238,7 @@ fn mask_pseudonymize_rejects_format_for_xlsx_and_text_mode() {
     for (file, extra) in [("book.xlsx", vec![]), ("notes.md", vec!["--mode", "text"])] {
         let mut args = vec![file, "--pseudonymize", "--dry-run", "--format", "csv"];
         args.extend(extra);
-        let out = Command::new(shk_bin())
+        let out = shk_cmd()
             .arg("mask")
             .args(&args)
             .current_dir(dir.path())
@@ -6957,7 +7267,7 @@ fn mask_pseudonymize_rejects_unmatched_cli_columns() {
         "Email,Note\nada@example.com,keep\n",
     )
     .unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "mask",
             "orders.csv",
@@ -6990,7 +7300,7 @@ fn mask_pseudonymize_unmatched_columns_does_not_echo_input() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("shk.toml"), "").unwrap();
         std::fs::write(dir.path().join("input.csv"), input).unwrap();
-        let out = Command::new(shk_bin())
+        let out = shk_cmd()
             .args([
                 "mask",
                 "input.csv",
@@ -7022,7 +7332,7 @@ fn mask_pseudonymize_rejects_invalid_policy_kinds_before_running() {
     )
     .unwrap();
     std::fs::write(dir.path().join("notes.md"), "hello\n").unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["mask", "notes.md", "--pseudonymize", "--dry-run"])
         .current_dir(dir.path())
         .output()
@@ -7046,7 +7356,7 @@ fn mask_pseudonymize_dry_run_counts_rows_beyond_the_sample() {
         body.push_str(&format!("user{i}@example.com\n"));
     }
     std::fs::write(dir.path().join("orders.csv"), body).unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "mask",
             "orders.csv",
@@ -7073,7 +7383,7 @@ fn pseudonymize_restore_missing_map_exits_2() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
     std::fs::write(dir.path().join("notes.md"), "hello\n").unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args([
             "pseudonymize",
             "restore",
@@ -7115,7 +7425,7 @@ fn mask_pseudonymize_reads_tables_and_text_from_stdin() {
         (&[], "plain text\n", "\"mode\": \"text\""),
     ];
     for (extra, input, needle) in cases {
-        let mut child = Command::new(shk_bin())
+        let mut child = shk_cmd()
             .args(["mask", "--pseudonymize", "--dry-run", "--json"])
             .args(extra)
             .current_dir(dir.path())
@@ -7147,7 +7457,7 @@ fn mask_pseudonymize_only_flags_without_pseudonymize_exit_2() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shk.toml"), "").unwrap();
     std::fs::write(dir.path().join("notes.txt"), "hello\n").unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["mask", "notes.txt", "--columns", "Email:email"])
         .current_dir(dir.path())
         .output()
@@ -7168,7 +7478,7 @@ fn mask_pseudonymize_only_flags_without_pseudonymize_exit_2() {
 // Exercise the actual hook process: fail-closed clients care about its exit
 // status, not merely whether the extraction helper returns a body.
 fn run_hook_payload(root: &Path, tool: &str, payload: serde_json::Value) -> std::process::Output {
-    let mut child = Command::new(shk_bin())
+    let mut child = shk_cmd()
         .args(["scan", "--hook-mode", tool])
         .current_dir(root)
         .stdin(std::process::Stdio::piped())
@@ -7283,7 +7593,7 @@ fn mcp_audit_scans_grok_and_codex_authentication_headers() {
         );
         std::fs::write(config_dir.join("config.toml"), config).unwrap();
     }
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["mcp", "audit", "--json"])
         .current_dir(dir.path())
         .output()
@@ -7319,7 +7629,7 @@ fn hooks_install_ai_opencode_writes_managed_plugin_and_is_idempotent() {
         "wrote managed OpenCode plugin",
         "unchanged managed OpenCode plugin",
     ] {
-        let out = Command::new(shk_bin())
+        let out = shk_cmd()
             .args(["hooks", "install-ai", "--tool", "opencode", "--log-blocked"])
             .current_dir(dir.path())
             .output()
@@ -7345,7 +7655,7 @@ fn hooks_install_ai_opencode_writes_managed_plugin_and_is_idempotent() {
     assert!(!body.contains(&canonical_path_text(dir.path())), "{body}");
 
     // doctor is clean right after install and flags hand edits.
-    let doctor = Command::new(shk_bin())
+    let doctor = shk_cmd()
         .args(["doctor", "--json"])
         .current_dir(dir.path())
         .output()
@@ -7353,7 +7663,7 @@ fn hooks_install_ai_opencode_writes_managed_plugin_and_is_idempotent() {
     let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).expect("doctor json");
     assert!(report["opencodePluginDrift"].is_null(), "{report}");
     std::fs::write(&plugin, format!("{body}\nconsole.log('edited');\n")).unwrap();
-    let doctor = Command::new(shk_bin())
+    let doctor = shk_cmd()
         .args(["doctor", "--json"])
         .current_dir(dir.path())
         .output()
@@ -7369,7 +7679,7 @@ fn hooks_install_ai_opencode_writes_managed_plugin_and_is_idempotent() {
     // An unmanaged file at the managed path is never overwritten.
     let unmanaged = "export default { id: \"mine\", setup() {} }\n";
     std::fs::write(&plugin, unmanaged).unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["hooks", "install-ai", "--tool", "opencode"])
         .current_dir(dir.path())
         .output()
@@ -7383,7 +7693,7 @@ fn hooks_install_ai_opencode_writes_managed_plugin_and_is_idempotent() {
     assert_eq!(std::fs::read_to_string(&plugin).unwrap(), unmanaged);
 
     // Installing every tool reports the conflict and still installs the rest.
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["hooks", "install-ai"])
         .current_dir(dir.path())
         .output()
@@ -7416,7 +7726,7 @@ fn opencode_install_rejects_symlinked_plugin_and_parent() {
             std::fs::create_dir_all(&plugins).unwrap();
             std::os::unix::fs::symlink(&target, plugins.join("shk-security.js")).unwrap();
         }
-        let out = Command::new(shk_bin())
+        let out = shk_cmd()
             .args(["hooks", "install-ai", "--tool", "opencode"])
             .current_dir(dir.path())
             .output()
@@ -7439,7 +7749,7 @@ fn hook_mode_opencode_denies_pre_tool_use_and_blocks_user_prompt() {
     let run_mode = |mode: &str, payload: String, extra: &[&str]| {
         let mut args = vec!["scan", ".", "--hook-mode", mode];
         args.extend_from_slice(extra);
-        Command::new(shk_bin())
+        shk_cmd()
             .args(&args)
             .current_dir(&root)
             .stdin(std::process::Stdio::piped())
@@ -7633,7 +7943,7 @@ fn opencode_plugin_contract_under_node() {
     let secret = opencode_fixture_secret();
     std::fs::write(project.join("secret.txt"), format!("{secret}\n")).unwrap();
     std::fs::write(project.join("clean.txt"), "nothing to see\n").unwrap();
-    let out = Command::new(shk_bin())
+    let out = shk_cmd()
         .args(["hooks", "install-ai", "--tool", "opencode"])
         .current_dir(&project)
         .output()
@@ -7652,6 +7962,7 @@ fn opencode_plugin_contract_under_node() {
 
     for missing in [false, true] {
         let mut cmd = Command::new(&node);
+        isolate_git_config(&mut cmd);
         cmd.arg(&harness)
             .current_dir(dir.path())
             .env("SHK_CONTRACT_SECRET", &secret)

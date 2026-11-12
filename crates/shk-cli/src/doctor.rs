@@ -1122,15 +1122,7 @@ pub fn has_managed_ai_hooks(root: &Path) -> bool {
 
 pub fn has_shk_pre_commit(root: &Path) -> bool {
     git::discover_repo_root(root)
-        .as_ref()
-        .map(|r| r.join(".git/hooks/pre-commit"))
-        .map(|p| {
-            p.is_file()
-                && fs::read_to_string(&p)
-                    .unwrap_or_default()
-                    .contains("shk scan --staged")
-        })
-        .unwrap_or(false)
+        .is_some_and(|repo_root| crate::hooks::has_shk_pre_commit(&repo_root))
 }
 
 pub fn collect_shk_executable_status() -> ShkExecutableStatus {
@@ -1243,10 +1235,19 @@ fn print_workflow_status(statuses: &[workflow_hardening::WorkflowFileStatus]) {
     println!("workflows: actions/checkout steps missing persist-credentials: false:");
     for status in statuses {
         for step in status.findings() {
-            println!("  - {}:{}", status.relative_path, step.line);
+            if step.manual_fix {
+                println!(
+                    "  - {}:{} (flow-style `with: {{ ... }}`; add persist-credentials: false by hand)",
+                    status.relative_path, step.line
+                );
+            } else {
+                println!("  - {}:{}", status.relative_path, step.line);
+            }
         }
     }
-    println!("  fix with `shk doctor workflows --fix`");
+    println!(
+        "  fix with `shk doctor workflows --fix` (flow-style `with:` steps are not rewritten automatically)"
+    );
 }
 
 struct DoctorReport {

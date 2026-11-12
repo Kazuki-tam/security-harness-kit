@@ -18,6 +18,10 @@ export const ja: Messages = {
     title: "問題が発生しました",
     description: "予期しないエラーが発生しました。再読み込みして続行してください。",
     reload: "アプリを再読み込み",
+    panelTitle: "このセクションを表示できませんでした",
+    panelDescription:
+      "プロジェクトのほかの部分は引き続き利用できます。再試行して読み込み直してください。",
+    retry: "再試行",
   },
   sidebar: {
     newProject: "新しいプロジェクト",
@@ -398,6 +402,7 @@ export const ja: Messages = {
       finding_threshold: "秘密値・個人情報の検出",
       action_guard: "危険な操作のブロック",
       payload_too_large: "大きすぎるツール入力のブロック",
+      policy_error: "ポリシーエラーによるブロック",
     },
     toolNames: {
       "claude-code": "Claude Code",

@@ -162,6 +162,19 @@ describe("ProjectSetupPanel env encryption card", () => {
     expect(setupHandlers.onEncryptEnv).not.toHaveBeenCalled();
   });
 
+  it("renders a missing ignore pattern that names a prototype member", () => {
+    const base = status();
+    renderPanel(
+      status({
+        doctor: { ...base.doctor, ignoreOk: false, missingIgnorePatterns: ["__proto__"] },
+        ignoreFixTargets: [{ name: "__proto__", exists: true }],
+      }),
+    );
+    openAdvanced();
+
+    expect(screen.getByText("(__proto__)")).toBeInTheDocument();
+  });
+
   it("hides the card when the project has no env files", () => {
     renderPanel(status({ envFiles: [] }));
     openAdvanced();

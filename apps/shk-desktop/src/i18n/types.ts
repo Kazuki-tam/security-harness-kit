@@ -20,6 +20,9 @@ export type Messages = {
     title: string;
     description: string;
     reload: string;
+    panelTitle: string;
+    panelDescription: string;
+    retry: string;
   };
   sidebar: {
     newProject: string;

@@ -31,6 +31,17 @@ pub struct SkillStatus {
     pub installed: bool,
 }
 
+/// What to do with a skill file that already exists at a destination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExistingSkill {
+    /// Fail before writing anything (`shk skills install`).
+    Refuse,
+    /// Replace it (`--force`).
+    Overwrite,
+    /// Leave it alone and report it (`shk init` re-runs).
+    Keep,
+}
+
 struct InstallPlan {
     tool: SkillTool,
     dest: PathBuf,
@@ -137,7 +148,11 @@ pub fn install_for(root: &Path, args: SkillsInstallArgs) -> Result<Vec<String>> 
         &selected_tools(args.tool.unwrap_or(SkillTool::All)),
         args.global,
         args.dry_run,
-        args.force,
+        if args.force {
+            ExistingSkill::Overwrite
+        } else {
+            ExistingSkill::Refuse
+        },
     )
 }
 
@@ -146,7 +161,7 @@ pub(crate) fn install_selected_tools_for(
     tools: &[SkillTool],
     global: bool,
     dry_run: bool,
-    force: bool,
+    existing: ExistingSkill,
 ) -> Result<Vec<String>> {
     let mut plans = tools
         .iter()
@@ -165,7 +180,7 @@ pub(crate) fn install_selected_tools_for(
     let mut seen_dests = std::collections::HashSet::new();
     plans.retain(|plan| seen_dests.insert(plan.dest.clone()));
 
-    if !dry_run && !force {
+    if !dry_run && existing == ExistingSkill::Refuse {
         ensure_no_existing_destinations(&plans)?;
     }
 
@@ -185,6 +200,25 @@ pub(crate) fn install_selected_tools_for(
                     legacy.display()
                 ));
             }
+            continue;
+        }
+
+        if existing == ExistingSkill::Keep && plan.dest.exists() {
+            let up_to_date =
+                std::fs::read(&plan.dest).is_ok_and(|bytes| bytes == SKILL_CONTENT.as_bytes());
+            details.push(if up_to_date {
+                format!(
+                    "{} skill already up to date -> {}",
+                    plan.tool.label(),
+                    plan.dest.display()
+                )
+            } else {
+                format!(
+                    "Skipped {} skill: {} differs from the bundled skill (run `shk skills install --force` to replace it)",
+                    plan.tool.label(),
+                    plan.dest.display()
+                )
+            });
             continue;
         }
 
@@ -382,8 +416,14 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), root.path().join(".agents")).unwrap();
 
-        let err = install_selected_tools_for(root.path(), &[SkillTool::Codex], false, false, true)
-            .unwrap_err();
+        let err = install_selected_tools_for(
+            root.path(),
+            &[SkillTool::Codex],
+            false,
+            false,
+            ExistingSkill::Overwrite,
+        )
+        .unwrap_err();
 
         assert!(err.to_string().contains("symbolic link"), "{err}");
         assert!(!outside.path().join("skills/shk/SKILL.md").exists());

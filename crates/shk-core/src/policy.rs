@@ -248,6 +248,7 @@ fn allowlist_all_paths() -> String {
     "**/*".into()
 }
 
+/// One `[[allowlist]]` table.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AllowlistEntry {
     #[serde(default)]
@@ -260,6 +261,14 @@ pub struct AllowlistEntry {
     pub reason: Option<String>,
     #[serde(default)]
     pub expires: Option<String>,
+    /// Keys the entry has that `shk` does not know (`owner`, `ticket`, or a
+    /// misspelled selector such as `rule` for `rule_id`). They are ignored
+    /// and do not fail the load — existing policies with annotation keys must
+    /// keep loading, or blocking hooks would deny everything — but each one
+    /// is reported as a `policy.allowlist_unknown_key` warning finding, and
+    /// an entry whose selectors are all misspelled is still rejected.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, toml::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -578,12 +587,53 @@ pub struct SecretProfile {
     pub expected_env: Option<String>,
 }
 
+/// Reject an `[[allowlist]]` entry with no selector at all: it matches every
+/// finding in every file (`path` defaults to all paths), which is never what
+/// its author meant. Keys that `shk` does not know are not selectors, so an
+/// entry whose only selectors are misspelled is rejected too. `source` is the
+/// policy text `entries` were parsed from; it tells an explicit `path` apart
+/// from the default.
+///
+/// Nothing else fails the load, because a policy that does not load makes
+/// blocking hooks deny everything: other unknown keys and an `expires` that
+/// is not a date are reported as warning findings instead (see
+/// `suppression::expired_allowlist_warnings`).
+fn validate_allowlist_entries(source: &str, entries: &[AllowlistEntry]) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let raw: toml::Table = toml::from_str(source).context("parse shk.toml")?;
+    let raw_entries = raw.get("allowlist").and_then(toml::Value::as_array);
+    for (idx, entry) in entries.iter().enumerate() {
+        let number = idx + 1;
+        let has_path = raw_entries
+            .and_then(|tables| tables.get(idx))
+            .and_then(toml::Value::as_table)
+            .is_some_and(|table| table.contains_key("path"));
+        if entry.rule_id.is_none() && entry.value_hash.is_none() && !has_path {
+            let unknown = if entry.unknown.is_empty() {
+                String::new()
+            } else {
+                let keys: Vec<String> =
+                    entry.unknown.keys().map(|key| format!("`{key}`")).collect();
+                format!(" (unknown keys are ignored: {})", keys.join(", "))
+            };
+            anyhow::bail!(
+                "[[allowlist]] entry {number} has no selector and would suppress every finding in every file; set at least one of `rule_id`, `value_hash`, `path`{unknown}"
+            );
+        }
+    }
+    Ok(())
+}
+
 impl Policy {
     pub fn load_from_dir(root: &Path) -> Result<(Self, Option<std::path::PathBuf>)> {
         let p = root.join("shk.toml");
         if p.is_file() {
             let s = std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
             let policy: Policy = toml::from_str(&s).with_context(|| "parse shk.toml")?;
+            validate_allowlist_entries(&s, &policy.allowlist)
+                .with_context(|| format!("invalid {}", p.display()))?;
             Ok((policy, Some(p)))
         } else {
             Ok((Self::default(), None))
@@ -1270,5 +1320,87 @@ format = "dotenv"
             project_id_from_git_remote("file:///Users/alice/repos/backend-api.git"),
             None
         );
+    }
+
+    fn load_policy_text(text: &str) -> Result<Policy> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("shk.toml"), text).unwrap();
+        Policy::load_from_dir(dir.path()).map(|(policy, _)| policy)
+    }
+
+    #[test]
+    fn allowlist_entry_with_only_unknown_keys_is_rejected() {
+        // Both selectors are misspelled, so nothing narrows the entry.
+        let err = load_policy_text("[[allowlist]]\nrule = \"pii.email\"\npaht = \"docs/**\"\n")
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("[[allowlist]] entry 1 has no selector"),
+            "{msg}"
+        );
+        assert!(msg.contains("`paht`, `rule`"), "{msg}");
+        // Key names only: the values never reach the message.
+        assert!(
+            !msg.contains("pii.email") && !msg.contains("docs/"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn allowlist_entry_keeps_unknown_annotation_keys_without_failing() {
+        let policy = load_policy_text(
+            "[[allowlist]]\nrule_id = \"pii.email\"\npath = \"docs/**\"\nowner = \"platform\"\nticket = 42\n\n[[allowlist]]\nrule_id = \"pii.phone\"\n",
+        )
+        .unwrap();
+        assert_eq!(policy.allowlist.len(), 2);
+        assert_eq!(policy.allowlist[0].rule_id.as_deref(), Some("pii.email"));
+        assert_eq!(policy.allowlist[0].path, "docs/**");
+        assert_eq!(
+            policy.allowlist[0].unknown.keys().collect::<Vec<_>>(),
+            vec!["owner", "ticket"]
+        );
+        assert!(policy.allowlist[1].unknown.is_empty());
+    }
+
+    #[test]
+    fn allowlist_entry_requires_a_selector() {
+        let err =
+            load_policy_text("[[allowlist]]\nreason = \"catch-all by accident\"\n").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("[[allowlist]] entry 1"), "{msg}");
+        assert!(msg.contains("rule_id"), "{msg}");
+
+        for selector in [
+            "rule_id = \"pii.email\"",
+            "path = \"docs/**\"",
+            "value_hash = \"sha256-hmac:00\"",
+        ] {
+            let policy = load_policy_text(&format!("[[allowlist]]\n{selector}\n")).unwrap();
+            assert_eq!(policy.allowlist.len(), 1, "{selector}");
+        }
+    }
+
+    #[test]
+    fn allowlist_entry_with_unparseable_expires_still_loads() {
+        // The entry is treated as expired by the suppression layer instead.
+        for bad in ["2026/12/31", "next year", "2026-13-01", ""] {
+            let policy = load_policy_text(&format!(
+                "[[allowlist]]\nrule_id = \"pii.email\"\nexpires = \"{bad}\"\n"
+            ))
+            .unwrap();
+            assert_eq!(policy.allowlist[0].expires.as_deref(), Some(bad));
+        }
+        let policy =
+            load_policy_text("[[allowlist]]\nrule_id = \"pii.email\"\nexpires = \"2099-12-31\"\n")
+                .unwrap();
+        assert_eq!(policy.allowlist[0].expires.as_deref(), Some("2099-12-31"));
+    }
+
+    #[test]
+    fn default_policy_templates_load() {
+        for strict in [false, true] {
+            let policy = load_policy_text(&default_policy_toml(strict));
+            assert!(policy.is_ok(), "strict={strict}: {:?}", policy.err());
+        }
     }
 }

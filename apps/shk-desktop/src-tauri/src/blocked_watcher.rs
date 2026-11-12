@@ -65,6 +65,10 @@ pub struct BlockedEvent {
 pub struct BlockedWatcher {
     /// Project path → byte offset already consumed from its audit log.
     cursors: Mutex<HashMap<String, LogCursor>>,
+    /// Serialises `set_watched` calls. Held for a whole registration,
+    /// including its file I/O, so it is deliberately separate from `cursors`:
+    /// the poll thread only ever takes the cursor lock.
+    registration: Mutex<()>,
 }
 
 /// Position in an audit log plus whether it sits inside a hostile oversized
@@ -80,19 +84,60 @@ impl BlockedWatcher {
     /// Replace the watched set. Newly watched projects start at end-of-file so
     /// blocks recorded before the app opened do not produce notifications.
     pub fn set_watched(&self, paths: Vec<String>) {
-        let mut cursors = self.lock();
-        let mut next = HashMap::with_capacity(paths.len());
-        for path in paths {
-            if path.trim().is_empty() {
-                continue;
-            }
-            let offset = match cursors.get(&path) {
-                Some(offset) => *offset,
-                None => current_log_cursor(&path),
+        self.set_watched_with(paths, current_log_cursor);
+    }
+
+    /// `read_cursor` does file I/O and can block for seconds on an unresponsive
+    /// network volume, so it never runs under the cursor lock: that would stall
+    /// the poll thread's `drain_new_events` for every other project.
+    ///
+    /// Registrations themselves are serialised by the registration lock, so a
+    /// call that stalls in `read_cursor` cannot commit its path set after a
+    /// call that started later: the later call waits and its set wins.
+    fn set_watched_with(&self, paths: Vec<String>, mut read_cursor: impl FnMut(&str) -> LogCursor) {
+        // The guarded value is `()`, so a poisoned lock carries no bad state.
+        let _registration = self
+            .registration
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let paths: Vec<String> = paths
+            .into_iter()
+            .filter(|path| !path.trim().is_empty())
+            .collect();
+        // Cursors read for projects that were not registered yet.
+        let mut fresh: HashMap<String, LogCursor> = HashMap::new();
+        loop {
+            let missing: Vec<String> = {
+                let mut cursors = self.lock();
+                let missing: Vec<String> = paths
+                    .iter()
+                    .filter(|path| !cursors.contains_key(*path) && !fresh.contains_key(*path))
+                    .cloned()
+                    .collect();
+                if missing.is_empty() {
+                    // A cursor that is registered by now wins over one read
+                    // here: it may have been advanced by a drain, or put there
+                    // by a registration that raced with this one.
+                    let next = paths
+                        .into_iter()
+                        .filter_map(|path| {
+                            let cursor =
+                                cursors.get(&path).or_else(|| fresh.get(&path)).copied()?;
+                            Some((path, cursor))
+                        })
+                        .collect();
+                    *cursors = next;
+                    return;
+                }
+                missing
             };
-            next.insert(path, offset);
+            // Each pass reads at least one new path, so this ends after at
+            // most `paths.len()` passes even if registrations keep racing.
+            for path in missing {
+                let cursor = read_cursor(&path);
+                fresh.insert(path, cursor);
+            }
         }
-        *cursors = next;
     }
 
     /// Consume everything appended since the last call across all watched logs.
@@ -641,6 +686,113 @@ mod tests {
 
         assert_eq!(watcher.drain_new_events().len(), 1);
         assert!(watcher.drain_new_events().is_empty());
+    }
+
+    #[test]
+    fn set_watched_reads_new_cursors_without_holding_the_lock() {
+        let watcher = BlockedWatcher::default();
+        let mut lock_was_free = Vec::new();
+        watcher.set_watched_with(vec!["/a".to_string(), "/b".to_string()], |_| {
+            lock_was_free.push(watcher.cursors.try_lock().is_ok());
+            LogCursor {
+                offset: 7,
+                discard_until_newline: false,
+            }
+        });
+
+        assert_eq!(lock_was_free, vec![true, true]);
+        let cursors = watcher.lock();
+        assert_eq!(cursors.len(), 2);
+        assert!(cursors.values().all(|cursor| cursor.offset == 7));
+    }
+
+    #[test]
+    fn set_watched_keeps_a_cursor_registered_while_it_was_reading() {
+        let watcher = BlockedWatcher::default();
+        watcher.set_watched_with(vec!["/a".to_string()], |path| {
+            // Another registration lands while this one is statting the log.
+            watcher.lock().insert(
+                path.to_string(),
+                LogCursor {
+                    offset: 3,
+                    discard_until_newline: false,
+                },
+            );
+            LogCursor {
+                offset: 9,
+                discard_until_newline: false,
+            }
+        });
+
+        assert_eq!(
+            watcher.lock().get("/a").map(|cursor| cursor.offset),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn set_watched_registers_a_project_dropped_while_it_was_reading() {
+        let watcher = BlockedWatcher::default();
+        watcher.set_watched_with(vec!["/a".to_string()], |_| LogCursor::default());
+        let mut reads = Vec::new();
+        watcher.set_watched_with(vec!["/a".to_string(), "/b".to_string()], |path| {
+            reads.push(path.to_string());
+            // `/a` was registered when this call started and is dropped by a
+            // racing registration before the new set is committed.
+            watcher.lock().clear();
+            LogCursor::default()
+        });
+
+        assert_eq!(reads, vec!["/b".to_string(), "/a".to_string()]);
+        let cursors = watcher.lock();
+        assert!(cursors.contains_key("/a") && cursors.contains_key("/b"));
+    }
+
+    #[test]
+    fn an_older_registration_stalled_in_io_cannot_overwrite_a_newer_one() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+
+        let watcher = &BlockedWatcher::default();
+        let (in_io_tx, in_io_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let newer_done = &AtomicBool::new(false);
+
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                watcher.set_watched_with(vec!["/a".to_string()], |_| {
+                    in_io_tx.send(()).unwrap();
+                    // Stands in for a `stat` stuck on a slow volume.
+                    release_rx.recv().unwrap();
+                    LogCursor::default()
+                });
+            });
+            in_io_rx.recv().unwrap();
+
+            scope.spawn(move || {
+                watcher.set_watched_with(vec!["/a".to_string(), "/b".to_string()], |_| {
+                    LogCursor::default()
+                });
+                newer_done.store(true, Ordering::SeqCst);
+            });
+
+            // The newer call must wait for the stalled one instead of
+            // committing first and then being overwritten.
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let newer_finished_early = newer_done.load(Ordering::SeqCst);
+            // The poll thread is not blocked meanwhile.
+            let cursor_lock_was_free = watcher.cursors.try_lock().is_ok();
+            // Release before asserting so a failure cannot hang the scope.
+            release_tx.send(()).unwrap();
+            assert!(!newer_finished_early);
+            assert!(cursor_lock_was_free);
+        });
+
+        assert!(newer_done.load(Ordering::SeqCst));
+        let cursors = watcher.lock();
+        let mut watched: Vec<&str> = cursors.keys().map(String::as_str).collect();
+        watched.sort_unstable();
+        assert_eq!(watched, vec!["/a", "/b"]);
     }
 
     #[test]

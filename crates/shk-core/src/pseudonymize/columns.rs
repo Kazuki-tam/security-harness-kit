@@ -37,6 +37,13 @@ pub struct ColumnOverrides {
     pub positions: Vec<(usize, Option<Kind>)>,
 }
 
+impl ColumnOverrides {
+    /// Whether the selection is by column position rather than by name.
+    pub fn is_positional(&self) -> bool {
+        !self.positions.is_empty()
+    }
+}
+
 pub fn parse_columns_spec(spec: &str) -> Result<ColumnOverrides, ParseKindError> {
     let mut entries = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -88,6 +95,63 @@ pub fn infer_header(first_row: &[String]) -> bool {
         .filter(|cell| classify_cell(cell).is_some())
         .count();
     pii_hits == 0
+}
+
+/// Whether something other than "the first row holds no address or phone
+/// number" says that row is a header: a selected column was found by its
+/// name (config or `--columns`), or its name is a known address / phone label.
+/// A selection by position or by sampled values alone proves nothing about
+/// the first row.
+pub(crate) fn header_is_confirmed(columns: &[ResolvedColumn], positional: bool) -> bool {
+    columns.iter().any(|column| match column.source {
+        ColumnSource::Config => true,
+        ColumnSource::Cli => !positional,
+        ColumnSource::Inferred => header_kind(&column.name).is_some(),
+        ColumnSource::Rule => false,
+    })
+}
+
+/// Whether a first row that was read as a header looks like one more data
+/// row in a selected column: its cell repeats a value from the rows below, or
+/// it is a number over a column of numbers. Deliberately narrow: a header is
+/// only reclassified on evidence a real header would rarely produce.
+pub(crate) fn first_row_matches_data(
+    first_row: &[String],
+    sample_rows: &[Vec<String>],
+    columns: &[ResolvedColumn],
+) -> bool {
+    columns.iter().any(|column| {
+        let Some(first) = first_row.get(column.index).map(|cell| cell.trim()) else {
+            return false;
+        };
+        if cell_is_missing(first) {
+            return false;
+        }
+        let below: Vec<&str> = sample_rows
+            .iter()
+            .take(INFER_SAMPLE_ROWS)
+            .filter_map(|row| row.get(column.index))
+            .map(|cell| cell.trim())
+            .filter(|cell| !cell_is_missing(cell))
+            .collect();
+        below.contains(&first)
+            || (!below.is_empty()
+                && is_number_shaped(first)
+                && below.iter().all(|cell| is_number_shaped(cell)))
+    })
+}
+
+/// Digits with the punctuation of numbers, dates, and identifiers.
+fn is_number_shaped(cell: &str) -> bool {
+    cell.chars().any(|ch| ch.is_ascii_digit())
+        && cell
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || " +-().,/:".contains(ch))
+}
+
+/// The `0`, `1`, … names a table without a header row gets.
+pub(crate) fn positional_headers(width: usize) -> Vec<String> {
+    (0..width).map(|index| index.to_string()).collect()
 }
 
 pub fn resolve_columns(

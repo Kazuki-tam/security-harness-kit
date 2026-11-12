@@ -1,10 +1,12 @@
 import type { Messages } from "../i18n/types";
 import type { ActionResult } from "../types";
+import { ownLabel } from "../utils";
 
 type ActionMessages = Messages["setup"]["action"];
 
 function localizeTitle(message: string, titles: Record<string, string>): string {
-  if (titles[message]) return titles[message];
+  const exact = ownLabel(titles, message);
+  if (exact) return exact;
   for (const [key, value] of Object.entries(titles)) {
     if (message.startsWith(key)) return value;
   }
@@ -16,7 +18,7 @@ export function localizeActionResult(
   action: ActionMessages,
 ): { title: string; details: string[] } {
   const title = localizeTitle(result.message, action.resultTitles);
-  const details = result.details.map((line) => action.resultDetails[line] ?? line);
+  const details = result.details.map((line) => ownLabel(action.resultDetails, line) ?? line);
   return { title, details };
 }
 

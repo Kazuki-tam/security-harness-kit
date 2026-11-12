@@ -1,6 +1,6 @@
 use crate::custom_rules;
 use crate::document_masker;
-use crate::finding::{Finding, ScanJsonReport, ScanSummary};
+use crate::finding::{ContextGuard, Finding, ScanJsonReport, ScanSummary};
 use crate::git;
 use crate::policy::{ColorMode, Policy, Severity};
 use crate::suppression;
@@ -147,6 +147,22 @@ struct GitHistorySelection {
 
 fn is_probably_binary(head: &[u8]) -> bool {
     head.contains(&0)
+}
+
+/// UTF-16 encoding named by a leading byte order mark, if any.
+fn utf16_bom_encoding(bytes: &[u8]) -> Option<&'static encoding_rs::Encoding> {
+    // `FF FE 00 00` is the UTF-32LE mark, which starts like the UTF-16LE one.
+    if bytes.starts_with(&[0xff, 0xfe, 0x00, 0x00]) {
+        return None;
+    }
+    match encoding_rs::Encoding::for_bom(bytes) {
+        Some((encoding, _))
+            if encoding == encoding_rs::UTF_16LE || encoding == encoding_rs::UTF_16BE =>
+        {
+            Some(encoding)
+        }
+        _ => None,
+    }
 }
 
 fn build_exclude_set(patterns: &[String]) -> Result<GlobSet> {
@@ -363,13 +379,32 @@ fn scan_text_prepared(
     prepared: &PreparedScan<'_>,
     include_context: bool,
 ) -> Result<ScanChunk> {
+    // A leading byte order mark is not part of the first line: left in place
+    // it hides that line from line-anchored rules and shifts its columns.
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let inline = suppression::parse_inline_suppressions(content);
     let mut suppressed = 0u64;
     let mut deduplicated = 0u64;
     let mut findings = Vec::new();
     let mut deduper = FindingDeduper::new();
 
-    for mut m in shk_rules::scan_content(content, rel, &prepared.cfg) {
+    let rule_matches = shk_rules::scan_content(content, rel, &prepared.cfg);
+    let custom_matches = custom_rules::scan_content(content, &prepared.custom);
+    // Context lines are redacted line by line, so anything that only matches
+    // across lines (suppressed matches included) is registered up front.
+    let context_guard = include_context.then(|| {
+        let mut guard = ContextGuard::for_content(content);
+        for m in &rule_matches {
+            guard.add_match(content, m.line, m.column, &m.matched_text);
+        }
+        for m in &custom_matches {
+            guard.add_match(content, m.line, m.column, &m.matched_text);
+        }
+        guard
+    });
+    let context_guard = context_guard.as_ref();
+
+    for mut m in rule_matches {
         if prepared.apply_suppressions && inline.is_suppressed(m.line, m.rule_id) {
             m.matched_text.zeroize();
             suppressed += 1;
@@ -396,14 +431,14 @@ fn scan_text_prepared(
         findings.push(Finding::from_rule_match_with_custom_context(
             rel,
             &m,
-            include_context,
+            context_guard,
             content,
             &prepared.cfg,
             &prepared.custom,
         ));
         m.matched_text.zeroize();
     }
-    for mut m in custom_rules::scan_content(content, &prepared.custom) {
+    for mut m in custom_matches {
         if prepared.apply_suppressions && inline.is_suppressed(m.line, &m.rule_id) {
             m.matched_text.zeroize();
             suppressed += 1;
@@ -430,7 +465,7 @@ fn scan_text_prepared(
         findings.push(Finding::from_custom_match(
             rel,
             &m,
-            include_context,
+            context_guard,
             content,
             &prepared.cfg,
             &prepared.custom,
@@ -566,6 +601,7 @@ fn scan_bytes_with_display(
         bytes.zeroize();
         return Ok(ScanChunk::skipped(f));
     }
+    let mut notes = Vec::new();
     match scan_document_bytes(scan_rel, display_rel, &bytes, prepared, include_context) {
         Ok(Some(chunk)) => {
             bytes.zeroize();
@@ -573,32 +609,63 @@ fn scan_bytes_with_display(
         }
         Ok(None) => {}
         Err(err) => {
-            let f = vec![skipped_finding(
+            // A document extension does not make the content a document: a
+            // renamed text file or a damaged archive is still scanned as raw
+            // bytes below, and the note records why extraction was skipped.
+            notes.push(skipped_finding(
                 "scan.file_read_error",
                 display_rel.to_string(),
-                format!("Skipped: could not read document text ({err})"),
-            )];
-            bytes.zeroize();
-            return Ok(ScanChunk::skipped(f));
+                format!(
+                    "Could not read document text ({err}); scanned the raw file content instead"
+                ),
+            ));
         }
     }
+    // UTF-16 text is full of NUL bytes, so a byte order mark is checked
+    // before the binary heuristic.
+    let utf16 = utf16_bom_encoding(&bytes);
     let take = prepared.policy.scan.binary_detection_bytes.min(bytes.len());
-    if !prepared.policy.scan.include_binary && is_probably_binary(&bytes[..take]) {
-        let f = vec![skipped_finding(
+    if utf16.is_none() && !prepared.policy.scan.include_binary && is_probably_binary(&bytes[..take])
+    {
+        notes.push(skipped_finding(
             "scan.binary_skipped",
             display_rel.to_string(),
             "Skipped: binary file (null byte in head)".into(),
-        )];
+        ));
         bytes.zeroize();
-        return Ok(ScanChunk::skipped(f));
+        return Ok(ScanChunk::skipped(notes));
     }
-    let non_utf8 = std::str::from_utf8(&bytes).is_err();
-    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    let (mut text, lossy) = match utf16 {
+        Some(encoding) => {
+            // `decode` strips the byte order mark it sniffs.
+            let (decoded, _, malformed) = encoding.decode(&bytes);
+            (decoded.into_owned(), malformed)
+        }
+        None => (
+            String::from_utf8_lossy(&bytes).into_owned(),
+            std::str::from_utf8(&bytes).is_err(),
+        ),
+    };
+    let non_utf8 = lossy && utf16.is_none();
     let mut result = scan_text_prepared(scan_rel, &text, prepared, include_context);
     if scan_rel != display_rel
         && let Ok(chunk) = &mut result
     {
         rewrite_finding_paths(&mut chunk.findings, display_rel);
+    }
+    if let Ok(chunk) = &mut result {
+        chunk.findings.append(&mut notes);
+    }
+    if lossy
+        && utf16.is_some()
+        && let Ok(chunk) = &mut result
+    {
+        chunk.findings.push(skipped_finding(
+            "scan.non_utf8_lossy",
+            display_rel.to_string(),
+            "File has a UTF-16 byte order mark but is not valid UTF-16; scanned with lossy decoding — detection may be incomplete"
+                .into(),
+        ));
     }
     if non_utf8 && let Ok(chunk) = &mut result {
         // Lossy decoding garbles legacy encodings (e.g. Shift-JIS), so
@@ -915,17 +982,16 @@ fn select_git_history(cwd: &Path, opts: &ScanOptions) -> Result<GitHistorySelect
     apply_scan_flag_overrides(&mut policy, opts);
     let filters = PathFilters::from_policy(&policy)?;
     let history_opts = git_history_options(opts);
-    let inventory = git::history_inventory(&repo, &history_opts)?;
+    // Path filters run before blobs are deduplicated: a blob committed under
+    // both an excluded and an included path must still be scanned.
+    let inventory =
+        git::history_inventory_filtered(&repo, &history_opts, |rel| filters.allows(rel))?;
     let git::GitHistoryInventory {
         candidate_commits,
         candidate_paths,
-        blobs,
+        unique_blobs,
+        blobs: filtered_blobs,
     } = inventory;
-    let unique_blobs = blobs.len();
-    let filtered_blobs: Vec<_> = blobs
-        .into_iter()
-        .filter(|blob| filters.allows(&blob.path.to_string_lossy().replace('\\', "/")))
-        .collect();
 
     Ok(GitHistorySelection {
         repo,
@@ -1163,6 +1229,7 @@ mod tests {
             value_hash: Some(hash.clone()),
             reason: Some("fixture".into()),
             expires: None,
+            unknown: Default::default(),
         });
         let compiled = suppression::compile_allowlist(&p.allowlist).unwrap();
         assert!(
@@ -1285,6 +1352,7 @@ mod tests {
             value_hash: None,
             reason: Some("public roadmap".into()),
             expires: None,
+            unknown: Default::default(),
         });
 
         let chunk = scan_text_content("docs/roadmap.md", "ProjectNebula\n", &p, false).unwrap();
@@ -1409,5 +1477,225 @@ mod tests {
             "{:?}",
             res.findings
         );
+    }
+
+    // not real credential: synthetic detector fixture value only
+    fn synthetic_openai_key() -> String {
+        format!("sk-proj-{}", "abcdefghijklmnopqrstuvwxyz0123456789")
+    }
+
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let email = format!("user.email=shk@{}", "example.invalid");
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=shk test", "-c", &email])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn git_history_scans_blob_shared_by_excluded_and_included_paths() {
+        let repo = tempfile::tempdir().unwrap();
+        git_ok(repo.path(), &["init", "-q"]);
+        fs::write(
+            repo.path().join("shk.toml"),
+            "[scan]\nexclude = [\"excluded/**\"]\n",
+        )
+        .unwrap();
+        // `excluded/` sorts first, so it is the path Git reports first.
+        for sub in ["excluded", "src"] {
+            fs::create_dir_all(repo.path().join(sub)).unwrap();
+            fs::write(
+                repo.path().join(sub).join("same.txt"),
+                format!("{}\n", synthetic_openai_key()),
+            )
+            .unwrap();
+        }
+        git_ok(repo.path(), &["add", "-A"]);
+        git_ok(repo.path(), &["commit", "-q", "-m", "dupes"]);
+
+        let res = scan_git_history(repo.path(), ScanOptions::default()).unwrap();
+        assert!(
+            res.findings
+                .iter()
+                .any(|f| f.rule_id == "secret.openai_api_key" && f.file.ends_with(":src/same.txt")),
+            "{:?}",
+            res.findings
+        );
+        assert!(
+            !res.scanned_paths.iter().any(|p| p.contains("excluded/")),
+            "{:?}",
+            res.scanned_paths
+        );
+
+        let preview = preview_git_history(repo.path(), ScanOptions::default()).unwrap();
+        // shk.toml and the shared blob: two unique blobs, both scannable.
+        assert_eq!(preview.unique_blobs, 2);
+        assert_eq!(preview.policy_filtered_blobs, 2);
+    }
+
+    #[test]
+    fn document_extraction_failure_falls_back_to_text_scan() {
+        let root = tempfile::tempdir().unwrap();
+        let names = ["notes.pdf", "notes.docx", "notes.xlsx", "notes.pptx"];
+        for (idx, name) in names.iter().enumerate() {
+            // Distinct values so per-file results do not depend on each other.
+            fs::write(
+                root.path().join(name),
+                format!("not a real document\n{}{idx}\n", synthetic_openai_key()),
+            )
+            .unwrap();
+        }
+
+        let res = scan_path(root.path(), ScanOptions::default()).unwrap();
+        for name in names {
+            assert!(
+                res.findings
+                    .iter()
+                    .any(|f| f.rule_id == "secret.openai_api_key" && f.file == name && f.line == 2),
+                "{name}: {:?}",
+                res.findings
+            );
+            assert!(
+                res.findings
+                    .iter()
+                    .any(|f| f.rule_id == "scan.file_read_error" && f.file == name),
+                "{name}: {:?}",
+                res.findings
+            );
+        }
+    }
+
+    #[test]
+    fn document_extraction_failure_on_binary_keeps_both_info_findings() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("broken.docx"), b"PK\x03\x04\x00\x00junk").unwrap();
+
+        let res = scan_path(root.path(), ScanOptions::default()).unwrap();
+        for rule in ["scan.file_read_error", "scan.binary_skipped"] {
+            assert!(
+                res.findings.iter().any(|f| f.rule_id == rule),
+                "{rule}: {:?}",
+                res.findings
+            );
+        }
+    }
+
+    fn utf16_bytes(text: &str, big_endian: bool) -> Vec<u8> {
+        let mut out = if big_endian {
+            vec![0xfe, 0xff]
+        } else {
+            vec![0xff, 0xfe]
+        };
+        for unit in text.encode_utf16() {
+            out.extend(if big_endian {
+                unit.to_be_bytes()
+            } else {
+                unit.to_le_bytes()
+            });
+        }
+        out
+    }
+
+    #[test]
+    fn utf16_text_with_bom_is_decoded_and_scanned() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("le.txt"),
+            utf16_bytes(
+                &format!("clean line\nkey {}L\n", synthetic_openai_key()),
+                false,
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("be.txt"),
+            utf16_bytes(
+                &format!("clean line\nkey {}B\n", synthetic_openai_key()),
+                true,
+            ),
+        )
+        .unwrap();
+
+        let res = scan_path(root.path(), ScanOptions::default()).unwrap();
+        for name in ["le.txt", "be.txt"] {
+            let hit = res
+                .findings
+                .iter()
+                .find(|f| f.rule_id == "secret.openai_api_key" && f.file == name)
+                .unwrap_or_else(|| panic!("{name}: {:?}", res.findings));
+            assert_eq!((hit.line, hit.column), (2, 5), "{name}");
+        }
+        assert!(
+            !res.findings
+                .iter()
+                .any(|f| f.rule_id == "scan.binary_skipped" || f.rule_id == "scan.non_utf8_lossy"),
+            "{:?}",
+            res.findings
+        );
+    }
+
+    #[test]
+    fn utf8_bom_does_not_hide_first_line_from_anchored_rules() {
+        let root = tempfile::tempdir().unwrap();
+        let name = ["API", "TOKEN"].join("_");
+        fs::write(
+            root.path().join(".env"),
+            format!("\u{feff}{name}=abcdefghijklmnop1234\n"),
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("key.txt"),
+            format!("\u{feff}{}\n", synthetic_openai_key()),
+        )
+        .unwrap();
+
+        let res = scan_path(root.path(), ScanOptions::default()).unwrap();
+        let env_hit = res
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "env.sensitive_assignment")
+            .unwrap_or_else(|| panic!("{:?}", res.findings));
+        assert_eq!((env_hit.line, env_hit.column), (1, 1));
+        let key_hit = res
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "secret.openai_api_key")
+            .unwrap_or_else(|| panic!("{:?}", res.findings));
+        assert_eq!((key_hit.line, key_hit.column), (1, 1));
+    }
+
+    #[test]
+    fn context_lines_inside_a_multi_line_match_are_redacted() {
+        let mut policy = Policy::default();
+        policy.custom_rules.push(CustomRule {
+            id: "custom.block".into(),
+            pattern: "(?s)START.*?STOP".into(),
+            severity: "high".into(),
+            kind: "secret".into(),
+            message: None,
+            confidence: None,
+            case_insensitive: false,
+            enabled: true,
+        });
+        // not real personal data: synthetic detector fixture value only
+        let content = format!(
+            "START alpha\nbravo user@{} charlie\ndelta STOP tail\n",
+            "example.com"
+        );
+        let chunk = scan_text_content("notes.txt", &content, &policy, true).unwrap();
+        let email = chunk
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "pii.email")
+            .unwrap_or_else(|| panic!("{:?}", chunk.findings));
+        assert_eq!(email.context_before, vec!["[REDACTED]".to_string()]);
+        assert_eq!(email.context_after, vec!["[REDACTED] tail".to_string()]);
     }
 }

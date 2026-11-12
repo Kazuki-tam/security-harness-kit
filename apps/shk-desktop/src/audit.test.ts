@@ -68,6 +68,49 @@ describe("isBlockedAuditReason", () => {
     expect(isBlockedAuditReason("hook_audit")).toBe(false);
     expect(isBlockedAuditReason(undefined)).toBe(false);
   });
+
+  it("accepts every reason the CLI writes for blocked events", () => {
+    expect(isBlockedAuditReason("policy_error")).toBe(true);
+    expect(isBlockedAuditReason("payload_too_large")).toBe(true);
+  });
+});
+
+describe("blocked reason labels", () => {
+  it.each([
+    ["en", en],
+    ["ja", ja],
+  ] as const)("labels every blocked reason in %s", (_locale, messages) => {
+    expect(Object.keys(messages.audit.reasonLabels).sort()).toEqual([
+      "action_guard",
+      "finding_threshold",
+      "payload_too_large",
+      "policy_error",
+    ]);
+  });
+});
+
+describe("untrusted identifiers", () => {
+  it("never resolves a prototype member as a label", () => {
+    const fields = blockedRowDetailFields(
+      {
+        ts: "2026-05-23T02:31:00Z",
+        event: "blocked",
+        tool: "__proto__",
+        hook: "__proto__",
+        reason: "__proto__",
+        kinds: ["__proto__", "constructor"],
+      },
+      en.audit,
+    );
+    for (const field of fields) {
+      expect(typeof field.value).toBe("string");
+    }
+    expect(fields.find((field) => field.label === en.audit.detailReason)?.value).toBe("__proto__");
+    expect(fields.find((field) => field.label === en.audit.detailHook)?.value).toBe("__proto__");
+    expect(fields.find((field) => field.label === en.audit.detailKinds)?.value).toBe(
+      "__proto__, constructor",
+    );
+  });
 });
 
 describe("blockedRecentRows", () => {
@@ -75,6 +118,20 @@ describe("blockedRecentRows", () => {
     const rows = blockedRecentRows(sampleReport());
     expect(rows).toHaveLength(1);
     expect(rows[0]?.reason).toBe("finding_threshold");
+  });
+
+  it("lists blocked events whatever their reason", () => {
+    const recent = [
+      { ts: "2026-05-23T02:33:00Z", event: "blocked", tool: "cursor", reason: "policy_error" },
+      { ts: "2026-05-23T02:32:00Z", event: "blocked", tool: "cursor", reason: "payload_too_large" },
+      { ts: "2026-05-23T02:31:00Z", event: "blocked", tool: "cursor", reason: "future_reason" },
+      { ts: "2026-05-23T02:30:00Z", tool: "cursor", hook: "post", reason: "hook_audit" },
+    ];
+    expect(blockedRecentRows(sampleReport({ recent })).map((row) => row.reason)).toEqual([
+      "policy_error",
+      "payload_too_large",
+      "future_reason",
+    ]);
   });
 });
 
@@ -462,6 +519,38 @@ describe("loadAuditReport", () => {
     if (state.status === "done") {
       expect(blockedRecentRows(state.data)).toEqual([blockedRow]);
     }
+  });
+
+  it("reads the log once when the blocked rows have other reasons", async () => {
+    const requests: AuditReportOptions[] = [];
+    const report = sampleReport({
+      recent: [
+        { ts: "2026-05-23T02:33:00Z", event: "blocked", tool: "cursor", reason: "policy_error" },
+      ],
+    });
+    const state = await loadAuditReport("/tmp/project", {}, async (_path, options) => {
+      requests.push(options);
+      return report;
+    });
+
+    expect(requests).toEqual([{ limit: 10 }]);
+    expect(state.status === "done" && blockedRecentRows(state.data)).toHaveLength(1);
+  });
+
+  it("keeps every row of the blocked-only page", async () => {
+    const policyError = {
+      ts: "2026-05-23T02:33:00Z",
+      event: "blocked",
+      tool: "cursor",
+      reason: "policy_error",
+    };
+    const state = await loadAuditReport("/tmp/project", {}, async (_path, options) =>
+      options.reason === "blocked"
+        ? sampleReport({ recent: [policyError] })
+        : sampleReport({ recent: [] }),
+    );
+
+    expect(state.status === "done" && state.data.recent).toEqual([policyError]);
   });
 
   it("returns error state when fetch fails", async () => {

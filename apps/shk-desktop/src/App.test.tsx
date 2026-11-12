@@ -169,6 +169,28 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Mask for AI" })).toBeInTheDocument();
   });
 
+  it("reports a failed clone inside the clone dialog", async () => {
+    openMock.mockResolvedValue("/tmp/destination");
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "clone_repository") throw new Error("authentication failed");
+      return undefined;
+    });
+    render(
+      <I18nProvider>
+        <App />
+      </I18nProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Clone repository" }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Repository URL" }), {
+      target: { value: "https://example.com/owner/repository.git" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Clone" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("authentication failed");
+  });
+
   it("keeps the mask screen usable without a native webview and can return home", async () => {
     webviewMock.mockImplementationOnce(() => {
       throw new Error("No native webview");

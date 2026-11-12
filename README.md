@@ -137,6 +137,8 @@ Install a Git pre-commit hook:
 shk hooks install
 ```
 
+`shk` only writes to the repository's own hooks directory. When `core.hooksPath` points elsewhere (a shared, tracked, or husky-managed directory), nothing is written; add `shk scan --staged` to your own hook there (for husky, `.husky/pre-commit`).
+
 Install AI tool hooks in audit mode:
 
 ```bash

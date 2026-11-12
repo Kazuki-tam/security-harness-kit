@@ -13,7 +13,7 @@ emit_release_plan() {
   local build_desktop="$5"
   local make_latest="$6"
 
-  shk_require_semver "$version"
+  shk_require_stable_version "$version"
   shk_gh_output "component=${component}"
   shk_gh_output "version=${version}"
   shk_gh_output "release_tag=${release_tag}"

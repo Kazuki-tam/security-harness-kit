@@ -50,6 +50,7 @@ cargo build --release
 - `--log-blocked` keeps pre-hook blocking behavior, writes metadata-only blocked-event entries to `.shk/audit.log`, and lets post hooks write non-blocking audit entries.
 - Post-execution hooks (`--post`) **always exit 0** — data is already in the AI's context.
 - Exit code 2 from a blocking pre-hook causes the AI tool to abort the pending operation.
+- A blocking pre-hook that hits an internal error (empty or non-JSON stdin, unreadable file, scan failure) fails closed through the same deny path (`shk internal error: ...` reason, tool-specific deny JSON and exit code). Audit and post hooks never block on such errors.
 - **Exception**: Claude Code `UserPromptSubmit` blocks exit **0** and emit `{"decision":"block","reason":...,"hookSpecificOutput":{"suppressOriginalPrompt":true}}` on stdout — Claude Code only parses that JSON on exit 0 (exit 2 discards stdout and would show the user nothing). The prompt is still blocked and erased; the `reason` is displayed to the user.
 
 Do not change exit code semantics without updating `crates/shk-cli/src/lib.rs` **and** this table.

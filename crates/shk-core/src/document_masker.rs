@@ -6,8 +6,9 @@ use anyhow::{Context, Result, bail};
 use quick_xml::escape::unescape;
 use quick_xml::events::{BytesCData, BytesRef, BytesText, Event};
 use quick_xml::{Reader, Writer};
+use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read, Seek, Write};
 use std::path::Path;
 use tempfile::NamedTempFile;
 use zeroize::Zeroize;
@@ -79,6 +80,9 @@ struct OoxmlFormat {
     required_entry: &'static str,
     should_mask_entry: fn(&str) -> bool,
     text_group: TextGroupKind,
+    /// Text parts found by reading the document rather than by name; see
+    /// `discover_text_parts`.
+    discovered_parts: BTreeSet<String>,
 }
 
 impl OoxmlFormat {
@@ -88,6 +92,7 @@ impl OoxmlFormat {
             required_entry: "word/document.xml",
             should_mask_entry: is_docx_mask_target,
             text_group: TextGroupKind::Docx,
+            discovered_parts: BTreeSet::new(),
         }
     }
 
@@ -97,6 +102,7 @@ impl OoxmlFormat {
             required_entry: "xl/workbook.xml",
             should_mask_entry: is_xlsx_mask_target,
             text_group: TextGroupKind::Xlsx,
+            discovered_parts: BTreeSet::new(),
         }
     }
 
@@ -106,6 +112,7 @@ impl OoxmlFormat {
             required_entry: "ppt/presentation.xml",
             should_mask_entry: is_pptx_mask_target,
             text_group: TextGroupKind::Pptx,
+            discovered_parts: BTreeSet::new(),
         }
     }
 
@@ -121,6 +128,41 @@ impl OoxmlFormat {
             None
         }
     }
+
+    fn is_text_part(&self, name: &str) -> bool {
+        (self.should_mask_entry)(name) || self.discovered_parts.contains(name)
+    }
+
+    /// A worksheet does not have to be called `xl/worksheets/sheetN.xml`: the
+    /// workbook names its sheets through relationships. Add the parts they
+    /// point at so a sheet stored under another name is read like any other.
+    /// A workbook whose relationships cannot be read keeps the name pattern.
+    fn discover_text_parts<R: Read + Seek>(
+        &mut self,
+        archive: &mut ZipArchive<R>,
+        entry_limit: u64,
+    ) -> Result<()> {
+        if !matches!(self.text_group, TextGroupKind::Xlsx) {
+            return Ok(());
+        }
+        let mut read = |name: &str| -> Result<Option<String>> {
+            let Ok(mut entry) = archive.by_name(name) else {
+                return Ok(None);
+            };
+            let bytes = read_entry_bounded(&mut entry, entry_limit, name)?;
+            Ok(String::from_utf8(bytes).ok())
+        };
+        let (Some(workbook), Some(rels)) = (
+            read("xl/workbook.xml")?,
+            read("xl/_rels/workbook.xml.rels")?,
+        ) else {
+            return Ok(());
+        };
+        if let Ok(parts) = crate::pseudonymize::worksheet_parts(&workbook, &rels) {
+            self.discovered_parts = parts;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -134,7 +176,7 @@ fn mask_ooxml(
     input: &Path,
     output: &Path,
     policy: &Policy,
-    format: OoxmlFormat,
+    mut format: OoxmlFormat,
 ) -> Result<DocumentMaskResult> {
     if paths_refer_to_same_target(input, output)? {
         bail!("--output must not be the same as input for Office document masking");
@@ -154,6 +196,7 @@ fn mask_ooxml(
 
     ensure_archive_entry_limit(archive.len())?;
     let limits = ooxml_read_limits(policy.scan.max_file_size_bytes);
+    format.discover_text_parts(&mut archive, limits.entry_bytes)?;
 
     let output_parent = output
         .parent()
@@ -198,7 +241,7 @@ fn mask_ooxml(
             .start_file(&name, options)
             .with_context(|| format!("write zip entry {name}"))?;
 
-        if (format.should_mask_entry)(&name) {
+        if format.is_text_part(&name) {
             let remaining = limits.total_bytes.saturating_sub(actual_total);
             let mut bytes =
                 read_entry_bounded(&mut entry, limits.entry_bytes.min(remaining), &name)?;
@@ -244,7 +287,7 @@ pub fn extract_ooxml_text_entries(
     bytes: &[u8],
     max_file_size_bytes: u64,
 ) -> Result<Option<Vec<DocumentTextEntry>>> {
-    let Some(format) = OoxmlFormat::from_path(scan_rel) else {
+    let Some(mut format) = OoxmlFormat::from_path(scan_rel) else {
         return Ok(None);
     };
 
@@ -260,6 +303,7 @@ pub fn extract_ooxml_text_entries(
 
     ensure_archive_entry_limit(archive.len())?;
     let limits = ooxml_read_limits(max_file_size_bytes);
+    format.discover_text_parts(&mut archive, limits.entry_bytes)?;
 
     let mut entries = Vec::new();
     let mut actual_total = 0u64;
@@ -268,7 +312,7 @@ pub fn extract_ooxml_text_entries(
             .by_index(idx)
             .with_context(|| format!("read zip entry {idx}"))?;
         let name = zip_entry_name(&entry)?;
-        if entry.is_dir() || !(format.should_mask_entry)(&name) {
+        if entry.is_dir() || !format.is_text_part(&name) {
             continue;
         }
 
@@ -440,6 +484,197 @@ struct XmlMaskContext<'a> {
     policy: &'a Policy,
     rel_label: &'a str,
     findings: &'a mut Vec<Finding>,
+    /// Indices of text items whose content masking actually changed.
+    changed_items: std::collections::HashSet<usize>,
+}
+
+/// Worksheet cell (`<c>`) being read by the mask path.
+struct OpenCell {
+    /// Index of the cell's start tag in the item list.
+    start: usize,
+    depth: usize,
+}
+
+/// Direct child element of a worksheet cell, as a range of the cell's items.
+struct CellChild {
+    local_name: String,
+    /// First item (start tag, or the empty-element tag itself).
+    first: usize,
+    /// Last item, inclusive.
+    last: usize,
+}
+
+fn cell_children(cell_items: &[XmlItem]) -> Vec<CellChild> {
+    let mut children = Vec::new();
+    let mut open: Option<(String, usize)> = None;
+    let mut depth = 0usize;
+    // Item 0 is the cell's own start tag.
+    for (idx, item) in cell_items.iter().enumerate().skip(1) {
+        let XmlItem::Event(event) = item else {
+            continue;
+        };
+        match event {
+            Event::Start(start) => {
+                if depth == 0 {
+                    open = Some((local_name(start.name().as_ref()).to_string(), idx));
+                }
+                depth += 1;
+            }
+            Event::End(_) => {
+                depth = depth.saturating_sub(1);
+                if depth == 0
+                    && let Some((local_name, first)) = open.take()
+                {
+                    children.push(CellChild {
+                        local_name,
+                        first,
+                        last: idx,
+                    });
+                }
+            }
+            Event::Empty(empty) if depth == 0 => children.push(CellChild {
+                local_name: local_name(empty.name().as_ref()).to_string(),
+                first: idx,
+                last: idx,
+            }),
+            _ => {}
+        }
+    }
+    children
+}
+
+/// Masked text of a cell child (its text items concatenated).
+fn cell_child_text(cell_items: &[XmlItem], child: &CellChild) -> String {
+    let mut text = String::new();
+    for item in &cell_items[child.first..=child.last] {
+        if let XmlItem::Text {
+            original,
+            replacement,
+            ..
+        } = item
+        {
+            text.push_str(replacement.as_deref().unwrap_or(original));
+        }
+    }
+    text
+}
+
+fn masked_text_item(text: String) -> XmlItem {
+    XmlItem::Text {
+        is_cdata: false,
+        original: String::new(),
+        replacement: Some(text),
+    }
+}
+
+/// Keep a masked worksheet cell valid SpreadsheetML.
+///
+/// Masking writes a placeholder into the text of `<v>` (cached value) and
+/// `<f>` (formula). A placeholder is not a number, a shared-string index or a
+/// formula, so the cell is retyped once its value or formula text changed:
+///
+/// - no formula: the cell becomes an inline string holding the masked value;
+/// - formula unchanged, value masked: the formula stays and the cached value
+///   becomes a formula string (`t="str"`);
+/// - formula masked: the formula becomes a string literal of its masked text
+///   (keeping the element, so shared-formula references still resolve) and
+///   the cached value is that same text.
+///
+/// `items[cell_start..]` is the cell without its end tag.
+fn retype_masked_cell(items: &mut Vec<XmlItem>, cell_start: usize, changed: &[usize]) {
+    let mut cell_items = items.split_off(cell_start);
+    let children = cell_children(&cell_items);
+    let child_changed = |child: &CellChild| {
+        changed
+            .iter()
+            .any(|idx| (child.first..=child.last).contains(&(idx - cell_start)))
+    };
+    let value = children.iter().find(|child| child.local_name == "v");
+    let formula = children.iter().find(|child| child.local_name == "f");
+    let value_changed = value.is_some_and(&child_changed);
+    let formula_changed = formula.is_some_and(&child_changed);
+    let Some(XmlItem::Event(Event::Start(cell_tag))) = cell_items.first() else {
+        items.extend(cell_items);
+        return;
+    };
+    if !value_changed && !formula_changed {
+        items.extend(cell_items);
+        return;
+    }
+
+    let cell_name = cell_tag.name().as_ref().to_string();
+    let prefix = cell_name
+        .rsplit_once(':')
+        .map(|(prefix, _)| format!("{prefix}:"))
+        .unwrap_or_default();
+    let child_name = |local: &str| format!("{prefix}{local}");
+    let cell_type = if formula.is_some() {
+        "str"
+    } else {
+        "inlineStr"
+    };
+    let mut new_tag = quick_xml::events::BytesStart::new(cell_name.clone());
+    for attribute in cell_tag.attributes().with_checks(false).flatten() {
+        if attribute.key.as_ref() != "t" {
+            new_tag.push_attribute(attribute);
+        }
+    }
+    new_tag.push_attribute(("t", cell_type));
+
+    let mut rebuilt = vec![XmlItem::Event(Event::Start(new_tag.into_owned()))];
+    let push_element = |rebuilt: &mut Vec<XmlItem>, name: String, text: String| {
+        let mut tag = quick_xml::events::BytesStart::new(name.clone());
+        if text.starts_with(char::is_whitespace) || text.ends_with(char::is_whitespace) {
+            tag.push_attribute(("xml:space", "preserve"));
+        }
+        rebuilt.push(XmlItem::Event(Event::Start(tag)));
+        rebuilt.push(masked_text_item(text));
+        rebuilt.push(XmlItem::Event(Event::End(
+            quick_xml::events::BytesEnd::new(name),
+        )));
+    };
+
+    match formula {
+        None => {
+            let text = value
+                .map(|child| cell_child_text(&cell_items, child))
+                .unwrap_or_default();
+            let is_name = child_name("is");
+            rebuilt.push(XmlItem::Event(Event::Start(
+                quick_xml::events::BytesStart::new(is_name.clone()),
+            )));
+            push_element(&mut rebuilt, child_name("t"), text);
+            rebuilt.push(XmlItem::Event(Event::End(
+                quick_xml::events::BytesEnd::new(is_name),
+            )));
+        }
+        Some(formula) => {
+            let formula_text = cell_child_text(&cell_items, formula);
+            let value_text = value
+                .map(|child| cell_child_text(&cell_items, child))
+                .unwrap_or_default();
+            if formula_changed {
+                // Keep the formula's own start tag (shared / array formula
+                // attributes) and make its text a string literal.
+                if let XmlItem::Event(Event::Start(tag)) = &cell_items[formula.first] {
+                    let name = tag.name().as_ref().to_string();
+                    rebuilt.push(XmlItem::Event(Event::Start(tag.clone())));
+                    rebuilt.push(masked_text_item(format!(
+                        "\"{}\"",
+                        formula_text.replace('"', "\"\"")
+                    )));
+                    rebuilt.push(XmlItem::Event(Event::End(
+                        quick_xml::events::BytesEnd::new(name),
+                    )));
+                }
+                push_element(&mut rebuilt, child_name("v"), formula_text);
+            } else {
+                rebuilt.extend(cell_items.drain(formula.first..=formula.last));
+                push_element(&mut rebuilt, child_name("v"), value_text);
+            }
+        }
+    }
+    items.extend(rebuilt);
 }
 
 /// quick-xml emits entity references (`&amp;`, `&#x3C;`) as separate
@@ -490,12 +725,30 @@ fn mask_xml_text(
             policy,
             rel_label,
             findings: &mut findings,
+            changed_items: std::collections::HashSet::new(),
         };
+        // Worksheet cells need retyping once their value or formula is
+        // masked; see `retype_masked_cell`.
+        let mut is_worksheet: Option<bool> = None;
+        let mut open_cell: Option<OpenCell> = None;
 
         loop {
             match reader.read_event_into(&mut buf).context("read XML event")? {
                 Event::Eof => break,
                 Event::Start(start) => {
+                    let local = local_name(start.name().as_ref()).to_string();
+                    let in_worksheet = *is_worksheet.get_or_insert_with(|| {
+                        matches!(text_group, TextGroupKind::Xlsx) && local == "worksheet"
+                    });
+                    if let Some(cell) = open_cell.as_mut() {
+                        cell.depth += 1;
+                    } else if in_worksheet && local == "c" {
+                        mask_context.changed_items.clear();
+                        open_cell = Some(OpenCell {
+                            start: items.len(),
+                            depth: 1,
+                        });
+                    }
                     if let Some(depth) = group_depth.as_mut() {
                         *depth += 1;
                     } else if starts_text_group(start.name().as_ref(), text_group) {
@@ -512,6 +765,21 @@ fn mask_xml_text(
                             group_text_items.clear();
                         } else {
                             group_depth = Some(depth - 1);
+                        }
+                    }
+                    let closed_cell = open_cell.as_mut().and_then(|cell| {
+                        cell.depth -= 1;
+                        (cell.depth == 0).then_some(cell.start)
+                    });
+                    if let Some(cell_start) = closed_cell {
+                        open_cell = None;
+                        let changed: Vec<usize> = mask_context
+                            .changed_items
+                            .drain()
+                            .filter(|idx| *idx >= cell_start)
+                            .collect();
+                        if !changed.is_empty() {
+                            retype_masked_cell(&mut items, cell_start, &changed);
                         }
                     }
                     items.push(XmlItem::Event(Event::End(end.into_owned())));
@@ -714,6 +982,9 @@ fn mask_text_items(
             ..
         } = &mut items[*idx]
         {
+            if replacement != *original {
+                context.changed_items.insert(*idx);
+            }
             original.zeroize();
             *target = Some(replacement);
         }
@@ -768,7 +1039,7 @@ fn process_ooxml_text_groups(
     max_file_size_bytes: u64,
     mut transform: impl FnMut(&str) -> Result<String>,
 ) -> Result<()> {
-    let format = OoxmlFormat::from_path(&input.to_string_lossy()).ok_or_else(|| {
+    let mut format = OoxmlFormat::from_path(&input.to_string_lossy()).ok_or_else(|| {
         anyhow::anyhow!(
             "unsupported Office document for text rewrite: {}",
             input.display()
@@ -793,6 +1064,7 @@ fn process_ooxml_text_groups(
     }
     ensure_archive_entry_limit(archive.len())?;
     let limits = ooxml_read_limits(max_file_size_bytes);
+    format.discover_text_parts(&mut archive, limits.entry_bytes)?;
 
     let mut writer = output.map(open_ooxml_output).transpose()?;
     let mut declared_total = 0u64;
@@ -829,7 +1101,7 @@ fn process_ooxml_text_groups(
                 .with_context(|| format!("write zip entry {name}"))?;
         }
 
-        if (format.should_mask_entry)(&name) {
+        if format.is_text_part(&name) {
             let remaining = limits.total_bytes.saturating_sub(actual_total);
             let mut bytes =
                 read_entry_bounded(&mut entry, limits.entry_bytes.min(remaining), &name)?;
@@ -1330,6 +1602,66 @@ mod tests {
     }
 
     #[test]
+    fn xlsx_worksheets_are_found_through_workbook_relationships() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("custom.xlsx");
+        let output = dir.path().join("custom.out.xlsx");
+        let secret = synthetic_openai_key('c');
+        let part = "xl/custom/active.xml";
+        let file = File::create(&input).unwrap();
+        let mut zip = ZipWriter::new(file);
+        for (name, body) in [
+            (
+                "xl/workbook.xml",
+                r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Active" sheetId="1" r:id="rId7"/></sheets></workbook>"#.to_string(),
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<Relationships><Relationship Id="rId7" Target="custom/active.xml"/></Relationships>"#.to_string(),
+            ),
+            (
+                part,
+                format!(
+                    r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{secret}</t></is></c></row></sheetData></worksheet>"#
+                ),
+            ),
+        ] {
+            zip.start_file(name, deflated_zip_options()).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+
+        // The scanner (and so `--check-remaining`) reads the sheet text.
+        let bytes = std::fs::read(&input).unwrap();
+        let entries = extract_ooxml_text_entries("custom.xlsx", &bytes, 1024 * 1024)
+            .unwrap()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].entry_path, part);
+        assert!(entries[0].text.contains(&secret));
+
+        // Restore and Office text mode rewrite it.
+        let mut seen = Vec::new();
+        rewrite_ooxml_text_groups(&input, &output, 1024 * 1024, |text| {
+            seen.push(text.to_string());
+            Ok("restored".to_string())
+        })
+        .unwrap();
+        assert_eq!(seen, vec![secret.clone()]);
+        let sheet = read_zip_entry(&output, part).unwrap();
+        assert!(
+            sheet.contains("restored") && !sheet.contains(&secret),
+            "{sheet}"
+        );
+
+        // Masking finds the same part.
+        let masked = dir.path().join("custom.masked.xlsx");
+        let result = mask_xlsx(&input, &masked, &Policy::default()).unwrap();
+        assert!(!result.findings.is_empty());
+        assert!(!read_zip_entry(&masked, part).unwrap().contains(&secret));
+    }
+
+    #[test]
     fn masks_xlsx_secret_split_across_rich_text_nodes() {
         let dir = tempdir().unwrap();
         let input = dir.path().join("workbook.xlsx");
@@ -1554,5 +1886,85 @@ mod tests {
 
         assert!(err.to_string().contains("mask XML entry"), "{err}");
         assert_eq!(std::fs::read(&output).unwrap(), b"existing-output");
+    }
+
+    /// Sixteen-digit Luhn-valid test number assembled at runtime.
+    fn synthetic_card_number() -> String {
+        format!("4{}", "1".repeat(15))
+    }
+
+    fn assert_well_formed_xml(xml: &str) {
+        let mut reader = Reader::from_str(xml);
+        let mut depth = 0usize;
+        loop {
+            match reader.read_event().expect("well-formed XML") {
+                Event::Eof => break,
+                Event::Start(_) => depth += 1,
+                Event::End(_) => depth -= 1,
+                _ => {}
+            }
+        }
+        assert_eq!(depth, 0, "{xml}");
+    }
+
+    #[test]
+    fn mask_converts_numeric_and_formula_cells_to_inline_strings() {
+        let card = synthetic_card_number();
+        let key = synthetic_openai_key('c');
+        let xml = format!(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" s="3"><v>{card}</v></c><c r="B1" t="str"><f>CONCATENATE("{key}",C1)</f><v>ok</v></c><c r="C1" t="s"><v>0</v></c><c r="D1"><f>SUM(E1:E2)</f><v>42</v></c></row></sheetData></worksheet>"#
+        );
+        let policy = Policy::default();
+        let (masked, findings) =
+            mask_xml_text(xml.as_bytes(), &policy, "book.xlsx", TextGroupKind::Xlsx).unwrap();
+        let out = String::from_utf8(masked).unwrap();
+
+        assert!(findings.len() >= 2, "{findings:?}");
+        assert!(!out.contains(&card), "{out}");
+        assert!(!out.contains(&key), "{out}");
+        assert_well_formed_xml(&out);
+        // A placeholder is neither a number nor a formula.
+        assert!(!out.contains("<v>[REDACTED]"), "{out}");
+        assert!(!out.contains("<f>CONCATENATE"), "{out}");
+        assert!(
+            out.contains(r#"<c r="A1" s="3" t="inlineStr"><is><t>[REDACTED]</t></is></c>"#),
+            "{out}"
+        );
+        // A masked formula becomes a string-literal formula with a string value.
+        assert!(out.contains(r#"<c r="B1" t="str"><f>&quot;"#), "{out}");
+        assert!(out.contains("&quot;</f><v>CONCATENATE("), "{out}");
+        // Untouched cells keep their value, type and formula.
+        assert!(out.contains(r#"<c r="C1" t="s"><v>0</v></c>"#), "{out}");
+        assert!(
+            out.contains(r#"<c r="D1"><f>SUM(E1:E2)</f><v>42</v></c>"#),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn masked_xlsx_with_numeric_cell_stays_readable() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("workbook.xlsx");
+        let output = dir.path().join("workbook.redacted.xlsx");
+        let card = synthetic_card_number();
+        create_minimal_xlsx(
+            &input,
+            "shared",
+            &format!(r#"plain</t></is></c><c r="B1"><v>{card}</v></c><c r="C1" t="inlineStr"><is><t>tail"#),
+        )
+        .unwrap();
+
+        let result = mask_xlsx(&input, &output, &Policy::default()).unwrap();
+
+        assert!(!result.findings.is_empty());
+        let sheet = read_zip_entry(&output, "xl/worksheets/sheet1.xml").unwrap();
+        assert!(!sheet.contains(&card), "{sheet}");
+        assert!(
+            sheet.contains(r#"<c r="B1" t="inlineStr"><is><t>[REDACTED]</t></is></c>"#),
+            "{sheet}"
+        );
+        let bytes = std::fs::read(&output).unwrap();
+        let entries = extract_ooxml_text_entries("workbook.redacted.xlsx", &bytes, u64::MAX);
+        assert!(entries.is_ok(), "{:?}", entries.err());
     }
 }

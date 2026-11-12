@@ -31,22 +31,26 @@ impl Finding {
         content: &str,
         rule_cfg: &RuleEngineConfig,
     ) -> Self {
-        Self::from_rule_match_with_custom_context(file, m, include_context, content, rule_cfg, &[])
+        let guard = include_context.then(|| {
+            let mut guard = ContextGuard::for_content(content);
+            guard.add_match(content, m.line, m.column, &m.matched_text);
+            guard
+        });
+        Self::from_rule_match_with_custom_context(file, m, guard.as_ref(), content, rule_cfg, &[])
     }
 
+    /// `context` is `None` when context lines are not wanted; otherwise it
+    /// names the parts of `content` that must be redacted in them.
     pub(crate) fn from_rule_match_with_custom_context(
         file: &str,
         m: &shk_rules::RuleMatch,
-        include_context: bool,
+        context: Option<&ContextGuard>,
         content: &str,
         rule_cfg: &RuleEngineConfig,
         custom_rules: &[CompiledCustomRule],
     ) -> Self {
-        let (ctx_before, ctx_after) = if include_context {
-            context_lines(content, m.line, 1)
-        } else {
-            (vec![], vec![])
-        };
+        let (context_before, context_after) =
+            sanitized_context(content, m.line, context, rule_cfg, custom_rules);
         Self {
             rule_id: m.rule_id.to_string(),
             severity: Severity::from(m.severity).as_str().to_string(),
@@ -61,24 +65,21 @@ impl Finding {
                 &m.matched_text,
             )),
             confidence: m.confidence,
-            context_before: sanitize_context(ctx_before, rule_cfg, custom_rules),
-            context_after: sanitize_context(ctx_after, rule_cfg, custom_rules),
+            context_before,
+            context_after,
         }
     }
 
     pub(crate) fn from_custom_match(
         file: &str,
         m: &CustomMatch,
-        include_context: bool,
+        context: Option<&ContextGuard>,
         content: &str,
         rule_cfg: &RuleEngineConfig,
         custom_rules: &[CompiledCustomRule],
     ) -> Self {
-        let (ctx_before, ctx_after) = if include_context {
-            context_lines(content, m.line, 1)
-        } else {
-            (vec![], vec![])
-        };
+        let (context_before, context_after) =
+            sanitized_context(content, m.line, context, rule_cfg, custom_rules);
         Self {
             rule_id: m.rule_id.clone(),
             severity: m.severity.as_str().to_string(),
@@ -93,8 +94,8 @@ impl Finding {
                 &m.matched_text,
             )),
             confidence: m.confidence,
-            context_before: sanitize_context(ctx_before, rule_cfg, custom_rules),
-            context_after: sanitize_context(ctx_after, rule_cfg, custom_rules),
+            context_before,
+            context_after,
         }
     }
 }
@@ -110,8 +111,107 @@ fn kind_str(k: Kind) -> &'static str {
     }
 }
 
-fn context_lines(content: &str, line_1based: usize, n: usize) -> (Vec<String>, Vec<String>) {
-    let lines: Vec<&str> = content.lines().collect();
+/// Parts of a scanned text that must not appear in context lines even though
+/// no rule matches them on their own line: private key blocks (only the
+/// header line matches a rule) and every match that spans several lines.
+/// Context lines are otherwise redacted one line at a time, which cannot see
+/// either.
+#[derive(Debug, Default)]
+pub(crate) struct ContextGuard {
+    /// Byte ranges of the scanned text; unsorted and possibly overlapping.
+    ranges: Vec<(usize, usize)>,
+}
+
+impl ContextGuard {
+    pub(crate) fn for_content(content: &str) -> Self {
+        Self {
+            ranges: shk_rules::private_key_block_ranges(content)
+                .into_iter()
+                .map(|range| (range.start, range.end))
+                .collect(),
+        }
+    }
+
+    /// Register a match reported at 1-based `line` / `column` (in chars).
+    /// Single-line matches are left to the per-line redaction.
+    pub(crate) fn add_match(
+        &mut self,
+        content: &str,
+        line: usize,
+        column: usize,
+        matched_text: &str,
+    ) {
+        if !matched_text.contains('\n') || line == 0 || column == 0 {
+            return;
+        }
+        let Some((line_start, line_text)) = lines_with_offsets(content).nth(line - 1) else {
+            return;
+        };
+        let column_offset = line_text
+            .char_indices()
+            .nth(column - 1)
+            .map_or(line_text.len(), |(offset, _)| offset);
+        let start = line_start + column_offset;
+        if content[start..].starts_with(matched_text) {
+            self.ranges.push((start, start + matched_text.len()));
+        }
+    }
+
+    /// Replace the guarded parts of the line at `line_start` with the
+    /// redaction placeholder.
+    fn redact_line(&self, line_start: usize, line: &str) -> String {
+        let line_end = line_start + line.len();
+        let mut spans: Vec<(usize, usize)> = self
+            .ranges
+            .iter()
+            .filter_map(|&(start, end)| {
+                let start = start.max(line_start);
+                let end = end.min(line_end);
+                (start < end).then(|| (start - line_start, end - line_start))
+            })
+            .collect();
+        if spans.is_empty() {
+            return line.to_string();
+        }
+        spans.sort_unstable();
+        let mut out = String::with_capacity(line.len());
+        let mut cursor = 0;
+        let mut placeholder_written = false;
+        for (start, end) in spans {
+            if placeholder_written && start <= cursor {
+                // Overlaps or touches the previous span: one placeholder.
+                cursor = cursor.max(end);
+                continue;
+            }
+            out.push_str(&line[cursor..start]);
+            out.push_str("[REDACTED]");
+            cursor = end;
+            placeholder_written = true;
+        }
+        out.push_str(&line[cursor..]);
+        out
+    }
+}
+
+/// Lines of `content` as `str::lines` yields them, with their byte offset.
+fn lines_with_offsets(content: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut offset = 0;
+    content.split_inclusive('\n').map(move |raw| {
+        let start = offset;
+        offset += raw.len();
+        let line = raw.strip_suffix('\n').unwrap_or(raw);
+        (start, line.strip_suffix('\r').unwrap_or(line))
+    })
+}
+
+type ContextLines<'a> = Vec<(usize, &'a str)>;
+
+fn context_lines(
+    content: &str,
+    line_1based: usize,
+    n: usize,
+) -> (ContextLines<'_>, ContextLines<'_>) {
+    let lines: ContextLines<'_> = lines_with_offsets(content).collect();
     if lines.is_empty() || line_1based == 0 {
         return (vec![], vec![]);
     }
@@ -119,31 +219,38 @@ fn context_lines(content: &str, line_1based: usize, n: usize) -> (Vec<String>, V
         .saturating_sub(1)
         .min(lines.len().saturating_sub(1));
     let start = idx.saturating_sub(n);
-    let before: Vec<String> = lines[start..idx].iter().map(|s| (*s).to_string()).collect();
+    let before = lines[start..idx].to_vec();
     let end = (idx + 1 + n).min(lines.len());
-    let after: Vec<String> = if idx + 1 < lines.len() {
-        lines[idx + 1..end]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect()
+    let after = if idx + 1 < lines.len() {
+        lines[idx + 1..end].to_vec()
     } else {
         vec![]
     };
     (before, after)
 }
 
-fn sanitize_context(
-    lines: Vec<String>,
+fn sanitized_context(
+    content: &str,
+    line_1based: usize,
+    guard: Option<&ContextGuard>,
     cfg: &RuleEngineConfig,
     custom_rules: &[CompiledCustomRule],
-) -> Vec<String> {
-    lines
-        .into_iter()
-        .map(|l| {
-            let redacted = redact_line_for_display(&l, cfg);
-            crate::custom_rules::redact_line_for_display(&redacted, custom_rules)
-        })
-        .collect()
+) -> (Vec<String>, Vec<String>) {
+    let Some(guard) = guard else {
+        return (vec![], vec![]);
+    };
+    let (before, after) = context_lines(content, line_1based, 1);
+    let sanitize = |lines: ContextLines<'_>| -> Vec<String> {
+        lines
+            .into_iter()
+            .map(|(line_start, line)| {
+                let guarded = guard.redact_line(line_start, line);
+                let redacted = redact_line_for_display(&guarded, cfg);
+                crate::custom_rules::redact_line_for_display(&redacted, custom_rules)
+            })
+            .collect()
+    };
+    (sanitize(before), sanitize(after))
 }
 
 #[derive(Debug, Deserialize)]
@@ -264,5 +371,32 @@ mod tests {
         let f = Finding::from_rule_match("x.txt", &m, true, content, &cfg);
         let blob = format!("{:?}{:?}", f.context_before, f.context_after);
         assert!(!blob.contains("secret.com"));
+    }
+
+    #[test]
+    fn context_never_leaks_private_key_block_body() {
+        let cfg = RuleEngineConfig::default();
+        let dashes = "-".repeat(5);
+        let label = ["RSA", "PRIVATE", "KEY"].join(" ");
+        let body = "Q1w2".repeat(12);
+        let footer = format!("{dashes}END {label}{dashes}");
+        // not real credential or personal data: synthetic detector fixture value only
+        let content =
+            format!("{dashes}BEGIN {label}{dashes}\n{body}\n{footer}\nowner user@example.com\n");
+        let matches = shk_rules::scan_content(&content, "x.txt", &cfg);
+        let header = matches
+            .iter()
+            .find(|m| m.rule_id == "secret.private_key_block")
+            .expect("private key header match");
+        let f = Finding::from_rule_match("x.txt", header, true, &content, &cfg);
+        assert_eq!(f.context_after.len(), 1);
+        assert!(!f.context_after[0].contains(&body), "{:?}", f.context_after);
+
+        let email = matches
+            .iter()
+            .find(|m| m.rule_id == "pii.email")
+            .expect("email match");
+        let f = Finding::from_rule_match("x.txt", email, true, &content, &cfg);
+        assert_eq!(f.context_before, vec!["[REDACTED]".to_string()]);
     }
 }

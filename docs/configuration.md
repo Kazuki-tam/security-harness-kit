@@ -362,7 +362,7 @@ SECRET=synthetic-example-value
 SECRET=synthetic-example-value
 ```
 
-A marker without a rule id (`# shk-ignore`, `# shk-ignore-next-line`) suppresses every rule on that line, and `//` comments work the same way as `#`.
+A marker without a rule id (`# shk-ignore`, `# shk-ignore-next-line`) suppresses every rule on that line, and `//` comments work the same way as `#`. A `shk-ignore-next-line` marker always targets the following line, also when it trails code.
 
 Policy allowlists can suppress by path and rule:
 
@@ -397,6 +397,8 @@ reason = "Public support address"
 Do not place raw secret values in `shk.toml`. Use `value_hash` for value-specific suppression. A `value_hash` is a deterministic fingerprint for equality checks, not cryptographic secret storage; anyone who knows the candidate value and rule id can compute the same hash.
 
 Expired allowlist entries produce low-severity warning findings.
+
+`shk.toml` is rejected when an `[[allowlist]]` entry has none of `rule_id`, `value_hash`, `path`: it would suppress every finding in every file. Unknown keys are not selectors, so an entry whose only selectors are misspelled (`rule` for `rule_id`) is rejected too. Other unknown keys, such as an `owner` or `ticket` annotation, are ignored and do not fail the load; each one produces a low-severity `policy.allowlist_unknown_key` warning finding that names the key and the entry's position. An `expires` value that is not a `YYYY-MM-DD` date does not fail the load either: the entry is treated as expired, so it stops suppressing, and the `policy.allowlist_expired` warning says the date could not be parsed. `path` is a glob, so escape literal metacharacters in file names with a character class, for example `app/[[]id]/page.tsx`; `shk allowlist suggest` does this for you.
 
 ## Doctor Ignore Settings
 
