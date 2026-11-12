@@ -33,6 +33,10 @@ pub struct CheckoutStep {
     /// 1-based line number of the `uses: actions/checkout` line.
     pub line: usize,
     pub state: PersistState,
+    /// The step uses a flow-style `with: { ... }` mapping that `--fix` will not
+    /// rewrite; `persist-credentials: false` has to be added by hand.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub manual_fix: bool,
 }
 
 impl CheckoutStep {
@@ -213,7 +217,11 @@ fn is_checkout_uses(line: &str) -> bool {
     let Some(value) = step_key_part(line).strip_prefix("uses:") else {
         return false;
     };
-    let value = strip_inline_comment(value).trim().trim_matches(['"', '\'']);
+    // GitHub resolves `owner/repo` action references case-insensitively.
+    let value = strip_inline_comment(value)
+        .trim()
+        .trim_matches(['"', '\''])
+        .to_ascii_lowercase();
     value == "actions/checkout" || value.starts_with("actions/checkout@")
 }
 
@@ -229,6 +237,102 @@ fn persist_state(line: &str) -> Option<PersistState> {
     } else {
         Some(PersistState::ExplicitTrue)
     }
+}
+
+/// Whether the line is a step-level `with:` key holding a flow mapping
+/// (`with: { ... }`), possibly continued on the following lines.
+fn is_flow_with(line: &str) -> bool {
+    step_key_part(line)
+        .strip_prefix("with:")
+        .is_some_and(|value| value.trim_start().starts_with('{'))
+}
+
+/// Top-level `key: value` entries of the flow mapping that opens on the first
+/// line of `lines`. Quotes, nested flow collections, and trailing comments are
+/// honoured; scanning stops at the closing brace.
+fn flow_mapping_entries(lines: &[&str]) -> Vec<String> {
+    let mut entries = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    for (idx, line) in lines.iter().enumerate() {
+        let line = if idx == 0 {
+            step_key_part(line).strip_prefix("with:").unwrap_or(line)
+        } else {
+            line
+        };
+        let mut prev = ' ';
+        for c in line.chars() {
+            if let Some(q) = quote {
+                current.push(c);
+                if c == q {
+                    quote = None;
+                }
+                prev = c;
+                continue;
+            }
+            match c {
+                '#' if prev.is_whitespace() => break,
+                '"' | '\'' => {
+                    quote = Some(c);
+                    current.push(c);
+                }
+                '{' | '[' => {
+                    depth += 1;
+                    if depth > 1 {
+                        current.push(c);
+                    }
+                }
+                '}' | ']' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        entries.push(current);
+                        return entries;
+                    }
+                    current.push(c);
+                }
+                ',' if depth == 1 => entries.push(std::mem::take(&mut current)),
+                _ if depth >= 1 => current.push(c),
+                _ => {}
+            }
+            prev = c;
+        }
+        current.push(' ');
+    }
+    entries.push(current);
+    entries
+}
+
+/// `persist-credentials` state inside a flow-style `with: { ... }` mapping that
+/// starts on the first line of `lines`.
+fn flow_with_persist_state(lines: &[&str]) -> PersistState {
+    let unquote = |s: &str| s.trim().trim_matches(['"', '\'']).to_string();
+    flow_mapping_entries(lines)
+        .iter()
+        .find_map(|entry| {
+            let (key, value) = entry.split_once(':')?;
+            if unquote(key) != "persist-credentials" {
+                return None;
+            }
+            Some(if unquote(value) == "false" {
+                PersistState::Disabled
+            } else {
+                PersistState::ExplicitTrue
+            })
+        })
+        .unwrap_or(PersistState::Missing)
+}
+
+/// Persist state of one step block, and whether its `with:` is a flow mapping.
+fn step_persist_state(block: &[&str]) -> (PersistState, bool) {
+    if let Some(w) = block.iter().position(|l| is_flow_with(l)) {
+        return (flow_with_persist_state(&block[w..]), true);
+    }
+    let state = block
+        .iter()
+        .find_map(|l| persist_state(l))
+        .unwrap_or(PersistState::Missing);
+    (state, false)
 }
 
 fn disabled_persist_credentials_line(line: &str) -> String {
@@ -269,13 +373,11 @@ fn analyze(content: &str) -> Vec<CheckoutStep> {
         .filter_map(|range| {
             let block = &lines[range.clone()];
             let uses_offset = block.iter().position(|l| is_checkout_uses(l))?;
-            let state = block
-                .iter()
-                .find_map(|l| persist_state(l))
-                .unwrap_or(PersistState::Missing);
+            let (state, flow_with) = step_persist_state(block);
             Some(CheckoutStep {
                 line: range.start + uses_offset + 1,
                 state,
+                manual_fix: flow_with && state != PersistState::Disabled,
             })
         })
         .collect()
@@ -327,10 +429,14 @@ fn fix_content(content: &str) -> (String, usize) {
 fn harden_checkout_step(block: &[&str], dash_indent: usize) -> (Vec<String>, bool) {
     let owned = || block.iter().map(|l| l.to_string()).collect::<Vec<_>>();
 
-    let already_hardened = block
-        .iter()
-        .any(|l| persist_state(l) == Some(PersistState::Disabled));
-    if !block.iter().any(|l| is_checkout_uses(l)) || already_hardened {
+    if !block.iter().any(|l| is_checkout_uses(l)) {
+        return (owned(), false);
+    }
+    // A flow-style `with: { ... }` cannot take a block child and rewriting
+    // inside the braces is not safe for a line-oriented fixer, so those steps
+    // stay as they are and remain reported for a manual edit.
+    let (state, flow_with) = step_persist_state(block);
+    if state == PersistState::Disabled || flow_with {
         return (owned(), false);
     }
 
@@ -347,10 +453,14 @@ fn harden_checkout_step(block: &[&str], dash_indent: usize) -> (Vec<String>, boo
     // Missing entirely: add it under an existing `with:` block, or create one.
     let mut lines: Vec<String> = Vec::with_capacity(block.len() + 2);
     if let Some(w) = block.iter().position(|l| is_with_key(l)) {
-        let with_indent = leading_spaces(block[w]);
-        let child_indent = block
-            .get(w + 1)
-            .filter(|l| !is_blank_or_comment(l) && leading_spaces(l) > with_indent)
+        // Column of the `with` key itself (it may sit on the dash line).
+        let with_indent = block[w].len() - step_key_part(block[w]).len();
+        // The first real child sets the indent; comment and blank lines
+        // between `with:` and its children do not.
+        let child_indent = block[w + 1..]
+            .iter()
+            .take_while(|l| is_blank_or_comment(l) || leading_spaces(l) > with_indent)
+            .find(|l| !is_blank_or_comment(l))
             .map(|l| leading_spaces(l))
             .unwrap_or(with_indent + 2);
         for (idx, line) in block.iter().enumerate() {
@@ -602,5 +712,116 @@ jobs:
         let (fixed, count) = fix_content(yaml);
         assert_eq!(count, 0);
         assert_eq!(fixed, yaml);
+    }
+
+    #[test]
+    fn flow_style_with_setting_false_is_hardened() {
+        let yaml = "\
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0, persist-credentials: false } # flow
+      - uses: actions/checkout@v6
+        with: {\"persist-credentials\": 'false'}
+      - uses: actions/checkout@v6
+        with: {
+          fetch-depth: 0,
+          persist-credentials: false,
+        }
+";
+        let steps = analyze(yaml);
+        assert_eq!(steps.len(), 3);
+        assert!(
+            steps.iter().all(|s| s.state == PersistState::Disabled),
+            "{steps:?}"
+        );
+        let (fixed, count) = fix_content(yaml);
+        assert_eq!(count, 0);
+        assert_eq!(fixed, yaml);
+    }
+
+    #[test]
+    fn flow_style_with_is_reported_but_never_auto_fixed() {
+        let yaml = "\
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+      - uses: actions/checkout@v6
+        with: { persist-credentials: true, ref: \"a,b\" }
+      - uses: actions/checkout@v6
+        with: {
+          fetch-depth: 0,
+        }
+";
+        let steps = analyze(yaml);
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps[0].state, PersistState::Missing);
+        assert_eq!(steps[1].state, PersistState::ExplicitTrue);
+        assert_eq!(steps[2].state, PersistState::Missing);
+        assert!(steps.iter().all(|s| s.manual_fix), "{steps:?}");
+
+        // Splicing a block child under a flow mapping would produce invalid
+        // YAML, so the fixer leaves these steps for a manual edit.
+        let (fixed, count) = fix_content(yaml);
+        assert_eq!(count, 0);
+        assert_eq!(fixed, yaml);
+    }
+
+    #[test]
+    fn block_style_steps_are_not_marked_manual() {
+        let yaml = "\
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+";
+        let steps = analyze(yaml);
+        assert!(!steps[0].manual_fix);
+    }
+
+    #[test]
+    fn fix_uses_child_indent_when_with_is_followed_by_comments() {
+        let yaml = "\
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # full history for changelog
+
+            fetch-depth: 0
+      - name: build
+        run: echo hi
+";
+        let (fixed, count) = fix_content(yaml);
+        assert_eq!(count, 1);
+        assert!(
+            fixed.contains(
+                "        with:\n            persist-credentials: false\n          # full history for changelog\n\n            fetch-depth: 0\n"
+            ),
+            "{fixed}"
+        );
+        assert_eq!(fix_content(&fixed).1, 0);
+    }
+
+    #[test]
+    fn matches_checkout_action_name_case_insensitively() {
+        let yaml = "\
+jobs:
+  build:
+    steps:
+      - uses: Actions/Checkout@v6
+";
+        let steps = analyze(yaml);
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].state, PersistState::Missing);
+        let (fixed, count) = fix_content(yaml);
+        assert_eq!(count, 1);
+        assert!(fixed.contains("persist-credentials: false"), "{fixed}");
     }
 }

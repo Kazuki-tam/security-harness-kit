@@ -42,7 +42,7 @@ Options:
 | `--global` | Write AI hooks and skills to user-level config directories. |
 | `--apply-sandbox` | Apply supported AI-tool sandbox hardening while installing hooks. |
 
-When `package.json` is detected, `shk init` can apply package-manager supply-chain hardening. For npm projects it writes project `.npmrc` settings such as `ignore-scripts=true` and `min-release-age=7`. For pnpm, Yarn, or Bun projects it writes the corresponding age-gate setting to `pnpm-workspace.yaml`, `.yarnrc.yml`, or `bunfig.toml`. Pass `--no-npm-hardening` to skip this step, including in `--yes` mode.
+When `package.json` is detected, `shk init` can apply package-manager supply-chain hardening. For npm projects it writes project `.npmrc` settings such as `ignore-scripts=true` and `min-release-age=7`. For pnpm, Yarn, or Bun projects it writes the corresponding age-gate setting to `pnpm-workspace.yaml`, `.yarnrc.yml`, or `bunfig.toml`. An existing age gate that is already at least as strict as the default is left untouched (including its trailing comment); a weaker value is raised to the default. Repeated `.npmrc` keys are evaluated the way npm reads them (the last occurrence wins) and the shadowed earlier lines are removed on apply. Pass `--no-npm-hardening` to skip this step, including in `--yes` mode.
 
 `shk policy init` writes only the starter `shk.toml` and skips the other setup steps:
 
@@ -108,7 +108,7 @@ shk mcp audit --fail-on medium
 ```
 
 The default scan is limited to project-local files. `--global` additionally reads user-level files under the current user's home directory. Missing files are silently skipped.
-Configuration reads are capped at 1 MiB and 1,000 server entries per file, and must remain inside the selected project or home scope after path resolution. Escaping symbolic links, oversized files, excessive server maps, and non-regular files produce `mcp.config_unreadable` instead of being read. On Unix, hard-linked configuration files are also rejected.
+Configuration reads are capped at 1 MiB and 1,000 server entries per file, and must remain inside the selected project or home scope after path resolution. Escaping symbolic links, oversized files, excessive server maps, and non-regular files produce `mcp.config_unreadable` instead of being read. On Unix, hard-linked configuration files are also rejected. Because such a file exists but was not audited (and a client may still load it), the finding is `high` and fails the default `--fail-on high` threshold; padding a configuration past the limits does not make the audit pass. A file that is simply not valid JSON/TOML stays `low`.
 
 Project configuration locations:
 
@@ -135,16 +135,18 @@ Rules:
 
 | Rule | Severity | Detects |
 |------|----------|---------|
-| `mcp.npx_auto_install` | medium | Automatic package installation with `npx -y` or `npx --yes` |
-| `mcp.unpinned_package` | medium | `npx`, `uvx`, or `pipx run` packages without an exact version |
+| `mcp.npx_auto_install` | medium | Automatic package installation with `npx -y` / `npx --yes` (also `npm exec -y`) |
+| `mcp.unpinned_package` | medium | `npx`, `npm exec`, `bunx`, `pnpm dlx`, `yarn dlx`, `uvx`, `uv tool run`, or `pipx run` packages without an exact version |
 | `mcp.shell_wrapper` | medium | Shell wrappers using `-c` or `/c` |
 | `mcp.local_unpinned_executable` | low | Relative or non-system executable paths without integrity verification |
 | `mcp.broad_filesystem_scope` | high / medium | Filesystem servers exposing `/` or the user's home directory |
 | `mcp.http_no_tls` | high | Non-loopback remote endpoints using `http://` |
 | `mcp.secret_in_url` | high | Sensitive query parameter names in a URL |
 | `mcp.unknown_transport` | info | Entries with neither a command nor a URL |
-| `mcp.config_unreadable` | low | Files that cannot be read or parsed |
+| `mcp.config_unreadable` | high / low | `high`: an existing file skipped by the read limits (oversized, too many servers, hard-linked, escaping or non-regular, unreadable). `low`: a file that cannot be parsed |
 | `mcp.env_file_unreadable` | low | An existing `--env-file` target that escapes the selected scope or cannot be safely read |
+
+The package-runner rules compare the executable name without a `.cmd`, `.exe`, `.bat`, or `.ps1` suffix and look through `cmd /c`, `sh -c`, PowerShell `-Command`, and `env` wrappers. Known value-taking runner options (for example `--registry <url>` or `uvx --python <version>`) are skipped when locating the package argument.
 
 Configured argument, process-variable, header, and URL values also pass through the existing secret rule engine. References such as `${VAR}`, `$VAR`, and `${input:token}` are not treated as plaintext values. Existing `[[allowlist]]` entries apply. Reports contain no process-variable values, header values, or raw matches.
 
@@ -501,7 +503,7 @@ shk doctor workflows --fix
 
 The diagnostic scans `.github/workflows/*.yml` and `*.yaml` and reports any `actions/checkout` step that does not set `persist-credentials: false`. Without it, `actions/checkout` leaves the workflow's GitHub token in a Git credential file that later steps can read, so a compromised or injected later step can exfiltrate the token.
 
-`--fix` requires `shk.toml` and adds `persist-credentials: false` to flagged checkout steps (creating a `with:` block when needed, or flipping an explicit `true`), preserving existing formatting and comments. Line endings are kept as CRLF when the file contains any CRLF and as LF otherwise. It is a project-only hardening aid, not a full GitHub Actions linter.
+`--fix` requires `shk.toml` and adds `persist-credentials: false` to flagged checkout steps (creating a `with:` block when needed, or flipping an explicit `true`), preserving existing formatting and comments. A flow-style `with: { ... }` mapping is read for detection but never rewritten: such steps stay reported (marked `manual_fix` in JSON) and must be edited by hand. Line endings are kept as CRLF when the file contains any CRLF and as LF otherwise. It is a project-only hardening aid, not a full GitHub Actions linter.
 
 ### `shk doctor version`
 

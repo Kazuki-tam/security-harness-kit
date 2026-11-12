@@ -20,6 +20,18 @@ shk_require_semver() {
   fi
 }
 
+# Release workflows publish every resolved version as a stable release (GitHub
+# Latest, the v1 action tag, Homebrew, npm, the desktop updater endpoint), so a
+# prerelease version must never be resolved into a release plan.
+shk_require_stable_version() {
+  local version="$1"
+  shk_require_semver "$version"
+  if [[ "$version" == *-* ]]; then
+    shk_error "prerelease versions are not supported by the release workflows: ${version} (they would be published as a stable release)"
+    exit 1
+  fi
+}
+
 # Retry a command with bounded exponential backoff.
 # Usage: shk_retry <attempts> <initial-delay-seconds> <max-delay-seconds> <command...>
 shk_retry() {

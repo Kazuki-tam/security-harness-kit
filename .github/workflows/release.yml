@@ -360,16 +360,25 @@ jobs:
     environment:
       name: ${{ vars.RELEASE_ENVIRONMENT || 'release' }}
     needs: [prepare, build-global-artifacts, build-desktop-artifacts]
+    # Every track being built must have succeeded. A job skipped because an
+    # upstream matrix leg failed reports `skipped`, not `failure`, so only the
+    # track that is not being built may be skipped here.
     if: >-
       ${{
         always() &&
         !cancelled() &&
         startsWith(github.ref, 'refs/tags/') &&
         needs.prepare.result == 'success' &&
-        needs.build-global-artifacts.result != 'failure' &&
-        needs.build-desktop-artifacts.result != 'failure' &&
         (
-          needs.build-global-artifacts.result == 'success' ||
+          needs.prepare.outputs.build_cli == 'true' ||
+          needs.prepare.outputs.build_desktop == 'true'
+        ) &&
+        (
+          needs.prepare.outputs.build_cli != 'true' ||
+          needs.build-global-artifacts.result == 'success'
+        ) &&
+        (
+          needs.prepare.outputs.build_desktop != 'true' ||
           needs.build-desktop-artifacts.result == 'success'
         )
       }}

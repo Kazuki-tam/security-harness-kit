@@ -43,6 +43,26 @@ if [[ "$release_workflow" == *"startsWith(needs.prepare.outputs.release_tag, 'v'
   exit 1
 fi
 
+# A job skipped because an upstream matrix leg failed reports `skipped`, not
+# `failure`, so the publish gate must require `success` for every track that
+# is being built instead of merely rejecting `failure`.
+publish_gate="$(awk '/^  publish:$/ { in_job = 1 } in_job && /^    steps:$/ { exit } in_job { print }' .github/workflows/release.yml)"
+for job in build-global-artifacts build-desktop-artifacts; do
+  if [[ "$publish_gate" == *"needs.${job}.result != 'failure'"* ]]; then
+    echo "FAIL: publish gate must not accept a skipped ${job} job via != 'failure'" >&2
+    exit 1
+  fi
+done
+assert_contains "publish gate requires a successful CLI build when the CLI is built" \
+  "$publish_gate" "needs.prepare.outputs.build_cli != 'true' ||"
+assert_contains "publish gate requires the CLI installers job to succeed" \
+  "$publish_gate" "needs.build-global-artifacts.result == 'success'"
+assert_contains "publish gate requires a successful desktop build when the desktop is built" \
+  "$publish_gate" "needs.prepare.outputs.build_desktop != 'true' ||"
+assert_contains "publish gate requires the desktop job to succeed" \
+  "$publish_gate" "needs.build-desktop-artifacts.result == 'success'"
+echo "ok: publish gate requires success for every built track"
+
 # release.yml installs dist from DIST_VERSION, but dist-workspace.toml declares
 # cargo-dist-version; a dist bump must update both.
 dist_config_version="$(awk -F'"' '/^cargo-dist-version = / { print $2; exit }' dist-workspace.toml)"
@@ -94,6 +114,33 @@ if resolve_tag vbad >/dev/null 2>&1; then
   exit 1
 fi
 echo "ok: invalid tag rejected"
+
+# Prerelease versions would be published as stable/Latest (moving the v1
+# action tag and pushing Homebrew/npm), so every resolver fails closed.
+for prerelease_tag in v1.2.3-rc.1 cli-v1.2.3-beta desktop-v1.2.3-rc.1 shk-v1.2.3-alpha.2; do
+  if prerelease_output="$(resolve_tag "$prerelease_tag" 2>&1)"; then
+    echo "FAIL: prerelease tag ${prerelease_tag} should be rejected" >&2
+    exit 1
+  fi
+  assert_contains "prerelease rejection explains itself (${prerelease_tag})" \
+    "$prerelease_output" "prerelease versions are not supported"
+done
+echo "ok: prerelease tags rejected by release resolver"
+
+if GITHUB_EVENT_NAME=workflow_dispatch RELEASE_COMPONENT=cli RELEASE_VERSION=1.2.3-rc.1 \
+  ./.github/scripts/release/resolve-target.sh >/dev/null 2>&1; then
+  echo "FAIL: prerelease workflow_dispatch version should be rejected" >&2
+  exit 1
+fi
+echo "ok: prerelease dispatch version rejected by release resolver"
+
+if prerelease_output="$(resolve_unsigned_tag desktop-unsigned-v0.4.0-rc.1 2>&1)"; then
+  echo "FAIL: prerelease unsigned desktop tag should be rejected" >&2
+  exit 1
+fi
+assert_contains "unsigned prerelease rejection explains itself" \
+  "$prerelease_output" "prerelease versions are not supported"
+echo "ok: prerelease tag rejected by unsigned resolver"
 
 if resolve_tag v1 >/dev/null 2>&1; then
   echo "FAIL: moving action tag should not resolve as a release" >&2
