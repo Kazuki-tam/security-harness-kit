@@ -108,7 +108,7 @@ shk mcp audit --fail-on medium
 ```
 
 The default scan is limited to project-local files. `--global` additionally reads user-level files under the current user's home directory. Missing files are silently skipped.
-Configuration reads are capped at 1 MiB and 1,000 server entries per file, and must remain inside the selected project or home scope after path resolution. Escaping symbolic links, oversized files, excessive server maps, and non-regular files produce `mcp.config_unreadable` instead of being read. On Unix, hard-linked configuration files are also rejected. Because such a file exists but was not audited (and a client may still load it), the finding is `high` and fails the default `--fail-on high` threshold; padding a configuration past the limits does not make the audit pass. A file that is simply not valid JSON/TOML stays `low`.
+Configuration reads are capped at 1 MiB and 1,000 server entries per file, and must remain inside the selected project or home scope after path resolution. Escaping symbolic links, oversized files, excessive server maps, and non-regular files produce `mcp.config_unreadable` instead of being read. On Unix, hard-linked configuration files are also rejected. Such a file exists but was not audited (and a client may still load it), so for a project-scope file the finding is `high` and fails the default `--fail-on high` threshold; padding a repository's configuration past the limits does not make the audit pass. For a user-scope file read with `--global` (for example a large `~/.claude.json`) the same finding is `low`, because the file is not repository content and can legitimately exceed the limits. The message names the cause (too large, too many server entries, hard-linked, outside the audited scope, not UTF-8, not a regular file). A file that is simply not valid JSON/TOML stays `low`.
 
 Project configuration locations:
 
@@ -143,7 +143,7 @@ Rules:
 | `mcp.http_no_tls` | high | Non-loopback remote endpoints using `http://` |
 | `mcp.secret_in_url` | high | Sensitive query parameter names in a URL |
 | `mcp.unknown_transport` | info | Entries with neither a command nor a URL |
-| `mcp.config_unreadable` | high / low | `high`: an existing file skipped by the read limits (oversized, too many servers, hard-linked, escaping or non-regular, unreadable). `low`: a file that cannot be parsed |
+| `mcp.config_unreadable` | high / low | `high`: an existing project-scope file skipped by the read limits (oversized, too many servers, hard-linked, escaping or non-regular, not UTF-8, unreadable). `low`: the same for a user-scope (`--global`) file, or a file that cannot be parsed. The message names the cause |
 | `mcp.env_file_unreadable` | low | An existing `--env-file` target that escapes the selected scope or cannot be safely read |
 
 The package-runner rules compare the executable name without a `.cmd`, `.exe`, `.bat`, or `.ps1` suffix and look through `cmd /c`, `sh -c`, PowerShell `-Command`, and `env` wrappers. Known value-taking runner options (for example `--registry <url>` or `uvx --python <version>`) are skipped when locating the package argument.
