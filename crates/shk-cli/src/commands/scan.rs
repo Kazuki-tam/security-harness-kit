@@ -461,8 +461,13 @@ fn run_hook_mode(
         // than the tool's deny contract as non-blocking. Audit and post hooks
         // never block, so their errors keep propagating unchanged.
         Err(err) if !post && !audit && !crate::exit::is_cli_exit(&err) => {
-            eprintln!("Error: {err:#}");
-            deny_hook(tool, hook_event, &hook_internal_error_reason(&err))
+            // Several tools feed a blocking hook's stderr to the model, so it
+            // gets the same sanitised reason as stdout, never the cause chain.
+            let reason = hook_internal_error_reason(&err);
+            if !blocking_reason_goes_to_stderr(tool, hook_event) {
+                eprintln!("{reason}");
+            }
+            deny_hook(tool, hook_event, &reason)
         }
         result => result,
     }
@@ -1038,6 +1043,13 @@ fn hook_deny_exit_code(tool: AiTool, event: hook_output::HookEvent) -> i32 {
 }
 
 fn emit_blocking_reason_to_stderr(tool: AiTool, event: hook_output::HookEvent, reason: &str) {
+    if blocking_reason_goes_to_stderr(tool, event) {
+        eprintln!("{reason}");
+    }
+}
+
+/// Whether a deny for this tool/event also writes its reason to stderr.
+fn blocking_reason_goes_to_stderr(tool: AiTool, event: hook_output::HookEvent) -> bool {
     let copilot_user_prompt =
         tool == AiTool::Copilot && event == hook_output::HookEvent::UserPromptSubmit;
     // Cascade (Windsurf) surfaces the stderr message of a
@@ -1045,14 +1057,11 @@ fn emit_blocking_reason_to_stderr(tool: AiTool, event: hook_output::HookEvent, r
     // Grok surfaces stderr on exit 2, and uses it as the deny reason when
     // stdout JSON carries none. The OpenCode plugin falls back to stderr when
     // stdout is not parseable.
-    if tool == AiTool::Codex
+    tool == AiTool::Codex
         || tool == AiTool::Windsurf
         || tool == AiTool::Grok
         || tool == AiTool::Opencode
         || copilot_user_prompt
-    {
-        eprintln!("{reason}");
-    }
 }
 
 fn hook_event_from_stdin(stdin: &str, post: bool) -> hook_output::HookEvent {
