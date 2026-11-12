@@ -248,7 +248,11 @@ fn allowlist_all_paths() -> String {
     "**/*".into()
 }
 
+/// One `[[allowlist]]` table. Unknown keys are rejected: a misspelled
+/// selector (`rule` for `rule_id`) would otherwise be dropped silently and
+/// leave an entry that suppresses far more than intended.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AllowlistEntry {
     #[serde(default)]
     pub rule_id: Option<String>,
@@ -578,12 +582,47 @@ pub struct SecretProfile {
     pub expected_env: Option<String>,
 }
 
+/// Reject `[[allowlist]]` entries that would not do what their author meant:
+/// an entry with no selector at all matches every finding in every file
+/// (`path` defaults to all paths), and an `expires` that is not a date would
+/// never expire. `source` is the policy text `entries` were parsed from; it
+/// tells an explicit `path` apart from the default.
+fn validate_allowlist_entries(source: &str, entries: &[AllowlistEntry]) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let raw: toml::Table = toml::from_str(source).context("parse shk.toml")?;
+    let raw_entries = raw.get("allowlist").and_then(toml::Value::as_array);
+    for (idx, entry) in entries.iter().enumerate() {
+        let number = idx + 1;
+        let has_path = raw_entries
+            .and_then(|tables| tables.get(idx))
+            .and_then(toml::Value::as_table)
+            .is_some_and(|table| table.contains_key("path"));
+        if entry.rule_id.is_none() && entry.value_hash.is_none() && !has_path {
+            anyhow::bail!(
+                "[[allowlist]] entry {number} has no selector and would suppress every finding in every file; set at least one of `rule_id`, `value_hash`, `path`"
+            );
+        }
+        if let Some(expires) = &entry.expires
+            && crate::suppression::parse_expire_date(expires).is_none()
+        {
+            anyhow::bail!(
+                "[[allowlist]] entry {number} has an invalid `expires` value `{expires}`; use a date in YYYY-MM-DD form"
+            );
+        }
+    }
+    Ok(())
+}
+
 impl Policy {
     pub fn load_from_dir(root: &Path) -> Result<(Self, Option<std::path::PathBuf>)> {
         let p = root.join("shk.toml");
         if p.is_file() {
             let s = std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
             let policy: Policy = toml::from_str(&s).with_context(|| "parse shk.toml")?;
+            validate_allowlist_entries(&s, &policy.allowlist)
+                .with_context(|| format!("invalid {}", p.display()))?;
             Ok((policy, Some(p)))
         } else {
             Ok((Self::default(), None))
@@ -1270,5 +1309,61 @@ format = "dotenv"
             project_id_from_git_remote("file:///Users/alice/repos/backend-api.git"),
             None
         );
+    }
+
+    fn load_policy_text(text: &str) -> Result<Policy> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("shk.toml"), text).unwrap();
+        Policy::load_from_dir(dir.path()).map(|(policy, _)| policy)
+    }
+
+    #[test]
+    fn allowlist_entry_rejects_unknown_keys() {
+        let err = load_policy_text("[[allowlist]]\nrule = \"pii.email\"\npaht = \"docs/**\"\n")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("unknown field"), "{err:#}");
+    }
+
+    #[test]
+    fn allowlist_entry_requires_a_selector() {
+        let err =
+            load_policy_text("[[allowlist]]\nreason = \"catch-all by accident\"\n").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("[[allowlist]] entry 1"), "{msg}");
+        assert!(msg.contains("rule_id"), "{msg}");
+
+        for selector in [
+            "rule_id = \"pii.email\"",
+            "path = \"docs/**\"",
+            "value_hash = \"sha256-hmac:00\"",
+        ] {
+            let policy = load_policy_text(&format!("[[allowlist]]\n{selector}\n")).unwrap();
+            assert_eq!(policy.allowlist.len(), 1, "{selector}");
+        }
+    }
+
+    #[test]
+    fn allowlist_entry_rejects_unparseable_expires() {
+        for bad in ["2026/12/31", "next year", "2026-13-01", ""] {
+            let err = load_policy_text(&format!(
+                "[[allowlist]]\nrule_id = \"pii.email\"\nexpires = \"{bad}\"\n"
+            ))
+            .unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("expires"), "{bad}: {msg}");
+            assert!(msg.contains("YYYY-MM-DD"), "{bad}: {msg}");
+        }
+        let policy =
+            load_policy_text("[[allowlist]]\nrule_id = \"pii.email\"\nexpires = \"2099-12-31\"\n")
+                .unwrap();
+        assert_eq!(policy.allowlist[0].expires.as_deref(), Some("2099-12-31"));
+    }
+
+    #[test]
+    fn default_policy_templates_load() {
+        for strict in [false, true] {
+            let policy = load_policy_text(&default_policy_toml(strict));
+            assert!(policy.is_ok(), "strict={strict}: {:?}", policy.err());
+        }
     }
 }

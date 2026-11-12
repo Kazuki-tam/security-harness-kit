@@ -35,6 +35,9 @@ impl GitHistoryOptions {
 pub struct GitHistoryInventory {
     pub candidate_commits: usize,
     pub candidate_paths: usize,
+    /// Distinct blobs among the candidates, before any path filter.
+    pub unique_blobs: usize,
+    /// One entry per distinct blob that has at least one allowed path.
     pub blobs: Vec<GitHistoryBlob>,
 }
 
@@ -66,7 +69,7 @@ pub fn staged_blobs(repo_root: &Path) -> Result<Vec<StagedBlob>> {
             "--raw",
             "--full-index",
             "--abbrev=64",
-            "--diff-filter=ACMR",
+            "--diff-filter=ACMRT",
             "-z",
         ])
         .current_dir(repo_root)
@@ -170,7 +173,7 @@ pub fn changed_files_since(repo_root: &Path, base: &str) -> Result<Vec<PathBuf>>
     }
     let range = format!("{base}...HEAD");
     let out = Command::new("git")
-        .args(["diff", "--name-only", "--diff-filter=ACMR", "-z", &range])
+        .args(["diff", "--name-only", "--diff-filter=ACMRT", "-z", &range])
         .current_dir(repo_root)
         .output()
         .with_context(|| format!("failed to run git diff {range}"))?;
@@ -194,6 +197,19 @@ pub fn history_inventory(
     repo_root: &Path,
     opts: &GitHistoryOptions,
 ) -> Result<GitHistoryInventory> {
+    history_inventory_filtered(repo_root, opts, |_| true)
+}
+
+/// Like [`history_inventory`], but a blob is only listed under a path that
+/// `path_allowed` accepts (repo-relative, `/` separators). The same content
+/// is often committed under several paths; filtering after picking one
+/// representative path per blob would drop the blob whenever that path
+/// happens to be an excluded one.
+pub fn history_inventory_filtered(
+    repo_root: &Path,
+    opts: &GitHistoryOptions,
+    path_allowed: impl Fn(&str) -> bool,
+) -> Result<GitHistoryInventory> {
     if let Some(rev) = &opts.rev
         && rev.starts_with('-')
     {
@@ -207,7 +223,7 @@ pub fn history_inventory(
 
     let mut args = vec![
         "log".to_string(),
-        "--diff-filter=ACMR".into(),
+        "--diff-filter=ACMRT".into(),
         "--name-only".into(),
         "--format=%x1e%H".into(),
         "-z".into(),
@@ -240,13 +256,15 @@ pub fn history_inventory(
         return Ok(GitHistoryInventory {
             candidate_commits,
             candidate_paths,
+            unique_blobs: 0,
             blobs: vec![],
         });
     }
-    let blobs = resolve_history_blobs(repo_root, candidates)?;
+    let (unique_blobs, blobs) = resolve_history_blobs(repo_root, candidates, path_allowed)?;
     Ok(GitHistoryInventory {
         candidate_commits,
         candidate_paths,
+        unique_blobs,
         blobs,
     })
 }
@@ -287,14 +305,16 @@ fn parse_history_candidates(stdout: &[u8]) -> Result<Vec<(String, PathBuf)>> {
 fn resolve_history_blobs(
     repo_root: &Path,
     candidates: Vec<(String, PathBuf)>,
-) -> Result<Vec<GitHistoryBlob>> {
+    path_allowed: impl Fn(&str) -> bool,
+) -> Result<(usize, Vec<GitHistoryBlob>)> {
     let queries = candidates
         .iter()
         .map(|(commit, path)| format!("{}:{}", commit, path.to_string_lossy().replace('\\', "/")))
         .collect::<Vec<_>>();
     let lines = cat_file_batch_check(repo_root, &queries)?;
 
-    let mut seen_oids = HashSet::new();
+    let mut all_oids = HashSet::new();
+    let mut listed_oids = HashSet::new();
     let mut blobs = Vec::new();
     for ((commit, path), line) in candidates.into_iter().zip(lines) {
         let mut parts = line.split_whitespace();
@@ -310,18 +330,23 @@ fn resolve_history_blobs(
         if kind != "blob" {
             continue;
         }
+        all_oids.insert(oid.to_string());
         // History scanning is content-oriented: scan each unique blob once, while
         // retaining one representative commit/path label for the emitted finding.
-        if seen_oids.insert(oid.to_string()) {
-            blobs.push(GitHistoryBlob {
-                commit,
-                oid: oid.to_string(),
-                path,
-                size,
-            });
+        // The representative is the first path the caller allows, so a blob
+        // that also lives under a filtered-out path is still listed.
+        if listed_oids.contains(oid) || !path_allowed(&path.to_string_lossy().replace('\\', "/")) {
+            continue;
         }
+        listed_oids.insert(oid.to_string());
+        blobs.push(GitHistoryBlob {
+            commit,
+            oid: oid.to_string(),
+            path,
+            size,
+        });
     }
-    Ok(blobs)
+    Ok((all_oids.len(), blobs))
 }
 
 fn cat_file_batch_check(repo_root: &Path, queries: &[String]) -> Result<Vec<String>> {
@@ -722,5 +747,66 @@ mod tests {
             std::os::unix::fs::symlink(wt.join(".git"), linked.join(".git")).unwrap();
             assert_eq!(linked_worktree_root(main.path(), &linked), None);
         }
+    }
+
+    /// Repository whose second commit replaces the symlink `conf` with a
+    /// regular file (a type change, status `T`). Returns the first commit.
+    #[cfg(unix)]
+    fn repo_with_symlink_replaced_by_file(dir: &Path, commit_replacement: bool) -> String {
+        git_ok(dir, &["init", "-q"]);
+        std::fs::write(dir.join("target.txt"), "target\n").unwrap();
+        std::os::unix::fs::symlink("target.txt", dir.join("conf")).unwrap();
+        git_ok(dir, &["add", "-A"]);
+        git_ok(dir, &["commit", "-q", "-m", "symlink"]);
+        let base = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        std::fs::remove_file(dir.join("conf")).unwrap();
+        std::fs::write(dir.join("conf"), "now a regular file\n").unwrap();
+        git_ok(dir, &["add", "-A"]);
+        if commit_replacement {
+            git_ok(dir, &["commit", "-q", "-m", "regular file"]);
+        }
+        String::from_utf8(base.stdout).unwrap().trim().to_string()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_blobs_include_type_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        repo_with_symlink_replaced_by_file(dir.path(), false);
+
+        let blobs = staged_blobs(dir.path()).unwrap();
+        assert!(
+            blobs.iter().any(|blob| blob.path == Path::new("conf")),
+            "{blobs:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn changed_files_since_include_type_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = repo_with_symlink_replaced_by_file(dir.path(), true);
+
+        let paths = changed_files_since(dir.path(), &base).unwrap();
+        assert_eq!(paths, vec![PathBuf::from("conf")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn history_blobs_include_type_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        repo_with_symlink_replaced_by_file(dir.path(), true);
+
+        let blobs = history_blobs(dir.path(), &GitHistoryOptions::default()).unwrap();
+        assert!(
+            blobs
+                .iter()
+                .any(|blob| blob.path == Path::new("conf") && blob.size == 19),
+            "{blobs:?}"
+        );
     }
 }

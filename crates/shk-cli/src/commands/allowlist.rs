@@ -100,7 +100,12 @@ fn render_entry(
         "rule_id = \"{}\"\n",
         toml_escape(&finding.rule_id)
     ));
-    out.push_str(&format!("path = \"{}\"\n", toml_escape(&finding.file)));
+    // `path` is a glob: a literal `[id]` or `*` in the file name has to be
+    // escaped or the entry never matches the file it was suggested for.
+    out.push_str(&format!(
+        "path = \"{}\"\n",
+        toml_escape(&glob_escape(&finding.file))
+    ));
     if value_hash && let Some(hash) = &finding.value_hash {
         out.push_str(&format!("value_hash = \"{}\"\n", toml_escape(hash)));
     }
@@ -119,6 +124,25 @@ fn is_allowlist_candidate(finding: &Finding) -> bool {
         && finding.kind != "ignore"
         && !finding.rule_id.starts_with("scan.")
         && !finding.rule_id.starts_with("policy.")
+}
+
+/// Escape glob metacharacters so the pattern matches `path` literally. Each
+/// one is wrapped in a character class (`[[]`, `[*]`), which reads the same
+/// on every platform; backslash escapes are off by default on Windows. A
+/// lone `]` is already literal.
+fn glob_escape(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        match c {
+            '*' | '?' | '[' | '{' | '}' => {
+                out.push('[');
+                out.push(c);
+                out.push(']');
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn toml_escape(s: &str) -> String {
@@ -347,5 +371,57 @@ mod tests {
     #[test]
     fn toml_escape_handles_control_characters() {
         assert_eq!(toml_escape("a\u{0001}\u{0008}\u{000c}z"), "a\\u0001\\b\\fz");
+    }
+
+    #[test]
+    fn suggested_path_matches_files_with_glob_metacharacters() {
+        for file in [
+            "app/[id]/page.tsx",
+            "docs/what?.md",
+            "notes/a*b.txt",
+            "src/{x,y}.rs",
+            "plain/file.txt",
+        ] {
+            let finding = Finding {
+                rule_id: "pii.email".into(),
+                severity: "medium".into(),
+                kind: "pii".into(),
+                file: file.into(),
+                line: 1,
+                column: 1,
+                message: "Email address detected".into(),
+                redacted_value: "[REDACTED]".into(),
+                value_hash: None,
+                confidence: 0.8,
+                context_before: vec![],
+                context_after: vec![],
+            };
+            let suggestions = suggestions_from_findings(&[finding], false, Some("fixture"), None);
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("shk.toml"), &suggestions[0]).unwrap();
+            let (policy, _) = shk_core::Policy::load_from_dir(dir.path()).unwrap();
+            let compiled = shk_core::suppression::compile_allowlist(&policy.allowlist).unwrap();
+            assert!(
+                shk_core::suppression::suppressed_by_allowlist(
+                    file,
+                    "pii.email",
+                    "value",
+                    &policy.allowlist,
+                    &compiled,
+                ),
+                "{file}: {}",
+                suggestions[0]
+            );
+            assert!(
+                !shk_core::suppression::suppressed_by_allowlist(
+                    "other/file.txt",
+                    "pii.email",
+                    "value",
+                    &policy.allowlist,
+                    &compiled,
+                ),
+                "{file}"
+            );
+        }
     }
 }

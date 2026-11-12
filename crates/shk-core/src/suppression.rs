@@ -22,7 +22,7 @@ pub fn compute_value_hmac(rule_id: &str, raw_value: &str) -> String {
     format!("sha256-hmac:{}", hex_lower(&digest))
 }
 
-fn parse_expire_date(exp: &str) -> Option<chrono::NaiveDate> {
+pub(crate) fn parse_expire_date(exp: &str) -> Option<chrono::NaiveDate> {
     chrono::NaiveDate::parse_from_str(exp.trim(), "%Y-%m-%d").ok()
 }
 
@@ -75,14 +75,33 @@ fn strip_ignore_keyword<'a>(inner: &'a str, keyword: &str) -> Option<&'a str> {
     }
 }
 
-fn rest_after_ignore_keywords(inner: &str) -> Option<&str> {
+/// Where an ignore comment points when it trails code on its own line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IgnoreTarget {
+    /// `shk-ignore`: the line carrying the comment.
+    SameLine,
+    /// `shk-ignore-next-line`: the line after the comment.
+    NextLine,
+}
+
+struct IgnoreDirective<'a> {
+    target: IgnoreTarget,
+    /// Text after the keyword (optional rule id).
+    rest: &'a str,
+}
+
+fn ignore_directive(inner: &str) -> Option<IgnoreDirective<'_>> {
     let inner = inner.trim_start();
     if let Some(rest) = strip_ignore_keyword(inner, "shk-ignore-next-line") {
-        Some(rest)
-    } else if let Some(rest) = strip_ignore_keyword(inner, "shk-ignore") {
-        Some(rest)
+        Some(IgnoreDirective {
+            target: IgnoreTarget::NextLine,
+            rest,
+        })
     } else {
-        None
+        strip_ignore_keyword(inner, "shk-ignore").map(|rest| IgnoreDirective {
+            target: IgnoreTarget::SameLine,
+            rest,
+        })
     }
 }
 
@@ -101,7 +120,9 @@ fn parse_standalone_ignore_line(trimmed_full_line: &str) -> Option<&str> {
     } else {
         html_comment_inner(tl)?
     };
-    rest_after_ignore_keywords(inner)
+    // A comment on a line of its own has nothing to suppress there, so both
+    // keywords point at the next line.
+    ignore_directive(inner).map(|directive| directive.rest)
 }
 
 fn first_rule_token(rest_after_kw: &str) -> Option<String> {
@@ -113,30 +134,30 @@ fn first_rule_token(rest_after_kw: &str) -> Option<String> {
     }
 }
 
-fn trailing_hash_ignore(trimmed_end: &str) -> Option<&str> {
+fn trailing_hash_ignore(trimmed_end: &str) -> Option<IgnoreDirective<'_>> {
     let (body, cmt) = trimmed_end.rsplit_once('#')?;
     if body.trim().is_empty() {
         return None;
     }
-    rest_after_ignore_keywords(cmt.trim())
+    ignore_directive(cmt.trim())
 }
 
-fn trailing_slash_ignore(trimmed_end: &str) -> Option<&str> {
+fn trailing_slash_ignore(trimmed_end: &str) -> Option<IgnoreDirective<'_>> {
     let idx = trimmed_end.rfind("//")?;
     let body = &trimmed_end[..idx];
     if body.trim().is_empty() {
         return None;
     }
-    rest_after_ignore_keywords(trimmed_end[idx + 2..].trim_start())
+    ignore_directive(trimmed_end[idx + 2..].trim_start())
 }
 
-fn trailing_html_ignore(trimmed_end: &str) -> Option<&str> {
+fn trailing_html_ignore(trimmed_end: &str) -> Option<IgnoreDirective<'_>> {
     let idx = trimmed_end.rfind("<!--")?;
     let body = &trimmed_end[..idx];
     if body.trim().is_empty() {
         return None;
     }
-    rest_after_ignore_keywords(html_comment_inner(&trimmed_end[idx..])?)
+    ignore_directive(html_comment_inner(&trimmed_end[idx..])?)
 }
 
 /// Parse `#`, `//`, and HTML standalone/trailing `shk-ignore` comments.
@@ -152,18 +173,15 @@ pub fn parse_inline_suppressions(content: &str) -> InlineSuppressions {
             continue;
         }
 
-        if let Some(rest_kw) = trailing_hash_ignore(trimmed_end) {
-            out.suppress_line(line_no, rest_kw);
-            continue;
-        }
-
-        if let Some(rest_kw) = trailing_slash_ignore(trimmed_end) {
-            out.suppress_line(line_no, rest_kw);
-            continue;
-        }
-
-        if let Some(rest_kw) = trailing_html_ignore(trimmed_end) {
-            out.suppress_line(line_no, rest_kw);
+        let trailing = trailing_hash_ignore(trimmed_end)
+            .or_else(|| trailing_slash_ignore(trimmed_end))
+            .or_else(|| trailing_html_ignore(trimmed_end));
+        if let Some(directive) = trailing {
+            let target_line = match directive.target {
+                IgnoreTarget::SameLine => line_no,
+                IgnoreTarget::NextLine => line_no.saturating_add(1),
+            };
+            out.suppress_line(target_line, directive.rest);
         }
     }
 
@@ -418,5 +436,25 @@ mod tests {
         assert!(ig_hash.is_suppressed(1, "secret.foo"));
         assert!(ig_slash.is_suppressed(2, "pii.email"));
         assert!(!ig_slash.is_suppressed(1, "pii.email"));
+    }
+
+    #[test]
+    fn trailing_next_line_comment_suppresses_the_following_line() {
+        for src in [
+            "x = 1 # shk-ignore-next-line pii.email\nnext\n",
+            "x = 1 // shk-ignore-next-line pii.email\nnext\n",
+            "x = 1 <!-- shk-ignore-next-line pii.email -->\nnext\n",
+        ] {
+            let ig = parse_inline_suppressions(src);
+            assert!(ig.is_suppressed(2, "pii.email"), "{src}");
+            assert!(!ig.is_suppressed(1, "pii.email"), "{src}");
+        }
+    }
+
+    #[test]
+    fn standalone_ignore_comment_still_targets_the_next_line() {
+        let ig = parse_inline_suppressions("// shk-ignore pii.email\nnext\n");
+        assert!(ig.is_suppressed(2, "pii.email"));
+        assert!(!ig.is_suppressed(1, "pii.email"));
     }
 }

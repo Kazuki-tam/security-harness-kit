@@ -109,6 +109,41 @@ enum AllowlistTarget {
     Line,
 }
 
+/// Header of any PEM / armored private key block: PKCS#8 (plain and
+/// encrypted), the legacy `RSA` / `EC` / `DSA` forms, OpenSSH and PGP.
+const PRIVATE_KEY_HEADER_PATTERN: &str = r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----";
+
+static PRIVATE_KEY_HEADER_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(PRIVATE_KEY_HEADER_PATTERN).expect("private key header regex"));
+
+static PRIVATE_KEY_FOOTER_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----")
+        .expect("private key footer regex")
+});
+
+/// Byte ranges of private key blocks in `content`, each running from the
+/// start of a `-----BEGIN … PRIVATE KEY-----` header through the end of the
+/// next footer. A block without a footer runs to the end of `content`, so a
+/// truncated key is still covered. Ranges are sorted and do not overlap.
+///
+/// Line-oriented callers (masking, context redaction) use this to treat the
+/// base64 body and footer as part of the secret, which per-line rules miss.
+pub fn private_key_block_ranges(content: &str) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut cursor = 0;
+    while let Some(header) = PRIVATE_KEY_HEADER_RE.find_at(content, cursor) {
+        let end = PRIVATE_KEY_FOOTER_RE
+            .find_at(content, header.end())
+            .map_or(content.len(), |footer| footer.end());
+        out.push(header.start()..end);
+        if end >= content.len() {
+            break;
+        }
+        cursor = end;
+    }
+    out
+}
+
 static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
     vec![
         CompiledRule {
@@ -369,7 +404,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "secret.private_key_block",
             severity: Severity::Critical,
             kind: Kind::Secret,
-            re: Regex::new(r"-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----")
+            re: Regex::new(PRIVATE_KEY_HEADER_PATTERN)
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Private key PEM block detected",
             confidence: 0.99,
@@ -2853,5 +2888,62 @@ jobs:
                 "should not match {text}: {m:?}"
             );
         }
+    }
+
+    fn synthetic_key_block(label: &str) -> String {
+        let dashes = "-".repeat(5);
+        format!(
+            "{dashes}BEGIN {label}{dashes}\n{}\n{dashes}END {label}{dashes}",
+            "Q1w2".repeat(12)
+        )
+    }
+
+    #[test]
+    fn private_key_header_rule_covers_all_block_variants() {
+        let cfg = RuleEngineConfig::default();
+        for label in [
+            "PRIVATE KEY",
+            "RSA PRIVATE KEY",
+            "EC PRIVATE KEY",
+            "DSA PRIVATE KEY",
+            "ENCRYPTED PRIVATE KEY",
+            "OPENSSH PRIVATE KEY",
+            "PGP PRIVATE KEY BLOCK",
+        ] {
+            let header = synthetic_key_block(label);
+            let header = header.lines().next().unwrap();
+            let m = scan_content(header, "x.txt", &cfg);
+            assert!(
+                m.iter().any(|x| x.rule_id == "secret.private_key_block"),
+                "{label}"
+            );
+        }
+        let public = synthetic_key_block("PUBLIC KEY");
+        assert!(
+            !scan_content(&public, "x.txt", &cfg)
+                .iter()
+                .any(|x| x.rule_id == "secret.private_key_block")
+        );
+    }
+
+    #[test]
+    fn private_key_block_ranges_cover_header_through_footer() {
+        let first = synthetic_key_block("RSA PRIVATE KEY");
+        let second = synthetic_key_block("PGP PRIVATE KEY BLOCK");
+        let content = format!("intro\n{first}\nmiddle\n{second}\noutro\n");
+        let ranges = private_key_block_ranges(&content);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(&content[ranges[0].clone()], first);
+        assert_eq!(&content[ranges[1].clone()], second);
+        assert!(private_key_block_ranges("no keys here\n").is_empty());
+    }
+
+    #[test]
+    fn unterminated_private_key_block_range_runs_to_end_of_input() {
+        let block = synthetic_key_block("OPENSSH PRIVATE KEY");
+        let cut = block.rfind('\n').unwrap();
+        let content = format!("intro\n{}\ntail", &block[..cut]);
+        let ranges = private_key_block_ranges(&content);
+        assert_eq!(ranges, vec![6..content.len()]);
     }
 }
