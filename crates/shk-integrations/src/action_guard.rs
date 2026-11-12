@@ -1253,10 +1253,19 @@ impl CommandScan<'_> {
             }
         };
         let mut examined = 0;
-        let mut screen = None;
+        // A screen covers the words from the start it is built at. The one
+        // for the later starts begins behind the first few, so that a quoted
+        // or otherwise special word among those does not make every later
+        // word count as a possible command.
+        let (mut early_screen, mut late_screen) = (None, None);
         for (index, (start, word)) in starts.iter().enumerate() {
             let candidate = &base[*start..];
             let full = index < MAX_AMBIGUOUS_COMMAND_STARTS;
+            let screen = if full {
+                &mut early_screen
+            } else {
+                &mut late_screen
+            };
             let screen = screen.get_or_insert_with(|| PlainTailScreen::new(base, *start, self));
             if !screen.may_be_flagged(word, base, *start) {
                 continue;
@@ -6573,6 +6582,28 @@ mod tests {
             "time nice -n 5 nohup command -p exec -c make test",
             // `command -v` runs nothing.
             &format!("time nohup command -v {TRANSFER}"),
+        ]);
+    }
+
+    #[test]
+    fn special_words_among_the_first_starts_do_not_make_later_ones_count() {
+        // More plain words than the guard examines one by one, behind a few
+        // words that are not plain.
+        let words = harmless_words(300);
+        assert_unguarded(&[
+            &format!("nice --zz echo \"quoted\" $HOME a b c d e f {words}"),
+            &format!("nohup --x 'one' two\\ three a b c d e f g {words}"),
+        ]);
+        assert_categories(&[
+            (
+                &format!("nice --zz echo \"quoted\" $HOME a b c d e f {words} {TRANSFER}"),
+                "external_transfer",
+            ),
+            // A special word further back leaves every word in question.
+            (
+                &format!("nice --zz echo a b c d e f g h i \"quoted\" {words}"),
+                "opaque_execution",
+            ),
         ]);
     }
 
