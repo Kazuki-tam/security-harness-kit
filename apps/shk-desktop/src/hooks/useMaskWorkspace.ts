@@ -39,6 +39,12 @@ type UseMaskWorkspaceOptions = {
   onNotice?: (message: string) => void;
 };
 
+function joinPath(directory: string | null, name: string): string {
+  if (!directory) return name;
+  const separator = directory.includes("\\") && !directory.includes("/") ? "\\" : "/";
+  return `${directory.replace(/[\\/]+$/, "")}${separator}${name}`;
+}
+
 /** The redaction path: `[REDACTED]` replacement with findings to review. */
 export function useMaskWorkspace({
   projectPath,
@@ -195,7 +201,9 @@ export function useMaskWorkspace({
     try {
       const outputPath = await save({
         title: m.saveMaskedFile,
-        defaultPath: maskOfficeSuggestedName(fileMeta.sourceLabel),
+        // With a project selected the backend only writes inside it, so start
+        // the dialog there instead of wherever the OS last saved a file.
+        defaultPath: joinPath(projectPath, maskOfficeSuggestedName(fileMeta.sourceLabel)),
         filters: [{ name: "Office", extensions: ["docx", "xlsx", "pptx"] }],
       });
       if (!isCurrent() || typeof outputPath !== "string" || !outputPath) return;
@@ -222,17 +230,24 @@ export function useMaskWorkspace({
       }
     } catch (error) {
       if (!isCurrent()) return;
-      setMaskState({
-        status: "error",
-        message: error instanceof Error ? error.message : String(error),
-      });
+      // Saving failed (for example a location outside the project), but the
+      // masked result is still valid: keep it so the user can pick another path.
+      onNotice?.(operationErrorMessage(messages.app.operationFailed, error));
     } finally {
       if (isCurrent()) {
         savingRef.current = false;
         setSaving(false);
       }
     }
-  }, [fileMeta, m.saveMaskedFile, m.savedTo, projectPath, t]);
+  }, [
+    fileMeta,
+    m.saveMaskedFile,
+    m.savedTo,
+    messages.app.operationFailed,
+    onNotice,
+    projectPath,
+    t,
+  ]);
 
   return {
     messages: m,
