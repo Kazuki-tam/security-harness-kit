@@ -135,19 +135,15 @@ pub fn encrypt(cwd: &Path, args: EnvEncryptArgs) -> Result<()> {
         ensure_remove_source_output_differs(cwd, &args.file, output)?;
     }
     with_secret_store_lock(&project, "env-project", || {
-        let plaintext = Zeroizing::new(
-            std::fs::read_to_string(&args.file)
-                .with_context(|| format!("read {}", args.file.display()))?,
-        );
-        let encrypted = encrypt_env_plaintext_with_stores(
+        encrypt_env_file_with_stores(
             stores.native.as_ref(),
             stores.dotenvx.as_ref(),
             &project,
             &private_key_name,
-            &plaintext,
+            &args.file,
+            output,
+            args.force || args.in_place,
         )?;
-        drop(plaintext);
-        write_output(output, encrypted.as_bytes(), args.force || args.in_place)?;
         println!(
             "Encrypted {} to {} with {private_key_name}",
             args.file.display(),
@@ -1318,7 +1314,6 @@ fn parse_quoted_env_value(value: &str, quote: char) -> Result<Zeroizing<String>>
                 'r' => out.push('\r'),
                 't' => out.push('\t'),
                 '"' => out.push('"'),
-                '\'' => out.push('\''),
                 '\\' => out.push('\\'),
                 '$' => out.push('$'),
                 other => {
@@ -1470,6 +1465,33 @@ fn private_to_public_key_name(private_key_name: &str) -> String {
     }
 }
 
+/// Encrypt `input` into `output`. The output path is checked before anything
+/// else so a first run that cannot write its result (existing file, no
+/// `--force`) fails before a new key is generated and stored.
+fn encrypt_env_file_with_stores(
+    native_store: &dyn SecretStore,
+    dotenvx_store: &dyn SecretStore,
+    project: &ProjectIdentity,
+    private_key_name: &str,
+    input: &Path,
+    output: &Path,
+    overwrite: bool,
+) -> Result<()> {
+    ensure_output_can_be_written(output, overwrite)?;
+    let plaintext = Zeroizing::new(
+        std::fs::read_to_string(input).with_context(|| format!("read {}", input.display()))?,
+    );
+    let encrypted = encrypt_env_plaintext_with_stores(
+        native_store,
+        dotenvx_store,
+        project,
+        private_key_name,
+        &plaintext,
+    )?;
+    drop(plaintext);
+    write_output(output, encrypted.as_bytes(), overwrite)
+}
+
 /// Encrypt `plaintext` with the stored key for `private_key_name`, creating
 /// the key only when none exists. The input is validated and encrypted before
 /// a newly generated key is persisted, so a rejected input never leaves a
@@ -1506,7 +1528,9 @@ fn encrypt_env_plaintext_with_stores(
 }
 
 fn dotenv_body_declares_key(body: &str, key_name: &str) -> bool {
-    body.lines()
+    body.strip_prefix(UTF8_BOM)
+        .unwrap_or(body)
+        .lines()
         .filter_map(split_dotenv_assignment)
         .any(|(raw_key, _)| raw_key.trim() == key_name)
 }
@@ -1598,6 +1622,8 @@ fn read_dotenvx_env_key(
     }))
 }
 
+const UTF8_BOM: char = '\u{FEFF}';
+
 fn encrypt_dotenv_body(body: &str, public_key_name: &str, public_key: &str) -> Result<String> {
     let mut out = Vec::new();
     // Keep the managed marker at the top, before preserving original comments or blank lines.
@@ -1606,6 +1632,12 @@ fn encrypt_dotenv_body(body: &str, public_key_name: &str, public_key: &str) -> R
     let mut saw_public_key = false;
     let mut saw_encrypted_value = false;
 
+    // A UTF-8 byte-order mark is not part of the first line's content: left in
+    // place it would make a leading comment or key look like a malformed line.
+    let (bom, body) = match body.strip_prefix(UTF8_BOM) {
+        Some(rest) => (true, rest),
+        None => (false, body),
+    };
     for (idx, raw_line) in body.lines().enumerate() {
         let line_no = idx + 1;
         let line = raw_line.trim();
@@ -1613,7 +1645,13 @@ fn encrypt_dotenv_body(body: &str, public_key_name: &str, public_key: &str) -> R
             continue;
         }
         if line.is_empty() || line.starts_with('#') {
-            out.push(raw_line.to_string());
+            if bom && idx == 0 {
+                // Earlier releases copied this line through verbatim, mark
+                // included, so decrypt hands back the original file start.
+                out.push(format!("{UTF8_BOM}{raw_line}"));
+            } else {
+                out.push(raw_line.to_string());
+            }
             continue;
         }
         // Anything else that is not an assignment (for example the
@@ -1827,12 +1865,16 @@ fn push_shk_public_key_header(out: &mut Vec<String>, public_key_name: &str, publ
 
 /// Quote a decrypted value so dotenv readers get the exact bytes back.
 ///
-/// Single quotes are literal for every reader (no escapes, no `$` expansion),
-/// so they are used whenever the value allows it. Values containing a single
-/// quote or a line break fall back to double quotes with escapes.
+/// Single quotes avoid `$` expansion and are used when the value is plain
+/// enough to be read the same way everywhere. They are not literal for every
+/// reader, though: some treat a backslash inside single quotes as an escape,
+/// which can change the value or, when it ends in a backslash, swallow the
+/// closing quote. Values containing a backslash, a single quote or a line
+/// break therefore use double quotes with escapes, which `parse_env_value`
+/// reads back identically.
 fn quote_env_value(value: &str) -> Zeroizing<String> {
     let mut out = Zeroizing::new(String::with_capacity(value.len() * 2 + 2));
-    if !value.contains(['\'', '\n', '\r']) {
+    if !value.contains(['\'', '\\', '\n', '\r']) {
         out.push('\'');
         out.push_str(value);
         out.push('\'');
@@ -1852,13 +1894,18 @@ fn quote_env_value(value: &str) -> Zeroizing<String> {
     out
 }
 
-fn write_output(path: &Path, body: &[u8], force: bool) -> Result<()> {
+fn ensure_output_can_be_written(path: &Path, force: bool) -> Result<()> {
     if path.exists() && !force {
         bail!(
             "{} already exists; pass --force to overwrite",
             path.display()
         );
     }
+    Ok(())
+}
+
+fn write_output(path: &Path, body: &[u8], force: bool) -> Result<()> {
+    ensure_output_can_be_written(path, force)?;
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -2710,6 +2757,97 @@ mod tests {
         .unwrap_err();
 
         assert!(format!("{err:#}").contains("store DOTENV_PRIVATE_KEY"));
+    }
+
+    #[test]
+    fn encrypt_does_not_persist_a_new_key_when_the_output_exists_without_force() {
+        let native_store = MockSecretStore::keyring();
+        let dotenvx_store = MockSecretStore::keyring();
+        let dir = tempfile::tempdir().unwrap();
+        let project = test_project(dir.path());
+        let input = dir.path().join("input.env");
+        let output = dir.path().join("output.env");
+        std::fs::write(&input, "NAME=value\n").unwrap();
+        std::fs::write(&output, "existing\n").unwrap();
+
+        let err = encrypt_env_file_with_stores(
+            &native_store,
+            &dotenvx_store,
+            &project,
+            "DOTENV_PRIVATE_KEY",
+            &input,
+            &output,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("--force"), "{err}");
+        assert!(native_store.list_keys(&project).unwrap().is_empty());
+        assert_eq!(std::fs::read(&output).unwrap(), b"existing\n");
+
+        // With overwrite allowed the same call stores a key and writes.
+        encrypt_env_file_with_stores(
+            &native_store,
+            &dotenvx_store,
+            &project,
+            "DOTENV_PRIVATE_KEY",
+            &input,
+            &output,
+            true,
+        )
+        .unwrap();
+        assert!(
+            read_native_env_key(&native_store, &project, "DOTENV_PRIVATE_KEY")
+                .unwrap()
+                .is_some()
+        );
+        let written = std::fs::read_to_string(&output).unwrap();
+        assert!(written.contains("NAME=\"encrypted:"), "{written}");
+    }
+
+    #[test]
+    fn encrypt_accepts_a_byte_order_mark_before_a_comment_or_blank_line() {
+        let keypair = Keypair::generate();
+        for first_line in ["# heading", ""] {
+            let body = format!("\u{FEFF}{first_line}\nNAME=value\n");
+            let encrypted =
+                encrypt_dotenv_body(&body, "DOTENV_PUBLIC_KEY", &keypair.public_key()).unwrap();
+            // The managed header stays first; the mark stays on its line.
+            assert!(!encrypted.starts_with('\u{FEFF}'), "{encrypted}");
+            assert!(
+                encrypted.contains(&format!("\n\u{FEFF}{first_line}\nNAME=\"encrypted:")),
+                "{encrypted}"
+            );
+
+            let plaintext = decrypt_dotenv_body(&encrypted, &keypair.private_key()).unwrap();
+            assert_eq!(
+                String::from_utf8(plaintext.to_vec()).unwrap(),
+                format!("\u{FEFF}{first_line}\nNAME='value'\n")
+            );
+        }
+    }
+
+    #[test]
+    fn encrypt_accepts_a_byte_order_mark_before_an_assignment() {
+        let keypair = Keypair::generate();
+        let body = "\u{FEFF}NAME=value\nOTHER=ok\n";
+        let encrypted =
+            encrypt_dotenv_body(body, "DOTENV_PUBLIC_KEY", &keypair.public_key()).unwrap();
+        assert!(!encrypted.contains('\u{FEFF}'), "{encrypted}");
+        assert!(encrypted.contains("\nNAME=\"encrypted:"), "{encrypted}");
+
+        let plaintext = decrypt_dotenv_body(&encrypted, &keypair.private_key()).unwrap();
+        assert_eq!(plaintext.as_slice(), b"NAME='value'\nOTHER='ok'\n");
+    }
+
+    #[test]
+    fn a_byte_order_mark_does_not_hide_a_public_key_header() {
+        let other_machine = Keypair::generate();
+        let body = format!(
+            "\u{FEFF}DOTENV_PUBLIC_KEY=\"{}\"\nNAME=value\n",
+            other_machine.public_key()
+        );
+        assert!(dotenv_body_declares_key(&body, "DOTENV_PUBLIC_KEY"));
     }
 
     #[test]
@@ -3648,7 +3786,8 @@ mod tests {
             expected,
             "decrypted output {plaintext:?} for {source_value:?}"
         );
-        if !expected.contains(['\'', '\n', '\r']) {
+        // Double-quoted output carries escapes the raw reader does not undo.
+        if !expected.contains(['\'', '\\', '\n', '\r']) {
             assert_eq!(
                 reference_raw_read(&plaintext, "VALUE"),
                 expected,
@@ -3687,9 +3826,68 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_preserves_escaped_single_quote_and_newline() {
-        assert_reference_round_trip(r#""it\'s here""#);
+    fn round_trip_preserves_single_quote_and_newline() {
+        assert_reference_round_trip(r#""it's here""#);
         assert_reference_round_trip(r#""first\nsecond""#);
+    }
+
+    /// Encrypt a one-assignment body, decrypt it, and read the result back
+    /// with shk's own parser. Returns the emitted form and the re-read value.
+    fn shk_round_trip(source_value: &str) -> (String, String) {
+        let keypair = Keypair::generate();
+        let source = format!("VALUE={source_value}\n");
+        let encrypted =
+            encrypt_dotenv_body(&source, "DOTENV_PUBLIC_KEY", &keypair.public_key()).unwrap();
+        let plaintext = decrypt_dotenv_body(&encrypted, &keypair.private_key()).unwrap();
+        let plaintext = String::from_utf8(plaintext.to_vec()).unwrap();
+        let emitted = plaintext
+            .trim_end_matches('\n')
+            .strip_prefix("VALUE=")
+            .expect("single VALUE assignment")
+            .to_string();
+        let reread = parse_env_value(&emitted).unwrap().to_string();
+        (emitted, reread)
+    }
+
+    #[test]
+    fn backslash_apostrophe_in_double_quotes_keeps_the_backslash() {
+        // Same as previous releases and POSIX shells: inside double quotes a
+        // backslash before an apostrophe is not an escape.
+        let source = r#""it\'s here""#;
+        let parsed = parse_env_value(source).unwrap();
+        assert_eq!(parsed.as_str(), r"it\'s here");
+
+        let (emitted, reread) = shk_round_trip(source);
+        assert_eq!(emitted, r#""it\\'s here""#);
+        assert_eq!(reread, parsed.as_str());
+    }
+
+    #[test]
+    fn round_trip_preserves_consecutive_and_trailing_backslashes() {
+        for value in [
+            r"a\\b",
+            r"\\server\share",
+            r"ends with\",
+            r"ends with\\",
+            r"\",
+        ] {
+            let quoted = quote_env_value(value);
+            assert!(
+                quoted.starts_with('"') && quoted.ends_with('"'),
+                "{value:?}"
+            );
+            assert_eq!(parse_env_value(&quoted).unwrap().as_str(), value);
+
+            // Single-quoted source is literal for shk, so it stores `value`.
+            let (emitted, reread) = shk_round_trip(&format!("'{value}'"));
+            assert_eq!(emitted, quoted.as_str());
+            assert_eq!(reread, value);
+            assert_eq!(
+                reference_read(&format!("VALUE={emitted}\n"), "VALUE"),
+                value,
+                "reference reader on {emitted:?}"
+            );
+        }
     }
 
     #[test]
@@ -3742,7 +3940,9 @@ mod tests {
     fn quote_env_value_prefers_single_quotes_when_exact() {
         assert_eq!(quote_env_value("plain").as_str(), "'plain'");
         assert_eq!(quote_env_value("").as_str(), "''");
-        assert_eq!(quote_env_value(r#"a"b\c$d"#).as_str(), r#"'a"b\c$d'"#);
+        assert_eq!(quote_env_value(r#"a"b$d"#).as_str(), r#"'a"b$d'"#);
+        assert_eq!(quote_env_value(r#"a"b\c$d"#).as_str(), r#""a\"b\\c$d""#);
+        assert_eq!(quote_env_value(r"tail\").as_str(), r#""tail\\""#);
         assert_eq!(
             quote_env_value(r#"it's "x"\y"#).as_str(),
             r#""it's \"x\"\\y""#
