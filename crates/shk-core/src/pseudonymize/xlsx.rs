@@ -278,20 +278,47 @@ pub fn cached_formula_error(sheet: &str, row: usize, col: usize) -> anyhow::Erro
 /// copies. Shorter values match unrelated results too easily.
 const MIN_COPIED_VALUE_CHARS: usize = 3;
 
+/// The same limit for a value with a non-ASCII character: two characters of
+/// CJK text are a whole surname, and far less likely to match by accident.
+const MIN_COPIED_NON_ASCII_VALUE_CHARS: usize = 2;
+
 /// The values of the selected cells, for finding copies of them in parts
 /// that are not rewritten. Matching ignores case, so a cached `UPPER(A2)`
 /// counts as a copy.
 #[derive(Default)]
 struct SelectedValues {
+    /// Text values: a cached result that contains one is a copy.
     values: HashSet<String>,
     /// Byte lengths of `values`, so a search only tries windows that can match.
     lengths: BTreeSet<usize>,
+    /// Purely numeric values: only a cached result equal to one is a copy,
+    /// since a short id also turns up inside unrelated totals.
+    numbers: HashSet<String>,
+}
+
+/// Whether a trimmed value is a plain number: digits with an optional sign
+/// and decimal point.
+fn is_numeric_value(value: &str) -> bool {
+    let digits = value.strip_prefix(['-', '+']).unwrap_or(value);
+    digits.bytes().any(|byte| byte.is_ascii_digit())
+        && digits
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
 }
 
 impl SelectedValues {
     fn insert(&mut self, raw: &str) {
         let value = raw.trim();
-        if value.chars().count() < MIN_COPIED_VALUE_CHARS {
+        let min_chars = if value.is_ascii() {
+            MIN_COPIED_VALUE_CHARS
+        } else {
+            MIN_COPIED_NON_ASCII_VALUE_CHARS
+        };
+        if value.chars().count() < min_chars {
+            return;
+        }
+        if is_numeric_value(value) {
+            self.numbers.insert(value.to_string());
             return;
         }
         let value = value.to_lowercase();
@@ -300,11 +327,27 @@ impl SelectedValues {
     }
 
     fn is_empty(&self) -> bool {
-        self.values.is_empty()
+        self.values.is_empty() && self.numbers.is_empty()
     }
 
-    /// Whether `text` equals or contains one of the values.
+    /// [`Self::copied_in`] for a whole XML part rather than one cached
+    /// value: a numeric value has to equal a text node.
+    fn copied_in_markup(&self, xml: &str) -> bool {
+        self.contains_text_value(xml)
+            || (!self.numbers.is_empty()
+                && xml
+                    .split('<')
+                    .filter_map(|piece| piece.split_once('>'))
+                    .any(|(_, text)| self.numbers.contains(text.trim())))
+    }
+
+    /// Whether `text` equals or contains one of the text values, or equals
+    /// one of the numeric values.
     fn copied_in(&self, text: &str) -> bool {
+        self.numbers.contains(text.trim()) || self.contains_text_value(text)
+    }
+
+    fn contains_text_value(&self, text: &str) -> bool {
         let text = text.to_lowercase();
         self.lengths
             .iter()
@@ -385,8 +428,8 @@ fn refuse_copies_of_selected_values(
     for part in chart_parts {
         let xml = read_zip_string(archive, part).with_context(|| format!("read {part}"))?;
         // Cached chart data is XML text, where `&`, `<` and `>` are escaped.
-        let copied = selected.copied_in(&xml)
-            || unescape(&xml).is_ok_and(|plain| selected.copied_in(&plain));
+        let copied = selected.copied_in_markup(&xml)
+            || unescape(&xml).is_ok_and(|plain| selected.copied_in_markup(&plain));
         if copied {
             bail!(
                 "refusing to pseudonymize a workbook with a chart ({part}) whose cached data copies a selected value, which would stay raw; remove the chart, or export the sheet as CSV, first"
@@ -719,6 +762,9 @@ fn parse_sheet_cells(xml: &str, shared: &[String]) -> Result<Vec<((usize, usize)
             }
             Event::Text(value) if in_value => {
                 text.push_str(&decode_text(&value)?);
+            }
+            Event::CData(value) if in_value => {
+                text.push_str(value.as_ref());
             }
             Event::GeneralRef(reference) if in_value => {
                 text.push_str(&resolve_cell_ref_entity(&reference)?);
@@ -1787,6 +1833,65 @@ mod tests {
         assert!(!selected.copied_in("Ada"));
         assert!(!selected.copied_in("1545"));
         assert!(!selected.copied_in(""));
+    }
+
+    #[test]
+    fn two_character_non_ascii_values_are_looked_for() {
+        let mut selected = SelectedValues::default();
+        for raw in ["田中", "ab", "é1", "x"] {
+            selected.insert(raw);
+        }
+        // A two-character surname is a whole value; two ASCII characters
+        // still match unrelated text too easily.
+        assert!(selected.copied_in("田中"));
+        assert!(selected.copied_in("担当: 田中 様"));
+        assert!(selected.copied_in("É1"));
+        assert!(!selected.copied_in("ab"));
+        assert!(!selected.copied_in("田"));
+
+        let mut single = SelectedValues::default();
+        single.insert("田");
+        assert!(single.is_empty());
+    }
+
+    #[test]
+    fn numeric_selected_values_match_only_an_equal_cached_value() {
+        let mut selected = SelectedValues::default();
+        assert!(selected.is_empty());
+        selected.insert(" 123 ");
+        assert!(!selected.is_empty());
+        assert!(selected.copied_in("123"));
+        assert!(selected.copied_in("  123\n"));
+        // An id is not "copied" by a total that merely has the same digits.
+        assert!(!selected.copied_in("41235"));
+        assert!(!selected.copied_in("1123.5"));
+        assert!(!selected.copied_in("Order 123"));
+        // Chart caches are searched as markup: only a whole text node counts.
+        assert!(selected.copied_in_markup("<c:pt idx=\"0\"><c:v>123</c:v></c:pt>"));
+        assert!(!selected.copied_in_markup("<c:pt idx=\"123\"><c:v>41235</c:v></c:pt>"));
+
+        // Text values are still found inside longer text and in markup.
+        selected.insert("A-123");
+        assert!(selected.copied_in("Order a-123 shipped"));
+        assert!(selected.copied_in_markup("<c:v>Order A-123</c:v>"));
+    }
+
+    #[test]
+    fn cached_cell_values_stored_as_cdata_are_read() {
+        let xml = concat!(
+            "<worksheet><sheetData><row r=\"1\">",
+            "<c r=\"A1\" t=\"str\"><f>B1</f><v><![CDATA[Ada <Lovelace>]]></v></c>",
+            "<c r=\"B1\" t=\"inlineStr\"><is><t>plain <![CDATA[& more]]></t></is></c>",
+            "</row></sheetData></worksheet>"
+        );
+        let cells = parse_sheet_cells(xml, &[]).unwrap();
+        assert_eq!(
+            cells,
+            vec![
+                ((0, 0), "Ada <Lovelace>".to_string()),
+                ((0, 1), "plain & more".to_string()),
+            ]
+        );
     }
 
     #[test]
