@@ -65,6 +65,10 @@ pub struct BlockedEvent {
 pub struct BlockedWatcher {
     /// Project path → byte offset already consumed from its audit log.
     cursors: Mutex<HashMap<String, LogCursor>>,
+    /// Serialises `set_watched` calls. Held for a whole registration,
+    /// including its file I/O, so it is deliberately separate from `cursors`:
+    /// the poll thread only ever takes the cursor lock.
+    registration: Mutex<()>,
 }
 
 /// Position in an audit log plus whether it sits inside a hostile oversized
@@ -86,7 +90,16 @@ impl BlockedWatcher {
     /// `read_cursor` does file I/O and can block for seconds on an unresponsive
     /// network volume, so it never runs under the cursor lock: that would stall
     /// the poll thread's `drain_new_events` for every other project.
+    ///
+    /// Registrations themselves are serialised by the registration lock, so a
+    /// call that stalls in `read_cursor` cannot commit its path set after a
+    /// call that started later: the later call waits and its set wins.
     fn set_watched_with(&self, paths: Vec<String>, mut read_cursor: impl FnMut(&str) -> LogCursor) {
+        // The guarded value is `()`, so a poisoned lock carries no bad state.
+        let _registration = self
+            .registration
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let paths: Vec<String> = paths
             .into_iter()
             .filter(|path| !path.trim().is_empty())
@@ -733,6 +746,53 @@ mod tests {
         assert_eq!(reads, vec!["/b".to_string(), "/a".to_string()]);
         let cursors = watcher.lock();
         assert!(cursors.contains_key("/a") && cursors.contains_key("/b"));
+    }
+
+    #[test]
+    fn an_older_registration_stalled_in_io_cannot_overwrite_a_newer_one() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+
+        let watcher = &BlockedWatcher::default();
+        let (in_io_tx, in_io_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let newer_done = &AtomicBool::new(false);
+
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                watcher.set_watched_with(vec!["/a".to_string()], |_| {
+                    in_io_tx.send(()).unwrap();
+                    // Stands in for a `stat` stuck on a slow volume.
+                    release_rx.recv().unwrap();
+                    LogCursor::default()
+                });
+            });
+            in_io_rx.recv().unwrap();
+
+            scope.spawn(move || {
+                watcher.set_watched_with(vec!["/a".to_string(), "/b".to_string()], |_| {
+                    LogCursor::default()
+                });
+                newer_done.store(true, Ordering::SeqCst);
+            });
+
+            // The newer call must wait for the stalled one instead of
+            // committing first and then being overwritten.
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let newer_finished_early = newer_done.load(Ordering::SeqCst);
+            // The poll thread is not blocked meanwhile.
+            let cursor_lock_was_free = watcher.cursors.try_lock().is_ok();
+            // Release before asserting so a failure cannot hang the scope.
+            release_tx.send(()).unwrap();
+            assert!(!newer_finished_early);
+            assert!(cursor_lock_was_free);
+        });
+
+        assert!(newer_done.load(Ordering::SeqCst));
+        let cursors = watcher.lock();
+        let mut watched: Vec<&str> = cursors.keys().map(String::as_str).collect();
+        watched.sort_unstable();
+        assert_eq!(watched, vec!["/a", "/b"]);
     }
 
     #[test]
