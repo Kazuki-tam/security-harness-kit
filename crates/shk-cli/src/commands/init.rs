@@ -1,5 +1,5 @@
 use crate::args::AiTool;
-use crate::commands::skills::SkillTool;
+use crate::commands::skills::{ExistingSkill, SkillTool};
 use crate::{hooks, npm_hardening, policy_cmd, safety};
 use anyhow::Result;
 use dialoguer::{Confirm, MultiSelect, Select, theme::ColorfulTheme};
@@ -207,7 +207,12 @@ pub fn run(cwd: &Path, args: InitArgs) -> Result<()> {
             &skill_tools_for(&tools),
             args.global,
             false,
-            args.force,
+            // Re-running init must not fail on, or clobber, an installed skill.
+            if args.force {
+                ExistingSkill::Overwrite
+            } else {
+                ExistingSkill::Keep
+            },
         )? {
             println!("{line}");
         }

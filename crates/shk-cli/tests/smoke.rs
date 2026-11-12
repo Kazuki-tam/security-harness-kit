@@ -4745,6 +4745,71 @@ fn init_yes_sets_up_selected_ai_tool_and_skill() {
 }
 
 #[test]
+fn init_yes_rerun_keeps_installed_skill_and_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = || {
+        Command::new(shk_bin())
+            .args([
+                "init",
+                "--yes",
+                "--tool",
+                "codex",
+                "--audit",
+                "--no-git-hook",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .expect("init --yes")
+    };
+    let first = run();
+    assert!(first.status.success(), "{}", output_log(&first));
+    let policy = dir.path().join("shk.toml");
+    std::fs::write(&policy, "# customised by the user\n").unwrap();
+    let skill = dir.path().join(".agents/skills/shk/SKILL.md");
+    let bundled = std::fs::read_to_string(&skill).unwrap();
+
+    // Identical skill file: nothing to do, and no `--force` suggestion.
+    let second = run();
+    assert!(second.status.success(), "{}", output_log(&second));
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    assert!(stdout.contains("already up to date"), "{stdout}");
+    assert_eq!(std::fs::read_to_string(&skill).unwrap(), bundled);
+    assert_eq!(
+        std::fs::read_to_string(&policy).unwrap(),
+        "# customised by the user\n"
+    );
+
+    // A locally edited skill file is kept and reported, not overwritten.
+    std::fs::write(&skill, "edited by the user\n").unwrap();
+    let third = run();
+    assert!(third.status.success(), "{}", output_log(&third));
+    let stdout = String::from_utf8_lossy(&third.stdout);
+    assert!(stdout.contains("Skipped"), "{stdout}");
+    assert!(stdout.contains("shk skills install --force"), "{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(&skill).unwrap(),
+        "edited by the user\n"
+    );
+
+    // `--force` still replaces it.
+    let forced = Command::new(shk_bin())
+        .args([
+            "init",
+            "--yes",
+            "--force",
+            "--tool",
+            "codex",
+            "--audit",
+            "--no-git-hook",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("init --yes --force");
+    assert!(forced.status.success(), "{}", output_log(&forced));
+    assert_eq!(std::fs::read_to_string(&skill).unwrap(), bundled);
+}
+
+#[test]
 fn init_yes_applies_npm_hardening_when_package_json_exists() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("package.json"), r#"{"name":"demo"}"#).unwrap();
