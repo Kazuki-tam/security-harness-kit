@@ -11,8 +11,9 @@ use crate::document_masker::{
 };
 use anyhow::{Context, Result, bail};
 use quick_xml::Reader;
+use quick_xml::escape::unescape;
 use quick_xml::events::{BytesRef, BytesStart, BytesText, Event};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::File;
 use std::io::{Cursor, Write};
 use std::path::Path;
@@ -49,7 +50,7 @@ pub fn run_xlsx(
                 .with_context(|| format!("xlsx sheet relationship is missing: {}", sheet.name))
         })
         .collect::<Result<BTreeSet<_>>>()?;
-    refuse_cached_copies(&mut archive, &sheets, &rels)?;
+    let chart_parts = refuse_pivot_caches(&mut archive)?;
     let shared = if archive_contains_entry(&archive, "xl/sharedStrings.xml")? {
         read_zip_string(&mut archive, "xl/sharedStrings.xml")?
     } else {
@@ -142,6 +143,28 @@ pub fn run_xlsx(
     {
         return Err(formula_cell_error(row, col));
     }
+    // Checked in the planning pass as well, so a plan and its run agree.
+    let mut selected_values = SelectedValues::default();
+    for row in &data_rows {
+        for column in &columns {
+            if let Some(raw) = row.get(column.index) {
+                selected_values.insert(raw);
+            }
+        }
+    }
+    let data_range = data_offset..data_offset + data_rows.len();
+    refuse_copies_of_selected_values(
+        &mut archive,
+        &sheets,
+        &rels,
+        &shared_strings,
+        &chart_parts,
+        &selected_values,
+        // Formula cells in the selected columns are reported or refused above.
+        |part, (row, col)| {
+            part == sheet_path && data_range.contains(&row) && selected_columns.contains(&col)
+        },
+    )?;
 
     if options.dry_run {
         return Ok(TableResult {
@@ -238,33 +261,67 @@ pub fn formula_cell_error(row: usize, col: usize) -> anyhow::Error {
     )
 }
 
-/// The refusal for a formula cell that carries a cached result (0-based row
-/// and column). Only the selected sheet's selected cells are rewritten, so a
-/// cached result anywhere in the workbook can still hold a raw copy of one.
+/// The refusal for a formula cell whose cached result repeats a value that
+/// is being pseudonymized (0-based row and column). Only the selected cells
+/// of the selected sheet are rewritten, so that cached copy would stay raw.
 pub fn cached_formula_error(sheet: &str, row: usize, col: usize) -> anyhow::Error {
     anyhow::anyhow!(
-        "refusing to pseudonymize a workbook with cached formula results: sheet `{sheet}` row {}, column {} may hold a raw copy of another cell; replace the formulas with their values first",
+        "refusing to pseudonymize a workbook with a cached formula result that copies a selected value: sheet `{sheet}` row {}, column {} would keep the raw value; replace the formula with its value, or export the sheet as CSV, first",
         row + 1,
         col + 1
     )
 }
 
+/// Shortest selected value (in characters) that is looked for in cached
+/// copies. Shorter values match unrelated results too easily.
+const MIN_COPIED_VALUE_CHARS: usize = 3;
+
+/// The values of the selected cells, for finding copies of them in parts
+/// that are not rewritten. Matching ignores case, so a cached `UPPER(A2)`
+/// counts as a copy.
+#[derive(Default)]
+struct SelectedValues {
+    values: HashSet<String>,
+    /// Byte lengths of `values`, so a search only tries windows that can match.
+    lengths: BTreeSet<usize>,
+}
+
+impl SelectedValues {
+    fn insert(&mut self, raw: &str) {
+        let value = raw.trim();
+        if value.chars().count() < MIN_COPIED_VALUE_CHARS {
+            return;
+        }
+        let value = value.to_lowercase();
+        self.lengths.insert(value.len());
+        self.values.insert(value);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    /// Whether `text` equals or contains one of the values.
+    fn copied_in(&self, text: &str) -> bool {
+        let text = text.to_lowercase();
+        self.lengths
+            .iter()
+            .take_while(|&&len| len <= text.len())
+            .any(|&len| {
+                (0..=text.len() - len).any(|start| {
+                    text.is_char_boundary(start)
+                        && text.is_char_boundary(start + len)
+                        && self.values.contains(&text[start..start + len])
+                })
+            })
+    }
+}
+
 /// Only the selected cells of one sheet are rewritten; every other part is
-/// copied as it is. Parts that keep their own copies of cell values would
-/// therefore still hold the originals, so a workbook that has any is refused:
-/// pivot caches, chart caches, and formula cells with a cached result on any
-/// sheet.
-///
-/// Dropping the cached results and asking for a recalculation on load was
-/// the alternative. It was not chosen: it means rewriting every sheet and the
-/// workbook's calculation settings, readers that do not recalculate (most
-/// libraries) would see empty cells, and pivot and chart caches would still
-/// have to be refused.
-fn refuse_cached_copies(
-    archive: &mut ZipArchive<File>,
-    sheets: &[SheetInfo],
-    rels: &str,
-) -> Result<()> {
+/// copied as it is. A pivot cache keeps its own copy of the source rows, so
+/// a workbook that has one is refused. Returns the chart parts, which
+/// [`refuse_copies_of_selected_values`] checks once the selection is known.
+fn refuse_pivot_caches(archive: &mut ZipArchive<File>) -> Result<Vec<String>> {
     let mut names = Vec::new();
     for name in archive.file_names() {
         names.push(name.context("decode zip entry name")?.to_string());
@@ -287,12 +344,58 @@ fn refuse_cached_copies(
         let types = read_zip_string(archive, "[Content_Types].xml")?;
         copies.extend(cached_copy_content_types(&types)?);
     }
-    if let Some((part, what)) = copies.first() {
+    if let Some((part, what)) = copies.iter().find(|(_, what)| *what == "pivot cache") {
         bail!(
-            "refusing to pseudonymize a workbook with a {what} ({part}): it keeps its own copy of cell values, which would stay raw; remove pivot tables and charts, or export the sheet as CSV, first"
+            "refusing to pseudonymize a workbook with a {what} ({part}): it keeps its own copy of cell values, which would stay raw; remove pivot tables, or export the sheet as CSV, first"
         );
     }
+    let charts: BTreeSet<String> = copies
+        .into_iter()
+        .map(|(part, _)| part)
+        .filter(|part| names.contains(part))
+        .collect();
+    Ok(charts.into_iter().collect())
+}
 
+/// Refuse a workbook in which a part that is copied as it is repeats a value
+/// that is being pseudonymized: a formula cell (on any sheet) whose cached
+/// result equals or contains a selected value, or a chart whose cached data
+/// does. Formulas and charts over other data — a `SUM` of an amount column —
+/// hold no copy and are left alone. `skip` names formula cells (worksheet
+/// part, 0-based row and column) that the caller handles itself.
+///
+/// Dropping the cached results and asking for a recalculation on load was
+/// the alternative. It was not chosen: it means rewriting every sheet and the
+/// workbook's calculation settings, and readers that do not recalculate (most
+/// libraries) would see empty cells.
+fn refuse_copies_of_selected_values(
+    archive: &mut ZipArchive<File>,
+    sheets: &[SheetInfo],
+    rels: &str,
+    shared_strings: &[String],
+    chart_parts: &[String],
+    selected: &SelectedValues,
+    skip: impl Fn(&str, (usize, usize)) -> bool,
+) -> Result<()> {
+    if selected.is_empty() {
+        return Ok(());
+    }
+    for part in chart_parts {
+        let xml = read_zip_string(archive, part).with_context(|| format!("read {part}"))?;
+        // Cached chart data is XML text, where `&`, `<` and `>` are escaped.
+        let copied = selected.copied_in(&xml)
+            || unescape(&xml).is_ok_and(|plain| selected.copied_in(&plain));
+        if copied {
+            bail!(
+                "refusing to pseudonymize a workbook with a chart ({part}) whose cached data copies a selected value, which would stay raw; remove the chart, or export the sheet as CSV, first"
+            );
+        }
+    }
+
+    let mut names = Vec::new();
+    for name in archive.file_names() {
+        names.push(name.context("decode zip entry name")?.to_string());
+    }
     let sheet_names: BTreeMap<String, &str> = sheets
         .iter()
         .filter_map(|sheet| {
@@ -309,8 +412,14 @@ fn refuse_cached_copies(
             None => continue,
         };
         let xml = read_zip_string(archive, name).with_context(|| format!("read {name}"))?;
-        if let Some((row, col)) = first_cached_formula(&xml)? {
-            return Err(cached_formula_error(label, row, col));
+        let formulas = parse_formula_cells(&xml)?;
+        if formulas.is_empty() {
+            continue;
+        }
+        for (coord, cached) in parse_sheet_cells(&xml, shared_strings)? {
+            if formulas.contains(&coord) && !skip(name, coord) && selected.copied_in(&cached) {
+                return Err(cached_formula_error(label, coord.0, coord.1));
+            }
         }
     }
     Ok(())
@@ -346,54 +455,6 @@ fn cached_copy_content_types(xml: &str) -> Result<Vec<(String, &'static str)>> {
         }
     }
     Ok(found)
-}
-
-/// The first cell (0-based row and column) that has both a formula and a
-/// non-empty cached result.
-fn first_cached_formula(xml: &str) -> Result<Option<(usize, usize)>> {
-    let mut reader = Reader::from_str(xml);
-    let mut cursor = CellCursor::default();
-    let mut current = None;
-    let mut has_formula = false;
-    let mut has_value = false;
-    let mut in_value = false;
-    loop {
-        match reader.read_event()? {
-            Event::Start(tag) | Event::Empty(tag) if local_name(tag.name().as_ref()) == "row" => {
-                cursor.enter_row(&tag)?;
-            }
-            Event::Start(tag) if local_name(tag.name().as_ref()) == "c" => {
-                current = Some(cursor.enter_cell(&tag)?);
-                has_formula = false;
-                has_value = false;
-            }
-            Event::Empty(tag) if local_name(tag.name().as_ref()) == "c" => {
-                cursor.enter_cell(&tag)?;
-            }
-            Event::Start(tag) | Event::Empty(tag) if local_name(tag.name().as_ref()) == "f" => {
-                has_formula = true;
-            }
-            Event::Start(tag) if matches!(local_name(tag.name().as_ref()), "v" | "t") => {
-                in_value = true;
-            }
-            Event::End(tag) if matches!(local_name(tag.name().as_ref()), "v" | "t") => {
-                in_value = false;
-            }
-            Event::Text(text) if in_value => {
-                has_value |= !decode_text(&text)?.trim().is_empty();
-            }
-            Event::CData(_) | Event::GeneralRef(_) if in_value => has_value = true,
-            Event::End(tag) if local_name(tag.name().as_ref()) == "c" => {
-                if has_formula && has_value {
-                    return Ok(current);
-                }
-                current = None;
-            }
-            Event::Eof => break,
-            _ => {}
-        }
-    }
-    Ok(None)
 }
 
 /// Worksheet parts the workbook's relationships point at. A part does not
@@ -1551,7 +1612,84 @@ mod tests {
         assert_eq!(err, cached_formula_error("Summary", 4, 2).to_string());
         assert_eq!(
             err,
-            "refusing to pseudonymize a workbook with cached formula results: sheet `Summary` row 5, column 3 may hold a raw copy of another cell; replace the formulas with their values first"
+            "refusing to pseudonymize a workbook with a cached formula result that copies a selected value: sheet `Summary` row 5, column 3 would keep the raw value; replace the formula with its value, or export the sheet as CSV, first"
+        );
+
+        // A copy inside a longer result, in another case, or stored as a
+        // shared string is still a copy.
+        for (name, cell, shared) in [
+            (
+                "concat.xlsx",
+                format!(
+                    r#"<c r="C5" t="str"><f>"To: "&amp;UPPER(Customers!A2)</f><v>To: {}</v></c>"#,
+                    email.to_uppercase()
+                ),
+                String::new(),
+            ),
+            (
+                "shared.xlsx",
+                r#"<c r="C5" t="s"><f>Customers!A2</f><v>0</v></c>"#.to_string(),
+                format!("<sst><si><t>{email}</t></si></sst>"),
+            ),
+        ] {
+            let mut extra = vec![("xl/custom/summary.xml", cached(&cell))];
+            if !shared.is_empty() {
+                extra.push(("xl/sharedStrings.xml", shared));
+            }
+            let err = attempt(name, extra, two_sheets, two_rels).unwrap_err();
+            assert_eq!(err, cached_formula_error("Summary", 4, 2).to_string());
+        }
+
+        // A formula cell next to the table that echoes a selected cell.
+        let echo = format!(
+            r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Email</t></is></c><c r="B1" t="inlineStr"><is><t>Copy</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>{email}</t></is></c><c r="B2" t="str"><f>"To "&amp;A2</f><v>To {email}</v></c></row></sheetData></worksheet>"#
+        );
+        let input = dir.path().join("echo.xlsx");
+        build_xlsx(
+            &input,
+            &[
+                ("xl/workbook.xml", WORKBOOK.into()),
+                ("xl/_rels/workbook.xml.rels", RELS.into()),
+                ("xl/worksheets/sheet1.xml", echo),
+            ],
+            &[],
+        );
+        let output = dir.path().join("out-echo.xlsx");
+        // The copy column is left alone, so only its cached result matters.
+        let mut echo_columns = parse_columns_spec("Email:email").unwrap();
+        echo_columns.skip.push("Copy".into());
+        let echo_options = TableOptions {
+            cli_columns: Some(echo_columns),
+            ..options()
+        };
+        let err = run_xlsx(
+            &input,
+            Some(&output),
+            None,
+            &echo_options,
+            Some(&material()),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            cached_formula_error("Customers", 1, 1).to_string()
+        );
+        assert!(!output.exists());
+
+        // A chart over other data holds no copy of a selected value.
+        assert_eq!(
+            attempt(
+                "numeric-chart.xlsx",
+                vec![(
+                    "xl/charts/chart1.xml",
+                    "<chartSpace><numCache><pt idx=\"0\"><v>1200</v></pt></numCache></chartSpace>"
+                        .to_string(),
+                )],
+                WORKBOOK,
+                RELS,
+            ),
+            Ok(())
         );
 
         // A formula that was never calculated holds no copy.
@@ -1567,6 +1705,86 @@ mod tests {
             ),
             Ok(())
         );
+    }
+
+    #[test]
+    fn formulas_over_unselected_columns_do_not_block_the_run() {
+        let dir = tempdir().unwrap();
+        let emails = [
+            ["ada", "@", "example.com"].concat(),
+            ["grace", "@", "example.org"].concat(),
+        ];
+        // A total row under an amount column, and a second sheet that sums it.
+        let sheet = format!(
+            r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Email</t></is></c><c r="B1" t="inlineStr"><is><t>Amount</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>{}</t></is></c><c r="B2"><v>1200</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>{}</t></is></c><c r="B3"><v>345</v></c></row><row r="4"><c r="B4"><f>SUM(B2:B3)</f><v>1545</v></c></row></sheetData></worksheet>"#,
+            emails[0], emails[1]
+        );
+        let summary = r#"<worksheet><sheetData><row r="1"><c r="A1" t="str"><f>"Total"</f><v>Total</v></c><c r="B1"><f>SUM(Customers!B2:B3)</f><v>1545</v></c></row></sheetData></worksheet>"#;
+        let workbook = r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Customers" sheetId="1" r:id="rId1"/><sheet name="Summary" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
+        let rels = r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#;
+        let input = dir.path().join("sum.xlsx");
+        build_xlsx(
+            &input,
+            &[
+                ("xl/workbook.xml", workbook.into()),
+                ("xl/_rels/workbook.xml.rels", rels.into()),
+                ("xl/worksheets/sheet1.xml", sheet),
+                ("xl/worksheets/sheet2.xml", summary.into()),
+            ],
+            &[],
+        );
+        let dry = TableOptions {
+            dry_run: true,
+            ..options()
+        };
+        let plan = run_xlsx(&input, None, None, &dry, None, None).unwrap();
+        assert!(plan.formula_cells.is_empty());
+
+        let output = dir.path().join("sum.out.xlsx");
+        let result = run_xlsx(
+            &input,
+            Some(&output),
+            None,
+            &options(),
+            Some(&material()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.meta.replaced.get("email"), Some(&2));
+        let mut archive = ZipArchive::new(File::open(&output).unwrap()).unwrap();
+        for index in 0..archive.len() {
+            let mut body = String::new();
+            archive
+                .by_index(index)
+                .unwrap()
+                .read_to_string(&mut body)
+                .unwrap();
+            for email in &emails {
+                assert!(!body.contains(email.as_str()), "{body}");
+            }
+        }
+        let out_sheet = sheet_xml(&output, "xl/worksheets/sheet1.xml");
+        assert!(
+            out_sheet.contains("<f>SUM(B2:B3)</f><v>1545</v>"),
+            "{out_sheet}"
+        );
+    }
+
+    #[test]
+    fn selected_values_match_copies_by_containment() {
+        let mut selected = SelectedValues::default();
+        assert!(selected.is_empty());
+        for raw in ["  Ada Lovelace ", "ab", "", "東京都"] {
+            selected.insert(raw);
+        }
+        assert!(selected.copied_in("ada lovelace"));
+        assert!(selected.copied_in("Dear ADA LOVELACE,"));
+        assert!(selected.copied_in("住所: 東京都港区"));
+        // Values under three characters are not looked for.
+        assert!(!selected.copied_in("ab"));
+        assert!(!selected.copied_in("Ada"));
+        assert!(!selected.copied_in("1545"));
+        assert!(!selected.copied_in(""));
     }
 
     #[test]
