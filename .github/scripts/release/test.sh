@@ -43,8 +43,8 @@ if [[ "$release_workflow" == *"startsWith(needs.prepare.outputs.release_tag, 'v'
   exit 1
 fi
 
-# release.yml installs dist by DIST_VERSION while generated installers record
-# cargo-dist-version, so a bump must update both.
+# release.yml installs dist from DIST_VERSION, but dist-workspace.toml declares
+# cargo-dist-version; a dist bump must update both.
 dist_config_version="$(awk -F'"' '/^cargo-dist-version = / { print $2; exit }' dist-workspace.toml)"
 dist_workflow_version="$(awk -F'"' '/^  DIST_VERSION: / { print $2; exit }' .github/workflows/release.yml)"
 if [[ ! "$dist_config_version" =~ $SHK_SEMVER_RE ]]; then
