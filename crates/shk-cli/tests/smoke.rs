@@ -3382,6 +3382,61 @@ fn hook_mode_blocking_pre_hook_internal_errors_fail_closed() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn hook_mode_internal_error_keeps_paths_out_of_stdout_and_stderr() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("unreadable-notes.txt");
+    std::fs::write(&file, "plain text\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&file).is_ok() {
+        // Running as root: the file cannot be made unreadable.
+        return;
+    }
+    let stdin = serde_json::json!({
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": file.to_string_lossy(),
+            "old_string": "plain",
+            "new_string": "simple"
+        }
+    })
+    .to_string();
+    let canonical_dir = std::fs::canonicalize(dir.path()).unwrap();
+
+    for tool in ["claude-code", "codex"] {
+        let out = hook_mode_output_in(dir.path(), &[tool], &stdin);
+        assert_eq!(out.status.code(), Some(2), "{tool}: {}", output_log(&out));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stdout.contains("shk internal error: hook payload could not be read"),
+            "{tool}: {}",
+            output_log(&out)
+        );
+        // The sanitised reason reaches stderr exactly once, without the cause
+        // chain that names the file.
+        assert_eq!(
+            stderr.matches("shk internal error: ").count(),
+            1,
+            "{tool}: {}",
+            output_log(&out)
+        );
+        for text in [&stdout, &stderr] {
+            for leaked in [
+                "unreadable-notes.txt".to_string(),
+                dir.path().to_string_lossy().into_owned(),
+                canonical_dir.to_string_lossy().into_owned(),
+                "read scanned file".to_string(),
+            ] {
+                assert!(!text.contains(&leaked), "{tool}: {}", output_log(&out));
+            }
+        }
+    }
+}
+
 #[test]
 fn hook_mode_claude_user_prompt_internal_error_blocks_with_exit_zero() {
     let dir = tempfile::tempdir().unwrap();
