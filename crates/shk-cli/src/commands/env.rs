@@ -1528,9 +1528,7 @@ fn encrypt_env_plaintext_with_stores(
 }
 
 fn dotenv_body_declares_key(body: &str, key_name: &str) -> bool {
-    body.strip_prefix(UTF8_BOM)
-        .unwrap_or(body)
-        .lines()
+    body.lines()
         .filter_map(split_dotenv_assignment)
         .any(|(raw_key, _)| raw_key.trim() == key_name)
 }
@@ -1624,6 +1622,15 @@ fn read_dotenvx_env_key(
 
 const UTF8_BOM: char = '\u{FEFF}';
 
+/// `raw_line` without a byte-order mark at its start (after any indentation).
+/// A line without one is returned unchanged.
+fn strip_line_bom(raw_line: &str) -> &str {
+    raw_line
+        .trim_start()
+        .strip_prefix(UTF8_BOM)
+        .unwrap_or(raw_line)
+}
+
 fn encrypt_dotenv_body(body: &str, public_key_name: &str, public_key: &str) -> Result<String> {
     let mut out = Vec::new();
     // Keep the managed marker at the top, before preserving original comments or blank lines.
@@ -1632,26 +1639,20 @@ fn encrypt_dotenv_body(body: &str, public_key_name: &str, public_key: &str) -> R
     let mut saw_public_key = false;
     let mut saw_encrypted_value = false;
 
-    // A UTF-8 byte-order mark is not part of the first line's content: left in
-    // place it would make a leading comment or key look like a malformed line.
-    let (bom, body) = match body.strip_prefix(UTF8_BOM) {
-        Some(rest) => (true, rest),
-        None => (false, body),
-    };
     for (idx, raw_line) in body.lines().enumerate() {
         let line_no = idx + 1;
+        // A UTF-8 byte-order mark is not part of a line's content: left in
+        // place it would make a comment or key look like a malformed line.
+        // It is dropped rather than copied, since the output starts with the
+        // managed header and a mark below it means nothing. Earlier releases
+        // did copy it, so it can sit on any line of an already encrypted file.
+        let raw_line = strip_line_bom(raw_line);
         let line = raw_line.trim();
         if is_managed_env_header_line(line) {
             continue;
         }
         if line.is_empty() || line.starts_with('#') {
-            if bom && idx == 0 {
-                // Earlier releases copied this line through verbatim, mark
-                // included, so decrypt hands back the original file start.
-                out.push(format!("{UTF8_BOM}{raw_line}"));
-            } else {
-                out.push(raw_line.to_string());
-            }
+            out.push(raw_line.to_string());
             continue;
         }
         // Anything else that is not an assignment (for example the
@@ -1726,8 +1727,7 @@ fn decrypt_dotenv_body(body: &str, private_key: &str) -> Result<Zeroizing<Vec<u8
         out.push('\n');
     }
     for (idx, raw_line) in body.lines().enumerate() {
-        let line = raw_line.trim_start();
-        if is_managed_env_header_line(line.trim()) {
+        if is_managed_env_header_line(strip_line_bom(raw_line).trim()) {
             continue;
         }
         let Some((raw_key, raw_value)) = split_dotenv_assignment(raw_line) else {
@@ -1796,8 +1796,11 @@ fn decrypt_dotenv_env_pairs(
     Ok(out)
 }
 
+/// The `KEY` and `VALUE` halves of an assignment line; `None` for a blank
+/// line, a comment, or a line without `=`. A byte-order mark at the start of
+/// the line is ignored (see [`strip_line_bom`]), so it never ends up in a key.
 fn split_dotenv_assignment(raw_line: &str) -> Option<(&str, &str)> {
-    let line = raw_line.trim_start();
+    let line = strip_line_bom(raw_line).trim_start();
     if line.is_empty() || line.starts_with('#') {
         return None;
     }
@@ -2812,19 +2815,75 @@ mod tests {
             let body = format!("\u{FEFF}{first_line}\nNAME=value\n");
             let encrypted =
                 encrypt_dotenv_body(&body, "DOTENV_PUBLIC_KEY", &keypair.public_key()).unwrap();
-            // The managed header stays first; the mark stays on its line.
-            assert!(!encrypted.starts_with('\u{FEFF}'), "{encrypted}");
+            // The managed header stays first and the mark is not carried
+            // into the middle of the file.
+            assert!(!encrypted.contains('\u{FEFF}'), "{encrypted}");
             assert!(
-                encrypted.contains(&format!("\n\u{FEFF}{first_line}\nNAME=\"encrypted:")),
+                encrypted.contains(&format!("\n{first_line}\nNAME=\"encrypted:")),
                 "{encrypted}"
             );
 
-            let plaintext = decrypt_dotenv_body(&encrypted, &keypair.private_key()).unwrap();
+            // The documented re-encrypt flow accepts its own output.
+            let again = encrypt_dotenv_body(&encrypted, "DOTENV_PUBLIC_KEY", &keypair.public_key())
+                .unwrap();
+            assert!(!again.contains('\u{FEFF}'), "{again}");
+
+            let plaintext = decrypt_dotenv_body(&again, &keypair.private_key()).unwrap();
             assert_eq!(
                 String::from_utf8(plaintext.to_vec()).unwrap(),
-                format!("\u{FEFF}{first_line}\nNAME='value'\n")
+                format!("{first_line}\nNAME='value'\n")
             );
         }
+    }
+
+    #[test]
+    fn reencrypt_accepts_a_byte_order_mark_left_mid_file_by_earlier_releases() {
+        let keypair = Keypair::generate();
+        let encrypted = encrypt_dotenv_body(
+            "# heading = text\nNAME=value\n",
+            "DOTENV_PUBLIC_KEY",
+            &keypair.public_key(),
+        )
+        .unwrap();
+        // Earlier releases wrote the mark back in front of the first comment
+        // or blank line, below the managed header.
+        for marked in [
+            "\n\u{FEFF}# heading = text\n",
+            "\n \u{FEFF}# heading = text\n",
+        ] {
+            let legacy = encrypted.replacen("\n# heading = text\n", marked, 1);
+            assert!(legacy.contains('\u{FEFF}') && !legacy.starts_with('\u{FEFF}'));
+
+            let again =
+                encrypt_dotenv_body(&legacy, "DOTENV_PUBLIC_KEY", &keypair.public_key()).unwrap();
+            assert!(!again.contains('\u{FEFF}'), "{again}");
+            assert!(
+                again.contains("\n# heading = text\nNAME=\"encrypted:"),
+                "{again}"
+            );
+            let plaintext = decrypt_dotenv_body(&again, &keypair.private_key()).unwrap();
+            assert_eq!(plaintext.as_slice(), b"# heading = text\nNAME='value'\n");
+
+            // Reading the legacy file does not take the marked comment for an
+            // assignment either.
+            let material = NativeEnvKeyMaterial {
+                public_key: keypair.public_key(),
+                private_key: keypair.private_key(),
+            };
+            let pairs = decrypt_dotenv_env_pairs(&legacy, &[material]).unwrap();
+            assert_eq!(pairs.len(), 1);
+            assert_eq!(pairs[0].0, "NAME");
+            let plaintext = decrypt_dotenv_body(&legacy, &keypair.private_key()).unwrap();
+            assert!(plaintext.ends_with(b"NAME='value'\n"));
+        }
+
+        // A mark in front of a mid-file assignment is not part of the key.
+        let body = "FIRST=one\n\u{FEFF}NAME=value\n";
+        let encrypted =
+            encrypt_dotenv_body(body, "DOTENV_PUBLIC_KEY", &keypair.public_key()).unwrap();
+        assert!(!encrypted.contains('\u{FEFF}'), "{encrypted}");
+        let plaintext = decrypt_dotenv_body(&encrypted, &keypair.private_key()).unwrap();
+        assert_eq!(plaintext.as_slice(), b"FIRST='one'\nNAME='value'\n");
     }
 
     #[test]
