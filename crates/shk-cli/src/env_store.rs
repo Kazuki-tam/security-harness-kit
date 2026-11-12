@@ -709,13 +709,23 @@ fn known_op_paths() -> Vec<PathBuf> {
 
 fn find_op_on_path() -> Result<Option<PathBuf>> {
     let path_var = std::env::var_os("PATH").ok_or_else(|| anyhow!("PATH is not set"))?;
-    for dir in std::env::split_paths(&path_var) {
+    Ok(find_op_in_path_var(&path_var))
+}
+
+fn find_op_in_path_var(path_var: &std::ffi::OsStr) -> Option<PathBuf> {
+    for dir in std::env::split_paths(path_var) {
+        // Empty and relative entries resolve against the current directory.
+        // Never run `op` from there; skip them and keep searching instead of
+        // failing later with an unrelated "must be an absolute path" error.
+        if !dir.is_absolute() {
+            continue;
+        }
         let candidate = dir.join(if cfg!(windows) { "op.exe" } else { "op" });
         if candidate.is_file() {
-            return Ok(Some(candidate));
+            return Some(candidate);
         }
     }
-    Ok(None)
+    None
 }
 
 fn validate_op_binary(path: &Path) -> Result<()> {
@@ -1838,6 +1848,33 @@ mod tests {
         assert_eq!(
             configured_op_path(Some(" /usr/local/bin/op ")),
             Some(PathBuf::from("/usr/local/bin/op"))
+        );
+    }
+
+    #[test]
+    fn op_path_search_skips_relative_and_empty_entries() {
+        let binary_name = if cfg!(windows) { "op.exe" } else { "op" };
+        let cwd = std::env::current_dir().unwrap();
+        // A directory reachable through a relative PATH entry.
+        let relative_dir = tempfile::tempdir_in(&cwd).unwrap();
+        std::fs::write(relative_dir.path().join(binary_name), b"").unwrap();
+        let relative_entry = PathBuf::from(relative_dir.path().file_name().unwrap());
+        assert!(relative_entry.join(binary_name).is_file());
+
+        let only_unsafe = std::env::join_paths([PathBuf::new(), relative_entry.clone()]).unwrap();
+        assert_eq!(find_op_in_path_var(&only_unsafe), None);
+
+        let absolute_dir = tempfile::tempdir().unwrap();
+        std::fs::write(absolute_dir.path().join(binary_name), b"").unwrap();
+        let with_absolute = std::env::join_paths([
+            PathBuf::new(),
+            relative_entry,
+            absolute_dir.path().to_path_buf(),
+        ])
+        .unwrap();
+        assert_eq!(
+            find_op_in_path_var(&with_absolute),
+            Some(absolute_dir.path().join(binary_name))
         );
     }
 
