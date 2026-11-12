@@ -4,7 +4,7 @@ members = ["cargo:."]
 # Config for 'dist'
 [dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
-cargo-dist-version = "0.31.0"
+cargo-dist-version = "0.34.0"
 # The release workflow is intentionally customized for SBOM/provenance steps.
 allow-dirty = ["ci"]
 # Packages to publish from this workspace

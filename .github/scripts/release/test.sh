@@ -43,6 +43,24 @@ if [[ "$release_workflow" == *"startsWith(needs.prepare.outputs.release_tag, 'v'
   exit 1
 fi
 
+# release.yml installs dist from DIST_VERSION, but dist-workspace.toml declares
+# cargo-dist-version; a dist bump must update both.
+dist_config_version="$(awk -F'"' '/^cargo-dist-version = / { print $2; exit }' dist-workspace.toml)"
+dist_workflow_version="$(awk -F'"' '/^  DIST_VERSION: / { print $2; exit }' .github/workflows/release.yml)"
+if [[ ! "$dist_config_version" =~ $SHK_SEMVER_RE ]]; then
+  echo "FAIL: could not read cargo-dist-version from dist-workspace.toml" >&2
+  exit 1
+fi
+if [[ ! "$dist_workflow_version" =~ $SHK_SEMVER_RE ]]; then
+  echo "FAIL: could not read top-level env DIST_VERSION from release.yml" >&2
+  exit 1
+fi
+if [[ "$dist_config_version" != "$dist_workflow_version" ]]; then
+  echo "FAIL: release.yml DIST_VERSION ${dist_workflow_version} != dist-workspace.toml cargo-dist-version ${dist_config_version}" >&2
+  exit 1
+fi
+echo "ok: dist version pinned consistently (${dist_config_version})"
+
 resolve_tag() {
   env GITHUB_EVENT_NAME=push GITHUB_REF="refs/tags/$1" GITHUB_REF_NAME="$1" \
     ./.github/scripts/release/resolve-target.sh
