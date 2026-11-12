@@ -1119,8 +1119,26 @@ fn minimum_release_age_days_from_text(text: &str) -> Option<u64> {
             return None;
         }
         let (_, value) = line.split_once(':')?;
-        parse_duration_days(unquote(value.trim().trim_end_matches(',')))
+        parse_duration_days(json5_scalar(value))
     })
+}
+
+/// The scalar at the start of a JSON5 `key: value` remainder: the content of a
+/// quoted string up to its closing quote, or a bare value with any trailing
+/// `//` / `#` comment and comma removed.
+fn json5_scalar(value: &str) -> &str {
+    let value = value.trim();
+    for quote in ['"', '\''] {
+        if let Some(rest) = value.strip_prefix(quote) {
+            return rest.split_once(quote).map_or(rest, |(inner, _)| inner);
+        }
+    }
+    let end = [value.find("//"), value.find('#')]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(value.len());
+    value[..end].trim().trim_end_matches(',').trim()
 }
 
 /// Whole days in a duration such as `7 days`, `2 weeks`, `36 hours`, or `7d`
@@ -1651,6 +1669,25 @@ updates:
             minimum_release_age_days_from_text("  minimumReleaseAge: \"2 weeks\",\n"),
             Some(14)
         );
+    }
+
+    #[test]
+    fn renovate_json5_line_with_trailing_comma_and_comment_parses() {
+        for (line, days) in [
+            ("  minimumReleaseAge: \"7 days\", // wait a week\n", 7),
+            ("  \"minimumReleaseAge\": '2 weeks', # cooldown\n", 14),
+            ("  minimumReleaseAge: \"3 days\" // last key\n", 3),
+            ("  minimumReleaseAge: 5, // bare number of days\n", 5),
+            ("  minimumReleaseAge: \"7 days\",\n", 7),
+        ] {
+            assert_eq!(
+                minimum_release_age_days_from_text(line),
+                Some(days),
+                "{line}"
+            );
+        }
+        let json5 = "{\n  // Renovate\n  minimumReleaseAge: \"7 days\", // wait a week\n}\n";
+        assert_eq!(renovate_minimum_release_age_days(json5), Some(7));
     }
 
     #[test]
