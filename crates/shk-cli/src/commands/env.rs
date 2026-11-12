@@ -94,7 +94,9 @@ fn credential_store_label(stores: &EnvStores) -> &'static str {
 
 pub fn dotenvx_import_keys(cwd: &Path, file: &Path) -> Result<()> {
     let (_project_root, project, stores) = load_env_context(cwd)?;
-    let body = std::fs::read_to_string(file).with_context(|| format!("read {}", file.display()))?;
+    let body = Zeroizing::new(
+        std::fs::read_to_string(file).with_context(|| format!("read {}", file.display()))?,
+    );
     let entries = parse_dotenvx_keys(&body)?;
     if entries.is_empty() {
         bail!("no DOTENV_PRIVATE_KEY* entries found in {}", file.display());
@@ -102,7 +104,12 @@ pub fn dotenvx_import_keys(cwd: &Path, file: &Path) -> Result<()> {
     let imported = entries.len();
 
     with_secret_store_lock(&project, "env-project", || {
-        dotenvx_import_keys_with_store(stores.dotenvx.as_ref(), &project, entries)
+        dotenvx_import_keys_with_store(
+            stores.dotenvx.as_ref(),
+            stores.native.as_ref(),
+            &project,
+            entries,
+        )
     })?;
 
     println!(
@@ -117,7 +124,6 @@ pub fn encrypt(cwd: &Path, args: EnvEncryptArgs) -> Result<()> {
     ensure_regular_env_encrypt_input(&args.file)?;
     let (_project_root, project, stores) = load_env_context(cwd)?;
     let private_key_name = env_key_name(args.key.as_ref(), &args.env)?;
-    let public_key_name = private_to_public_key_name(&private_key_name);
     if args.remove_source {
         ensure!(
             !args.in_place,
@@ -126,25 +132,21 @@ pub fn encrypt(cwd: &Path, args: EnvEncryptArgs) -> Result<()> {
     }
     let output = env_encrypt_output_path(&args)?;
     if args.remove_source {
-        ensure!(
-            comparable_path(cwd, &args.file) != comparable_path(cwd, output),
-            "--remove-source requires input and output to be different files"
-        );
+        ensure_remove_source_output_differs(cwd, &args.file, output)?;
     }
     with_secret_store_lock(&project, "env-project", || {
-        let mut key_material = read_or_create_native_env_key_unlocked(
+        let plaintext = Zeroizing::new(
+            std::fs::read_to_string(&args.file)
+                .with_context(|| format!("read {}", args.file.display()))?,
+        );
+        let encrypted = encrypt_env_plaintext_with_stores(
             stores.native.as_ref(),
             stores.dotenvx.as_ref(),
             &project,
             &private_key_name,
+            &plaintext,
         )?;
-        let mut plaintext = std::fs::read_to_string(&args.file)
-            .with_context(|| format!("read {}", args.file.display()))?;
-        let encrypt_result =
-            encrypt_dotenv_body(&plaintext, &public_key_name, &key_material.public_key);
-        plaintext.zeroize();
-        let encrypted = encrypt_result?;
-        key_material.private_key.zeroize();
+        drop(plaintext);
         write_output(output, encrypted.as_bytes(), args.force || args.in_place)?;
         println!(
             "Encrypted {} to {} with {private_key_name}",
@@ -181,11 +183,10 @@ pub fn decrypt(cwd: &Path, args: EnvDecryptArgs) -> Result<()> {
             "no stored {private_key_name}; run `shk env encrypt` or `shk env dotenvx import-keys .env.keys` first"
         )
     })?;
-    let mut plaintext = decrypt_dotenv_body(&body, &key_material.private_key)?;
+    let plaintext = decrypt_dotenv_body(&body, &key_material.private_key)?;
     key_material.private_key.zeroize();
-    let write_result = write_output(output, &plaintext, args.force);
-    plaintext.zeroize();
-    write_result?;
+    write_output(output, &plaintext, args.force)?;
+    drop(plaintext);
     println!(
         "Decrypted {} to {} with {}",
         args.file.display(),
@@ -263,7 +264,12 @@ pub fn key_list(cwd: &Path) -> Result<()> {
 pub fn key_delete(cwd: &Path, args: EnvKeyDeleteArgs) -> Result<()> {
     let (_project_root, project, stores) = load_env_context(cwd)?;
     with_secret_store_lock(&project, "env-project", || {
-        key_delete_with_store(stores.native.as_ref(), &project, args)
+        key_delete_with_store(
+            stores.native.as_ref(),
+            stores.dotenvx.as_ref(),
+            &project,
+            args,
+        )
     })
 }
 
@@ -667,7 +673,7 @@ fn discover_private_key_candidates(project_root: &Path) -> Result<BTreeSet<Strin
     Ok(candidates)
 }
 
-fn read_migration_candidate(path: &Path) -> Result<String> {
+fn read_migration_candidate(path: &Path) -> Result<Zeroizing<String>> {
     let metadata = std::fs::symlink_metadata(path)
         .with_context(|| format!("inspect migration candidate {}", path.display()))?;
     if metadata.file_type().is_symlink() {
@@ -691,7 +697,11 @@ fn read_migration_candidate(path: &Path) -> Result<String> {
     }
 
     let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let mut body = String::new();
+    // Reserve the whole budget up front so the buffer never reallocates and
+    // leaves an unwiped copy of the file body behind.
+    let mut body = Zeroizing::new(String::with_capacity(
+        (metadata.len() as usize).saturating_add(1),
+    ));
     file.take(MAX_MIGRATION_CANDIDATE_BYTES + 1)
         .read_to_string(&mut body)
         .with_context(|| format!("read {}", path.display()))?;
@@ -764,6 +774,7 @@ pub fn key_export(cwd: &Path, args: EnvKeyExportArgs) -> Result<()> {
 
 fn key_delete_with_store(
     store: &dyn SecretStore,
+    dotenvx_store: &dyn SecretStore,
     project: &ProjectIdentity,
     args: EnvKeyDeleteArgs,
 ) -> Result<()> {
@@ -783,20 +794,76 @@ fn key_delete_with_store(
             .with_context(|| format!("delete {key}"))?;
     }
     println!("Deleted {} native env private key(s)", targets.len());
+    for note in dotenvx_readoption_notes(dotenvx_store, project, &targets) {
+        println!("{note}");
+    }
     Ok(())
+}
+
+/// After native keys were deleted, describe imported dotenvx copies that are
+/// still stored: the next native env command would silently adopt them again.
+fn dotenvx_readoption_notes(
+    dotenvx_store: &dyn SecretStore,
+    project: &ProjectIdentity,
+    deleted: &[String],
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    for key in deleted {
+        match store_has_key(dotenvx_store, project, key) {
+            Ok(true) => notes.push(format!(
+                "note: an imported dotenvx copy of {key} is still stored and will be re-adopted by the next `shk env` command; remove it with `shk env dotenvx delete --key {key}`"
+            )),
+            Ok(false) => {}
+            Err(err) => notes.push(format!(
+                "warning: could not check for an imported dotenvx copy of {key}: {err}"
+            )),
+        }
+    }
+    notes
 }
 
 fn dotenvx_import_keys_with_store(
     store: &dyn SecretStore,
+    native_store: &dyn SecretStore,
     project: &ProjectIdentity,
-    entries: Vec<(String, String)>,
+    entries: Vec<(String, Zeroizing<String>)>,
 ) -> Result<()> {
-    for (key, mut value) in entries {
+    // Check every entry before writing anything so a conflict leaves both
+    // stores untouched.
+    for (key, value) in &entries {
+        ensure_native_copy_matches_import(native_store, project, key, value)?;
+    }
+    for (key, value) in entries {
         store
             .put(project, &key, &value)
             .with_context(|| format!("store {key}"))?;
-        value.zeroize();
     }
+    Ok(())
+}
+
+/// Native commands prefer the native copy of a key. Importing a rotated
+/// dotenvx key next to a different native copy would leave them on the stale
+/// one, so refuse instead of importing a key that would not be used.
+fn ensure_native_copy_matches_import(
+    native_store: &dyn SecretStore,
+    project: &ProjectIdentity,
+    key: &str,
+    imported_private_key: &str,
+) -> Result<()> {
+    let Some(native) = read_native_env_key(native_store, project, key)? else {
+        return Ok(());
+    };
+    let matches = match Keypair::from_private_key(imported_private_key) {
+        Ok(keypair) => keypair.public_key() == native.public_key,
+        Err(_) => imported_private_key == native.private_key,
+    };
+    ensure!(
+        matches,
+        "the shk native store already holds a different {key} (for example adopted from an earlier import), \
+         and `shk env` commands would keep using it; nothing was imported. \
+         Run `shk env key delete --key {key}` and import again, \
+         or replace the native copy with `shk env key import --key {key} --force`"
+    );
     Ok(())
 }
 
@@ -977,7 +1044,7 @@ fn build_native_env_run_command(
         for (key, value) in decrypt_dotenv_env_pairs(&body, key_materials)
             .with_context(|| format!("load {}", file_path.display()))?
         {
-            cmd.env(key, value);
+            cmd.env(key, value.as_str());
         }
     }
     Ok(cmd)
@@ -1025,6 +1092,47 @@ fn comparable_path(cwd: &Path, path: &Path) -> PathBuf {
         }
     }
     normalized
+}
+
+/// `--remove-source` deletes the input after the output is written, so the two
+/// must be different files. A lexical comparison misses case-insensitive
+/// filesystems and symlinked directories; compare file identity as well.
+fn ensure_remove_source_output_differs(cwd: &Path, input: &Path, output: &Path) -> Result<()> {
+    let same = comparable_path(cwd, input) == comparable_path(cwd, output)
+        || is_same_existing_file(input, output)?;
+    ensure!(
+        !same,
+        "--remove-source requires input and output to be different files"
+    );
+    Ok(())
+}
+
+fn is_same_existing_file(input: &Path, output: &Path) -> Result<bool> {
+    let output_metadata = match std::fs::metadata(output) {
+        Ok(metadata) => metadata,
+        // Nothing exists at the output path yet, so it cannot be the input.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(err).with_context(|| format!("inspect env output {}", output.display()));
+        }
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let input_metadata = std::fs::metadata(input)
+            .with_context(|| format!("inspect env input {}", input.display()))?;
+        Ok(input_metadata.dev() == output_metadata.dev()
+            && input_metadata.ino() == output_metadata.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = output_metadata;
+        let input = std::fs::canonicalize(input)
+            .with_context(|| format!("canonicalize env input {}", input.display()))?;
+        let output = std::fs::canonicalize(output)
+            .with_context(|| format!("canonicalize env output {}", output.display()))?;
+        Ok(input == output)
+    }
 }
 
 fn read_private_key_for_import(private_key_name: &str, from_stdin: bool) -> Result<String> {
@@ -1149,7 +1257,7 @@ fn project_root(cwd: &Path) -> Result<PathBuf> {
     std::fs::canonicalize(&root).with_context(|| format!("canonicalize {}", root.display()))
 }
 
-fn parse_dotenvx_keys(body: &str) -> Result<Vec<(String, String)>> {
+fn parse_dotenvx_keys(body: &str) -> Result<Vec<(String, Zeroizing<String>)>> {
     let mut out = Vec::new();
     for (idx, raw_line) in body.lines().enumerate() {
         let line = raw_line.trim();
@@ -1174,20 +1282,24 @@ fn parse_dotenvx_keys(body: &str) -> Result<Vec<(String, String)>> {
     Ok(out)
 }
 
-fn parse_env_value(raw: &str) -> Result<String> {
+fn parse_env_value(raw: &str) -> Result<Zeroizing<String>> {
     let value = raw.trim();
     if let Some(quote) = value.chars().next().filter(|ch| *ch == '"' || *ch == '\'') {
         return parse_quoted_env_value(value, quote);
     }
-    Ok(value
-        .split_once(" #")
-        .map(|(before, _)| before.trim_end())
-        .unwrap_or(value)
-        .to_string())
+    Ok(Zeroizing::new(
+        value
+            .split_once(" #")
+            .map(|(before, _)| before.trim_end())
+            .unwrap_or(value)
+            .to_string(),
+    ))
 }
 
-fn parse_quoted_env_value(value: &str, quote: char) -> Result<String> {
-    let mut out = String::new();
+fn parse_quoted_env_value(value: &str, quote: char) -> Result<Zeroizing<String>> {
+    // The parsed value is never longer than its source, so this buffer does
+    // not reallocate and is wiped on every return path.
+    let mut out = Zeroizing::new(String::with_capacity(value.len()));
     let mut chars = value[quote.len_utf8()..].char_indices().peekable();
     while let Some((idx, ch)) = chars.next() {
         if ch == quote {
@@ -1206,6 +1318,7 @@ fn parse_quoted_env_value(value: &str, quote: char) -> Result<String> {
                 'r' => out.push('\r'),
                 't' => out.push('\t'),
                 '"' => out.push('"'),
+                '\'' => out.push('\''),
                 '\\' => out.push('\\'),
                 '$' => out.push('$'),
                 other => {
@@ -1357,41 +1470,45 @@ fn private_to_public_key_name(private_key_name: &str) -> String {
     }
 }
 
-#[cfg(test)]
-fn read_or_create_native_env_key(
+/// Encrypt `plaintext` with the stored key for `private_key_name`, creating
+/// the key only when none exists. The input is validated and encrypted before
+/// a newly generated key is persisted, so a rejected input never leaves a
+/// fresh key behind.
+fn encrypt_env_plaintext_with_stores(
     native_store: &dyn SecretStore,
     dotenvx_store: &dyn SecretStore,
     project: &ProjectIdentity,
     private_key_name: &str,
-) -> Result<NativeEnvKeyMaterial> {
-    with_secret_store_lock(project, &format!("native-key:{private_key_name}"), || {
-        read_or_create_native_env_key_unlocked(
-            native_store,
-            dotenvx_store,
-            project,
-            private_key_name,
-        )
-    })
-}
-
-fn read_or_create_native_env_key_unlocked(
-    native_store: &dyn SecretStore,
-    dotenvx_store: &dyn SecretStore,
-    project: &ProjectIdentity,
-    private_key_name: &str,
-) -> Result<NativeEnvKeyMaterial> {
+    plaintext: &str,
+) -> Result<String> {
+    let public_key_name = private_to_public_key_name(private_key_name);
     if let Some(key) =
         read_or_adopt_env_key_material(native_store, dotenvx_store, project, private_key_name)?
     {
-        return Ok(key);
+        return encrypt_dotenv_body(plaintext, &public_key_name, &key.public_key);
     }
+    // The file was prepared for a key this machine does not have. Generating
+    // a new one would silently fork the project's key.
+    ensure!(
+        !dotenv_body_declares_key(plaintext, &public_key_name),
+        "refusing to encrypt: the input already carries a {public_key_name} header but no {private_key_name} is stored locally; \
+         import the matching private key (`shk env key import` / `shk env dotenvx import-keys`), \
+         or remove the stale header line if every value is still plaintext"
+    );
     let keypair = Keypair::generate();
     let key = NativeEnvKeyMaterial {
         public_key: keypair.public_key(),
         private_key: keypair.private_key(),
     };
+    let encrypted = encrypt_dotenv_body(plaintext, &public_key_name, &key.public_key)?;
     store_native_env_key(native_store, project, private_key_name, &key)?;
-    Ok(key)
+    Ok(encrypted)
+}
+
+fn dotenv_body_declares_key(body: &str, key_name: &str) -> bool {
+    body.lines()
+        .filter_map(split_dotenv_assignment)
+        .any(|(raw_key, _)| raw_key.trim() == key_name)
 }
 
 fn read_or_adopt_env_key_material(
@@ -1489,17 +1606,28 @@ fn encrypt_dotenv_body(body: &str, public_key_name: &str, public_key: &str) -> R
     let mut saw_public_key = false;
     let mut saw_encrypted_value = false;
 
-    for raw_line in body.lines() {
-        let line = raw_line.trim_start();
-        if is_managed_env_header_line(line.trim()) {
+    for (idx, raw_line) in body.lines().enumerate() {
+        let line_no = idx + 1;
+        let line = raw_line.trim();
+        if is_managed_env_header_line(line) {
             continue;
         }
-        let Some((raw_key, raw_value)) = split_dotenv_assignment(raw_line) else {
+        if line.is_empty() || line.starts_with('#') {
             out.push(raw_line.to_string());
             continue;
+        }
+        // Anything else that is not an assignment (for example the
+        // continuation lines of an unquoted multi-line value) would be copied
+        // into the output unencrypted. Fail closed, and never echo the line.
+        let Some((raw_key, raw_value)) = split_dotenv_assignment(raw_line) else {
+            bail!(
+                "refusing to encrypt: line {line_no} is not a KEY=VALUE assignment and would be written unencrypted; \
+                 multi-line values are not supported, so keep each value on one line \
+                 (for example with \\n escapes inside double quotes)"
+            );
         };
         let key = raw_key.trim();
-        validate_dotenv_assignment_key(key)?;
+        validate_dotenv_assignment_key(key, line_no)?;
         if is_dotenvx_private_key_name(key) {
             bail!(
                 "refusing to encrypt dotenv file containing {key}; store private keys outside the env file"
@@ -1509,7 +1637,7 @@ fn encrypt_dotenv_body(body: &str, public_key_name: &str, public_key: &str) -> R
             saw_public_key = true;
             let existing = parse_env_value(raw_value)
                 .with_context(|| format!("parse existing {key} while encrypting dotenv"))?;
-            if key != public_key_name || existing != public_key {
+            if key != public_key_name || existing.as_str() != public_key {
                 existing_public_key_differs = true;
             }
             continue;
@@ -1518,7 +1646,7 @@ fn encrypt_dotenv_body(body: &str, public_key_name: &str, public_key: &str) -> R
             .with_context(|| format!("parse {key} while encrypting dotenv"))?;
         if value.starts_with(DOTENV_ENCRYPTED_PREFIX) {
             saw_encrypted_value = true;
-            out.push(format!("{key}=\"{value}\""));
+            out.push(format!("{key}=\"{}\"", value.as_str()));
             continue;
         }
         let encrypted = dotenvx_encrypt(&value, public_key)
@@ -1550,19 +1678,26 @@ fn encrypt_dotenv_body(body: &str, public_key_name: &str, public_key: &str) -> R
     Ok(format!("{}\n", out.join("\n")))
 }
 
-fn decrypt_dotenv_body(body: &str, private_key: &str) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
-    for raw_line in body.lines() {
+fn decrypt_dotenv_body(body: &str, private_key: &str) -> Result<Zeroizing<Vec<u8>>> {
+    // Plaintext is shorter than its ciphertext, so reserving the input length
+    // keeps the buffer from reallocating in practice; it is wiped on every
+    // path, including errors part-way through the file.
+    let mut out = Zeroizing::new(String::with_capacity(body.len() + 1));
+    fn push_line(out: &mut String, line: &str) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    for (idx, raw_line) in body.lines().enumerate() {
         let line = raw_line.trim_start();
         if is_managed_env_header_line(line.trim()) {
             continue;
         }
         let Some((raw_key, raw_value)) = split_dotenv_assignment(raw_line) else {
-            out.push(raw_line.to_string());
+            push_line(&mut out, raw_line);
             continue;
         };
         let key = raw_key.trim();
-        validate_dotenv_assignment_key(key)?;
+        validate_dotenv_assignment_key(key, idx + 1)?;
         if is_dotenvx_private_key_name(key) {
             bail!(
                 "refusing to decrypt dotenv file containing {key}; private keys must stay outside env files"
@@ -1574,31 +1709,39 @@ fn decrypt_dotenv_body(body: &str, private_key: &str) -> Result<Vec<u8>> {
         let value = parse_env_value(raw_value)
             .with_context(|| format!("parse {key} while decrypting dotenv"))?;
         if value.starts_with(DOTENV_ENCRYPTED_PREFIX) {
-            let decrypted = dotenvx_decrypt(&value, private_key)
-                .map_err(|err| anyhow!("decrypt {key} with dotenvx ECIES: {err}"))?;
-            out.push(format!("{key}={}", quote_env_value(&decrypted)));
+            let decrypted = Zeroizing::new(
+                dotenvx_decrypt(&value, private_key)
+                    .map_err(|err| anyhow!("decrypt {key} with dotenvx ECIES: {err}"))?,
+            );
+            let quoted = quote_env_value(&decrypted);
+            out.push_str(key);
+            out.push('=');
+            push_line(&mut out, &quoted);
         } else {
-            out.push(raw_line.to_string());
+            push_line(&mut out, raw_line);
         }
     }
-    Ok(format!("{}\n", out.join("\n")).into_bytes())
+    if out.is_empty() {
+        out.push('\n');
+    }
+    Ok(Zeroizing::new(std::mem::take(&mut *out).into_bytes()))
 }
 
 fn decrypt_dotenv_env_pairs(
     body: &str,
     key_materials: &[NativeEnvKeyMaterial],
-) -> Result<Vec<(String, String)>> {
+) -> Result<Vec<(String, Zeroizing<String>)>> {
     ensure!(
         !key_materials.is_empty(),
         "at least one stored native env key is required"
     );
     let mut out = Vec::new();
-    for raw_line in body.lines() {
+    for (idx, raw_line) in body.lines().enumerate() {
         let Some((raw_key, raw_value)) = split_dotenv_assignment(raw_line) else {
             continue;
         };
         let key = raw_key.trim();
-        validate_dotenv_assignment_key(key)?;
+        validate_dotenv_assignment_key(key, idx + 1)?;
         if is_dotenvx_private_key_name(key) {
             bail!(
                 "refusing to load dotenv file containing {key}; private keys must stay outside env files"
@@ -1631,15 +1774,15 @@ fn decrypt_env_value(
     key: &str,
     value: &str,
     key_materials: &[NativeEnvKeyMaterial],
-) -> Result<String> {
+) -> Result<Zeroizing<String>> {
     if !value.starts_with(DOTENV_ENCRYPTED_PREFIX) {
-        return Ok(value.to_string());
+        return Ok(Zeroizing::new(value.to_string()));
     }
 
     let mut last_error = None;
     for material in key_materials {
         match dotenvx_decrypt(value, &material.private_key) {
-            Ok(decrypted) => return Ok(decrypted),
+            Ok(decrypted) => return Ok(Zeroizing::new(decrypted)),
             Err(err) => last_error = Some(err.to_string()),
         }
     }
@@ -1647,18 +1790,17 @@ fn decrypt_env_value(
     bail!("decrypt {key} with stored native env keys: {detail}")
 }
 
-fn validate_dotenv_assignment_key(key: &str) -> Result<()> {
+/// Errors name the line number only: the text before `=` on a malformed line
+/// can be secret material (for example part of a multi-line value).
+fn validate_dotenv_assignment_key(key: &str, line_no: usize) -> Result<()> {
     let mut chars = key.chars();
     let Some(first) = chars.next() else {
-        bail!("empty dotenv key");
+        bail!("empty dotenv key on line {line_no}");
     };
     ensure!(
-        first.is_ascii_alphabetic() || first == '_',
-        "invalid dotenv key {key}"
-    );
-    ensure!(
-        chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_'),
-        "invalid dotenv key {key}"
+        (first.is_ascii_alphabetic() || first == '_')
+            && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_'),
+        "invalid dotenv key on line {line_no}"
     );
     Ok(())
 }
@@ -1683,13 +1825,31 @@ fn push_shk_public_key_header(out: &mut Vec<String>, public_key_name: &str, publ
     out.push(format!("{public_key_name}=\"{public_key}\""));
 }
 
-fn quote_env_value(value: &str) -> String {
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r");
-    format!("\"{escaped}\"")
+/// Quote a decrypted value so dotenv readers get the exact bytes back.
+///
+/// Single quotes are literal for every reader (no escapes, no `$` expansion),
+/// so they are used whenever the value allows it. Values containing a single
+/// quote or a line break fall back to double quotes with escapes.
+fn quote_env_value(value: &str) -> Zeroizing<String> {
+    let mut out = Zeroizing::new(String::with_capacity(value.len() * 2 + 2));
+    if !value.contains(['\'', '\n', '\r']) {
+        out.push('\'');
+        out.push_str(value);
+        out.push('\'');
+        return out;
+    }
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn write_output(path: &Path, body: &[u8], force: bool) -> Result<()> {
@@ -1728,6 +1888,34 @@ mod tests {
             root: root.to_path_buf(),
             project_id: None,
         }
+    }
+
+    /// Import into `store` with an empty native store alongside it.
+    fn import_dotenvx_keys(
+        store: &dyn SecretStore,
+        project: &ProjectIdentity,
+        entries: Vec<(String, String)>,
+    ) -> Result<()> {
+        dotenvx_import_keys_with_store(
+            store,
+            &MockSecretStore::keyring(),
+            project,
+            zeroizing_entries(entries),
+        )
+    }
+
+    fn zeroizing_entries(entries: Vec<(String, String)>) -> Vec<(String, Zeroizing<String>)> {
+        entries
+            .into_iter()
+            .map(|(key, value)| (key, Zeroizing::new(value)))
+            .collect()
+    }
+
+    fn plain_entries(entries: Vec<(String, Zeroizing<String>)>) -> Vec<(String, String)> {
+        entries
+            .into_iter()
+            .map(|(key, value)| (key, value.to_string()))
+            .collect()
     }
 
     struct FailingPutSecretStore;
@@ -1877,7 +2065,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            parsed,
+            plain_entries(parsed),
             vec![
                 (
                     "DOTENV_PRIVATE_KEY".to_string(),
@@ -1901,7 +2089,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            parsed,
+            plain_entries(parsed),
             vec![
                 (
                     "DOTENV_PRIVATE_KEY".to_string(),
@@ -1920,7 +2108,7 @@ mod tests {
         let store = MockSecretStore::keyring();
         let root = Path::new("/repo/app");
         let project = test_project(root);
-        dotenvx_import_keys_with_store(
+        import_dotenvx_keys(
             &store,
             &project,
             vec![
@@ -1976,7 +2164,7 @@ mod tests {
         let store = MockSecretStore::keyring();
         let root = Path::new("/repo/app");
         let project = test_project(root);
-        dotenvx_import_keys_with_store(
+        import_dotenvx_keys(
             &store,
             &project,
             vec![
@@ -2085,7 +2273,7 @@ mod tests {
         let store = MockSecretStore::keyring();
         let root = Path::new("/repo/app");
         let project = test_project(root);
-        dotenvx_import_keys_with_store(
+        import_dotenvx_keys(
             &store,
             &project,
             vec![
@@ -2193,9 +2381,9 @@ mod tests {
         assert!(!encrypted.contains("API_KEY=secret"), "{encrypted}");
         assert!(!encrypted.contains(&keypair.private_key()), "{encrypted}");
         let plaintext = decrypt_dotenv_body(&encrypted, &keypair.private_key()).unwrap();
-        let plaintext = String::from_utf8(plaintext).unwrap();
-        assert!(plaintext.contains("API_KEY=\"secret\""), "{plaintext}");
-        assert!(plaintext.contains("PUBLIC_VALUE=\"ok\""), "{plaintext}");
+        let plaintext = String::from_utf8(plaintext.to_vec()).unwrap();
+        assert!(plaintext.contains("API_KEY='secret'"), "{plaintext}");
+        assert!(plaintext.contains("PUBLIC_VALUE='ok'"), "{plaintext}");
     }
 
     #[test]
@@ -2212,10 +2400,10 @@ mod tests {
         assert!(!encrypted.contains("# API_KEY=\"encrypted:"), "{encrypted}");
 
         let plaintext = decrypt_dotenv_body(&encrypted, &keypair.private_key()).unwrap();
-        let plaintext = String::from_utf8(plaintext).unwrap();
+        let plaintext = String::from_utf8(plaintext.to_vec()).unwrap();
 
         assert!(plaintext.contains(commented), "{plaintext}");
-        assert!(plaintext.contains("ACTIVE=\"secret\""), "{plaintext}");
+        assert!(plaintext.contains("ACTIVE='secret'"), "{plaintext}");
     }
 
     #[test]
@@ -2388,7 +2576,7 @@ mod tests {
         )
         .unwrap();
         let plaintext = decrypt_dotenv_body(&encrypted, &keypair.private_key()).unwrap();
-        let plaintext = String::from_utf8(plaintext).unwrap();
+        let plaintext = String::from_utf8(plaintext.to_vec()).unwrap();
 
         assert!(!plaintext.contains("[SHK_NATIVE_ENV]"), "{plaintext}");
         assert!(!plaintext.contains("[DOTENV_PUBLIC_KEY]"), "{plaintext}");
@@ -2397,7 +2585,7 @@ mod tests {
             "{plaintext}"
         );
         assert!(!plaintext.contains("dotenvx.com"), "{plaintext}");
-        assert!(plaintext.contains("API_KEY=\"secret\""), "{plaintext}");
+        assert!(plaintext.contains("API_KEY='secret'"), "{plaintext}");
     }
 
     #[test]
@@ -2417,22 +2605,132 @@ mod tests {
         let dotenvx_store = MockSecretStore::keyring();
         let root = Path::new("/repo");
         let project = test_project(root);
-        let first = read_or_create_native_env_key(
+        encrypt_env_plaintext_with_stores(
             &native_store,
             &dotenvx_store,
             &project,
             "DOTENV_PRIVATE_KEY",
+            "NAME=value\n",
         )
         .unwrap();
-        let second = read_or_create_native_env_key(
+        let first = read_native_env_key(&native_store, &project, "DOTENV_PRIVATE_KEY")
+            .unwrap()
+            .unwrap();
+        encrypt_env_plaintext_with_stores(
             &native_store,
             &dotenvx_store,
             &project,
             "DOTENV_PRIVATE_KEY",
+            "NAME=value\n",
         )
         .unwrap();
+        let second = read_native_env_key(&native_store, &project, "DOTENV_PRIVATE_KEY")
+            .unwrap()
+            .unwrap();
         assert_eq!(first.public_key, second.public_key);
         assert_eq!(first.private_key, second.private_key);
+    }
+
+    #[test]
+    fn encrypt_does_not_persist_a_new_key_when_the_input_is_rejected() {
+        let native_store = MockSecretStore::keyring();
+        let dotenvx_store = MockSecretStore::keyring();
+        let project = test_project(Path::new("/repo"));
+
+        let err = encrypt_env_plaintext_with_stores(
+            &native_store,
+            &dotenvx_store,
+            &project,
+            "DOTENV_PRIVATE_KEY",
+            "NAME=value\nnot an assignment\n",
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("line 2"), "{err:#}");
+        assert!(native_store.list_keys(&project).unwrap().is_empty());
+        assert_eq!(
+            native_store.get(&project, "DOTENV_PRIVATE_KEY").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn encrypt_refuses_to_generate_a_key_for_input_with_a_public_key_header() {
+        let native_store = MockSecretStore::keyring();
+        let dotenvx_store = MockSecretStore::keyring();
+        let project = test_project(Path::new("/repo"));
+        let other_machine = Keypair::generate();
+        let body = format!(
+            "DOTENV_PUBLIC_KEY=\"{}\"\nNAME=value\n",
+            other_machine.public_key()
+        );
+
+        let err = encrypt_env_plaintext_with_stores(
+            &native_store,
+            &dotenvx_store,
+            &project,
+            "DOTENV_PRIVATE_KEY",
+            &body,
+        )
+        .unwrap_err();
+
+        let message = format!("{err:#}");
+        assert!(message.contains("DOTENV_PUBLIC_KEY header"), "{message}");
+        assert!(message.contains("no DOTENV_PRIVATE_KEY"), "{message}");
+        assert!(native_store.list_keys(&project).unwrap().is_empty());
+
+        // A header for another key name does not block key creation.
+        encrypt_env_plaintext_with_stores(
+            &native_store,
+            &dotenvx_store,
+            &project,
+            "DOTENV_PRIVATE_KEY_STAGING",
+            &body,
+        )
+        .unwrap();
+        assert!(
+            read_native_env_key(&native_store, &project, "DOTENV_PRIVATE_KEY_STAGING")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn encrypt_fails_without_output_when_the_new_key_cannot_be_stored() {
+        let dotenvx_store = MockSecretStore::keyring();
+        let project = test_project(Path::new("/repo"));
+
+        let err = encrypt_env_plaintext_with_stores(
+            &FailingPutSecretStore,
+            &dotenvx_store,
+            &project,
+            "DOTENV_PRIVATE_KEY",
+            "NAME=value\n",
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("store DOTENV_PRIVATE_KEY"));
+    }
+
+    #[test]
+    fn encrypt_output_decrypts_with_the_newly_stored_key() {
+        let native_store = MockSecretStore::keyring();
+        let dotenvx_store = MockSecretStore::keyring();
+        let project = test_project(Path::new("/repo"));
+
+        let encrypted = encrypt_env_plaintext_with_stores(
+            &native_store,
+            &dotenvx_store,
+            &project,
+            "DOTENV_PRIVATE_KEY",
+            "NAME=value\n",
+        )
+        .unwrap();
+        let stored = read_native_env_key(&native_store, &project, "DOTENV_PRIVATE_KEY")
+            .unwrap()
+            .unwrap();
+        let plaintext = decrypt_dotenv_body(&encrypted, &stored.private_key).unwrap();
+        assert_eq!(plaintext.as_slice(), b"NAME='value'\n");
     }
 
     #[test]
@@ -2528,6 +2826,7 @@ mod tests {
 
         key_delete_with_store(
             &store,
+            &MockSecretStore::keyring(),
             &project,
             EnvKeyDeleteArgs {
                 all: false,
@@ -2549,6 +2848,7 @@ mod tests {
 
         key_delete_with_store(
             &store,
+            &MockSecretStore::keyring(),
             &project,
             EnvKeyDeleteArgs {
                 all: true,
@@ -2585,6 +2885,7 @@ mod tests {
 
         key_delete_with_store(
             &store,
+            &MockSecretStore::keyring(),
             &project,
             EnvKeyDeleteArgs {
                 all: false,
@@ -2811,7 +3112,10 @@ mod tests {
             command: vec!["npm".to_string(), "test".to_string()],
         };
         let pairs = decrypt_dotenv_env_pairs(&encrypted, &[material]).unwrap();
-        assert_eq!(pairs, vec![("API_KEY".to_string(), "secret".to_string())]);
+        assert_eq!(
+            plain_entries(pairs),
+            vec![("API_KEY".to_string(), "secret".to_string())]
+        );
 
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".env"), encrypted).unwrap();
@@ -3295,5 +3599,345 @@ mod tests {
         assert!(updated.contains("secret_store = \"1password\""));
         assert!(updated.contains("project_id = \"acme/app\""));
         assert!(updated.contains("secrets = true # keep me"));
+    }
+
+    /// Reads `name` the way the reference `dotenvx` crate parser does.
+    fn reference_read(body: &str, name: &str) -> String {
+        let mut parser = dotenvx::DotenvParser::new();
+        parser
+            .parse(body)
+            .expect("reference parser accepts body")
+            .get(name)
+            .cloned()
+            .expect("reference parser found the variable")
+    }
+
+    /// Mirror of the raw quote stripping the reference crate's encrypt/decrypt
+    /// services apply (no escape processing at all).
+    fn reference_raw_read(body: &str, name: &str) -> String {
+        let line = body
+            .lines()
+            .find(|line| line.starts_with(&format!("{name}=")))
+            .expect("assignment line present");
+        let value = line[name.len() + 1..].trim();
+        if value.len() >= 2
+            && ((value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\'')))
+        {
+            return value[1..value.len() - 1].to_string();
+        }
+        value.to_string()
+    }
+
+    fn assert_reference_round_trip(source_value: &str) {
+        let keypair = Keypair::generate();
+        let source = format!("VALUE={source_value}\n");
+        let expected = reference_read(&source, "VALUE");
+
+        let encrypted =
+            encrypt_dotenv_body(&source, "DOTENV_PUBLIC_KEY", &keypair.public_key()).unwrap();
+        let ciphertext = reference_read(&encrypted, "VALUE");
+        assert!(ciphertext.starts_with(DOTENV_ENCRYPTED_PREFIX));
+        let stored = dotenvx_decrypt(&ciphertext, &keypair.private_key()).unwrap();
+        assert_eq!(stored, expected, "encrypted value for {source_value:?}");
+
+        let plaintext = decrypt_dotenv_body(&encrypted, &keypair.private_key()).unwrap();
+        let plaintext = String::from_utf8(plaintext.to_vec()).unwrap();
+        assert_eq!(
+            reference_read(&plaintext, "VALUE"),
+            expected,
+            "decrypted output {plaintext:?} for {source_value:?}"
+        );
+        if !expected.contains(['\'', '\n', '\r']) {
+            assert_eq!(
+                reference_raw_read(&plaintext, "VALUE"),
+                expected,
+                "raw reader on decrypted output {plaintext:?} for {source_value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn round_trip_preserves_backslashes() {
+        assert_reference_round_trip(r"C:\dir\name");
+        assert_reference_round_trip(r#""C:\\dir\\name""#);
+    }
+
+    #[test]
+    fn round_trip_preserves_double_quotes() {
+        assert_reference_round_trip(r#"'say "hi" twice'"#);
+        assert_reference_round_trip(r#""say \"hi\" twice""#);
+    }
+
+    #[test]
+    fn round_trip_preserves_dollar_signs() {
+        assert_reference_round_trip("'cost$5 and $HOME'");
+        assert_reference_round_trip(r#""cost$5""#);
+    }
+
+    #[test]
+    fn round_trip_preserves_single_quoted_json() {
+        assert_reference_round_trip(r#"'{"name":"demo","count":1}'"#);
+    }
+
+    #[test]
+    fn round_trip_preserves_hash_without_preceding_space() {
+        assert_reference_round_trip("abc#def");
+        assert_reference_round_trip(r#""abc #def""#);
+    }
+
+    #[test]
+    fn round_trip_preserves_escaped_single_quote_and_newline() {
+        assert_reference_round_trip(r#""it\'s here""#);
+        assert_reference_round_trip(r#""first\nsecond""#);
+    }
+
+    #[test]
+    fn encrypt_rejects_lines_without_assignment_naming_only_the_line_number() {
+        let keypair = Keypair::generate();
+        let body = "CERT=first-part\ncontinuation-material\nOTHER=ok\n";
+        let err =
+            encrypt_dotenv_body(body, "DOTENV_PUBLIC_KEY", &keypair.public_key()).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("line 2"), "{message}");
+        assert!(!message.contains("continuation-material"), "{message}");
+    }
+
+    #[test]
+    fn invalid_key_errors_name_the_line_without_echoing_text() {
+        let keypair = Keypair::generate();
+        let body = "OK=1\nleft hand material=rest\n";
+        let err =
+            encrypt_dotenv_body(body, "DOTENV_PUBLIC_KEY", &keypair.public_key()).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("line 2"), "{message}");
+        assert!(!message.contains("left hand material"), "{message}");
+
+        let err = decrypt_dotenv_body(body, &keypair.private_key()).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("line 2"), "{message}");
+        assert!(!message.contains("left hand material"), "{message}");
+
+        let material = NativeEnvKeyMaterial {
+            public_key: keypair.public_key(),
+            private_key: keypair.private_key(),
+        };
+        let err = decrypt_dotenv_env_pairs(body, &[material]).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("line 2"), "{message}");
+        assert!(!message.contains("left hand material"), "{message}");
+    }
+
+    #[test]
+    fn encrypt_keeps_blank_and_comment_lines() {
+        let keypair = Keypair::generate();
+        let body = "# heading\n\n   \nNAME=value\n  # trailing note\n";
+        let encrypted =
+            encrypt_dotenv_body(body, "DOTENV_PUBLIC_KEY", &keypair.public_key()).unwrap();
+        assert!(encrypted.contains("# heading\n\n   \nNAME=\"encrypted:"));
+        assert!(encrypted.ends_with("  # trailing note\n"));
+    }
+
+    #[test]
+    fn quote_env_value_prefers_single_quotes_when_exact() {
+        assert_eq!(quote_env_value("plain").as_str(), "'plain'");
+        assert_eq!(quote_env_value("").as_str(), "''");
+        assert_eq!(quote_env_value(r#"a"b\c$d"#).as_str(), r#"'a"b\c$d'"#);
+        assert_eq!(
+            quote_env_value(r#"it's "x"\y"#).as_str(),
+            r#""it's \"x\"\\y""#
+        );
+        assert_eq!(quote_env_value("a\nb\rc").as_str(), r#""a\nb\rc""#);
+    }
+
+    #[test]
+    fn import_rejects_rotated_key_when_native_copy_differs() {
+        let native_store = MockSecretStore::keyring();
+        let dotenvx_store = MockSecretStore::keyring();
+        let project = test_project(Path::new("/repo"));
+        let old = Keypair::generate();
+        let rotated = Keypair::generate();
+        let entry = |keypair: &Keypair| {
+            vec![(
+                "DOTENV_PRIVATE_KEY".to_string(),
+                Zeroizing::new(keypair.private_key()),
+            )]
+        };
+        dotenvx_import_keys_with_store(&dotenvx_store, &native_store, &project, entry(&old))
+            .unwrap();
+        read_or_adopt_env_key_material(
+            &native_store,
+            &dotenvx_store,
+            &project,
+            "DOTENV_PRIVATE_KEY",
+        )
+        .unwrap()
+        .unwrap();
+
+        // Re-importing the key the native store already holds is fine.
+        dotenvx_import_keys_with_store(&dotenvx_store, &native_store, &project, entry(&old))
+            .unwrap();
+
+        let mut entries = vec![(
+            "DOTENV_PRIVATE_KEY_STAGING".to_string(),
+            Zeroizing::new(Keypair::generate().private_key()),
+        )];
+        entries.extend(entry(&rotated));
+        let err = dotenvx_import_keys_with_store(&dotenvx_store, &native_store, &project, entries)
+            .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("already holds a different DOTENV_PRIVATE_KEY"),
+            "{message}"
+        );
+        assert!(message.contains("shk env key delete"), "{message}");
+        assert!(!message.contains(&old.private_key()), "{message}");
+        assert!(!message.contains(&rotated.private_key()), "{message}");
+
+        // Nothing was written: neither the rotated key nor the other entry.
+        assert_eq!(
+            dotenvx_store.get(&project, "DOTENV_PRIVATE_KEY").unwrap(),
+            Some(old.private_key())
+        );
+        assert_eq!(
+            dotenvx_store
+                .get(&project, "DOTENV_PRIVATE_KEY_STAGING")
+                .unwrap(),
+            None
+        );
+        let used = read_or_adopt_env_key_material(
+            &native_store,
+            &dotenvx_store,
+            &project,
+            "DOTENV_PRIVATE_KEY",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(used.public_key, old.public_key());
+    }
+
+    #[test]
+    fn key_delete_reports_dotenvx_copies_that_will_be_readopted() {
+        let native_store = MockSecretStore::keyring();
+        let dotenvx_store = MockSecretStore::keyring();
+        let project = test_project(Path::new("/repo"));
+        let keypair = Keypair::generate();
+        dotenvx_store
+            .put(&project, "DOTENV_PRIVATE_KEY", &keypair.private_key())
+            .unwrap();
+        read_or_adopt_env_key_material(
+            &native_store,
+            &dotenvx_store,
+            &project,
+            "DOTENV_PRIVATE_KEY",
+        )
+        .unwrap()
+        .unwrap();
+
+        let deleted = vec![
+            "DOTENV_PRIVATE_KEY".to_string(),
+            "DOTENV_PRIVATE_KEY_STAGING".to_string(),
+        ];
+        let notes = dotenvx_readoption_notes(&dotenvx_store, &project, &deleted);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("DOTENV_PRIVATE_KEY "), "{notes:?}");
+        assert!(notes[0].contains("re-adopted"), "{notes:?}");
+        assert!(
+            notes[0].contains("shk env dotenvx delete --key DOTENV_PRIVATE_KEY"),
+            "{notes:?}"
+        );
+        assert!(!notes[0].contains(&keypair.private_key()), "{notes:?}");
+
+        key_delete_with_store(
+            &native_store,
+            &dotenvx_store,
+            &project,
+            EnvKeyDeleteArgs {
+                all: false,
+                key: Some("DOTENV_PRIVATE_KEY".to_string()),
+                env: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            native_store.get(&project, "DOTENV_PRIVATE_KEY").unwrap(),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_source_guard_detects_same_file_through_symlinked_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join("link")).unwrap();
+        let input = real.join("app.env");
+        std::fs::write(&input, "NAME=value\n").unwrap();
+        let output = dir.path().join("link").join("app.env");
+        assert_ne!(
+            comparable_path(dir.path(), &input),
+            comparable_path(dir.path(), &output),
+            "the paths differ lexically"
+        );
+
+        let err = ensure_remove_source_output_differs(dir.path(), &input, &output).unwrap_err();
+        assert!(err.to_string().contains("different files"), "{err}");
+    }
+
+    #[test]
+    fn remove_source_guard_detects_same_file_by_case_on_insensitive_filesystems() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("app.env");
+        std::fs::write(&input, "NAME=value\n").unwrap();
+        let output = dir.path().join("APP.ENV");
+        if !output.exists() {
+            // Case-sensitive filesystem: these are two different files.
+            ensure_remove_source_output_differs(dir.path(), &input, &output).unwrap();
+            return;
+        }
+        let err = ensure_remove_source_output_differs(dir.path(), &input, &output).unwrap_err();
+        assert!(err.to_string().contains("different files"), "{err}");
+    }
+
+    #[test]
+    fn remove_source_guard_allows_distinct_and_missing_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("app.env");
+        std::fs::write(&input, "NAME=value\n").unwrap();
+        let existing = dir.path().join("app.env.encrypted");
+        std::fs::write(&existing, "old\n").unwrap();
+
+        ensure_remove_source_output_differs(dir.path(), &input, &existing).unwrap();
+        ensure_remove_source_output_differs(dir.path(), &input, &dir.path().join("new.env"))
+            .unwrap();
+        let err = ensure_remove_source_output_differs(dir.path(), &input, &input).unwrap_err();
+        assert!(err.to_string().contains("different files"), "{err}");
+    }
+
+    #[test]
+    fn secret_carrying_buffers_are_zeroizing() {
+        // Compile-time contract: these buffers wipe themselves on every path,
+        // including early returns through `?`.
+        let keypair = Keypair::generate();
+        let _: Zeroizing<String> = parse_env_value("'value'").unwrap();
+        let _: Zeroizing<String> = quote_env_value("value");
+        let _: Vec<(String, Zeroizing<String>)> =
+            parse_dotenvx_keys("DOTENV_PRIVATE_KEY=placeholder\n").unwrap();
+        let encrypted =
+            encrypt_dotenv_body("NAME=value\n", "DOTENV_PUBLIC_KEY", &keypair.public_key())
+                .unwrap();
+        let _: Zeroizing<Vec<u8>> =
+            decrypt_dotenv_body(&encrypted, &keypair.private_key()).unwrap();
+        let material = NativeEnvKeyMaterial {
+            public_key: keypair.public_key(),
+            private_key: keypair.private_key(),
+        };
+        let _: Vec<(String, Zeroizing<String>)> =
+            decrypt_dotenv_env_pairs(&encrypted, &[material]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env.keys");
+        std::fs::write(&path, "DOTENV_PRIVATE_KEY=placeholder\n").unwrap();
+        let _: Zeroizing<String> = read_migration_candidate(&path).unwrap();
     }
 }
