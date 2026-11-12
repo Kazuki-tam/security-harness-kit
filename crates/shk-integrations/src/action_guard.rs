@@ -4,7 +4,7 @@ use crate::hook_payload::parse_hook_payload;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const SECRET_PATH_PATTERNS: &[&str] = &[
     ".env",
@@ -493,12 +493,14 @@ pub fn detect_dangerous_action_with_config(
     // each of them is read.
     let candidates = candidate_command_strings(&v);
     let budget = ScanBudget::for_payload(candidates.iter().map(|c| c.text.len()).sum());
+    // Likewise the policy lists are prepared once, not per command part.
+    let policy = GuardPolicy::new(config);
     for candidate in candidates {
         let matched = detect_candidate_command(
             &candidate.text,
             candidate.command_typed,
             profile,
-            config,
+            &policy,
             &budget,
         );
         if matched.is_some() {
@@ -982,6 +984,23 @@ const MAX_EXAMINED_COMMAND_BYTES: usize = 1024 * 1024;
 /// `FOO=1 …`, `$(…)`) under every reading.
 const EXAMINED_BYTES_PER_PAYLOAD_BYTE: usize = 4;
 
+/// Comparisons of an action with a policy list entry allowed per hook
+/// payload. Only entries that share their literal start with the action are
+/// compared at all, so ordinary lists (`Bash(git status)`, `Bash(npm run *)`)
+/// cost next to nothing. What adds up is a list of entries that start with a
+/// wildcard: each of them has to be tried on every part of every command.
+const MAX_POLICY_WORK: usize = 4 * 1024 * 1024;
+
+/// A long payload may make this many comparisons per byte instead.
+const POLICY_WORK_PER_PAYLOAD_BYTE: usize = 8;
+
+/// A comparison reads the action, so a long action counts as one comparison
+/// more for every this many bytes.
+const POLICY_ACTION_BYTES_PER_UNIT: usize = 32;
+
+/// Segments up to this long are remembered once found clean.
+const MAX_REMEMBERED_SEGMENT_BYTES: usize = 256;
+
 /// Work left for one hook payload, shared by all of its candidate command
 /// strings and all readings of them.
 struct ScanBudget {
@@ -991,6 +1010,10 @@ struct ScanBudget {
     examined_bytes: Cell<usize>,
     /// Bytes of text that may still be examined behind ambiguous wrappers.
     fan_out_bytes: Cell<usize>,
+    /// Comparisons with policy list entries that may still be made.
+    policy_work: Cell<usize>,
+    /// A comparison was skipped because none was left.
+    policy_overdrawn: Cell<bool>,
 }
 
 impl ScanBudget {
@@ -1003,6 +1026,10 @@ impl ScanBudget {
                     .max(payload_bytes.saturating_mul(EXAMINED_BYTES_PER_PAYLOAD_BYTE)),
             ),
             fan_out_bytes: Cell::new(MAX_FAN_OUT_BYTES),
+            policy_work: Cell::new(
+                MAX_POLICY_WORK.max(payload_bytes.saturating_mul(POLICY_WORK_PER_PAYLOAD_BYTE)),
+            ),
+            policy_overdrawn: Cell::new(false),
         }
     }
 
@@ -1025,6 +1052,20 @@ impl ScanBudget {
     /// behind an ambiguous wrapper, on top of `charge_examined`.
     fn charge_fan_out(&self, bytes: usize) -> bool {
         Self::charge_bytes(&self.fan_out_bytes, bytes)
+    }
+
+    /// Charges comparing an action of `action_bytes` with one policy list
+    /// entry. False when the payload has no comparison left; the scan then
+    /// fails closed.
+    fn charge_policy_comparison(&self, action_bytes: usize) -> bool {
+        let charged = Self::charge_bytes(
+            &self.policy_work,
+            1 + action_bytes / POLICY_ACTION_BYTES_PER_UNIT,
+        );
+        if !charged {
+            self.policy_overdrawn.set(true);
+        }
+        charged
     }
 
     fn charge_bytes(left: &Cell<usize>, bytes: usize) -> bool {
@@ -1099,7 +1140,7 @@ fn detect_candidate_command(
     text: &str,
     command_typed: bool,
     profile: ActionGuardProfile,
-    config: &ActionGuardConfig,
+    policy: &GuardPolicy<'_>,
     budget: &ScanBudget,
 ) -> Option<ActionGuardMatch> {
     let reparses = budget.reparses.get();
@@ -1115,14 +1156,13 @@ fn detect_candidate_command(
         // Every reading gets the same re-parses; the payload is charged for
         // the most expensive one. Examined text is charged for all of them.
         budget.reparses.set(reparses);
-        let scan = CommandScan {
+        let scan = CommandScan::new(
             profile,
-            config,
-            unwrap_prefixes: command_typed,
+            policy,
+            command_typed,
             budget,
-            comments: CommentReading::new(mode, ansi_c),
-            fan_out: RefCell::default(),
-        };
+            CommentReading::new(mode, ansi_c),
+        );
         matched = detect_command(text, &scan, 0, false);
         reparses_left = reparses_left.min(budget.reparses.get());
         if matched.is_some() {
@@ -1172,7 +1212,7 @@ impl FanOutMemo {
 /// Settings and shared state for scanning one candidate command string.
 struct CommandScan<'a> {
     profile: ActionGuardProfile,
-    config: &'a ActionGuardConfig,
+    policy: &'a GuardPolicy<'a>,
     /// Unwrap reserved words and exec-style wrappers. Only for strings known
     /// to be shell commands: in file bodies and prose a leading `if` or `{`
     /// says nothing about what runs.
@@ -1181,6 +1221,27 @@ struct CommandScan<'a> {
     budget: &'a ScanBudget,
     comments: CommentReading,
     fan_out: RefCell<FanOutMemo>,
+    /// Counts the fan-outs behind ambiguous wrappers. What one of them
+    /// examines depends on what the others already have (`fan_out`).
+    fan_outs: Cell<u64>,
+    /// Short segments found clean without a fan-out, by the kind of pass
+    /// (`pass_kind`), with the examined text the pass charged to the payload.
+    /// Such a verdict depends on nothing but the segment's text and the
+    /// settings above, so a repeated segment is not scanned again: it is
+    /// charged what scanning it would have charged.
+    clean_segments: RefCell<HashMap<String, Vec<(usize, usize)>>>,
+    /// The text being scanned was put together from the words of a wrapper
+    /// (`bash -c "…"`, `eval …`) instead of being cut out of the command as
+    /// written. Its backslashes are close to, but not exactly, what the
+    /// shell would hand to the wrapped command.
+    reassembled: Cell<bool>,
+}
+
+/// Tells the passes over a segment apart whose verdicts may differ: nested
+/// text is denied at the depth limit, a shallow pass skips substitutions and
+/// does not fan out, and reassembled text has its backslashes read loosely.
+fn pass_kind(depth: usize, shallow: bool, reassembled: bool) -> usize {
+    4 * depth + 2 * usize::from(reassembled) + usize::from(shallow)
 }
 
 /// The fail-closed answer when a payload needs more analysis than its budget
@@ -1195,7 +1256,52 @@ fn too_many_words_after_wrapper() -> ActionGuardMatch {
     )
 }
 
-impl CommandScan<'_> {
+impl<'a> CommandScan<'a> {
+    fn new(
+        profile: ActionGuardProfile,
+        policy: &'a GuardPolicy<'a>,
+        unwrap_prefixes: bool,
+        budget: &'a ScanBudget,
+        comments: CommentReading,
+    ) -> Self {
+        Self {
+            profile,
+            policy,
+            unwrap_prefixes,
+            budget,
+            comments,
+            fan_out: RefCell::default(),
+            fan_outs: Cell::new(0),
+            clean_segments: RefCell::default(),
+            reassembled: Cell::new(false),
+        }
+    }
+
+    /// Scans text that only the additional scans read: what a substitution
+    /// runs where the segment splitter's reading of quotes hides it. Such a
+    /// scan may only add a denial. So it gets a fan-out memo of its own:
+    /// what it finds clean is never a reason for another scan to skip text.
+    fn detect_additional(&self, text: &str, depth: usize) -> Option<ActionGuardMatch> {
+        let memo = self.fan_out.take();
+        let matched = detect_command(text, self, depth, false);
+        self.fan_out.replace(memo);
+        matched
+    }
+
+    /// Scans the text a wrapper runs, as put together from the wrapper's
+    /// words.
+    fn detect_reassembled(&self, text: &str, depth: usize) -> Option<ActionGuardMatch> {
+        let outer = self.reassembled.replace(true);
+        let matched = detect_command(text, self, depth, false);
+        self.reassembled.set(outer);
+        matched
+    }
+
+    /// True when a `Bash(…)` action for `command` matches an entry of `list`.
+    fn command_matches(&self, list: &ActionPatterns, command: &str) -> bool {
+        list.matches_bash && list.matches(&normalized_bash_action(command), self.budget)
+    }
+
     /// Scans the commands one wrapper may run: `texts` as given, and the
     /// suffixes of `base` that begin at `starts` (byte offset and word).
     ///
@@ -1220,7 +1326,7 @@ impl CommandScan<'_> {
             ([], []) => return None,
             // Text of its own (`bash -c …`, `eval …`) has not been scanned by
             // the enclosing segment, so it is always read in full.
-            ([only], []) => return detect_command(only, self, depth, false),
+            ([only], []) => return self.detect_reassembled(only, depth),
             ([], [(start, _)]) => {
                 let (start, depth) = self.peel_plain_wrappers(base, *start, depth)?;
                 return detect_command(&base[start..], self, depth, shallow);
@@ -1229,11 +1335,12 @@ impl CommandScan<'_> {
             _ if shallow => return Some(too_many_words_after_wrapper()),
             _ => {}
         }
+        self.fan_outs.set(self.fan_outs.get() + 1);
         for text in texts {
             if !self.budget.charge_reparse() {
                 return Some(too_many_words_after_wrapper());
             }
-            if let Some(matched) = detect_command(text, self, depth, false) {
+            if let Some(matched) = self.detect_reassembled(text, depth) {
                 return Some(matched);
             }
         }
@@ -1307,8 +1414,8 @@ impl CommandScan<'_> {
         let unpeeled = Some((start, depth));
         let tail = &base[start..];
         let first = tail.split(' ').next().unwrap_or_default();
-        if !self.config.allow.is_empty()
-            || !self.config.deny.is_empty()
+        if !self.policy.config.allow.is_empty()
+            || !self.policy.config.deny.is_empty()
             || !self.skippable_wrapper(first)
             || !plainly_spaced_words(tail)
         {
@@ -1367,7 +1474,7 @@ impl CommandScan<'_> {
     /// command behind a comment (`# note \<newline> ls`).
     fn allowed_without_its_comment(&self, raw_segment: &str) -> bool {
         if self.comments.mode != CommentMode::Ignored
-            || self.config.allow.is_empty()
+            || !self.policy.allow.matches_bash
             || !raw_segment.contains('#')
         {
             return false;
@@ -1381,7 +1488,7 @@ impl CommandScan<'_> {
             && raw_segment.starts_with(command.as_str())
             && [reading.decoded(command), command.clone()]
                 .iter()
-                .any(|form| action_allowed(&format!("Bash({form})"), &self.config.allow))
+                .any(|form| self.command_matches(&self.policy.allow, form))
     }
 }
 
@@ -1438,11 +1545,11 @@ impl PlainTailScreen {
             deny_prefixes: Vec::new(),
             deny_needles: Vec::new(),
         };
-        for pattern in &scan.config.deny {
+        for pattern in &scan.policy.deny.patterns {
             if screen.every_word {
                 break;
             }
-            screen.add_deny_entry(&normalize_action_pattern(pattern), base, tail_start);
+            screen.add_deny_entry(pattern, base, tail_start);
         }
         screen
     }
@@ -1551,7 +1658,6 @@ fn detect_command(
     depth: usize,
     shallow: bool,
 ) -> Option<ActionGuardMatch> {
-    let (profile, config) = (scan.profile, scan.config);
     if depth >= MAX_NESTED_COMMAND_DEPTH {
         return Some(guard_match(
             ActionCategory::OpaqueExecution,
@@ -1562,100 +1668,237 @@ fn detect_command(
     if depth > 0 && !scan.budget.charge_examined(command.len()) {
         return Some(too_many_words_after_wrapper());
     }
-    let ansi_c = scan.comments.ansi_c;
-    let normalized_whole = normalize_shell(command);
-    let whole_action = format!("Bash({normalized_whole})");
-    if compound_action_allowed(&whole_action, &config.allow) {
-        return None;
-    }
-    if action_denied(&whole_action, &config.deny) {
-        return Some(guard_match(
-            ActionCategory::CustomPolicy,
-            format!("shk action guard: `{whole_action}` denied by project policy"),
-        ));
+    let policy = scan.policy;
+    if policy.compound_allow.matches_bash || policy.deny.matches_bash {
+        let normalized_whole = normalize_shell(command);
+        let whole_action = format!("Bash({normalized_whole})");
+        let action = normalize_action_pattern(&whole_action);
+        if policy.compound_allow.matches(&action, scan.budget) {
+            return None;
+        }
+        if policy.deny.matches(&action, scan.budget) {
+            return Some(guard_match(
+                ActionCategory::CustomPolicy,
+                format!("shk action guard: `{whole_action}` denied by project policy"),
+            ));
+        }
+        if scan.budget.policy_overdrawn.get() {
+            return Some(too_many_policy_comparisons());
+        }
     }
 
-    for raw_segment in shell_command_segments(command, &scan.comments) {
-        // Decode before anything lowercases or re-tokenises the text, so the
-        // nested passes below see the characters the shell would run.
-        let segment = scan.comments.decoded(&raw_segment);
-        let normalized = normalize_shell(&segment);
-        if !shallow {
-            for embedded in embedded_shell_commands(&normalized, ansi_c) {
-                if let Some(matched) = detect_command_at_depth(&embedded, scan, depth + 1) {
+    let reassembled = scan.reassembled.get();
+    let kind = pass_kind(depth, shallow, reassembled);
+    let mut heredoc_substitutions = Vec::new();
+    let filtered =
+        command_without_heredoc_bodies(command, &scan.comments, &mut heredoc_substitutions);
+    // The last few clean segments of this pass, with what each charged, in
+    // front of `clean_segments`: a run of one command needs no lookup there.
+    let mut recent = [("", 0); 4];
+    let mut next_recent = 0;
+    for raw_segment in split_command_segments(&filtered, &scan.comments) {
+        let short = raw_segment.len() <= MAX_REMEMBERED_SEGMENT_BYTES;
+        let remembered = recent
+            .iter()
+            .find(|(segment, _)| *segment == raw_segment)
+            .map(|(_, examined)| *examined)
+            .or_else(|| {
+                let clean = scan.clean_segments.borrow();
+                let passes = short.then(|| clean.get(raw_segment)).flatten()?;
+                let (_, examined) = passes.iter().find(|(pass, _)| *pass == kind)?;
+                Some(*examined)
+            });
+        let examined = match remembered {
+            Some(examined) => {
+                if !scan.budget.charge_examined(examined) {
+                    return Some(too_many_words_after_wrapper());
+                }
+                examined
+            }
+            None => {
+                let fan_outs = scan.fan_outs.get();
+                let left = scan.budget.examined_bytes.get();
+                if let Some(matched) = detect_segment(raw_segment, scan, depth, shallow) {
+                    return Some(matched);
+                }
+                if !short || scan.fan_outs.get() != fan_outs {
+                    continue;
+                }
+                let examined = left - scan.budget.examined_bytes.get();
+                scan.clean_segments
+                    .borrow_mut()
+                    .entry(raw_segment.to_string())
+                    .or_default()
+                    .push((kind, examined));
+                examined
+            }
+        };
+        recent[next_recent] = (raw_segment, examined);
+        next_recent = (next_recent + 1) % recent.len();
+    }
+    if shallow {
+        // The enclosing pass has read the same text for substitutions.
+        return None;
+    }
+
+    // The scans above read quotes the way the segment splitter does. The
+    // shell does not always: these look again at the substitutions it runs
+    // where the splitter's reading hides them. Each adds denials only.
+    let mut substitutions = heredoc_substitutions;
+    arithmetic_substitutions(&filtered, &mut substitutions);
+    double_quoted_substitutions(
+        &filtered,
+        scan.comments.ansi_c,
+        reassembled,
+        &mut substitutions,
+    );
+    for body in &substitutions {
+        if let Some(matched) = scan.detect_additional(body, depth + 1) {
+            return Some(matched);
+        }
+    }
+    None
+}
+
+/// Scans one segment of a command: a simple command, or a quoted region the
+/// splitter kept whole.
+fn detect_segment(
+    raw_segment: &str,
+    scan: &CommandScan<'_>,
+    depth: usize,
+    shallow: bool,
+) -> Option<ActionGuardMatch> {
+    let (profile, policy) = (scan.profile, scan.policy);
+    let ansi_c = scan.comments.ansi_c;
+    // Decode before anything lowercases or re-tokenises the text, so the
+    // nested passes below see the characters the shell would run.
+    let segment = scan.comments.decoded(raw_segment);
+    let normalized = normalize_shell(&segment);
+    if !shallow {
+        let mut unclosed = Vec::new();
+        for embedded in substitution_bodies(&normalized, ansi_c, Some(&mut unclosed)) {
+            if let Some(matched) = detect_command_at_depth(&embedded, scan, depth + 1) {
+                return Some(matched);
+            }
+        }
+        // A `$(` without a closing parenthesis of its own: an escaped or
+        // quoted `(` in its body took it. What follows is its body.
+        for start in unclosed {
+            let matched = scan.detect_additional(&normalized[start..], depth + 1);
+            if matched.is_some() {
+                return matched;
+            }
+        }
+        // A backtick substitution the splitter cut in two: the rest of the
+        // segment is the first command of its body. Only in strings known to
+        // be shell commands; in prose and Markdown an inline code span with
+        // a `|` or `;` in it looks the same.
+        let cut = scan
+            .unwrap_prefixes
+            .then(|| cut_backtick_substitution(&normalized, ansi_c))
+            .flatten();
+        if let Some(start) = cut {
+            let mut bodies = Vec::new();
+            push_backtick_body(&normalized[start..], &mut bodies);
+            // A command word with a blank in it names no command. That is
+            // what a quote opened right behind the first word makes of it,
+            // as in a comment that quotes `like this'.
+            bodies.retain(|body| {
+                shell_words_unquoted(body, ansi_c)
+                    .first()
+                    .is_some_and(|word| !word.text.contains(char::is_whitespace))
+            });
+            for body in &bodies {
+                if let Some(matched) = scan.detect_additional(body, depth + 1) {
                     return Some(matched);
                 }
             }
         }
-        // The segment as written, plus the form bash actually runs once quotes
-        // and backslashes are removed from the command word (`cu""rl`, `c\url`).
-        let canonical = canonical_command_segment(&segment, ansi_c);
-        let variants = std::iter::once(segment.as_str())
-            .chain(canonical.as_deref())
-            .collect::<Vec<_>>();
-        for variant in &variants {
-            let normalized = normalize_shell(variant);
-            let words = shell_tokens(&normalized);
-            let raw_command = words.first().map(String::as_str).unwrap_or_default();
-            let command_name = command_basename(raw_command);
-            let nested = nested_command_payloads(raw_command, command_name, &words);
-            let matched = match nested.starts.first() {
-                None => scan.detect_wrapped(&nested.texts, "", &[], depth + 1, shallow),
-                Some(&first) => {
-                    let (joined, offsets) = join_shell_tokens_for_reparse(&words[first..]);
-                    let starts = nested
-                        .starts
-                        .iter()
-                        .map(|&index| (offsets[index - first], words[index].as_str()))
-                        .collect::<Vec<_>>();
-                    scan.detect_wrapped(&nested.texts, &joined, &starts, depth + 1, shallow)
-                }
-            };
-            if matched.is_some() {
-                return matched;
+    }
+    // The segment as written, plus the form bash actually runs once quotes
+    // and backslashes are removed from the command word (`cu""rl`, `c\url`).
+    let canonical = canonical_command_segment(&segment, ansi_c);
+    let variants = std::iter::once(segment.as_str())
+        .chain(canonical.as_deref())
+        .collect::<Vec<_>>();
+    for variant in &variants {
+        let normalized = normalize_shell(variant);
+        let words = shell_tokens(&normalized);
+        let raw_command = words.first().map(String::as_str).unwrap_or_default();
+        let command_name = command_basename(raw_command);
+        let nested = nested_command_payloads(raw_command, command_name, &words);
+        let matched = match nested.starts.first() {
+            None => scan.detect_wrapped(&nested.texts, "", &[], depth + 1, shallow),
+            Some(&first) => {
+                let (joined, offsets) = join_shell_tokens_for_reparse(&words[first..]);
+                let starts = nested
+                    .starts
+                    .iter()
+                    .map(|&index| (offsets[index - first], words[index].as_str()))
+                    .collect::<Vec<_>>();
+                scan.detect_wrapped(&nested.texts, &joined, &starts, depth + 1, shallow)
             }
+        };
+        if matched.is_some() {
+            return matched;
         }
+    }
+    if policy.allow.matches_bash || policy.deny.matches_bash {
         // Policy entries may spell ANSI-C quoting (`$'…'`) as typed or as the
-        // text it denotes, so both forms of the segment are matched.
-        let typed = (raw_segment != segment).then_some(raw_segment.as_str());
-        if std::iter::once(segment.as_str())
-            .chain(typed)
-            .any(|form| action_allowed(&format!("Bash({form})"), &config.allow))
-            || scan.allowed_without_its_comment(&raw_segment)
+        // text it denotes, so both forms of the segment are matched. Each
+        // form is normalised once for both lists.
+        let typed = (raw_segment != segment).then_some(raw_segment);
+        let segment_action = normalized_bash_action(&segment);
+        let typed_action = typed.map(normalized_bash_action);
+        let allowed = |action: &String| policy.allow.matches(action, scan.budget);
+        if allowed(&segment_action)
+            || typed_action.as_ref().is_some_and(allowed)
+            || scan.allowed_without_its_comment(raw_segment)
         {
-            continue;
+            return None;
         }
-        for variant in variants.iter().copied().chain(typed) {
-            let action = format!("Bash({variant})");
-            if action_denied(&action, &config.deny) {
+        let canonical_action = canonical.as_deref().map(normalized_bash_action);
+        let forms = [
+            (Some(segment.as_str()), Some(&segment_action)),
+            (canonical.as_deref(), canonical_action.as_ref()),
+            (typed, typed_action.as_ref()),
+        ];
+        for (variant, action) in forms {
+            let (Some(variant), Some(action)) = (variant, action) else {
+                continue;
+            };
+            if policy.deny.matches(action, scan.budget) {
                 return Some(guard_match(
                     ActionCategory::CustomPolicy,
-                    format!("shk action guard: `{action}` denied by project policy"),
+                    format!("shk action guard: `Bash({variant})` denied by project policy"),
                 ));
             }
         }
-        // Reserved words and exec-style wrappers run the command that follows
-        // them. An explicitly allowed segment (checked above) is not unwrapped.
-        if scan.unwrap_prefixes {
-            let words = shell_words_unquoted(&normalized, ansi_c);
-            let texts = words
-                .iter()
-                .map(|word| word.text.as_str())
-                .collect::<Vec<_>>();
-            let starts = prefixed_command_starts(&texts)
-                .into_iter()
-                .filter_map(|index| words.get(index))
-                .map(|word| (word.start, word.text.as_str()))
-                .collect::<Vec<_>>();
-            let matched = scan.detect_wrapped(&[], &normalized, &starts, depth + 1, shallow);
-            if matched.is_some() {
-                return matched;
-            }
+        if scan.budget.policy_overdrawn.get() {
+            return Some(too_many_policy_comparisons());
         }
-        for variant in &variants {
-            if let Some(matched) = detect_builtin_command(variant, profile, ansi_c) {
-                return Some(matched);
-            }
+    }
+    // Reserved words and exec-style wrappers run the command that follows
+    // them. An explicitly allowed segment (checked above) is not unwrapped.
+    if scan.unwrap_prefixes {
+        let words = shell_words_unquoted(&normalized, ansi_c);
+        let texts = words
+            .iter()
+            .map(|word| word.text.as_str())
+            .collect::<Vec<_>>();
+        let starts = prefixed_command_starts(&texts)
+            .into_iter()
+            .filter_map(|index| words.get(index))
+            .map(|word| (word.start, word.text.as_str()))
+            .collect::<Vec<_>>();
+        let matched = scan.detect_wrapped(&[], &normalized, &starts, depth + 1, shallow);
+        if matched.is_some() {
+            return matched;
+        }
+    }
+    for variant in &variants {
+        if let Some(matched) = detect_builtin_command(variant, profile, ansi_c) {
+            return Some(matched);
         }
     }
     None
@@ -2217,7 +2460,16 @@ fn detect_builtin_command(
 }
 
 fn shell_command_segments(command: &str, comments: &CommentReading) -> Vec<String> {
-    let command = command_without_heredoc_bodies(command, comments);
+    let command = command_without_heredoc_bodies(command, comments, &mut Vec::new());
+    split_command_segments(&command, comments)
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Splits command text whose heredoc bodies and comments have been taken out
+/// (`command_without_heredoc_bodies`) into its segments.
+fn split_command_segments<'c>(command: &'c str, comments: &CommentReading) -> Vec<&'c str> {
     let mut segments = Vec::new();
     let mut start = 0;
     let mut quote = None;
@@ -2243,14 +2495,14 @@ fn shell_command_segments(command: &str, comments: &CommentReading) -> Vec<Strin
         if quote.is_none() && matches!(ch, ';' | '|' | '&' | '\n' | '(' | ')') {
             let segment = command[start..index].trim();
             if !segment.is_empty() {
-                segments.push(segment.to_string());
+                segments.push(segment);
             }
             start = index + ch.len_utf8();
         }
     }
     let segment = command[start..].trim();
     if !segment.is_empty() {
-        segments.push(segment.to_string());
+        segments.push(segment);
     }
     segments
 }
@@ -2262,10 +2514,31 @@ struct HeredocDelimiter {
     expand_body: bool,
 }
 
-fn command_without_heredoc_bodies(command: &str, comments: &CommentReading) -> String {
+/// The command without its heredoc bodies and comments. The substitutions of
+/// an expanded body are appended in its place. Those that only show once the
+/// body's quote characters are read as the ordinary text they are go to
+/// `literal_quote_substitutions` instead: put into the text, their own quotes
+/// could change how the commands after the heredoc are read.
+fn command_without_heredoc_bodies(
+    command: &str,
+    comments: &CommentReading,
+    literal_quote_substitutions: &mut Vec<String>,
+) -> String {
     let mut filtered = String::with_capacity(command.len());
     let mut pending = std::collections::VecDeque::<HeredocDelimiter>::new();
     let mut state = ShellLineState::default();
+    // The expanded heredoc body being read, and the substitutions appended
+    // for its lines so far.
+    let mut body = String::new();
+    let mut appended = HashSet::new();
+    let mut finish_body = |body: &mut String, appended: &mut HashSet<String>| {
+        let mut found = Vec::new();
+        substitutions_ignoring_quotes(body, &mut found);
+        found.retain(|substitution| !appended.contains(substitution));
+        literal_quote_substitutions.extend(found);
+        body.clear();
+        appended.clear();
+    };
 
     for line_with_newline in command.split_inclusive('\n') {
         let line = line_with_newline
@@ -2280,11 +2553,16 @@ fn command_without_heredoc_bodies(command: &str, comments: &CommentReading) -> S
             if candidate == delimiter.value {
                 pending.pop_front();
                 filtered.push('\n');
+                finish_body(&mut body, &mut appended);
             } else if delimiter.expand_body {
                 for embedded in embedded_shell_commands(line, comments.ansi_c) {
                     filtered.push(';');
                     filtered.push_str(&embedded);
+                    appended.insert(embedded);
                 }
+                // A substitution may also span lines, which the search line
+                // by line above does not see.
+                body.push_str(line_with_newline);
             }
             continue;
         }
@@ -2303,6 +2581,7 @@ fn command_without_heredoc_bodies(command: &str, comments: &CommentReading) -> S
         }
         pending.extend(delimiters);
     }
+    finish_body(&mut body, &mut appended);
 
     filtered
 }
@@ -2353,6 +2632,19 @@ fn heredoc_delimiters(
     state: &mut ShellLineState,
     comments: &CommentReading,
 ) -> (Vec<HeredocDelimiter>, Option<usize>) {
+    // Most lines hold none of the characters the loop below reacts to. All
+    // it does for such a line is to note that the line break ends the word.
+    let reacted_to = |byte: u8| {
+        matches!(
+            byte,
+            b'\\' | b'\'' | b'"' | b'#' | b'$' | b'}' | b'`' | b'(' | b')' | b'<'
+        )
+    };
+    if !line.bytes().any(reacted_to) {
+        state.mid_word = state.quote.is_some();
+        state.mid_word_after_parenthesis = state.mid_word;
+        return (Vec::new(), None);
+    }
     let chars = line.char_indices().collect::<Vec<_>>();
     let mut delimiters = Vec::new();
     let mut index = 0;
@@ -2884,6 +3176,17 @@ fn join_shell_tokens_for_reparse(words: &[String]) -> (String, Vec<usize>) {
 }
 
 fn embedded_shell_commands(command: &str, ansi_c: bool) -> Vec<String> {
+    substitution_bodies(command, ansi_c, None)
+}
+
+/// The bodies of the command substitutions in `command` that are not inside
+/// single or ANSI-C quotes. With `unclosed`, also reports where the body of
+/// each `$(` starts that has no closing parenthesis of its own.
+fn substitution_bodies(
+    command: &str,
+    ansi_c: bool,
+    mut unclosed: Option<&mut Vec<usize>>,
+) -> Vec<String> {
     let chars = command.char_indices().collect::<Vec<_>>();
     let mut commands = Vec::new();
     let mut index = 0;
@@ -2941,10 +3244,438 @@ fn embedded_shell_commands(command: &str, ansi_c: bool) -> Vec<String> {
                 index = end_index + 1;
                 continue;
             }
+            // When the body starts with another `$(` that stays open, that
+            // one's body is reported and this one's adds nothing to it.
+            let opens_again = chars.get(start_index).map(|(_, next)| *next) == Some('$')
+                && chars.get(start_index + 1).map(|(_, next)| *next) == Some('(')
+                && chars.get(start_index + 2).map(|(_, next)| *next) != Some('(')
+                && closing[start_index + 1].is_none();
+            if let (Some(unclosed), Some((start, _)), false) =
+                (unclosed.as_deref_mut(), chars.get(start_index), opens_again)
+            {
+                unclosed.push(*start);
+            }
         }
         index += 1;
     }
     commands
+}
+
+/// Collects the bodies of the command substitutions in `text` when its quote
+/// characters do not quote: the body of an expanded heredoc, an arithmetic
+/// expression. A backslash still escapes the next character.
+///
+/// A `$(` body runs to its closing parenthesis (`closing_parentheses_of`),
+/// or to the end of `text` when it has none there. The body is a command of
+/// its own, in which quotes quote again, so the search continues behind it.
+/// Only a body that starts with a parenthesis is searched as well, because
+/// `$((…))` is arithmetic.
+fn substitutions_ignoring_quotes(text: &str, bodies: &mut Vec<String>) {
+    if !text.contains('`') && !text.contains("$(") {
+        return;
+    }
+    let chars = text.char_indices().collect::<Vec<_>>();
+    let offset_of = |index: usize| chars.get(index).map_or(text.len(), |(offset, _)| *offset);
+    let mut closing_parentheses = None;
+    // Where the parenthesised body ends that the search is inside of. That
+    // body was added as a whole, so the parenthesised ones in it are only
+    // searched: adding each would copy the text once per level of nesting.
+    let mut inside_until = 0;
+    let mut index = 0;
+    while index < chars.len() {
+        let (_, ch) = chars[index];
+        if ch == '\\' {
+            index += 2;
+            continue;
+        }
+        if ch == '`'
+            && let Some(end) = closing_backtick(&chars, index + 1)
+        {
+            push_backtick_body(&text[offset_of(index + 1)..offset_of(end)], bodies);
+            index = end + 1;
+            continue;
+        }
+        if ch == '$' && chars.get(index + 1).map(|(_, next)| *next) == Some('(') {
+            let closing = closing_parentheses.get_or_insert_with(|| closing_parentheses_of(&chars));
+            let end = closing[index + 1].unwrap_or(chars.len());
+            let body = &text[offset_of(index + 2)..offset_of(end)];
+            let parenthesised = body.starts_with('(');
+            let covered = parenthesised && index < inside_until;
+            if !covered && !body.trim().is_empty() {
+                bodies.push(body.to_string());
+            }
+            if parenthesised {
+                inside_until = inside_until.max(end);
+                index += 2;
+            } else {
+                index = end + 1;
+            }
+            continue;
+        }
+        index += 1;
+    }
+}
+
+/// The index of the backtick that closes a substitution whose body starts at
+/// `start`: the next one that is not escaped with a backslash.
+fn closing_backtick(chars: &[(usize, char)], start: usize) -> Option<usize> {
+    let mut index = start;
+    while let Some((_, ch)) = chars.get(index) {
+        match ch {
+            '`' => return Some(index),
+            '\\' => index += 2,
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// Adds the body of a backtick substitution. Inside backticks a backslash in
+/// front of a backtick, a dollar sign or another backslash is removed before
+/// the body runs, which is how a nested substitution is written
+/// (`` `echo \`date\`` ``); the body is added that way too.
+fn push_backtick_body(body: &str, bodies: &mut Vec<String>) {
+    if body.trim().is_empty() {
+        return;
+    }
+    bodies.push(body.to_string());
+    if !body.contains('\\') {
+        return;
+    }
+    let mut unescaped = String::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match (ch, chars.peek()) {
+            ('\\', Some(next @ ('`' | '$' | '\\'))) => {
+                unescaped.push(*next);
+                chars.next();
+            }
+            _ => unescaped.push(ch),
+        }
+    }
+    if unescaped != body {
+        bodies.push(unescaped);
+    }
+}
+
+/// Collects the command substitutions inside the arithmetic expressions of
+/// `text`: `$((…))`, `((…))` and `$[…]`. Quote characters do not quote in
+/// there, so `$(( '$(cmd)' ))` runs `cmd`. The expressions are looked for
+/// wherever they could start, whatever the quoting around them.
+fn arithmetic_substitutions(text: &str, bodies: &mut Vec<String>) {
+    if (!text.contains("((") && !text.contains("$[")) || !text.contains(['`', '$']) {
+        return;
+    }
+    let chars = text.char_indices().collect::<Vec<_>>();
+    let offset_of = |index: usize| chars.get(index).map_or(text.len(), |(offset, _)| *offset);
+    let closing = closing_parentheses_of(&chars);
+    let mut index = 0;
+    while index + 1 < chars.len() {
+        let (current, next) = (chars[index].1, chars[index + 1].1);
+        let end = match (current, next) {
+            ('(', '(') => closing[index].unwrap_or(chars.len()),
+            ('$', '[') => balanced_region_end(&chars, index + 1, '[', ']'),
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        let expression = &text[offset_of(index + 2)..offset_of(end)];
+        if expression.contains(['\'', '"']) {
+            substitutions_ignoring_quotes(expression, bodies);
+        }
+        index = end.max(index + 2);
+    }
+}
+
+/// Collects the bodies of the substitutions inside double-quoted strings,
+/// found the way the shell finds them: a substitution's body is a command of
+/// its own, in which quotes start afresh and nest (`"$(echo "a;b"; cmd)"`).
+/// The segment splitter does not follow that. It reads the quote inside the
+/// body as the end of the string around it, cuts at the `;` and leaves no
+/// segment in which the body can be recognised.
+///
+/// A body without quotes, backslashes or parentheses reads the same either
+/// way and is left to the scan of its segment, until a body that does not has
+/// been passed: from there on the splitter's reading of the quotes is off.
+///
+/// In `reassembled` text a backtick behind any backslash is taken to be
+/// escaped. Such text is not unescaped quite as the shell does it: where the
+/// command spelled an escaped backslash and an escaped backtick, it holds
+/// two backslashes and a backtick, which read as an escaped backslash and a
+/// live backtick.
+fn double_quoted_substitutions(
+    text: &str,
+    ansi_c: bool,
+    reassembled: bool,
+    bodies: &mut Vec<String>,
+) {
+    if !text.contains('"') || !text.contains(['`', '$']) {
+        return;
+    }
+    let chars = text.char_indices().collect::<Vec<_>>();
+    let offset_of = |index: usize| chars.get(index).map_or(text.len(), |(offset, _)| *offset);
+    let mut quote = None;
+    let mut diverged = false;
+    let mut index = 0;
+    while index < chars.len() {
+        let (_, ch) = chars[index];
+        if ch == '\\' && quote != Some('\'') {
+            index += 2;
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            let after_dollar = ansi_c && quote_follows_dollar(&chars, index);
+            open_shell_quote(&mut quote, ch, after_dollar);
+        } else if quote == Some('"')
+            && ch == '$'
+            && chars.get(index + 1).map(|(_, next)| *next) == Some('(')
+        {
+            // `$((…))` is arithmetic: no quoting in there to diverge on.
+            let arithmetic = chars.get(index + 2).map(|(_, next)| *next) == Some('(');
+            let end = match shell_arithmetic_end(&chars, index) {
+                Some(end) if arithmetic => end - 1,
+                _ => substitution_end(&chars, index + 2, ansi_c),
+            };
+            let body = &text[offset_of(index + 2)..offset_of(end)];
+            if !arithmetic && body.contains(['"', '\\', '(', ')']) {
+                diverged = true;
+            }
+            if diverged && !body.trim().is_empty() {
+                bodies.push(body.to_string());
+            }
+            index = end;
+        } else if quote == Some('"')
+            && ch == '`'
+            && !(reassembled && index > 0 && chars[index - 1].1 == '\\')
+            && let Some(end) = closing_backtick(&chars, index + 1)
+        {
+            let body = &text[offset_of(index + 1)..offset_of(end)];
+            if body.contains(['"', '\\']) {
+                diverged = true;
+            }
+            if diverged {
+                push_backtick_body(body, bodies);
+            }
+            index = end;
+        }
+        index += 1;
+    }
+}
+
+/// The index of the `)` that closes a command substitution whose body starts
+/// at `start`, or the length of `chars` when nothing does. The body is read
+/// as a command: single-quoted strings, backtick substitutions and comments
+/// are skipped, a double-quoted string is skipped including the
+/// substitutions in it, parentheses nest, the `)` behind a `case` pattern
+/// closes nothing, and a heredoc body is skipped up to its delimiter.
+fn substitution_end(chars: &[(usize, char)], start: usize, ansi_c: bool) -> usize {
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum Open {
+        /// The substitution itself, a nested one, or a subshell.
+        Parenthesis,
+        DoubleQuote,
+        /// `case … esac`: a `)` directly inside ends a pattern.
+        Case,
+    }
+    let mut open = vec![Open::Parenthesis];
+    // Heredoc delimiters seen on the current line, with `<<-` tab stripping.
+    let mut heredocs = Vec::<(String, bool)>::new();
+    let at = |index: usize| chars.get(index).map(|(_, ch)| *ch);
+    // True when the characters from `index` on spell `word` as a word.
+    let word_at = |index: usize, word: &str| {
+        word.chars()
+            .enumerate()
+            .all(|(offset, expected)| at(index + offset) == Some(expected))
+            && at(index + word.len())
+                .is_none_or(|next| next.is_whitespace() || matches!(next, ';' | '|' | '&' | ')'))
+    };
+    // A word starts here; and a command, when only blanks lie between here
+    // and the start of the body or a control operator.
+    let mut word_start = true;
+    let mut command_start = true;
+    let mut index = start;
+    while let Some(ch) = at(index) {
+        let in_double_quotes = open.last() == Some(&Open::DoubleQuote);
+        let (at_word_start, at_command_start) = (word_start, command_start);
+        word_start =
+            !in_double_quotes && (ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | '(' | ')'));
+        command_start = !in_double_quotes
+            && (matches!(ch, ';' | '|' | '&' | '(' | '\n')
+                || (at_command_start && matches!(ch, ' ' | '\t')));
+        // Arithmetic holds no quoting and no heredocs (`<<` is a shift).
+        if (ch == '$' || !in_double_quotes)
+            && let Some(end) = shell_arithmetic_end(chars, index)
+        {
+            index = end;
+            continue;
+        }
+        match ch {
+            '\\' => index += 1,
+            '`' => index = closing_backtick(chars, index + 1).unwrap_or(chars.len()),
+            '"' if in_double_quotes => {
+                open.pop();
+            }
+            '$' if in_double_quotes && at(index + 1) == Some('(') => {
+                open.push(Open::Parenthesis);
+                index += 1;
+                (word_start, command_start) = (true, true);
+            }
+            _ if in_double_quotes => {}
+            '"' => open.push(Open::DoubleQuote),
+            '\'' => {
+                let escapes = ansi_c && quote_follows_dollar(chars, index);
+                index += 1;
+                while let Some(quoted) = at(index) {
+                    match quoted {
+                        '\'' => break,
+                        '\\' if escapes => index += 2,
+                        _ => index += 1,
+                    }
+                }
+            }
+            '#' if at_word_start => {
+                // A comment runs to the end of the line.
+                while at(index + 1).is_some_and(|next| next != '\n') {
+                    index += 1;
+                }
+            }
+            'c' if at_command_start && word_at(index, "case") => open.push(Open::Case),
+            'e' if at_word_start && open.last() == Some(&Open::Case) && word_at(index, "esac") => {
+                open.pop();
+            }
+            '(' => open.push(Open::Parenthesis),
+            ')' if open.last() == Some(&Open::Case) => {}
+            ')' => {
+                open.pop();
+                if open.is_empty() {
+                    return index;
+                }
+            }
+            '<' if at(index + 1) == Some('<') && at(index + 2) != Some('<') => {
+                let (delimiter, next) = heredoc_delimiter_word(chars, index + 2);
+                heredocs.extend(delimiter);
+                index = next;
+                continue;
+            }
+            '<' if at(index + 1) == Some('<') => index += 2,
+            '\n' if !heredocs.is_empty() => {
+                for (delimiter, strip_tabs) in heredocs.drain(..) {
+                    index = heredoc_body_end(chars, index + 1, &delimiter, strip_tabs);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    chars.len()
+}
+
+/// Reads the delimiter word behind a `<<` whose word starts at `start`:
+/// the word without its quotes and whether tabs are stripped (`<<-`), plus
+/// the index behind it.
+fn heredoc_delimiter_word(
+    chars: &[(usize, char)],
+    start: usize,
+) -> (Option<(String, bool)>, usize) {
+    let at = |index: usize| chars.get(index).map(|(_, ch)| *ch);
+    let mut index = start;
+    let strip_tabs = at(index) == Some('-');
+    if strip_tabs {
+        index += 1;
+    }
+    while at(index).is_some_and(|ch| ch == ' ' || ch == '\t') {
+        index += 1;
+    }
+    let mut word = String::new();
+    let mut quote = None;
+    while let Some(ch) = at(index) {
+        match (quote, ch) {
+            (Some(open), _) if open == ch => quote = None,
+            (Some(_), _) => word.push(ch),
+            (None, '\'' | '"') => quote = Some(ch),
+            (None, '\\') => {
+                index += 1;
+                word.extend(at(index));
+            }
+            (None, _) if ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | '(' | ')') => break,
+            (None, _) => word.push(ch),
+        }
+        index += 1;
+    }
+    ((!word.is_empty()).then_some((word, strip_tabs)), index)
+}
+
+/// The index of the line break that ends the delimiter line of a heredoc
+/// whose body starts at `start`, or the length of `chars` when the body is
+/// not ended.
+fn heredoc_body_end(
+    chars: &[(usize, char)],
+    start: usize,
+    delimiter: &str,
+    strip_tabs: bool,
+) -> usize {
+    let mut line_start = start;
+    while line_start < chars.len() {
+        let line_end = chars[line_start..]
+            .iter()
+            .position(|(_, ch)| *ch == '\n')
+            .map_or(chars.len(), |length| line_start + length);
+        let mut line = chars[line_start..line_end]
+            .iter()
+            .map(|(_, ch)| *ch)
+            .peekable();
+        while strip_tabs && line.peek() == Some(&'\t') {
+            line.next();
+        }
+        if line.eq(delimiter.chars()) {
+            return line_end;
+        }
+        line_start = line_end + 1;
+    }
+    chars.len()
+}
+
+/// Where the body of a backtick substitution starts that `segment` ends
+/// inside of. The segment splitter cuts at a `;`, `|`, `&`, parenthesis or
+/// line break in a backtick body, so the segment holds the backtick and the
+/// first command of the body, not the closing backtick. Single and ANSI-C
+/// quotes keep a backtick inert, as does a backslash in front of it.
+fn cut_backtick_substitution(segment: &str, ansi_c: bool) -> Option<usize> {
+    if !segment.contains('`') {
+        return None;
+    }
+    let chars = segment.char_indices().collect::<Vec<_>>();
+    let mut quote = None;
+    let mut closing_parentheses = None;
+    let mut index = 0;
+    while index < chars.len() {
+        let (_, ch) = chars[index];
+        if ch == '\\' && quote != Some('\'') {
+            index += 2;
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            let after_dollar = ansi_c && quote_follows_dollar(&chars, index);
+            open_shell_quote(&mut quote, ch, after_dollar);
+        } else if quote == Some('"')
+            && ch == '$'
+            && chars.get(index + 1).map(|(_, next)| *next) == Some('(')
+        {
+            // The body of a `$(` in double quotes is scanned as a command of
+            // its own, with its own quotes and heredocs.
+            let closing = closing_parentheses.get_or_insert_with(|| closing_parentheses_of(&chars));
+            index = closing[index + 1].unwrap_or(chars.len());
+        } else if ch == '`' && !matches!(quote, Some('\'' | '$')) {
+            match closing_backtick(&chars, index + 1) {
+                Some(end) => index = end,
+                None => return chars.get(index + 1).map(|(offset, _)| *offset),
+            }
+        }
+        index += 1;
+    }
+    None
 }
 
 /// For every `(`, the index of the `)` that closes it when each parenthesis
@@ -2967,17 +3698,135 @@ fn closing_parentheses_of(chars: &[(usize, char)]) -> Vec<Option<usize>> {
     closing
 }
 
-fn action_allowed(action: &str, allow: &[String]) -> bool {
-    action_list_matches(action, allow)
+/// One policy list with every entry normalised once.
+///
+/// The entries are indexed by the literal text they start with (everything
+/// before the first `*`). An entry can only match an action that starts with
+/// that text, so an action is compared with the few entries found by walking
+/// the index along its own start instead of with the whole list.
+struct ActionPatterns {
+    /// Normalised entries.
+    patterns: Vec<String>,
+    /// Prefix tree over the literal starts; the root is node 0.
+    nodes: Vec<PatternNode>,
+    /// Some entry may match a `Bash(…)` action.
+    matches_bash: bool,
 }
 
-fn compound_action_allowed(action: &str, allow: &[String]) -> bool {
-    allow.iter().any(|pattern| {
-        pattern
-            .chars()
-            .any(|ch| matches!(ch, ';' | '|' | '&' | '\n'))
-            && action_list_matches(action, std::slice::from_ref(pattern))
-    })
+#[derive(Default)]
+struct PatternNode {
+    /// Child nodes by the next byte of the literal start.
+    next: Vec<(u8, usize)>,
+    /// Entries whose literal start ends here.
+    patterns: Vec<usize>,
+}
+
+impl ActionPatterns {
+    fn new<'p>(raw: impl Iterator<Item = &'p String>) -> Self {
+        const BASH_ACTION_START: &str = "bash(";
+        let mut list = Self {
+            patterns: Vec::new(),
+            nodes: vec![PatternNode::default()],
+            matches_bash: false,
+        };
+        for pattern in raw {
+            let pattern = normalize_action_pattern(pattern);
+            let literal = pattern.split('*').next().unwrap_or_default();
+            list.matches_bash |=
+                literal.starts_with(BASH_ACTION_START) || BASH_ACTION_START.starts_with(literal);
+            let mut node = 0;
+            for byte in literal.bytes() {
+                let known = list.nodes[node]
+                    .next
+                    .iter()
+                    .find(|(candidate, _)| *candidate == byte)
+                    .map(|(_, next)| *next);
+                node = match known {
+                    Some(next) => next,
+                    None => {
+                        list.nodes.push(PatternNode::default());
+                        let next = list.nodes.len() - 1;
+                        list.nodes[node].next.push((byte, next));
+                        next
+                    }
+                };
+            }
+            list.nodes[node].patterns.push(list.patterns.len());
+            list.patterns.push(pattern);
+        }
+        list
+    }
+
+    /// True when an entry matches `action`, which must be normalised. Every
+    /// comparison is charged to the payload; once none is left, nothing
+    /// matches and the budget is marked overdrawn.
+    fn matches(&self, action: &str, budget: &ScanBudget) -> bool {
+        let mut node = &self.nodes[0];
+        let mut bytes = action.bytes();
+        loop {
+            for &index in &node.patterns {
+                if !budget.charge_policy_comparison(action.len()) {
+                    return false;
+                }
+                if wildcard_match(&self.patterns[index], action) {
+                    return true;
+                }
+            }
+            let Some(byte) = bytes.next() else {
+                return false;
+            };
+            let Some((_, next)) = node.next.iter().find(|(candidate, _)| *candidate == byte) else {
+                return false;
+            };
+            node = &self.nodes[*next];
+        }
+    }
+}
+
+/// The normalised action of running `command` in a shell.
+fn normalized_bash_action(command: &str) -> String {
+    normalize_action_pattern(&format!("Bash({command})"))
+}
+
+/// The guard configuration with its policy lists prepared for matching. Built
+/// once per hook payload.
+struct GuardPolicy<'a> {
+    config: &'a ActionGuardConfig,
+    allow: ActionPatterns,
+    /// The allow entries that hold a command separator: they may allow a
+    /// compound command as a whole.
+    compound_allow: ActionPatterns,
+    deny: ActionPatterns,
+}
+
+impl<'a> GuardPolicy<'a> {
+    fn new(config: &'a ActionGuardConfig) -> Self {
+        let compound = |pattern: &&String| {
+            pattern
+                .chars()
+                .any(|ch| matches!(ch, ';' | '|' | '&' | '\n'))
+        };
+        Self {
+            config,
+            allow: ActionPatterns::new(config.allow.iter()),
+            compound_allow: ActionPatterns::new(config.allow.iter().filter(compound)),
+            deny: ActionPatterns::new(config.deny.iter()),
+        }
+    }
+}
+
+/// The fail-closed answer when matching a payload against the policy lists
+/// takes more comparisons than its budget allows.
+fn too_many_policy_comparisons() -> ActionGuardMatch {
+    guard_match(
+        ActionCategory::OpaqueExecution,
+        "shk action guard: the command has too many parts to match against the project policy \
+         lists",
+    )
+}
+
+fn action_allowed(action: &str, allow: &[String]) -> bool {
+    action_list_matches(action, allow)
 }
 
 fn action_denied(action: &str, deny: &[String]) -> bool {
@@ -6176,14 +7025,14 @@ mod tests {
     fn category_reading(command: &str, mode: CommentMode, ansi_c: bool) -> Option<&'static str> {
         let config = ActionGuardConfig::default();
         let budget = ScanBudget::for_payload(command.len());
-        let scan = CommandScan {
-            profile: ActionGuardProfile::parse(&config.profile),
-            config: &config,
-            unwrap_prefixes: true,
-            budget: &budget,
-            comments: CommentReading::new(mode, ansi_c),
-            fan_out: RefCell::default(),
-        };
+        let policy = GuardPolicy::new(&config);
+        let scan = CommandScan::new(
+            ActionGuardProfile::parse(&config.profile),
+            &policy,
+            true,
+            &budget,
+            CommentReading::new(mode, ansi_c),
+        );
         detect_command(command, &scan, 0, false).map(|matched| matched.category)
     }
 
@@ -6623,7 +7472,7 @@ mod tests {
                 &command,
                 true,
                 ActionGuardProfile::Recommended,
-                &ActionGuardConfig::default(),
+                &GuardPolicy::new(&ActionGuardConfig::default()),
                 &budget,
             );
             assert!(matched.is_none(), "{chain}");
@@ -6857,5 +7706,604 @@ mod tests {
             let matched = guard_within_five_seconds(label, &payload);
             assert_eq!(matched.map(|matched| matched.category), None, "{label}");
         }
+    }
+
+    /// `count` allow entries and as many deny entries, none of which matches
+    /// the commands of `tiny_segments`.
+    fn policy_lists(count: usize) -> ActionGuardConfig {
+        ActionGuardConfig {
+            allow: (0..count)
+                .map(|tag| format!("Bash(tool{tag} sub *)"))
+                .collect(),
+            deny: (0..count)
+                .map(|tag| format!("Bash(danger{tag} *)"))
+                .collect(),
+            ..ActionGuardConfig::default()
+        }
+    }
+
+    /// About 1 MiB of `unit`, followed by a tail that makes the guard read
+    /// the text every way it can: both `$'…'` readings times three comment
+    /// readings.
+    fn tiny_segments(unit: &str) -> String {
+        const TAIL: &str = " $'x' (b)# c\necho d # e";
+        let mut text = unit.repeat((1024 * 1024 - TAIL.len()) / unit.len());
+        text.push_str(TAIL);
+        text
+    }
+
+    #[test]
+    fn policy_lists_do_not_multiply_the_cost_of_tiny_segments() {
+        // Without the lists these take one to two seconds each in a debug
+        // build, and as long with them. Every entry used to be normalised
+        // again for every segment under every reading, which took minutes.
+        for count in [12, 50] {
+            let config = policy_lists(count);
+            for unit in ["a\n", "\\a;", "do *\n", "a=b<i |"] {
+                let stdin = bash_payload(&tiny_segments(unit));
+                let started = std::time::Instant::now();
+                let matched = detect_dangerous_action_with_config(&stdin, &config).unwrap();
+                let elapsed = started.elapsed();
+                if std::env::var_os("SHK_PRINT_GUARD_TIMINGS").is_some() {
+                    eprintln!("{count}+{count} entries, {unit:?}: {elapsed:?}");
+                }
+                assert_eq!(matched, None, "{count} entries, {unit:?}");
+                assert!(
+                    elapsed < std::time::Duration::from_secs(5),
+                    "{count}+{count} entries, {unit:?} took {elapsed:?}"
+                );
+            }
+        }
+    }
+
+    /// The verdict for `text` as the body an edit tool writes under a generic
+    /// key.
+    fn category_of_file_body(text: &str) -> Option<&'static str> {
+        category_of_payload(serde_json::json!({
+            "tool": "write",
+            "args": { "filePath": "/workspace/notes/guide.md", "content": text }
+        }))
+    }
+
+    #[test]
+    fn policy_lists_match_like_a_scan_of_the_whole_list() {
+        const PARTS: &[&str] = &[
+            "Bash(", "bash(", "Read(", "git", " status", "ls", "a", "b", " ", "*", "*", ":*", ")",
+            "./", "file://", "x;y", "|", "\n", "é", "\\", "(", "",
+        ];
+        let mut rng = Rng(0x5eed_0f11_5755);
+        let budget = ScanBudget::for_payload(0);
+        for _ in 0..4_000 {
+            let text = |rng: &mut Rng| {
+                (0..1 + rng.next() % 5)
+                    .map(|_| rng.pick(PARTS))
+                    .collect::<String>()
+            };
+            let patterns = (0..rng.next() % 6)
+                .map(|_| text(&mut rng))
+                .collect::<Vec<_>>();
+            let list = ActionPatterns::new(patterns.iter());
+            for _ in 0..6 {
+                let action = text(&mut rng);
+                assert_eq!(
+                    list.matches(&normalize_action_pattern(&action), &budget),
+                    action_list_matches(&action, &patterns),
+                    "{action:?} against {patterns:?}"
+                );
+                // A command is matched as its `Bash(…)` action.
+                let scan_config = ActionGuardConfig::default();
+                let policy = GuardPolicy::new(&scan_config);
+                let scan = CommandScan::new(
+                    ActionGuardProfile::Recommended,
+                    &policy,
+                    true,
+                    &budget,
+                    CommentReading::new(CommentMode::Words, true),
+                );
+                assert_eq!(
+                    scan.command_matches(&list, &action),
+                    action_list_matches(&format!("Bash({action})"), &patterns),
+                    "Bash({action:?}) against {patterns:?}"
+                );
+            }
+        }
+        assert!(!budget.policy_overdrawn.get());
+    }
+
+    #[test]
+    fn repeated_segments_are_charged_like_distinct_ones() {
+        // A segment found clean is not scanned again, but the payload is
+        // charged for it as if it were.
+        let examined = |command: &str| {
+            let budget = ScanBudget::for_payload(command.len());
+            let left = budget.examined_bytes.get();
+            let matched = detect_candidate_command(
+                command,
+                true,
+                ActionGuardProfile::Recommended,
+                &GuardPolicy::new(&ActionGuardConfig::default()),
+                &budget,
+            );
+            assert_eq!(matched, None, "{command}");
+            left - budget.examined_bytes.get()
+        };
+        for unit in ["time ls -la", "if true", "echo \"$(date)\"", "FOO=1 make"] {
+            let once = examined(unit);
+            assert!(once > 0, "{unit}");
+            assert_eq!(
+                examined(&format!("{unit};").repeat(50)),
+                50 * once,
+                "{unit}"
+            );
+        }
+
+        // So a payload of repeated segments still runs out of budget: every
+        // `then` has the words behind it examined again.
+        let unit = format!("{}cat \"a\";", "then ".repeat(12));
+        assert_eq!(category_of(&unit.repeat(20_000)), Some("opaque_execution"));
+        assert_eq!(category_of(&unit.repeat(1_000)), None);
+        // And a guarded command among them is still found.
+        assert_eq!(
+            category_of(&format!("{}{TRANSFER}", "time ls;".repeat(1_000))),
+            Some("external_transfer")
+        );
+        assert_eq!(
+            category_of(&format!(
+                "{}{}ls",
+                "time ls;".repeat(10),
+                "time ".repeat(40)
+            )),
+            Some("opaque_execution")
+        );
+    }
+
+    #[test]
+    fn expensive_policy_lists_fail_closed() {
+        // Entries that start with a wildcard have to be tried on every part
+        // of every command.
+        let config = ActionGuardConfig {
+            allow: (0..50).map(|tag| format!("Bash(*allowed{tag}*)")).collect(),
+            deny: (0..50).map(|tag| format!("Bash(*denied{tag}*)")).collect(),
+            ..ActionGuardConfig::default()
+        };
+        // 60,000 commands times 100 entries is more than the payload may
+        // compare (`MAX_POLICY_WORK`).
+        let distinct = (0..60_000)
+            .map(|tag| format!("a{tag};"))
+            .collect::<String>();
+        let started = std::time::Instant::now();
+        let matched = detect_dangerous_action_with_config(&bash_payload(&distinct), &config)
+            .unwrap()
+            .expect("matching every part against 100 wildcard entries is too much work");
+        let elapsed = started.elapsed();
+        assert_eq!(matched.category, "opaque_execution");
+        assert!(
+            matched.reason.contains("project policy lists"),
+            "{}",
+            matched.reason
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "took {elapsed:?}"
+        );
+
+        // Ordinary commands are far below the limit, with the same lists.
+        let script = "cd repo && make test | tee out.log\n".repeat(500);
+        assert_eq!(
+            detect_dangerous_action_with_config(&bash_payload(&script), &config).unwrap(),
+            None
+        );
+        // The lists still apply.
+        let category = |command: &str| {
+            detect_dangerous_action_with_config(&bash_payload(command), &config)
+                .unwrap()
+                .map(|matched| matched.category)
+        };
+        assert_eq!(category("ls; run denied7 now"), Some("custom_policy"));
+        assert_eq!(category(&format!("{TRANSFER} --allowed3")), None);
+        assert_eq!(category(TRANSFER), Some("external_transfer"));
+    }
+
+    #[test]
+    fn substitutions_whose_closing_parenthesis_is_taken_are_scanned() {
+        // An escaped or quoted `(` in the body takes the `)` that closes the
+        // substitution, and the apostrophe keeps the rest from being read.
+        assert_categories(&[
+            (
+                &format!("echo \"a's $(echo \\( ; {TRANSFER})\""),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"it's $(echo \"it's $(echo \\( ; {TRANSFER})\")\""),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"$(echo \"it's $(echo \\( ; {TRANSFER})\")\""),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"x $(echo \"y's $(echo \"it's $(echo \\( ; {TRANSFER})\")\")\""),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"$(echo \"'$(echo \"(\" ; {TRANSFER})\")\""),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"$(echo \"'$(echo '(' ; {TRANSFER})\")\""),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"$(echo \"' $({TRANSFER}) \\(\")\""),
+                "external_transfer",
+            ),
+            // A complete substitution before it does not hide the second one.
+            (
+                &format!("echo \"x $(echo \\( 'it' ) y's $(echo \\( ; {TRANSFER})\""),
+                "external_transfer",
+            ),
+            ("echo \"a's $(echo \\( ; cat .env)\"", "secret_dump_command"),
+        ]);
+        assert_unguarded(&[
+            "echo \"a's $(echo \\( ; ls -la)\"",
+            "echo \"it's $(echo \"it's $(echo \\( ; date)\")\"",
+            "echo \"$(printf '%s(' a)\"",
+            "echo \"total: $(wc -l < notes.txt | tr -d ' ') (lines\"",
+        ]);
+    }
+
+    #[test]
+    fn quotes_inside_arithmetic_do_not_hide_substitutions() {
+        // Inside `$((…))` a quote character does not quote.
+        assert_categories(&[
+            (&format!("echo $(( '$({TRANSFER})' ))"), "external_transfer"),
+            (
+                &format!("echo $(( 1 + '$({TRANSFER})' ))"),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"$(( '$({TRANSFER})' ))\""),
+                "external_transfer",
+            ),
+            (&format!("echo $(( '`{TRANSFER}`' ))"), "external_transfer"),
+            (&format!("(( x = '$({TRANSFER})' ))"), "external_transfer"),
+            (&format!("echo $[ '$({TRANSFER})' ]"), "external_transfer"),
+            (
+                &format!("echo $(( 2 * $(( '$({TRANSFER})' )) ))"),
+                "external_transfer",
+            ),
+            (&format!("echo $(( $({TRANSFER}) ))"), "external_transfer"),
+            ("n=$(( '$(cat .env)' ))", "secret_dump_command"),
+        ]);
+        assert_unguarded(&[
+            "echo $(( 1 + 2 ))",
+            "echo $(( '$(wc -l < a.txt)' + 1 ))",
+            "echo \"count: $(( $(wc -l < a.txt) + 1 ))\"",
+            "x=$(( (a+b) * 2 )); n=$(($(nproc) - 1))",
+            // Quotes do quote again inside a substitution.
+            &format!("echo $(( $(echo '$({TRANSFER})' | wc -c) ))"),
+        ]);
+    }
+
+    #[test]
+    fn quotes_in_an_expanded_heredoc_body_do_not_hide_substitutions() {
+        // With an unquoted delimiter the body is expanded and its quote
+        // characters are ordinary text.
+        assert_categories(&[
+            (
+                &format!("cat <<EOF\n'$({TRANSFER})\nEOF"),
+                "external_transfer",
+            ),
+            (
+                &format!("cat <<EOF\n'$({TRANSFER})'\nEOF"),
+                "external_transfer",
+            ),
+            (
+                &format!("cat <<EOF\nit's $({TRANSFER})\nEOF"),
+                "external_transfer",
+            ),
+            (
+                &format!("cat <<EOF\nit's `{TRANSFER}`\nEOF"),
+                "external_transfer",
+            ),
+            (
+                &format!("cat <<-EOF\n\tdon't \"$({TRANSFER})\"\n\tEOF"),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"it's $(cat <<EOF\n'$({TRANSFER})\nEOF\n)\""),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"$(cat <<EOF\n'$({TRANSFER})\nEOF\n)\""),
+                "external_transfer",
+            ),
+            (
+                &format!("echo $(cat <<EOF\n'$({TRANSFER})\nEOF\n)"),
+                "external_transfer",
+            ),
+            (
+                &format!("cat <<EOF\nsum: $(( '$({TRANSFER})' ))\nEOF"),
+                "external_transfer",
+            ),
+            // The substitution's first line is scanned even when it is closed
+            // on a later one.
+            (
+                &format!("cat <<EOF\nit's $({TRANSFER}\n)\nEOF"),
+                "external_transfer",
+            ),
+            (
+                "cat <<EOF\nthe key's value: $(cat .env)\nEOF",
+                "secret_dump_command",
+            ),
+        ]);
+        assert_unguarded(&[
+            // A quoted delimiter leaves the body alone.
+            &format!("cat <<'EOF'\nit's $({TRANSFER}) and `{TRANSFER}`\nEOF"),
+            &format!("cat <<\\EOF\n'$({TRANSFER})\nEOF"),
+            &format!("cat > notes.md <<\"EOF\"\ndon't run `{TRANSFER}`\nEOF"),
+            &format!(
+                "git commit -m \"$(cat <<'EOF'\nfix: don't run `{TRANSFER}` (or $({TRANSFER}))\n\n\
+                 It's `$HOME` and $USER here.\nEOF\n)\""
+            ),
+            // Escaped, so not expanded.
+            &format!("cat <<EOF\nit's \\$({TRANSFER}) and \\`{TRANSFER}\\`\nEOF"),
+            "cat <<EOF\nHello $(whoami), it's $(date)\nEOF",
+            "cat <<EOF\nit's `date` o'clock (\"now\")\nEOF",
+        ]);
+    }
+
+    #[test]
+    fn backtick_substitutions_holding_command_separators_are_scanned() {
+        // The segment splitter cuts a backtick body at `;`, `|`, `(` and so
+        // on, which used to leave neither half recognisable.
+        assert_categories(&[
+            (&format!("echo `{TRANSFER}; (echo a)`"), "external_transfer"),
+            (&format!("echo `{TRANSFER} | (cat)`"), "external_transfer"),
+            (
+                &format!("echo `{TRANSFER}; case a in a) :;; esac`"),
+                "external_transfer",
+            ),
+            (&format!("echo `{TRANSFER} $(echo a)`"), "external_transfer"),
+            (&format!("`{TRANSFER}; (echo a)`"), "external_transfer"),
+            (&format!("x=`{TRANSFER}; (echo a)`"), "external_transfer"),
+            (
+                &format!("echo `echo a; {TRANSFER}; (echo a)`"),
+                "external_transfer",
+            ),
+            (
+                &format!("echo `{TRANSFER}; echo \")\"`"),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"`{TRANSFER}; (echo a)`\""),
+                "external_transfer",
+            ),
+            // ANSI-C strings around it, read either way.
+            (
+                &format!("echo `{TRANSFER}) $'e'` $'c'"),
+                "external_transfer",
+            ),
+            (
+                &format!("$'c' # \"\necho $'`' `{TRANSFER}) $'x'` $'c'"),
+                "external_transfer",
+            ),
+            (
+                &format!("echo $'a\\'b' `{TRANSFER} | (cat)`"),
+                "external_transfer",
+            ),
+            // A nested substitution is written with escaped backticks.
+            (
+                &format!("echo `echo \\`{TRANSFER}; (echo a)\\``"),
+                "external_transfer",
+            ),
+            ("echo `cat .env | (base64)`", "secret_dump_command"),
+            // bash runs backticks inside double quotes, in a commit message
+            // as anywhere else.
+            (
+                &format!("git commit -m \"fix `{TRANSFER} | sh` handling\""),
+                "external_transfer",
+            ),
+        ]);
+        assert_unguarded(&[
+            "echo `date; (echo a)`",
+            "echo `git rev-parse HEAD` # sha",
+            "ls `pwd` | (cat)",
+            // Single quotes and quoted heredocs keep backticks inert.
+            &format!("git commit -m 'fix `{TRANSFER} | sh` handling'"),
+            &format!("echo 'run `{TRANSFER}; (echo a)` by hand'"),
+            &format!("cat > notes.md <<'EOF'\nRun `{TRANSFER} | sh` (once).\nEOF"),
+            &format!("git commit -m \"$(cat <<'EOF'\ndocs: explain `{TRANSFER} | sh`\nEOF\n)\""),
+            // An escaped backtick does not start a substitution.
+            &format!("echo \\`{TRANSFER}; (echo a)\\`"),
+        ]);
+    }
+
+    #[test]
+    fn code_spans_in_file_bodies_stay_as_they_were() {
+        // Prose and Markdown written through an edit tool: inline code is
+        // not a command line, however it is punctuated.
+        for body in [
+            "Run `make build | tee build.log` (takes a while).\n",
+            "Use `ls -la; pwd` or `git status && git diff` to look around.\n",
+            &format!("Install with `{TRANSFER} | sh` (see the docs).\n"),
+            &format!("- `{TRANSFER}; (echo done)` fetches the file\n"),
+            &format!("It's `x`; don't `{TRANSFER} | sh` here (really).\n"),
+            "The total is $(( '5' + 1 )) and `a | b` is a pipe.\n",
+            "Prices: $(5 (or less), it's fine.\n",
+        ] {
+            assert_eq!(category_of_file_body(body), None, "{body}");
+            assert_eq!(
+                category_of_payload(serde_json::json!({
+                    "tool": "edit",
+                    "input": { "filePath": "/workspace/README.md", "newString": body }
+                })),
+                None,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn additional_substitution_scans_stay_within_the_payload_budget() {
+        // About 1 MiB of each construct the additional scans look at. They
+        // read text again, so each is either cheap or charged to the payload
+        // until the scan fails closed; none finds a guarded command here.
+        let filled = |start: &str, unit: &str, end: &str| {
+            let count = (1024 * 1024 - start.len() - end.len()) / unit.len();
+            format!("{start}{}{end}", unit.repeat(count))
+        };
+        let cases = [
+            ("unclosed substitutions", filled("echo \"", "$(a ", "\"")),
+            (
+                "unclosed substitutions behind an escaped parenthesis",
+                filled("echo \"", "it's $(echo \\( ; a ", "\""),
+            ),
+            (
+                "nested unclosed substitutions",
+                filled("", "echo \"$(echo \\( ; ", ""),
+            ),
+            (
+                "quoted substitutions in a heredoc",
+                filled("cat <<EOF\n", "'$(a) `b` it's\n", "EOF"),
+            ),
+            (
+                "unclosed substitutions in a heredoc",
+                filled("cat <<EOF\n", "it's $(a\n", "EOF"),
+            ),
+            (
+                "nested arithmetic in a heredoc",
+                filled("cat <<EOF\n", "$(( '", "\nEOF"),
+            ),
+            (
+                "many heredocs",
+                filled("", "cat <<EOF\nit's $(a)\nEOF\n", ""),
+            ),
+            (
+                "quoted substitutions in arithmetic",
+                filled("echo $(( ", "'$(a)' + ", "1 ))"),
+            ),
+            ("nested arithmetic", filled("", "$(( '", "")),
+            ("arithmetic commands", filled("", "(( '$(a)' ));", "")),
+            ("legacy arithmetic", filled("", "$[ '`a`' ];", "")),
+            (
+                "cut backtick substitutions",
+                filled("", "echo `a; (b)`;", ""),
+            ),
+            (
+                "quoted strings in double-quoted substitutions",
+                filled("echo \"", "$(echo \"a;b\") ", "\""),
+            ),
+            (
+                "nested double-quoted substitutions",
+                filled("", "echo \"$(echo \"", ""),
+            ),
+            (
+                "case patterns in a double-quoted substitution",
+                filled("echo \"$(", "case x in x) a;; esac; ", ")\""),
+            ),
+            (
+                "heredocs in double-quoted substitutions",
+                filled("echo \"", "$(cat <<'E'\nit's\nE\n) ", "\""),
+            ),
+            ("backticks", filled("", "`", "")),
+            ("escaped backticks", filled("echo `", "\\`", "")),
+            (
+                "backtick substitutions cut at line breaks",
+                filled("", "x=`a\n", ""),
+            ),
+        ];
+        for (label, command) in &cases {
+            let payload = serde_json::json!({ "tool_input": { "command": command } });
+            if let Some(matched) = guard_within_five_seconds(label, &payload) {
+                assert_eq!(matched.category, "opaque_execution", "{label}");
+                assert!(
+                    matched.reason.contains("too many"),
+                    "{label}: {}",
+                    matched.reason
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn quotes_nest_inside_double_quoted_substitutions() {
+        // The body of a substitution is a command of its own: a quote in it
+        // opens a string there instead of closing the one around it.
+        assert_categories(&[
+            (
+                &format!("echo \"x $(echo \"a;b\"; {TRANSFER})\""),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"x $(echo \"a|b\" && {TRANSFER})\""),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"$(printf \"%s;\" a | {TRANSFER})\""),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"$(echo \"it's\") $({TRANSFER})\""),
+                "external_transfer",
+            ),
+            (
+                &format!("x=\"$(cd \"$(dirname \"$0\")\" && {TRANSFER})\""),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"$(echo \")\" ; {TRANSFER})\""),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"$(echo ')' ; {TRANSFER})\""),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"x `echo \"a;b\"; {TRANSFER}`\""),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"$(echo \"$(echo \"a;b\"; {TRANSFER})\")\""),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"$(cat <<'EOF'\nit's (fine\nEOF\n{TRANSFER})\""),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"$(echo $(( 1 << 2 ))\n{TRANSFER})\""),
+                "external_transfer",
+            ),
+            ("echo \"$'$(echo \"(\" ; set)'\"", "environment_dump"),
+            // The `)` of a `case` pattern or in a comment closes nothing.
+            (
+                &format!("echo \"$(case x in x) {TRANSFER};; esac)\""),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"$(case x in (a) : ;; b|c) echo \"d;\" && {TRANSFER};; esac)\""),
+                "external_transfer",
+            ),
+            (
+                &format!("echo \"$(echo a # )\n{TRANSFER})\""),
+                "external_transfer",
+            ),
+            (
+                "echo \"it's $(echo \"a;b\"; cat .env)\"",
+                "secret_dump_command",
+            ),
+        ]);
+        assert_unguarded(&[
+            "echo \"x $(echo \"a;b\"; ls -la)\"",
+            "root=\"$(cd \"$(dirname \"$0\")\" && pwd)\"",
+            "echo \"$(git log --format=\"%h %s\" | head -5)\"",
+            "test -n \"$(git status --porcelain)\" && echo dirty",
+            // Quoted inside the substitution, so not run.
+            &format!("echo \"it's $(echo '$({TRANSFER})')\""),
+            &format!("git commit -m \"$(cat <<'EOF'\nfix: don't (do it\n{TRANSFER}\nEOF\n)\""),
+            &format!("git commit -m \"$(cat <<'EOF'\nfix: say \"hi\" and run {TRANSFER}\nEOF\n)\""),
+            "echo \"$(case \"$1\" in start) echo s ;; *) echo \"u;v\" ;; esac)\"",
+        ]);
     }
 }
