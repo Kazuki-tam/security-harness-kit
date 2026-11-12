@@ -3348,13 +3348,24 @@ sandbox_mode = "danger-full-access"
         ] {
             let path = dir.path().join(name);
             fs::write(&path, body).unwrap();
-            let before = fs::metadata(&path).unwrap().modified().unwrap();
+            let before = fs::metadata(&path).unwrap();
 
             remove_codex_scan_hooks(&path, false).unwrap();
 
             assert_eq!(fs::read_to_string(&path).unwrap(), body, "{name}");
-            let after = fs::metadata(&path).unwrap().modified().unwrap();
-            assert_eq!(before, after, "{name} must not be rewritten");
+            let after = fs::metadata(&path).unwrap();
+            // A rewrite replaces the file atomically, which gives it a new
+            // inode even when the timestamp is too coarse to show a change.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                assert_eq!(before.ino(), after.ino(), "{name} must not be rewritten");
+            }
+            assert_eq!(
+                before.modified().unwrap(),
+                after.modified().unwrap(),
+                "{name} must not be rewritten"
+            );
         }
     }
 
