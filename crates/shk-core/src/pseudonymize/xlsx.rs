@@ -1,7 +1,9 @@
 use super::apply::{CellAction, MapCollector, apply_cell, replacement_text};
-use super::columns::{infer_header, resolve_columns};
+use super::columns::{
+    first_row_matches_data, header_is_confirmed, infer_header, positional_headers, resolve_columns,
+};
 use super::derive::KeyMaterial;
-use super::table::{TableOptions, TableResult, meta_from_parts};
+use super::table::{TableOptions, TableResult, is_positional, meta_from_parts};
 use super::{INFER_SAMPLE_ROWS, TABLE_PREVIEW_ROWS};
 use crate::document_masker::{
     copy_entry_bounded, decode_general_ref, decode_xml_text as decode_text, local_name,
@@ -84,25 +86,40 @@ pub fn run_xlsx(
         ));
     }
 
-    let has_header = if options.no_header {
+    let mut has_header = if options.no_header {
         false
     } else {
         infer_header(&grid[0])
     };
-    let headers = if has_header {
+    let mut headers = if has_header {
         grid.remove(0)
     } else {
-        (0..grid[0].len()).map(|idx| idx.to_string()).collect()
+        positional_headers(grid[0].len())
     };
-    let data_rows = grid;
-    let sample_len = data_rows.len().min(INFER_SAMPLE_ROWS);
-    let columns = resolve_columns(
-        &headers,
-        &data_rows[..sample_len],
-        &options.config_columns,
-        options.cli_columns.as_ref(),
-    )
-    .map_err(|err| anyhow::anyhow!(err))?;
+    let mut data_rows = grid;
+    let resolve = |headers: &[String], data_rows: &[Vec<String>]| {
+        resolve_columns(
+            headers,
+            &data_rows[..data_rows.len().min(INFER_SAMPLE_ROWS)],
+            &options.config_columns,
+            options.cli_columns.as_ref(),
+        )
+        .map_err(|err| anyhow::anyhow!(err))
+    };
+    let mut columns = resolve(&headers, &data_rows)?;
+    let mut header_assumed = false;
+    if has_header && !header_is_confirmed(&columns, is_positional(options)) {
+        if first_row_matches_data(&headers, &data_rows, &columns) {
+            // The "header" is one more data row: give it back to the data.
+            has_header = false;
+            let synthetic = positional_headers(headers.len());
+            let first_row = std::mem::replace(&mut headers, synthetic);
+            data_rows.insert(0, first_row);
+            columns = resolve(&headers, &data_rows)?;
+        } else {
+            header_assumed = !columns.is_empty();
+        }
+    }
     let data_offset = leading_blank + usize::from(has_header);
     let selected_columns: BTreeSet<usize> = columns.iter().map(|column| column.index).collect();
     // The first formula cell per selected column, plus every column that has
@@ -140,6 +157,7 @@ pub fn run_xlsx(
             ),
             columns,
             has_header,
+            header_assumed,
             headers,
             sample_rows: data_rows[..data_rows.len().min(TABLE_PREVIEW_ROWS)].to_vec(),
             formula_cells,
@@ -203,6 +221,7 @@ pub fn run_xlsx(
         ),
         columns,
         has_header,
+        header_assumed,
         headers,
         sample_rows: Vec::new(),
         formula_cells: Vec::new(),
@@ -1364,6 +1383,60 @@ mod tests {
         assert_eq!(cells.len(), 4);
         assert_eq!(cells[3], ((1, 1), "keep".into()));
         assert!(cells[2].1.starts_with("email_"), "{cells:?}");
+    }
+
+    #[test]
+    fn headerless_first_row_shaped_like_the_data_is_pseudonymized() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("raw.xlsx");
+        let output = dir.path().join("out.xlsx");
+        let cell = |reference: &str, value: &str| {
+            format!(r#"<c r="{reference}" t="inlineStr"><is><t>{value}</t></is></c>"#)
+        };
+        let rows: String = [
+            ("Hana Sato", "Tokyo"),
+            ("Ken Suzuki", "Osaka"),
+            ("Hana Sato", "Nagoya"),
+        ]
+        .iter()
+        .enumerate()
+        .map(|(index, (name, city))| {
+            let row = index + 1;
+            format!(
+                r#"<row r="{row}">{}{}</row>"#,
+                cell(&format!("A{row}"), name),
+                cell(&format!("B{row}"), city)
+            )
+        })
+        .collect();
+        build_xlsx(
+            &input,
+            &[
+                ("xl/workbook.xml", WORKBOOK.into()),
+                ("xl/_rels/workbook.xml.rels", RELS.into()),
+                (
+                    "xl/worksheets/sheet1.xml",
+                    format!("<worksheet><sheetData>{rows}</sheetData></worksheet>"),
+                ),
+            ],
+            &[],
+        );
+        let mut opts = options();
+        opts.cli_columns = Some(crate::pseudonymize::ColumnOverrides {
+            entries: Vec::new(),
+            skip: Vec::new(),
+            positions: vec![(0, Some(crate::pseudonymize::Kind::Name))],
+        });
+        let result = run_xlsx(&input, Some(&output), None, &opts, Some(&material()), None).unwrap();
+        assert!(!result.has_header && !result.header_assumed);
+        assert_eq!(result.meta.rows_processed, 3);
+        assert_eq!(result.meta.replaced.get("name"), Some(&3));
+        assert_eq!(result.meta.columns[0].name, "0");
+        let sheet = sheet_xml(&output, "xl/worksheets/sheet1.xml");
+        assert!(
+            !sheet.contains("Sato") && sheet.contains("Tokyo"),
+            "{sheet}"
+        );
     }
 
     #[test]

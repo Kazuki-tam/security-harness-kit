@@ -1,6 +1,7 @@
 use super::apply::{CellAction, MapCollector, apply_cell, replacement_text};
 use super::columns::{
-    ColumnOverrides, ColumnSource, ResolvedColumn, infer_header, resolve_columns,
+    ColumnOverrides, ColumnSource, ResolvedColumn, first_row_matches_data, header_is_confirmed,
+    infer_header, positional_headers, resolve_columns,
 };
 use super::derive::KeyMaterial;
 use super::normalize::NormalizeSettings;
@@ -57,6 +58,10 @@ pub struct TableResult {
     pub meta: PseudonymizeMeta,
     pub columns: Vec<ResolvedColumn>,
     pub has_header: bool,
+    /// The first row was kept as a header only because it holds no address or
+    /// phone number: no selected column was found by name. If it is in fact
+    /// data it has been copied unchanged, so callers should say so.
+    pub header_assumed: bool,
     /// Header names, or the synthetic `0`, `1`, … names when `has_header` is false.
     pub headers: Vec<String>,
     /// The first rows for dry-run previews (at most `TABLE_PREVIEW_ROWS`).
@@ -92,6 +97,7 @@ impl TableResult {
             ),
             columns,
             has_header,
+            header_assumed: false,
             headers: Vec::new(),
             sample_rows: Vec::new(),
             formula_cells: Vec::new(),
@@ -141,17 +147,16 @@ pub fn run_table<R: Read, W: Write>(
     let first = first.context("read first CSV row")?;
     let first_row = record_to_row(&first);
 
-    let has_header = if options.no_header {
+    let mut has_header = if options.no_header {
         false
     } else {
         infer_header(&first_row)
     };
 
-    let (headers, mut pending_rows) = if has_header {
+    let (mut headers, mut pending_rows) = if has_header {
         (first_row, Vec::new())
     } else {
-        let headers = (0..first_row.len()).map(|idx| idx.to_string()).collect();
-        (headers, vec![first_row])
+        (positional_headers(first_row.len()), vec![first_row])
     };
 
     while pending_rows.len() < INFER_SAMPLE_ROWS {
@@ -161,13 +166,32 @@ pub fn run_table<R: Read, W: Write>(
         }
     }
 
-    let columns = resolve_columns(
+    let mut columns = resolve_columns(
         &headers,
         &pending_rows,
         &options.config_columns,
         options.cli_columns.as_ref(),
     )
     .map_err(|err| anyhow::anyhow!(err))?;
+    let mut header_assumed = false;
+    if has_header && !header_is_confirmed(&columns, is_positional(options)) {
+        if first_row_matches_data(&headers, &pending_rows, &columns) {
+            // The "header" is one more data row: give it back to the data.
+            has_header = false;
+            let synthetic = positional_headers(headers.len());
+            let first_row = std::mem::replace(&mut headers, synthetic);
+            pending_rows.insert(0, first_row);
+            columns = resolve_columns(
+                &headers,
+                &pending_rows,
+                &options.config_columns,
+                options.cli_columns.as_ref(),
+            )
+            .map_err(|err| anyhow::anyhow!(err))?;
+        } else {
+            header_assumed = !columns.is_empty();
+        }
+    }
 
     if options.dry_run {
         // Count the remaining rows so the plan reports the real table size.
@@ -192,6 +216,7 @@ pub fn run_table<R: Read, W: Write>(
             ),
             columns,
             has_header,
+            header_assumed,
             headers,
             sample_rows: pending_rows,
             formula_cells: Vec::new(),
@@ -264,6 +289,7 @@ pub fn run_table<R: Read, W: Write>(
         ),
         columns,
         has_header,
+        header_assumed,
         headers,
         sample_rows: Vec::new(),
         formula_cells: Vec::new(),
@@ -347,6 +373,13 @@ fn record_to_row(record: &csv::StringRecord) -> Vec<String> {
     record.iter().map(str::to_string).collect()
 }
 
+pub(crate) fn is_positional(options: &TableOptions) -> bool {
+    options
+        .cli_columns
+        .as_ref()
+        .is_some_and(ColumnOverrides::is_positional)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn meta_from_parts(
     options: &TableOptions,
@@ -358,6 +391,10 @@ pub(crate) fn meta_from_parts(
     material: Option<&KeyMaterial>,
     dry_run: bool,
 ) -> PseudonymizeMeta {
+    // A column chosen by position is recorded by position. Its "header" may
+    // be a first data row that could not be told apart from one, and a cell
+    // value must never end up in the metadata.
+    let positional = is_positional(options);
     PseudonymizeMeta {
         shk_version: options.shk_version.clone(),
         mode,
@@ -368,7 +405,11 @@ pub(crate) fn meta_from_parts(
         columns: columns
             .iter()
             .map(|column| MetaColumn {
-                name: column.name.clone(),
+                name: if positional {
+                    column.index.to_string()
+                } else {
+                    column.name.clone()
+                },
                 kind: column.kind.as_config_value(),
                 source: column.source,
                 match_rate: column.match_rate,
@@ -556,6 +597,104 @@ mod tests {
         assert_eq!(result.meta.rows_processed, 2);
         assert!(!text.contains(&email), "{text}");
         assert_eq!(text.matches("email_").count(), 2);
+    }
+
+    fn positional(choices: Vec<(usize, Option<Kind>)>, dry_run: bool) -> TableOptions {
+        let mut opts = options("x:name", dry_run);
+        opts.cli_columns = Some(crate::pseudonymize::ColumnOverrides {
+            entries: Vec::new(),
+            skip: Vec::new(),
+            positions: choices,
+        });
+        opts
+    }
+
+    #[test]
+    fn headerless_first_row_shaped_like_the_data_is_pseudonymized() {
+        let material = material();
+        // No address or phone anywhere, so the first row used to pass for a
+        // header: it was copied raw and its cells became column names.
+        let repeated = "Hana Sato,Tokyo\nKen Suzuki,Osaka\nHana Sato,Nagoya\n";
+        let numeric = "1001,first\n1002,second\n1003,third\n";
+        for (input, kind, leaked) in [
+            (repeated, Kind::Name, "Sato"),
+            (numeric, Kind::Custom("member".into()), "1001"),
+        ] {
+            let opts = positional(vec![(0, Some(kind))], false);
+            let mut out = Vec::new();
+            let result = run_table(
+                input.as_bytes(),
+                Some(&mut out),
+                &opts,
+                Some(&material),
+                None,
+            )
+            .unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert!(!result.has_header, "{text}");
+            assert_eq!(result.meta.rows_processed, 3);
+            assert_eq!(result.headers, vec!["0".to_string(), "1".to_string()]);
+            assert_eq!(result.meta.columns[0].name, "0");
+            assert!(!text.contains(leaked), "{text}");
+            assert_eq!(text.lines().count(), 3);
+        }
+
+        // A real header over the same data keeps its row.
+        let with_header = format!("Customer,City\n{repeated}");
+        let mut out = Vec::new();
+        let result = run_table(
+            with_header.as_bytes(),
+            Some(&mut out),
+            &positional(vec![(0, Some(Kind::Name))], false),
+            Some(&material),
+            None,
+        )
+        .unwrap();
+        assert!(result.has_header && result.header_assumed);
+        assert_eq!(result.meta.rows_processed, 3);
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .starts_with("Customer,City\n")
+        );
+        // A column found by name or by a known label confirms the header.
+        for confirmed in ["Email:email", "Note:custom:note"] {
+            let csv = format!(
+                "Email,Note\n{},keep\n",
+                ["ada", "@", "example.com"].concat()
+            );
+            let result = run_table(
+                csv.as_bytes(),
+                None::<&mut Vec<u8>>,
+                &options(confirmed, true),
+                None,
+                None,
+            )
+            .unwrap();
+            assert!(result.has_header && !result.header_assumed, "{confirmed}");
+        }
+    }
+
+    #[test]
+    fn positional_selections_never_record_first_row_cells_as_names() {
+        let material = material();
+        // Nothing tells this first row apart from a header, so it is kept as
+        // one; its cells must still not reach the metadata sidecar.
+        let input = "Hana Sato,Tokyo\nKen Suzuki,Osaka\n";
+        let mut out = Vec::new();
+        let result = run_table(
+            input.as_bytes(),
+            Some(&mut out),
+            &positional(vec![(0, Some(Kind::Name)), (1, None)], false),
+            Some(&material),
+            None,
+        )
+        .unwrap();
+        assert!(result.has_header && result.header_assumed);
+        assert_eq!(result.meta.columns.len(), 1);
+        assert_eq!(result.meta.columns[0].name, "0");
+        let meta = serde_json::to_string(&result.meta).unwrap();
+        assert!(!meta.contains("Sato"), "{meta}");
     }
 
     #[test]
