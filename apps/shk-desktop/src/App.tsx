@@ -199,26 +199,24 @@ function App() {
     }
   }, [addProject, messages.app.selectFolder, showOperationError]);
 
+  // Resolves to false when the destination picker is cancelled. Failures reject
+  // so the clone dialog can show them inline; an app notice would sit behind
+  // the dialog's backdrop.
   const cloneGitRepository = useCallback(
     async (remoteUrl: string): Promise<boolean> => {
-      try {
-        const destinationParent = await open({
-          directory: true,
-          multiple: false,
-          title: messages.app.selectCloneDestination,
-        });
-        if (typeof destinationParent !== "string" || !destinationParent) return false;
+      const destinationParent = await open({
+        directory: true,
+        multiple: false,
+        title: messages.app.selectCloneDestination,
+      });
+      if (typeof destinationParent !== "string" || !destinationParent) return false;
 
-        const result = await cloneRepository(remoteUrl, destinationParent);
-        addProject(result.path);
-        setCurrentView("project");
-        return true;
-      } catch (error) {
-        showOperationError(error);
-        return false;
-      }
+      const result = await cloneRepository(remoteUrl, destinationParent);
+      addProject(result.path);
+      setCurrentView("project");
+      return true;
     },
-    [addProject, messages.app.selectCloneDestination, showOperationError],
+    [addProject, messages.app.selectCloneDestination],
   );
 
   const openProjectInAppHandler = useCallback(
