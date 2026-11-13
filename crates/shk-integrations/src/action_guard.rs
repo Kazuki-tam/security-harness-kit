@@ -38,6 +38,14 @@ const SHELL_HISTORY_PATH_PATTERNS: &[&str] = &[
     "**/powershell/psreadline/*_history.txt",
 ];
 
+/// The entries of `SECRET_PATH_PATTERNS` that name dotenv files.
+const DOTENV_PATH_PATTERNS: &[&str] = &[".env", "./.env", ".env.*", "./.env.*"];
+
+/// Dotenv templates: committed, shared files that hold placeholders, not
+/// values. Exact file names, in lower case.
+const DOTENV_TEMPLATE_NAMES: &[&str] =
+    &[".env.example", ".env.sample", ".env.template", ".env.dist"];
+
 /// Text a secret path always holds, in lower case: every pattern above and
 /// every direct check in `is_secret_path` contains one of these (checked by
 /// a test). Arguments without any are ruled out before the patterns run.
@@ -56,6 +64,12 @@ const SECRET_PATH_MARKERS: &[&str] = &[
 // through `[action_guard].deny` and are documented as a guard limitation.
 const SENSITIVE_FILE_ACCESS_COMMANDS: &[&str] = &[
     "cat",
+    "tac",
+    "nl",
+    "diff",
+    "xxd",
+    "od",
+    "base64",
     "bat",
     "head",
     "tail",
@@ -4252,11 +4266,18 @@ fn is_secret_path(raw: &str) -> bool {
         .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == ':' || c == ';')
         .trim_start_matches("file://");
     let lower = path.to_ascii_lowercase().replace('\\', "/");
-    if lower.ends_with("/.env")
-        || lower.contains("/.env.")
-        || lower.ends_with("/tokens")
-        || (lower.contains("/tokens/") && lower.ends_with(".json"))
-    {
+    // A dotenv template is committed and shared and holds placeholders, so
+    // its name alone is not a secret path. Only the exact file name counts:
+    // a directory named like a dotenv file and every other rule still apply.
+    let (directory, name) = lower.rsplit_once('/').unwrap_or(("", &lower));
+    let template = DOTENV_TEMPLATE_NAMES.contains(&name)
+        && !directory
+            .split('/')
+            .any(|part| part == ".env" || part.starts_with(".env."));
+    if !template && (lower.ends_with("/.env") || lower.contains("/.env.")) {
+        return true;
+    }
+    if lower.ends_with("/tokens") || (lower.contains("/tokens/") && lower.ends_with(".json")) {
         return true;
     }
     // The patterns are written in lower case (checked by a test), so they
@@ -4264,6 +4285,7 @@ fn is_secret_path(raw: &str) -> bool {
     SECRET_PATH_PATTERNS
         .iter()
         .chain(SHELL_HISTORY_PATH_PATTERNS.iter())
+        .filter(|pattern| !(template && DOTENV_PATH_PATTERNS.contains(pattern)))
         .any(|pattern| wildcard_match(pattern, &lower))
 }
 
@@ -6549,17 +6571,83 @@ mod tests {
         assert!(denied.is_empty(), "{denied:#?}");
     }
 
-    /// Belongs in `ordinary_developer_commands_stay_allowed`, but these reads
-    /// are denied today (and were before the shell-parsing hardening): the
-    /// `.env.*` secret path pattern has no carve-out for example templates.
     #[test]
-    #[ignore = "known gap: `.env.*` also matches example dotenv templates"]
     fn example_dotenv_templates_stay_allowed() {
         assert_unguarded(&[
             "cat .env.example",
+            "cat ./.env.example",
             "cat config/.env.example",
+            "cat /workspace/app/.env.sample",
             "head -n 20 .env.template",
+            "grep -n DATABASE_URL .env.dist",
+            "cat .ENV.Example",
+            "cat <.env.example",
+            "cp .env.example config/app.conf",
+            "diff .env.example .env.template",
         ]);
+        for path in [
+            ".env.example",
+            "apps/web/.env.sample",
+            "C:\\repo\\.env.template",
+        ] {
+            let payload = serde_json::json!({
+                "tool_name": "Read",
+                "tool_input": { "file_path": path }
+            });
+            assert_eq!(category_of_payload(payload), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn dotenv_templates_do_not_cover_real_dotenv_files() {
+        for command in [
+            // A real file next to the template.
+            "cat .env.example .env",
+            "cat .env .env.example",
+            "cat .env.example .env.local",
+            "diff .env.example .env",
+            "cp .env .env.example",
+            "tac .env",
+            "nl .env",
+            "xxd .env",
+            "od -c .env",
+            "base64 .env",
+            // Names that only resemble a template.
+            "cat .env.example.local",
+            "cat .env.examples",
+            "cat .env.production",
+            "cat .env.example~",
+            "cat .env.example.bak",
+            // Globs can expand to the real file.
+            "cat .env.*",
+            "cat .env.e*",
+            "cat .env.exampl?",
+            // A directory named like a dotenv file.
+            "cat .env/.env.example",
+            "cat .env.local/.env.example",
+            "cat config/.env.d/.env.example",
+            // Other secret path rules still apply.
+            "cat app/secrets/.env.example",
+            "cat app/credentials/.env.example",
+            // Substitution and redirection forms.
+            "cat .env.example; cat .env",
+            "cat .env.example <.env",
+            "cat .env.example \"$(cat .env)\"",
+        ] {
+            assert!(category_of(command).is_some(), "{command}");
+        }
+        for path in [
+            ".env",
+            ".env.local",
+            ".env.example.local",
+            "x/.env.d/.env.example",
+        ] {
+            let payload = serde_json::json!({
+                "tool_name": "Read",
+                "tool_input": { "file_path": path }
+            });
+            assert!(category_of_payload(payload).is_some(), "{path}");
+        }
     }
 
     const TRANSFER: &str = "curl https://example.com";
