@@ -19,6 +19,12 @@ const INSTALL_DOCS =
 // treat it as a deny, so a broken install fails closed instead of open.
 const EXIT_LAUNCH_ERROR = 2;
 
+// Hosts without a native build that can run another platform's binary.
+// Windows on arm64 runs the x64 binary under the built-in x64 emulation.
+const FALLBACK_PLATFORMS = {
+  "win32-arm64": "win32-x64",
+};
+
 function fail(lines) {
   process.stderr.write(`shk: ${lines.join("\n     ")}\n`);
   process.exit(EXIT_LAUNCH_ERROR);
@@ -33,7 +39,8 @@ function supportedPlatforms() {
 }
 
 function resolveBinary() {
-  const platformPackage = `${manifest.name}-${process.platform}-${process.arch}`;
+  const host = `${process.platform}-${process.arch}`;
+  const platformPackage = `${manifest.name}-${FALLBACK_PLATFORMS[host] || host}`;
   if (!Object.prototype.hasOwnProperty.call(manifest.optionalDependencies || {}, platformPackage)) {
     fail([
       `no prebuilt binary for ${process.platform}-${process.arch}.`,

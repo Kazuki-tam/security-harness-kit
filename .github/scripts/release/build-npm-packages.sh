@@ -65,7 +65,7 @@ base_manifest() {
 }
 
 optional_dependencies='{}'
-while read -r target os cpu libc binary; do
+while read -r target os cpu libc binary cpus; do
   package="$(shk_npm_platform_package "$os" "$cpu")"
   archive_name="$(shk_cli_archive_name "$target")"
   archive="${assets_dir}/${archive_name}"
@@ -97,7 +97,7 @@ while read -r target os cpu libc binary; do
     --arg name "$package" \
     --arg target "$target" \
     --arg os "$os" \
-    --arg cpu "$cpu" \
+    --arg cpus "$cpus" \
     --arg libc "$libc" \
     --arg binary "$binary" \
     --arg archive "$archive_name" \
@@ -109,7 +109,7 @@ while read -r target os cpu libc binary; do
       description: ("Prebuilt shk binary for " + $target + ". Install security-harness-kit instead."),
       license, repository, homepage, bugs,
       os: [$os],
-      cpu: [$cpu]
+      cpu: ($cpus | split(","))
     }
     + (if $libc == "-" then {} else {libc: [$libc]} end)
     + {

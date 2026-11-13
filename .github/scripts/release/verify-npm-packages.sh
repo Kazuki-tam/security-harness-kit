@@ -97,14 +97,14 @@ verify_tarball() {
 }
 
 expected_optional_dependencies='{}'
-while read -r target os cpu libc binary; do
+while read -r target os cpu libc binary cpus; do
   package="$(shk_npm_platform_package "$os" "$cpu")"
   tarball="${assets_dir}/${package}-${version}.tgz"
   verify_tarball "$package" "bin/${binary}" THIRD_PARTY_LICENSES.md
 
-  if ! jq -e --arg os "$os" --arg cpu "$cpu" --arg libc "$libc" '
+  if ! jq -e --arg os "$os" --arg cpus "$cpus" --arg libc "$libc" '
     .os == [$os]
-    and .cpu == [$cpu]
+    and .cpu == ($cpus | split(","))
     and (if $libc == "-" then has("libc") | not else .libc == [$libc] end)
     and (has("bin") | not)
     and (has("optionalDependencies") | not)

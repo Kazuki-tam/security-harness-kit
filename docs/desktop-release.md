@@ -178,7 +178,8 @@ releases need no mirror.
 CLI releases publish six npm packages from `release.yml`: the main
 `security-harness-kit` package and one `security-harness-kit-<os>-<cpu>`
 package per cargo-dist target (`darwin-arm64`, `darwin-x64`, `linux-arm64`,
-`linux-x64`, `win32-x64`). cargo-dist's own npm installer is not used, because
+`linux-x64`, `win32-x64`). The `win32-x64` package also installs on arm64,
+where the launcher falls back to it. cargo-dist's own npm installer is not used, because
 it downloads the binary at install time and ships an `npm-shrinkwrap.json` for
 its runtime dependencies.
 

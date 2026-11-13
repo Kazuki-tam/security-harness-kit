@@ -1110,8 +1110,8 @@ assert_output "npm linux package is restricted to glibc" \
   '{"os":["linux"],"cpu":["arm64"],"libc":["glibc"]}' \
   bash -c "tar -xzOf '$channel_fixture/security-harness-kit-linux-arm64-${current_version}.tgz' package/package.json \
     | jq -c '{os, cpu, libc}'"
-assert_output "npm windows package ships shk.exe for win32-x64" \
-  '{"os":["win32"],"cpu":["x64"],"files":["bin/shk.exe","THIRD_PARTY_LICENSES.md"]}' \
+assert_output "npm windows package ships shk.exe and also installs on arm64" \
+  '{"os":["win32"],"cpu":["x64","arm64"],"files":["bin/shk.exe","THIRD_PARTY_LICENSES.md"]}' \
   bash -c "tar -xzOf '$channel_fixture/security-harness-kit-win32-x64-${current_version}.tgz' package/package.json \
     | jq -c '{os, cpu, files}'"
 
@@ -1235,6 +1235,27 @@ if [[ -n "$npm_host_target" && "$npm_host" != win32-* ]]; then
   echo "ok: launcher does not report success for a signal-killed binary"
 else
   echo "skip: launcher run test (no POSIX platform package for ${npm_host})"
+fi
+
+# Windows on arm64 has no native build: the x64 package installs there and the
+# launcher falls back to it. The fixture shk.exe is a shell script, so this
+# runs on a POSIX host with the platform faked.
+npm_unpack security-harness-kit-win32-x64
+if launcher_output="$(node -e '
+  Object.defineProperty(process, "platform", { value: "win32" });
+  Object.defineProperty(process, "arch", { value: "arm64" });
+  require(process.argv[1]);
+' "$npm_launcher" scan 2>&1)"; then
+  launcher_status=0
+else
+  launcher_status=$?
+fi
+if [[ "$npm_host" != win32-* ]]; then
+  if [[ "$launcher_status" -ne 7 || "$launcher_output" != "fixture shk x86_64-pc-windows-msvc scan" ]]; then
+    echo "FAIL: launcher on win32-arm64 did not fall back to the x64 binary (exit ${launcher_status}): ${launcher_output}" >&2
+    exit 1
+  fi
+  echo "ok: launcher on Windows arm64 falls back to the x64 package"
 fi
 
 if launcher_output="$(node -e '

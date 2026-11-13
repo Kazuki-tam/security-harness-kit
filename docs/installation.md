@@ -19,11 +19,13 @@ The npm package has no dependencies and no install scripts, and it does not down
 | macOS, Intel | `security-harness-kit-darwin-x64` |
 | Linux, arm64 (glibc) | `security-harness-kit-linux-arm64` |
 | Linux, x64 (glibc) | `security-harness-kit-linux-x64` |
-| Windows, x64 | `security-harness-kit-win32-x64` |
+| Windows, x64 and arm64 | `security-harness-kit-win32-x64` |
+
+There is no native Windows arm64 build. On Windows arm64 the x64 package is installed and runs under the x64 emulation of Windows 11.
 
 The launcher needs Node.js 18 or later. Because the binary comes from the npm registry, the install works with `ignore-scripts=true`, behind an npm proxy or registry mirror, and without access to `github.com`.
 
-Install `security-harness-kit` itself, not a platform package. The platform package is an optional dependency, so do not omit optional dependencies (`--omit=optional`, `--no-optional`), and do not copy `node_modules` from one operating system or CPU to another. On a system without a platform package, such as Alpine (musl) or Windows on arm64, the install still succeeds, but `shk` prints the reason and exits with code 2. Use another install method from this page there.
+Install `security-harness-kit` itself, not a platform package. The platform package is an optional dependency, so do not omit optional dependencies (`--omit=optional`, `--no-optional`), and do not copy `node_modules` from one operating system or CPU to another. On a system without a platform package, such as Alpine (musl), the install still succeeds, but `shk` prints the reason and exits with code 2. Use another install method from this page there.
 
 To check a platform package against the GitHub release, compare the `shkBinary.archiveSha256` value in its `package.json` with the `.sha256` file of the release archive. The packages are published from the release workflow with npm provenance.
 

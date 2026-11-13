@@ -308,15 +308,19 @@ EOF
 # `os` / `cpu` / `libc` fields match the host.
 readonly SHK_NPM_PACKAGE="security-harness-kit"
 
-# One line per target: <rust-target> <npm-os> <npm-cpu> <npm-libc|-> <binary>.
+# One line per target:
+#   <rust-target> <npm-os> <npm-cpu> <npm-libc|-> <binary> <installable-cpus>
+# <npm-cpu> names the package; <installable-cpus> is its `cpu` field. The
+# Windows x64 package also installs on arm64, where Windows runs it under x64
+# emulation and the launcher falls back to it (there is no native arm64 build).
 # Keep in sync with `targets` in dist-workspace.toml (test.sh enforces it).
 shk_npm_platforms() {
   cat <<'PLATFORMS'
-aarch64-apple-darwin darwin arm64 - shk
-x86_64-apple-darwin darwin x64 - shk
-aarch64-unknown-linux-gnu linux arm64 glibc shk
-x86_64-unknown-linux-gnu linux x64 glibc shk
-x86_64-pc-windows-msvc win32 x64 - shk.exe
+aarch64-apple-darwin darwin arm64 - shk arm64
+x86_64-apple-darwin darwin x64 - shk x64
+aarch64-unknown-linux-gnu linux arm64 glibc shk arm64
+x86_64-unknown-linux-gnu linux x64 glibc shk x64
+x86_64-pc-windows-msvc win32 x64 - shk.exe x64,arm64
 PLATFORMS
 }
 
@@ -329,8 +333,8 @@ shk_npm_platform_package() {
 # Platform package names first, the main package last. Publishing follows this
 # order so the main package never references an unpublished dependency.
 shk_npm_package_names() {
-  local target os cpu libc binary
-  while read -r target os cpu libc binary; do
+  local target os cpu libc binary cpus
+  while read -r target os cpu libc binary cpus; do
     shk_npm_platform_package "$os" "$cpu"
     printf '\n'
   done < <(shk_npm_platforms)
