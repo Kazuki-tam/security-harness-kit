@@ -48,8 +48,11 @@ readonly forbidden_fields_filter='
   | join(", ")
 '
 
-# Print the package.json of a tarball after checking its paths, entry types,
-# identity, exact file list, and install-time fields.
+# Check a tarball's paths, entry types, identity, exact file list, and
+# install-time fields, then leave its package.json in $manifest. Not called in
+# a command substitution: shk_error writes workflow commands to stdout on
+# GitHub Actions, and a substitution would swallow them.
+manifest=""
 verify_tarball() {
   local package="$1"
   shift
@@ -78,7 +81,7 @@ verify_tarball() {
     return 1
   fi
 
-  local manifest name manifest_version forbidden
+  local name manifest_version forbidden
   manifest="$(tar -xzOf "$tarball" package/package.json)"
   name="$(jq -r '.name // empty' <<<"$manifest")"
   manifest_version="$(jq -r '.version // empty' <<<"$manifest")"
@@ -91,14 +94,13 @@ verify_tarball() {
     shk_error "${package}: package.json must not define: ${forbidden}"
     return 1
   fi
-  printf '%s\n' "$manifest"
 }
 
 expected_optional_dependencies='{}'
 while read -r target os cpu libc binary; do
   package="$(shk_npm_platform_package "$os" "$cpu")"
   tarball="${assets_dir}/${package}-${version}.tgz"
-  manifest="$(verify_tarball "$package" "bin/${binary}" THIRD_PARTY_LICENSES.md)"
+  verify_tarball "$package" "bin/${binary}" THIRD_PARTY_LICENSES.md
 
   if ! jq -e --arg os "$os" --arg cpu "$cpu" --arg libc "$libc" '
     .os == [$os]
@@ -144,7 +146,7 @@ while read -r target os cpu libc binary; do
   echo "npm package ok: ${package}@${version} (binary matches ${archive_name})"
 done < <(shk_npm_platforms)
 
-manifest="$(verify_tarball "$SHK_NPM_PACKAGE" bin/shk.js)"
+verify_tarball "$SHK_NPM_PACKAGE" bin/shk.js
 if ! jq -e --argjson expected "$expected_optional_dependencies" '
   .bin == {shk: "bin/shk.js"}
   and .optionalDependencies == $expected
@@ -157,10 +159,11 @@ fi
 echo "npm package ok: ${SHK_NPM_PACKAGE}@${version} (no dependencies, no install scripts)"
 
 unexpected=()
+known_packages="$(shk_npm_package_names)"
 shopt -s nullglob
 for tarball in "$assets_dir"/*.tgz; do
   name="$(basename "$tarball" "-${version}.tgz")"
-  if ! grep -F -x -q "$name" < <(shk_npm_package_names); then
+  if ! grep -F -x -q "$name" <<<"$known_packages"; then
     unexpected+=("$(basename "$tarball")")
   fi
 done
