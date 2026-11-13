@@ -80,6 +80,9 @@ if (result.error) {
 if (result.signal) {
   // Re-raise the signal so the caller sees the same termination as the binary.
   process.kill(process.pid, result.signal);
+  // Node ignores some signals (SIGPIPE), so the re-raise can be a no-op. Never
+  // fall through to exit 0 for a binary that did not finish.
+  process.exit(EXIT_LAUNCH_ERROR);
 } else {
   process.exit(result.status === null ? EXIT_LAUNCH_ERROR : result.status);
 }

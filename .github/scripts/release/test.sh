@@ -1224,6 +1224,15 @@ if [[ -n "$npm_host_target" && "$npm_host" != win32-* ]]; then
     exit 1
   fi
   echo "ok: launcher runs the platform binary and forwards arguments and exit code"
+
+  # Node ignores SIGPIPE, so re-raising it is a no-op; the launcher must still
+  # not report success for a binary that was killed.
+  printf '#!/bin/sh\nkill -PIPE $$\n' > "$npm_install_dir/security-harness-kit-${npm_host}/bin/shk"
+  if node "$npm_launcher" scan >/dev/null 2>&1; then
+    echo "FAIL: launcher must not exit 0 when the binary is killed by a signal" >&2
+    exit 1
+  fi
+  echo "ok: launcher does not report success for a signal-killed binary"
 else
   echo "skip: launcher run test (no POSIX platform package for ${npm_host})"
 fi

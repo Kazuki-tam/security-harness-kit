@@ -17,9 +17,8 @@
 # ruleset only lets repository admins create `v*` refs, and the workflow's
 # GITHUB_TOKEN has no bypass, so the mirror tag must be created with a
 # maintainer's credentials. Creating the tag outside GitHub Actions re-triggers
-# the Release workflow (and the duplicate CLI release would fail on the npm
-# publish), so `run` parks the workflow while the tag is created and re-enables
-# it on exit.
+# the Release workflow (and would run a duplicate CLI release), so `run` parks
+# the workflow while the tag is created and re-enables it on exit.
 #
 # Usage:
 #   mirror-cli-release.sh tag <source-tag>     # print the mirror tag
