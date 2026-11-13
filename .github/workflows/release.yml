@@ -323,6 +323,21 @@ jobs:
         shell: bash
         run: dist build --artifacts=global
 
+      - name: set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+
+      # The npm packages are built here, not by dist: dist's npm installer
+      # downloads the binary at install time and ships an npm-shrinkwrap.json
+      # for its own runtime dependencies. These packages carry the binaries
+      # from the archives above and have no dependencies or install scripts.
+      - name: build npm packages
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: ./.github/scripts/release/build-npm-packages.sh target/distrib "${RELEASE_VERSION}" target/distrib
+
       - name: verify shell installer checksums
         shell: bash
         run: ./.github/scripts/release/verify-cli-installer-checksums.sh target/distrib
@@ -341,7 +356,7 @@ jobs:
             target/distrib/*-installer.sh
             target/distrib/*-installer.ps1
             target/distrib/*.rb
-            target/distrib/*-npm-package.tar.gz
+            target/distrib/security-harness-kit-*.tgz
             target/distrib/source.tar.gz
             target/distrib/source.tar.gz.sha256
             target/distrib/sha256.sum
@@ -568,14 +583,18 @@ jobs:
             git push
           fi
 
-  # Publish the dist-generated npm package so users can run
-  # `npm install -g security-harness-kit`. Authenticates with npm trusted
+  # Publish the npm packages so users can run
+  # `npm install -g security-harness-kit`: one package per target holding the
+  # prebuilt binary, then the dependency-free main package that selects one of
+  # them through `optionalDependencies`. Authenticates with npm trusted
   # publishing (GitHub Actions OIDC via `id-token: write`), which also signs
   # provenance — no npm token secret is used. The trusted publisher must be
-  # configured on npmjs.com for the package: repository
-  # Kazuki-tam/security-harness-kit, workflow release.yml.
+  # configured on npmjs.com for every package: repository
+  # Kazuki-tam/security-harness-kit, workflow release.yml. See
+  # docs/desktop-release.md#npm-packages for the one-time setup of a new
+  # platform package.
   publish-npm-package:
-    name: publish npm package
+    name: publish npm packages
     runs-on: ubuntu-22.04
     needs: [prepare, publish]
     if: >-
@@ -591,6 +610,10 @@ jobs:
       contents: read
       id-token: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
       - name: download global artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -608,43 +631,10 @@ jobs:
       - name: publish to npm
         shell: bash
         env:
-          EXPECTED_NPM_PACKAGE: security-harness-kit
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          set -euo pipefail
-          shopt -s nullglob
           npm --version
-          # The leading ./ is required: without it npm treats the path as a
-          # GitHub "user/repo" shortcut and fails with a git error (exit 128).
-          pkgs=(./dist-global/*-npm-package.tar.gz)
-          if [ "${#pkgs[@]}" -ne 1 ]; then
-            echo "::error::expected exactly one *-npm-package.tar.gz in dist-global artifact, found ${#pkgs[@]}" >&2
-            exit 1
-          fi
-
-          pkg="${pkgs[0]}"
-          pkg_json_path="$(tar -tzf "${pkg}" | awk -F/ 'NF == 2 && $2 == "package.json" && path == "" { path = $0 } END { print path }')"
-          if [ -z "${pkg_json_path}" ]; then
-            echo "::error::npm package tarball does not contain a top-level package.json" >&2
-            exit 1
-          fi
-          pkg_json="$(tar -xzOf "${pkg}" "${pkg_json_path}")"
-          name="$(jq -r .name <<<"${pkg_json}")"
-          version="$(jq -r .version <<<"${pkg_json}")"
-          if [ "${name}" != "${EXPECTED_NPM_PACKAGE}" ]; then
-            echo "::error::expected npm package ${EXPECTED_NPM_PACKAGE}, found ${name}" >&2
-            exit 1
-          fi
-          if [ "${version}" != "${RELEASE_VERSION}" ]; then
-            echo "::error::expected npm package version ${RELEASE_VERSION}, found ${version}" >&2
-            exit 1
-          fi
-
-          if npm view "${name}@${version}" version >/dev/null 2>&1; then
-            echo "${name}@${version} already published; nothing to do"
-            exit 0
-          fi
-          npm publish "${pkg}" --provenance --access public
+          ./.github/scripts/release/publish-npm-packages.sh dist-global "${RELEASE_VERSION}"
 
   verify-cli-channels:
     name: verify published CLI channels
