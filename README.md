@@ -63,7 +63,7 @@ real-time protection.
 
 - Download and install: [Installation → Desktop App](docs/installation.md#desktop-app)
 - Notification behaviour: [Blocked-activity notifications](docs/installation.md#blocked-activity-notifications)
-- Maintainer release process: [Desktop Release](docs/desktop-release.md)
+- Maintainer release process: [CLI Release](docs/cli-release.md), [Desktop Release](docs/desktop-release.md)
 
 ## Installation
 

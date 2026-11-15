@@ -69,7 +69,7 @@ for package in "${packages[@]}"; do
   # `dist-global/x.tgz` is read by npm as a GitHub "user/repo" shortcut.
   tarball="$(cd "$packages_dir" && pwd)/${package}-${version}.tgz"
   if ! npm publish "$tarball" --provenance --access public; then
-    shk_error "failed to publish ${package}@${version}. A package that has never been published needs the one-time bootstrap in docs/desktop-release.md#npm-packages before trusted publishing can publish it."
+    shk_error "failed to publish ${package}@${version}. A package that has never been published needs the one-time bootstrap in docs/cli-release.md#npm-packages before trusted publishing can publish it."
     exit 1
   fi
 done
