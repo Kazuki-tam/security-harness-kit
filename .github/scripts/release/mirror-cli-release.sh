@@ -7,8 +7,8 @@
 # and cargo-dist cannot parse this repo's `shk-v*` / `cli-v*` tag conventions
 # anyway (it only understands `v{version}` and `{package}-v{version}`), so the
 # artifact-download URLs it embeds always follow its own `v{version}`
-# convention. The shell/PowerShell installers, the Homebrew formula, and the
-# npm package therefore resolve CLI archives from
+# convention. The shell/PowerShell installers and the Homebrew formula
+# therefore resolve CLI archives from
 # `releases/download/v{version}/...` no matter which tag the pipeline
 # published under. Plain `v*` releases are aligned by construction; combined
 # and `cli-v*` releases need this mirror so those install channels resolve.
@@ -17,9 +17,8 @@
 # ruleset only lets repository admins create `v*` refs, and the workflow's
 # GITHUB_TOKEN has no bypass, so the mirror tag must be created with a
 # maintainer's credentials. Creating the tag outside GitHub Actions re-triggers
-# the Release workflow (and the duplicate CLI release would fail on the npm
-# publish), so `run` parks the workflow while the tag is created and re-enables
-# it on exit.
+# the Release workflow (and would run a duplicate CLI release), so `run` parks
+# the workflow while the tag is created and re-enables it on exit.
 #
 # Usage:
 #   mirror-cli-release.sh tag <source-tag>     # print the mirror tag
@@ -73,7 +72,7 @@ CLI asset mirror for \`${mirror_tag}\`.
 
 The release pipeline published every asset for this version under
 [\`${source_tag}\`](${source_url}), but the cargo-dist-generated install
-channels (shell/PowerShell installers, the Homebrew formula, the npm package)
+channels (shell/PowerShell installers, the Homebrew formula)
 resolve CLI archives from \`releases/download/${mirror_tag}/...\`. This release
 mirrors the CLI assets byte-for-byte (identical SHA-256) so those channels
 work.

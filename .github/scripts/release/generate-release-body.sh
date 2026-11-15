@@ -30,6 +30,7 @@ shk_handwritten_notes() {
     cli)
       shk_handwritten_notes "v${version}"
       shk_dist_announcement
+      shk_npm_release_notes "$version"
       shk_winget_release_notes
       ;;
     desktop)
@@ -43,6 +44,7 @@ shk_handwritten_notes() {
       shk_handwritten_notes "v${version}"
       shk_handwritten_notes "desktop-v${version}"
       shk_dist_announcement
+      shk_npm_release_notes "$version"
       shk_winget_release_notes
       echo ""
       shk_desktop_release_notes "$version"

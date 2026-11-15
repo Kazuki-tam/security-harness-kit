@@ -64,13 +64,15 @@ if ! grep -q "v${version}" "$workdir/shk.rb"; then
 fi
 
 # Registry replicas can lag a successful publish. Allow roughly five minutes
-# while keeping the check bounded and rerunnable.
-published_npm_version="$(shk_retry 8 10 60 npm view "security-harness-kit@${version}" version)"
-if [[ "$published_npm_version" != "$version" ]]; then
-  shk_error "npm published ${published_npm_version}, expected ${version}"
-  exit 1
-fi
-shk_retry 8 10 60 npm pack "security-harness-kit@${version}" --pack-destination "$workdir" >/dev/null
+# per package while keeping the check bounded and rerunnable.
+while IFS= read -r npm_package; do
+  published_npm_version="$(shk_retry 8 10 60 npm view "${npm_package}@${version}" version)"
+  if [[ "$published_npm_version" != "$version" ]]; then
+    shk_error "npm published ${npm_package}@${published_npm_version}, expected ${version}"
+    exit 1
+  fi
+  shk_retry 8 10 60 npm pack "${npm_package}@${version}" --pack-destination "$workdir" >/dev/null
+done < <(shk_npm_package_names)
 
 "${ROOT}/.github/scripts/release/verify-cli-channel-artifacts.sh" "$workdir" "$version"
 echo "published installer, Homebrew, and npm channels verified for ${distribution_tag}"

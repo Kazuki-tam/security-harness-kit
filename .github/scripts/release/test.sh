@@ -981,15 +981,50 @@ RELEASE_VERSION="$current_version" \
   ./.github/scripts/release/verify-unsigned-desktop-assets.sh "$unsigned_assets" >/dev/null
 echo "ok: unsigned desktop asset verification"
 
+# The npm packaging table must cover exactly the targets cargo-dist builds.
+dist_targets="$(awk -F'[][]' '/^targets = / { print $2 }' dist-workspace.toml | tr -d '" ' | tr ',' '\n' | LC_ALL=C sort)"
+npm_targets="$(shk_npm_platforms | awk '{ print $1 }' | LC_ALL=C sort)"
+if [[ -z "$dist_targets" || "$dist_targets" != "$npm_targets" ]]; then
+  echo "FAIL: shk_npm_platforms targets differ from dist-workspace.toml targets" >&2
+  echo "dist: ${dist_targets//$'\n'/ }" >&2
+  echo "npm:  ${npm_targets//$'\n'/ }" >&2
+  exit 1
+fi
+echo "ok: npm platform packages cover every dist target"
+if grep -E -q '^(installers|publish-jobs) = .*"npm"' dist-workspace.toml; then
+  echo "FAIL: dist must not generate or publish its own npm installer (it ships npm-shrinkwrap.json)" >&2
+  exit 1
+fi
+echo "ok: dist npm installer stays disabled"
+
+# cargo-dist-shaped archives. The "binary" is a shell script so the launcher
+# test below can run it on any POSIX host.
 channel_fixture="$tmpdir/cli-channel-artifacts"
-mkdir -p "$channel_fixture/npm/package"
+mkdir -p "$channel_fixture"
+channel_stage="$tmpdir/cli-channel-stage"
 for channel_archive in \
   shk-cli-aarch64-apple-darwin.tar.xz \
   shk-cli-aarch64-unknown-linux-gnu.tar.xz \
   shk-cli-x86_64-apple-darwin.tar.xz \
   shk-cli-x86_64-pc-windows-msvc.zip \
   shk-cli-x86_64-unknown-linux-gnu.tar.xz; do
-  printf 'archive %s\n' "$channel_archive" > "$channel_fixture/$channel_archive"
+  channel_target="${channel_archive#shk-cli-}"
+  channel_target="${channel_target%.tar.xz}"
+  channel_target="${channel_target%.zip}"
+  channel_stage_dir="$channel_stage/shk-cli-${channel_target}"
+  mkdir -p "$channel_stage_dir"
+  printf 'readme\n' > "$channel_stage_dir/README.md"
+  case "$channel_archive" in
+    *.zip)
+      printf '#!/bin/sh\necho "fixture shk %s $*"\nexit 7\n' "$channel_target" > "$channel_stage_dir/shk.exe"
+      (cd "$channel_stage_dir" && zip -q "$channel_fixture/$channel_archive" shk.exe README.md)
+      ;;
+    *)
+      printf '#!/bin/sh\necho "fixture shk %s $*"\nexit 7\n' "$channel_target" > "$channel_stage_dir/shk"
+      chmod 755 "$channel_stage_dir/shk"
+      tar -cJf "$channel_fixture/$channel_archive" -C "$channel_stage" "shk-cli-${channel_target}"
+      ;;
+  esac
   channel_digest="$(fixture_sha256 "$channel_fixture/$channel_archive")"
   printf '%s  %s\n' "$channel_digest" "$channel_archive" \
     > "$channel_fixture/$channel_archive.sha256"
@@ -1013,11 +1048,9 @@ printf '%s\n' "https://github.com/Kazuki-tam/security-harness-kit/releases/downl
   > "$channel_fixture/shk-cli-installer.ps1"
 printf '%s\n' "url \"https://github.com/Kazuki-tam/security-harness-kit/releases/download/v${current_version}/shk-cli-x86_64-unknown-linux-gnu.tar.xz\"" \
   > "$channel_fixture/shk.rb"
-printf '%s\n' "https://github.com/Kazuki-tam/security-harness-kit/releases/download/v${current_version}" \
-  > "$channel_fixture/npm/package/install.js"
-printf '{"name":"security-harness-kit","version":"%s"}\n' "$current_version" \
-  > "$channel_fixture/npm/package/package.json"
-tar -czf "$channel_fixture/shk-cli-npm-package.tar.gz" -C "$channel_fixture/npm" package
+./.github/scripts/release/build-npm-packages.sh \
+  "$channel_fixture" "$current_version" "$channel_fixture" >/dev/null
+echo "ok: npm packages built from CLI archives"
 ./.github/scripts/release/verify-cli-channel-artifacts.sh \
   "$channel_fixture" "$current_version" >/dev/null
 echo "ok: CLI channel artifact references verified"
@@ -1043,28 +1076,298 @@ printf '%s\n' \
   "$channel_fixture" "$current_version" >/dev/null
 echo "ok: unrelated third-party release URLs ignored"
 
-printf '{"name":"security-harness-kit","version":"9.9.9"}\n' \
-  > "$channel_fixture/npm/package/package.json"
-tar -czf "$channel_fixture/shk-cli-npm-package.tar.gz" -C "$channel_fixture/npm" package
-if ./.github/scripts/release/verify-cli-channel-artifacts.sh \
-  "$channel_fixture" "$current_version" >/dev/null 2>&1; then
-  echo "FAIL: mismatched npm package identity should fail" >&2
+# --- npm packages: dependency-free main package + per-platform binaries ---
+npm_package_names=()
+while IFS= read -r npm_package_name; do
+  npm_package_names+=("$npm_package_name")
+done < <(shk_npm_package_names)
+if [[ "${#npm_package_names[@]}" -ne 6 || "${npm_package_names[5]}" != "security-harness-kit" ]]; then
+  echo "FAIL: expected five platform packages followed by security-harness-kit" >&2
   exit 1
 fi
-echo "ok: mismatched npm package identity rejected"
+for npm_package_name in "${npm_package_names[@]}"; do
+  npm_tarball="$channel_fixture/${npm_package_name}-${current_version}.tgz"
+  npm_entries="$(tar -tzf "$npm_tarball")"
+  for forbidden_entry in npm-shrinkwrap.json package-lock.json binding.gyp node_modules; do
+    if [[ "$npm_entries" == *"$forbidden_entry"* ]]; then
+      echo "FAIL: ${npm_package_name} tarball contains ${forbidden_entry}" >&2
+      exit 1
+    fi
+  done
+  if ! tar -xzOf "$npm_tarball" package/package.json \
+    | jq -e '(has("scripts") or has("dependencies")) | not' >/dev/null; then
+    echo "FAIL: ${npm_package_name} defines scripts or dependencies" >&2
+    exit 1
+  fi
+done
+echo "ok: npm packages ship no shrinkwrap, lockfile, install scripts, or dependencies"
 
-printf '{"name":"security-harness-kit","version":"%s"}\n' "$current_version" \
-  > "$channel_fixture/npm/package/package.json"
-ln -s /etc/passwd "$channel_fixture/npm/package/unsafe-link"
-tar -czf "$channel_fixture/shk-cli-npm-package.tar.gz" -C "$channel_fixture/npm" package
-if ./.github/scripts/release/verify-cli-channel-artifacts.sh \
-  "$channel_fixture" "$current_version" >/dev/null 2>&1; then
-  echo "FAIL: npm package link entry should fail" >&2
+assert_output "npm main package pins every platform package to the release version" \
+  "security-harness-kit-darwin-arm64@${current_version} security-harness-kit-darwin-x64@${current_version} security-harness-kit-linux-arm64@${current_version} security-harness-kit-linux-x64@${current_version} security-harness-kit-win32-x64@${current_version}" \
+  bash -c "tar -xzOf '$channel_fixture/security-harness-kit-${current_version}.tgz' package/package.json \
+    | jq -r '[.optionalDependencies | to_entries[] | \"\(.key)@\(.value)\"] | join(\" \")'"
+assert_output "npm linux package is restricted to glibc" \
+  '{"os":["linux"],"cpu":["arm64"],"libc":["glibc"]}' \
+  bash -c "tar -xzOf '$channel_fixture/security-harness-kit-linux-arm64-${current_version}.tgz' package/package.json \
+    | jq -c '{os, cpu, libc}'"
+assert_output "npm windows package ships shk.exe and also installs on arm64" \
+  '{"os":["win32"],"cpu":["x64","arm64"],"files":["bin/shk.exe","THIRD_PARTY_LICENSES.md"]}' \
+  bash -c "tar -xzOf '$channel_fixture/security-harness-kit-win32-x64-${current_version}.tgz' package/package.json \
+    | jq -c '{os, cpu, files}'"
+
+# Tamper with one built tarball, expect the channel verification to reject it
+# for the stated reason, then restore the pristine tarballs.
+npm_pristine="$tmpdir/npm-pristine"
+mkdir -p "$npm_pristine"
+cp "$channel_fixture"/*.tgz "$npm_pristine/"
+npm_repack() {
+  local package="$1"
+  shift
+  local dir="$tmpdir/npm-repack"
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  tar -xzf "$channel_fixture/${package}-${current_version}.tgz" -C "$dir"
+  (cd "$dir/package" && "$@")
+  COPYFILE_DISABLE=1 tar -czf "$channel_fixture/${package}-${current_version}.tgz" -C "$dir" package
+}
+npm_edit_manifest() {
+  jq "$1" package.json > package.json.new
+  mv package.json.new package.json
+}
+expect_npm_rejected() {
+  local description="$1"
+  local expected_error="$2"
+  local output
+  if output="$(./.github/scripts/release/verify-cli-channel-artifacts.sh \
+    "$channel_fixture" "$current_version" 2>&1)"; then
+    echo "FAIL: ${description} should fail" >&2
+    exit 1
+  fi
+  assert_contains "${description} error" "$output" "$expected_error"
+  echo "ok: ${description} rejected"
+  rm -f "$channel_fixture"/*.tgz
+  cp "$npm_pristine"/*.tgz "$channel_fixture/"
+}
+
+npm_repack security-harness-kit npm_edit_manifest '.version = "9.9.9"'
+expect_npm_rejected "mismatched npm package identity" "npm package identity mismatch"
+
+npm_repack security-harness-kit bash -c 'printf "{}\n" > npm-shrinkwrap.json'
+expect_npm_rejected "npm package with a shrinkwrap" "unexpected npm package contents"
+
+npm_repack security-harness-kit npm_edit_manifest '.scripts = {postinstall: "node install.js"}'
+expect_npm_rejected "npm package with an install script" "package.json must not define: scripts"
+
+npm_repack security-harness-kit-linux-x64 npm_edit_manifest '.dependencies = {"left-pad": "1.0.0"}'
+expect_npm_rejected "npm platform package with a dependency" "package.json must not define: dependencies"
+
+npm_repack security-harness-kit npm_edit_manifest \
+  '.optionalDependencies["security-harness-kit-linux-x64"] |= "^" + .'
+expect_npm_rejected "npm main package with a version range" "optionalDependencies must pin every platform package"
+
+npm_repack security-harness-kit-darwin-arm64 bash -c 'printf "tampered\n" >> bin/shk'
+expect_npm_rejected "npm platform binary that differs from the release archive" "binary does not match shk-cli-aarch64-apple-darwin.tar.xz"
+
+npm_repack security-harness-kit-linux-arm64 npm_edit_manifest 'del(.libc)'
+expect_npm_rejected "npm linux package without the glibc restriction" "unexpected os/cpu/libc"
+
+npm_repack security-harness-kit ln -s /etc/passwd unsafe-link
+expect_npm_rejected "npm package link entry" "contains a link or special archive entry"
+
+rm "$channel_fixture/security-harness-kit-win32-x64-${current_version}.tgz"
+expect_npm_rejected "missing npm platform package" "missing npm package tarball: security-harness-kit-win32-x64-${current_version}.tgz"
+
+cp "$channel_fixture/security-harness-kit-${current_version}.tgz" \
+  "$channel_fixture/security-harness-kit-freebsd-x64-${current_version}.tgz"
+expect_npm_rejected "unlisted npm package tarball" "unexpected npm package tarball(s)"
+
+./.github/scripts/release/verify-cli-channel-artifacts.sh \
+  "$channel_fixture" "$current_version" >/dev/null
+echo "ok: restored npm packages verify again"
+
+# Launcher: unpack the tarballs the way a package manager lays them out and
+# run the `shk` bin. The fixture binary echoes its arguments and exits 7.
+npm_install_dir="$tmpdir/npm-install/node_modules"
+npm_unpack() {
+  local package="$1"
+  mkdir -p "$npm_install_dir/$package"
+  tar -xzf "$channel_fixture/${package}-${current_version}.tgz" \
+    -C "$npm_install_dir/$package" --strip-components=1
+}
+npm_unpack security-harness-kit
+npm_launcher="$npm_install_dir/security-harness-kit/bin/shk.js"
+npm_host="$(node -p 'process.platform + "-" + process.arch')"
+npm_host_target="$(shk_npm_platforms | awk -v host="$npm_host" '$2 "-" $3 == host { print $1 }')"
+if [[ -n "$npm_host_target" && "$npm_host" != win32-* ]]; then
+  if launcher_output="$(node "$npm_launcher" scan --flag 2>&1)"; then
+    echo "FAIL: launcher without the platform package should fail" >&2
+    exit 1
+  else
+    launcher_status=$?
+  fi
+  if [[ "$launcher_status" -ne 2 ]]; then
+    echo "FAIL: launcher without the platform package exited ${launcher_status}, expected 2" >&2
+    exit 1
+  fi
+  assert_contains "launcher names the missing platform package" "$launcher_output" \
+    "security-harness-kit-${npm_host}@${current_version} is not installed"
+  echo "ok: launcher fails closed when the platform package is missing"
+
+  npm_unpack "security-harness-kit-${npm_host}"
+  if launcher_output="$(node "$npm_launcher" scan --flag 2>&1)"; then
+    launcher_status=0
+  else
+    launcher_status=$?
+  fi
+  if [[ "$launcher_status" -ne 7 || "$launcher_output" != "fixture shk ${npm_host_target} scan --flag" ]]; then
+    echo "FAIL: launcher did not run the platform binary (exit ${launcher_status}): ${launcher_output}" >&2
+    exit 1
+  fi
+  echo "ok: launcher runs the platform binary and forwards arguments and exit code"
+
+  # Node ignores SIGPIPE, so re-raising it is a no-op; the launcher must still
+  # not report success for a binary that was killed.
+  printf '#!/bin/sh\nkill -PIPE $$\n' > "$npm_install_dir/security-harness-kit-${npm_host}/bin/shk"
+  if node "$npm_launcher" scan >/dev/null 2>&1; then
+    echo "FAIL: launcher must not exit 0 when the binary is killed by a signal" >&2
+    exit 1
+  fi
+  echo "ok: launcher does not report success for a signal-killed binary"
+else
+  echo "skip: launcher run test (no POSIX platform package for ${npm_host})"
+fi
+
+# Windows on arm64 has no native build: the x64 package installs there and the
+# launcher falls back to it. The fixture shk.exe is a shell script, so this
+# runs on a POSIX host with the platform faked.
+npm_unpack security-harness-kit-win32-x64
+if launcher_output="$(node -e '
+  Object.defineProperty(process, "platform", { value: "win32" });
+  Object.defineProperty(process, "arch", { value: "arm64" });
+  require(process.argv[1]);
+' "$npm_launcher" scan 2>&1)"; then
+  launcher_status=0
+else
+  launcher_status=$?
+fi
+if [[ "$npm_host" != win32-* ]]; then
+  if [[ "$launcher_status" -ne 7 || "$launcher_output" != "fixture shk x86_64-pc-windows-msvc scan" ]]; then
+    echo "FAIL: launcher on win32-arm64 did not fall back to the x64 binary (exit ${launcher_status}): ${launcher_output}" >&2
+    exit 1
+  fi
+  echo "ok: launcher on Windows arm64 falls back to the x64 package"
+fi
+
+if launcher_output="$(node -e '
+  Object.defineProperty(process, "platform", { value: "freebsd" });
+  require(process.argv[1]);
+' "$npm_launcher" 2>&1)"; then
+  echo "FAIL: launcher on an unsupported platform should fail" >&2
+  exit 1
+else
+  launcher_status=$?
+fi
+if [[ "$launcher_status" -ne 2 ]]; then
+  echo "FAIL: launcher on an unsupported platform exited ${launcher_status}, expected 2" >&2
   exit 1
 fi
-echo "ok: npm package link entry rejected"
-rm "$channel_fixture/npm/package/unsafe-link"
-tar -czf "$channel_fixture/shk-cli-npm-package.tar.gz" -C "$channel_fixture/npm" package
+assert_contains "launcher explains the unsupported platform" "$launcher_output" \
+  "no prebuilt binary for freebsd-"
+assert_contains "launcher lists supported platforms" "$launcher_output" \
+  "darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-x64"
+echo "ok: launcher reports unsupported platforms with exit 2"
+
+# Publishing: platform packages first, the main package last, skipping
+# versions that already exist. `npm` is stubbed; nothing reaches a registry.
+npm_stub="$tmpdir/npm-stub"
+mkdir -p "$npm_stub/bin"
+cat > "$npm_stub/bin/npm" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  view)
+    grep -F -x -q "$2" "$NPM_STUB_STATE/published"
+    ;;
+  publish)
+    name="$(basename "$2" .tgz)"
+    [[ "$2" == /* ]] || { echo "publish path must be absolute: $2" >&2; exit 1; }
+    if [[ "$name" == "${NPM_STUB_FAIL:-}-"* ]]; then
+      exit 1
+    fi
+    shift 2
+    printf '%s %s\n' "$name" "$*" >> "$NPM_STUB_STATE/publish.log"
+    tar -xzOf "$NPM_STUB_DIR/${name}.tgz" package/package.json \
+      | jq -r '"\(.name)@\(.version)"' >> "$NPM_STUB_STATE/published"
+    ;;
+  *)
+    echo "unexpected npm call: $*" >&2
+    exit 1
+    ;;
+esac
+STUB
+chmod +x "$npm_stub/bin/npm"
+npm_stub_reset() {
+  rm -rf "$npm_stub/state"
+  mkdir -p "$npm_stub/state"
+  : > "$npm_stub/state/published"
+  : > "$npm_stub/state/publish.log"
+}
+npm_stub_publish() {
+  env PATH="$npm_stub/bin:$PATH" NPM_STUB_STATE="$npm_stub/state" NPM_STUB_DIR="$channel_fixture" \
+    NPM_STUB_FAIL="${NPM_STUB_FAIL:-}" \
+    ./.github/scripts/release/publish-npm-packages.sh "$channel_fixture" "$current_version"
+}
+
+npm_stub_reset
+npm_stub_publish >/dev/null
+expected_publish_log=""
+for npm_package_name in "${npm_package_names[@]}"; do
+  expected_publish_log+="${npm_package_name}-${current_version} --provenance --access public"$'\n'
+done
+if [[ "$(<"$npm_stub/state/publish.log")"$'\n' != "$expected_publish_log" ]]; then
+  echo "FAIL: npm packages must publish platform packages first and the main package last" >&2
+  cat "$npm_stub/state/publish.log" >&2
+  exit 1
+fi
+echo "ok: npm publish order is platform packages, then the main package"
+
+: > "$npm_stub/state/publish.log"
+npm_stub_publish >/dev/null
+if [[ -s "$npm_stub/state/publish.log" ]]; then
+  echo "FAIL: already-published npm packages must be skipped" >&2
+  exit 1
+fi
+echo "ok: already-published npm packages are skipped"
+
+npm_stub_reset
+if NPM_STUB_FAIL=security-harness-kit-linux-x64 npm_stub_publish >/dev/null 2>&1; then
+  echo "FAIL: a failed platform publish must fail the job" >&2
+  exit 1
+fi
+if grep -q "^security-harness-kit-${current_version} " "$npm_stub/state/publish.log"; then
+  echo "FAIL: the main npm package must not publish after a platform package failed" >&2
+  exit 1
+fi
+echo "ok: main npm package is not published when a platform package fails"
+
+npm_stub_reset
+mv "$channel_fixture/security-harness-kit-win32-x64-${current_version}.tgz" "$tmpdir/"
+if npm_stub_publish >/dev/null 2>&1 || [[ -s "$npm_stub/state/publish.log" ]]; then
+  echo "FAIL: a missing npm tarball must stop publishing before anything is published" >&2
+  exit 1
+fi
+mv "$tmpdir/security-harness-kit-win32-x64-${current_version}.tgz" "$channel_fixture/"
+echo "ok: missing npm tarball stops publishing before the first publish"
+
+assert_contains "release workflow publishes npm packages through the publish script" \
+  "$release_workflow" './.github/scripts/release/publish-npm-packages.sh dist-global "${RELEASE_VERSION}"'
+assert_contains "release workflow uploads the npm tarballs" \
+  "$release_workflow" "target/distrib/security-harness-kit-*.tgz"
+if [[ "$release_workflow" == *"npm-package.tar.gz"* || "$release_workflow" == *"NODE_AUTH_TOKEN"* || "$release_workflow" == *"NPM_TOKEN"* ]]; then
+  echo "FAIL: release workflow must not publish the dist npm installer or use an npm token" >&2
+  exit 1
+fi
+echo "ok: release workflow publishes the dependency-free npm packages over OIDC"
 
 rm "$channel_fixture/shk-cli-aarch64-apple-darwin.tar.xz"
 if ./.github/scripts/release/verify-cli-channel-artifacts.sh \
@@ -1188,6 +1491,8 @@ release_body_first_line() {
 assert_output "CLI notes lead the release body" "## CLI notes stub" release_body_first_line cli 1.2.3
 assert_contains "CLI release body keeps the dist announcement" \
   "$(<"$release_body_dir/body.md")" "## Install stub"
+assert_contains "CLI release body includes the npm install command" \
+  "$(<"$release_body_dir/body.md")" "npm install -g security-harness-kit@1.2.3"
 assert_output "desktop notes lead the release body" "## Desktop notes stub" release_body_first_line desktop 1.2.3
 assert_output "combined release body starts with the CLI notes" "## CLI notes stub" release_body_first_line both 1.2.3
 assert_contains "combined release body includes the desktop notes" \

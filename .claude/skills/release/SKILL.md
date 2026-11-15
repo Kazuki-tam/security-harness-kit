@@ -34,6 +34,13 @@ Check that the runner labels in `release.yml` are still listed in
 [actions/runner-images](https://github.com/actions/runner-images). PR CI does
 not run that workflow, so a retired label only fails once a tag is pushed.
 
+For CLI releases, every npm package the workflow publishes
+(`security-harness-kit` and the five `security-harness-kit-<os>-<cpu>`
+platform packages) must already exist on npmjs.com with `release.yml` as its
+trusted publisher; see
+[npm packages](../../../docs/desktop-release.md#npm-packages). Check with
+`npm view security-harness-kit-linux-x64 name` and so on.
+
 For desktop releases while Windows Authenticode is unconfigured, the repo
 variable `SHK_ALLOW_UNSIGNED_WINDOWS=true` must exist
 (`gh variable list`). Delete it once Authenticode signing lands.
@@ -88,8 +95,8 @@ external transfers. Use `gh release download` instead.
 
 ## 5. CLI mirror (only for `shk-v*` / `cli-v*` tags)
 
-cargo-dist embeds `releases/download/vX.Y.Z/...` URLs in the installers,
-Homebrew formula, and npm package regardless of the pushed tag, so combined
+cargo-dist embeds `releases/download/vX.Y.Z/...` URLs in the installers and
+Homebrew formula regardless of the pushed tag, so combined
 releases must mirror the CLI assets to a `vX.Y.Z` release:
 
 ```bash
@@ -98,7 +105,7 @@ releases must mirror the CLI assets to a `vX.Y.Z` release:
 
 The script handles tag creation, checksum verification, and the temporary
 Release-workflow disable/re-enable (a `v*` tag push would otherwise re-trigger
-the pipeline and fail on the duplicate npm publish). If it aborts, confirm the
+the pipeline and publish a duplicate CLI release). If it aborts, confirm the
 workflow is re-enabled: `gh workflow enable release.yml`. Background in
 [docs/desktop-release.md](../../../docs/desktop-release.md#combined-releases-and-the-cli-mirror).
 
