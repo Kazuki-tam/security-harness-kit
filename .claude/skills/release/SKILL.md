@@ -40,6 +40,12 @@ platform packages) must already exist on npmjs.com with `release.yml` as its
 trusted publisher; see
 [npm packages](../../../docs/desktop-release.md#npm-packages). Check with
 `npm view security-harness-kit-linux-x64 name` and so on.
+A trusted publisher configuration that has never published **expires 2 days
+after it was created**, and it cannot be checked from the CLI. Until the first
+release has published the platform packages, ask the maintainer to confirm on
+npmjs.com, on the day of the release, that all five configurations exist, are
+not expired, and have "Allow npm publish" selected. Only the maintainer can
+create them.
 
 For desktop releases while Windows Authenticode is unconfigured, the repo
 variable `SHK_ALLOW_UNSIGNED_WINDOWS=true` must exist

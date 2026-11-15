@@ -212,13 +212,41 @@ Before the first release that includes a new package name, a maintainer with
 publish rights must:
 
 1. Publish a placeholder version of that name by hand, for example `0.0.0`
-   with only a `package.json` and a README, and deprecate it.
-2. Open the package settings on npmjs.com and add a trusted publisher:
-   repository `Kazuki-tam/security-harness-kit`, workflow `release.yml`, and
-   the same environment setting as `security-harness-kit`.
+   with only a `package.json` and a README, and deprecate it. npm lists a new
+   package as `0.0.0-stage` for a few minutes before `0.0.0` appears, and
+   `npm deprecate` fails with "No version found" until it does; retry then.
+2. Shortly before the release, open the package settings on npmjs.com and add
+   a trusted publisher for GitHub Actions:
 
-Until this is done for all five platform packages, the `publish npm packages`
-job fails on the first missing one and does not publish the main package.
+   | Field | Value |
+   | --- | --- |
+   | Organization or user | `Kazuki-tam` |
+   | Repository | `security-harness-kit` |
+   | Workflow filename | `release.yml` |
+   | Environment name | same as `security-harness-kit` (empty) |
+   | Allowed actions | **Allow npm publish** (the workflow runs `npm publish`; `npm dist-tag` is not needed) |
+
+   All fields are case-sensitive, npm does not check them when saving, and a
+   saved configuration cannot be edited, only deleted and created again.
+
+A new trusted publisher configuration **expires after 2 days** unless a
+publish through it succeeds in that time. Create it on the day of the release
+or the day before. If it has expired, delete it and create it again; the
+package name and placeholder stay. Once the first release has published
+through it, the configuration is permanent.
+
+The five current platform packages were reserved with a deprecated `0.0.0`
+placeholder on 2026-11-15. Their trusted publisher configurations still have
+to be valid when the first release that publishes them runs.
+
+Until every platform package has a valid trusted publisher, the
+`publish npm packages` job fails on the first one without it and does not
+publish the main package. Fix the configuration and rerun the job; it skips
+what is already published.
+
+Setting "Require two-factor authentication and disallow tokens" under
+Publishing access is recommended for all six packages. It does not affect
+trusted publishing.
 
 ## Release Checklist
 
