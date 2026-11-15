@@ -11,6 +11,7 @@ description: >
 
 Runbook for releasing the CLI, the desktop app, or both. The release pipeline
 is `.github/workflows/release.yml`; maintainer docs live in
+[docs/cli-release.md](../../../docs/cli-release.md) and
 [docs/desktop-release.md](../../../docs/desktop-release.md).
 
 ## 1. Pre-flight (on a clean, up-to-date `main`)
@@ -38,8 +39,14 @@ For CLI releases, every npm package the workflow publishes
 (`security-harness-kit` and the five `security-harness-kit-<os>-<cpu>`
 platform packages) must already exist on npmjs.com with `release.yml` as its
 trusted publisher; see
-[npm packages](../../../docs/desktop-release.md#npm-packages). Check with
+[npm packages](../../../docs/cli-release.md#npm-packages). Check with
 `npm view security-harness-kit-linux-x64 name` and so on.
+A trusted publisher configuration that has never published **expires 2 days
+after it was created**, and it cannot be checked from the CLI. Until the first
+release has published the platform packages, ask the maintainer to confirm on
+npmjs.com, on the day of the release, that all five configurations exist, are
+not expired, and have "Allow npm publish" selected. Only the maintainer can
+create them.
 
 For desktop releases while Windows Authenticode is unconfigured, the repo
 variable `SHK_ALLOW_UNSIGNED_WINDOWS=true` must exist
@@ -107,7 +114,7 @@ The script handles tag creation, checksum verification, and the temporary
 Release-workflow disable/re-enable (a `v*` tag push would otherwise re-trigger
 the pipeline and publish a duplicate CLI release). If it aborts, confirm the
 workflow is re-enabled: `gh workflow enable release.yml`. Background in
-[docs/desktop-release.md](../../../docs/desktop-release.md#combined-releases-and-the-cli-mirror).
+[docs/cli-release.md](../../../docs/cli-release.md#combined-releases-and-the-cli-mirror).
 
 ## 6. Follow-ups
 
