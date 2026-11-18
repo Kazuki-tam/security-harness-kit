@@ -6,8 +6,8 @@ use crate::safety;
 use anyhow::{Context, Result, bail};
 use shk_core::policy::{ColorMode, Policy, Severity};
 use shk_core::scanner::{
-    GitHistoryPreview, ScanOptions, ScanResult, preview_git_history, scan_path, scan_string,
-    scan_strings,
+    GitHistoryPreview, InlineIgnores, ScanOptions, ScanPart, ScanResult, preview_git_history,
+    scan_parts, scan_path,
 };
 use shk_integrations::ActionGuardMatch;
 use std::collections::HashSet;
@@ -583,12 +583,23 @@ fn run_hook_mode_inner(
             }
         })
         .collect();
-    let parts: Vec<(&str, &str)> = policy_labels
+    // Only what a referenced file already holds on disk keeps its inline
+    // `shk-ignore` comments. Payload text (a command, tool arguments, text to
+    // be written, fetched content) comes from the agent or a remote source,
+    // which must not be able to exempt itself.
+    let parts: Vec<ScanPart<'_>> = policy_labels
         .iter()
         .zip(&segments)
-        .map(|(label, segment)| (label.as_str(), segment.text.as_str()))
+        .map(|(label, segment)| ScanPart {
+            label: label.as_str(),
+            text: segment.text.as_str(),
+            inline_ignores: match &segment.on_disk {
+                Some(on_disk) => InlineIgnores::OnlyLinesOf(on_disk),
+                None => InlineIgnores::Ignored,
+            },
+        })
         .collect();
-    let res = scan_strings(&repo_root, &parts, opts).context("hook scan failed")?;
+    let res = scan_parts(&repo_root, &parts, opts).context("hook scan failed")?;
     let labels: Vec<(&str, &str)> = policy_labels
         .iter()
         .zip(&segments)
@@ -937,8 +948,16 @@ fn run_user_prompt_mode(
 
     let opts = hook_scan_options(fail_on, false);
 
-    let res = scan_string(repo_root, "<user-prompt>", prompt.as_ref(), opts)
-        .context("user-prompt scan failed")?;
+    let res = scan_parts(
+        repo_root,
+        &[ScanPart {
+            label: "<user-prompt>",
+            text: prompt.as_ref(),
+            inline_ignores: InlineIgnores::Ignored,
+        }],
+        opts,
+    )
+    .context("user-prompt scan failed")?;
 
     if audit {
         hook_audit_log::append_audit_hook(repo_root, tool, event, "<user-prompt>", &res)?;
@@ -1130,6 +1149,7 @@ fn fs_canonical_or_same(p: PathBuf) -> PathBuf {
 mod tests {
     use super::*;
     use hook_output::HookEvent;
+    use shk_core::scanner::scan_strings;
 
     fn init_test_repo(path: &Path) {
         std::fs::create_dir(path.join(".git")).unwrap();

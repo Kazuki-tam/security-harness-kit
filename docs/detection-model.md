@@ -100,6 +100,21 @@ Common zsh, bash, sh, fish, and PowerShell PSReadLine history files are treated 
 paths. Supported nested shell payloads are inspected recursively; the strict profile additionally
 rejects opaque execution whose contents are otherwise safe.
 
+Dotenv files are protected by argument: in a shell command only a short list of commands that do
+not print the file may be handed one, input redirections from a sensitive path are denied, and
+scripts passed to a shell or interpreter through a heredoc or here-string are scanned. A shell fed
+from a pipe or a redirected file is denied because its script is not visible.
+
+The guard reads the command line, not what the command does. A sensitive path that never appears
+on the command line is not seen (`echo NAME | xargs cat`, `find . -exec cat {} +`, a script file
+that opens the path itself), nor is one assembled from variables or command substitutions at run
+time, reached through `$_`, or read by a function or alias that redefines a command on the safe
+list. A shell deeper inside a compound command that a pipe feeds (`… | if x; then bash; fi`) or
+behind a wrapper there (`… | timeout 5 bash`) is not recognised as reading the pipe, and a script
+for an interpreter is only checked for the plain forms of printing the environment. The other sensitive name patterns (`*key*`, `*token*`, …) are only applied to listed reader
+commands. For those, a bare data file name counts like a path (`cat credentials.json`,
+`cat tokenizer.json`), so an allow entry is needed where such a name is harmless.
+
 Shell-history protection is path- and command-based rather than a complete shell interpreter.
 Custom history locations and indirect loading through an unrecognized command remain intentional
 limitations. Add project-specific `[action_guard].deny` patterns when those paths or workflows

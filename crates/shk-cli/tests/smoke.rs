@@ -7991,3 +7991,292 @@ fn which_node() -> Option<PathBuf> {
         .map(|dir| dir.join(name))
         .find(|candidate| candidate.is_file())
 }
+
+// not real credential: synthetic detector fixture value only. Split so the
+// source line itself is not a finding.
+const REVIEW_FIXTURE_KEY: &str = concat!("sk-proj-", "abcdefghijklmnopqrstuvwxyz0123456789");
+
+fn init_plain_repo(dir: &Path) {
+    let init = git_cmd()
+        .args(["init"])
+        .current_dir(dir)
+        .output()
+        .expect("git init");
+    assert!(init.status.success());
+}
+
+fn scan_exit_code(dir: &Path, args: &[&str]) -> Option<i32> {
+    shk_cmd()
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("shk scan")
+        .status
+        .code()
+}
+
+// A leading `<digit>:` in a path is an index stage number to `git show`, so
+// the staged content must be read by object id. Colons are not valid in
+// Windows file names.
+#[cfg(unix)]
+#[test]
+fn scan_staged_reads_a_file_named_like_an_index_stage() {
+    let dir = tempfile::tempdir().unwrap();
+    init_plain_repo(dir.path());
+    std::fs::write(dir.path().join("a.txt"), "clean\n").unwrap();
+    std::fs::write(
+        dir.path().join("0:a.txt"),
+        format!("{REVIEW_FIXTURE_KEY}\n"),
+    )
+    .unwrap();
+    let add = git_cmd()
+        .args(["add", "-A"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git add");
+    assert!(add.status.success());
+
+    assert_eq!(scan_exit_code(dir.path(), &["scan", "--staged"]), Some(1));
+}
+
+#[test]
+fn scan_ignores_dot_ignore_files() {
+    let dir = tempfile::tempdir().unwrap();
+    init_plain_repo(dir.path());
+    std::fs::write(dir.path().join("b.txt"), format!("{REVIEW_FIXTURE_KEY}\n")).unwrap();
+    std::fs::write(dir.path().join(".ignore"), "*\n").unwrap();
+
+    assert_eq!(scan_exit_code(dir.path(), &["scan", "--", "."]), Some(1));
+}
+
+#[test]
+fn scan_includes_tracked_files_matched_by_gitignore() {
+    let dir = tempfile::tempdir().unwrap();
+    init_plain_repo(dir.path());
+    std::fs::write(dir.path().join(".gitignore"), "b.txt\nc.txt\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), format!("{REVIEW_FIXTURE_KEY}\n")).unwrap();
+    // Ignored and untracked: still left out.
+    std::fs::write(dir.path().join("c.txt"), format!("{REVIEW_FIXTURE_KEY}\n")).unwrap();
+    assert_eq!(scan_exit_code(dir.path(), &["scan", "--", "."]), Some(0));
+
+    let add = git_cmd()
+        .args(["add", "-f", "b.txt"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git add");
+    assert!(add.status.success());
+    assert_eq!(scan_exit_code(dir.path(), &["scan", "--", "."]), Some(1));
+}
+
+#[test]
+fn hook_payload_cannot_suppress_its_own_findings() {
+    let dir = tempfile::tempdir().unwrap();
+    init_plain_repo(dir.path());
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    for marker in ["# shk-ignore", "// shk-ignore"] {
+        let out = run_hook_payload(
+            dir.path(),
+            "claude-code",
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": { "command": format!("echo {REVIEW_FIXTURE_KEY} {marker}") }
+            }),
+        );
+        assert_eq!(out.status.code(), Some(2), "{marker}");
+    }
+    // The prompt is blocked with exit 0 and a block decision.
+    let out = run_hook_payload(
+        dir.path(),
+        "claude-code",
+        serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": format!("use {REVIEW_FIXTURE_KEY} # shk-ignore")
+        }),
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("\"decision\":\"block\""),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // A file keeps the inline ignores it has on disk.
+    let fixture = dir.path().join("fixture.txt");
+    std::fs::write(
+        &fixture,
+        format!("header\n{REVIEW_FIXTURE_KEY} # shk-ignore\nfooter\n"),
+    )
+    .unwrap();
+    let hook = |tool: &str, input: serde_json::Value| {
+        run_hook_payload(
+            dir.path(),
+            "claude-code",
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": tool,
+                "tool_input": input
+            }),
+        )
+        .status
+        .code()
+    };
+    assert_eq!(
+        hook("Read", serde_json::json!({ "file_path": fixture })),
+        Some(0)
+    );
+    // An edit elsewhere in that file leaves them in force.
+    assert_eq!(
+        hook(
+            "Edit",
+            serde_json::json!({
+                "file_path": fixture, "old_string": "footer", "new_string": "new footer"
+            })
+        ),
+        Some(0)
+    );
+    // Text the tool call adds cannot bring its own marker, whether it is
+    // edited in or written over the file.
+    let marked = format!("sk-proj-{} # shk-ignore", "z9y8x7w6".repeat(5));
+    assert_eq!(
+        hook(
+            "Edit",
+            serde_json::json!({
+                "file_path": fixture, "old_string": "footer", "new_string": marked
+            })
+        ),
+        Some(2)
+    );
+    assert_eq!(
+        hook(
+            "Write",
+            serde_json::json!({ "file_path": fixture, "content": format!("{marked}\n") })
+        ),
+        Some(2)
+    );
+}
+
+// Listing tracked files runs git in the scanned tree. A crafted repository
+// (sparse index, missing tree, promisor remote with an `ext::` URL) must not
+// get a command of its own run by that.
+#[cfg(unix)]
+#[test]
+fn scan_does_not_run_commands_from_the_scanned_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join("d")).unwrap();
+    std::fs::create_dir_all(repo.join("other")).unwrap();
+    std::fs::write(repo.join("d/f.txt"), "x\n").unwrap();
+    std::fs::write(repo.join("other/g.txt"), "y\n").unwrap();
+    let marker = dir.path().join("marker");
+    let git = |args: &[&str]| {
+        git_cmd()
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .expect("git")
+    };
+    init_plain_repo(&repo);
+    git(&["add", "."]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.invalid",
+        "commit",
+        "-qm",
+        "init",
+    ]);
+    if !git(&["sparse-checkout", "init", "--cone", "--sparse-index"])
+        .status
+        .success()
+    {
+        // Git without sparse-index support has nothing to expand.
+        return;
+    }
+    git(&["sparse-checkout", "set", "other"]);
+    let tree = String::from_utf8(git(&["rev-parse", "HEAD:d"]).stdout).unwrap();
+    let tree = tree.trim();
+    let object = repo.join(".git/objects").join(&tree[..2]).join(&tree[2..]);
+    if std::fs::remove_file(&object).is_err() {
+        // Packed already: the setup below would not trigger a fetch.
+        return;
+    }
+    git(&["config", "extensions.partialClone", "origin"]);
+    git(&["config", "remote.origin.promisor", "true"]);
+    git(&["config", "protocol.ext.allow", "always"]);
+    git(&[
+        "config",
+        "remote.origin.url",
+        &format!("ext::sh -c touch% {}", marker.display()),
+    ]);
+
+    let out = shk_cmd()
+        .args(["scan", "--", "."])
+        .current_dir(&repo)
+        .output()
+        .expect("shk scan");
+    assert!(
+        !marker.exists(),
+        "scan ran a command configured by the scanned repository: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// A Codex patch quotes unchanged lines of the file as context. A marked
+// fixture line among them stays suppressed; a line the patch adds does not.
+#[test]
+fn codex_patch_context_keeps_the_files_inline_ignores() {
+    let dir = tempfile::tempdir().unwrap();
+    init_plain_repo(dir.path());
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let marked = format!("KEY={REVIEW_FIXTURE_KEY} # shk-ignore");
+    std::fs::write(
+        dir.path().join("fixture.txt"),
+        format!("header\n{marked}\nfooter\n"),
+    )
+    .unwrap();
+    let patch_exit = |body: &str| {
+        run_hook_payload(
+            dir.path(),
+            "codex",
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "apply_patch",
+                "tool_input": { "command": format!("*** Begin Patch\n{body}*** End Patch\n") },
+                "cwd": dir.path()
+            }),
+        )
+        .status
+        .code()
+    };
+
+    let context =
+        format!("*** Update File: fixture.txt\n@@\n header\n {marked}\n-footer\n+new footer\n");
+    assert_eq!(patch_exit(&context), Some(0));
+
+    let added = format!(
+        "*** Update File: fixture.txt\n@@\n header\n+KEY=sk-proj-{} # shk-ignore\n footer\n",
+        "z9y8x7w6".repeat(5)
+    );
+    assert_eq!(patch_exit(&added), Some(2));
+
+    // The marked line is only trusted for the file that holds it, also when
+    // the same patch updates that file.
+    let copied = format!("*** Add File: other.txt\n+{marked}\n");
+    assert_eq!(patch_exit(&copied), Some(2));
+    assert_eq!(patch_exit(&format!("{context}{copied}")), Some(2));
+
+    // Outside the patch tool a patch header gives a payload no trust.
+    let out = run_hook_payload(
+        dir.path(),
+        "claude-code",
+        serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": format!("cat <<'EOF'\n*** Update File: fixture.txt\n{marked}\nEOF")
+            }
+        }),
+    );
+    assert_eq!(out.status.code(), Some(2));
+}

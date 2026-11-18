@@ -379,10 +379,33 @@ fn scan_text_prepared(
     prepared: &PreparedScan<'_>,
     include_context: bool,
 ) -> Result<ScanChunk> {
+    scan_text_with_inline(
+        rel,
+        content,
+        prepared,
+        include_context,
+        InlineIgnores::Honored,
+    )
+}
+
+fn scan_text_with_inline(
+    rel: &str,
+    content: &str,
+    prepared: &PreparedScan<'_>,
+    include_context: bool,
+    inline_ignores: InlineIgnores<'_>,
+) -> Result<ScanChunk> {
     // A leading byte order mark is not part of the first line: left in place
     // it hides that line from line-anchored rules and shifts its columns.
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
-    let inline = suppression::parse_inline_suppressions(content);
+    let inline = match inline_ignores {
+        InlineIgnores::Honored => suppression::parse_inline_suppressions(content),
+        InlineIgnores::Ignored => suppression::InlineSuppressions::default(),
+        InlineIgnores::OnlyLinesOf(on_disk) => {
+            let on_disk = on_disk.strip_prefix('\u{feff}').unwrap_or(on_disk);
+            suppression::parse_inline_suppressions_trusting(content, on_disk)
+        }
+    };
     let mut suppressed = 0u64;
     let mut deduplicated = 0u64;
     let mut findings = Vec::new();
@@ -524,6 +547,7 @@ fn scan_one_path(
 fn scan_staged_blob(
     repo: &Path,
     rel_path: &Path,
+    oid: &str,
     size: u64,
     prepared: &PreparedScan<'_>,
     include_context: bool,
@@ -539,7 +563,7 @@ fn scan_staged_blob(
             ),
         )]));
     }
-    let bytes = git::staged_file_bytes(repo, rel_path)?;
+    let bytes = git::staged_blob_bytes(repo, oid)?;
     scan_bytes(&rel, bytes, prepared, include_context)
 }
 
@@ -751,6 +775,41 @@ pub fn scan_string(
 /// policy load. AI hook payloads use this so path-scoped policy (allowlist
 /// rows, rule path filters) only applies to the text under its own path.
 pub fn scan_strings(root: &Path, parts: &[(&str, &str)], opts: ScanOptions) -> Result<ScanResult> {
+    let parts: Vec<ScanPart<'_>> = parts
+        .iter()
+        .map(|(label, text)| ScanPart {
+            label,
+            text,
+            inline_ignores: InlineIgnores::Honored,
+        })
+        .collect();
+    scan_parts(root, &parts, opts)
+}
+
+/// Which inline `shk-ignore` comments of a scanned text suppress findings.
+#[derive(Clone, Copy, Debug)]
+pub enum InlineIgnores<'a> {
+    /// All of them: the text is a file's own content.
+    Honored,
+    /// None: the text comes from an AI tool call or a prompt, and whoever
+    /// wrote it must not be able to exempt it.
+    Ignored,
+    /// Those on lines the given on-disk content already has: the text is a
+    /// file as a tool call would leave it.
+    OnlyLinesOf(&'a str),
+}
+
+/// One text scanned under a synthetic path label.
+#[derive(Clone, Copy, Debug)]
+pub struct ScanPart<'a> {
+    pub label: &'a str,
+    pub text: &'a str,
+    pub inline_ignores: InlineIgnores<'a>,
+}
+
+/// Like [`scan_strings`], with per-part control over inline `shk-ignore`
+/// comments.
+pub fn scan_parts(root: &Path, parts: &[ScanPart<'_>], opts: ScanOptions) -> Result<ScanResult> {
     let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let (mut policy, policy_path) = Policy::load_from_dir(&root)?;
     apply_scan_flag_overrides(&mut policy, &opts);
@@ -768,8 +827,14 @@ pub fn scan_strings(root: &Path, parts: &[(&str, &str)], opts: ScanOptions) -> R
     let mut findings = Vec::new();
     let mut suppressed = 0;
     let mut deduplicated = 0;
-    for (rel_display_path, content) in parts {
-        let chunk = scan_text_prepared(rel_display_path, content, &prepared, include_context)?;
+    for part in parts {
+        let chunk = scan_text_with_inline(
+            part.label,
+            part.text,
+            &prepared,
+            include_context,
+            part.inline_ignores,
+        )?;
         findings.extend(chunk.findings);
         suppressed += chunk.suppressed;
         deduplicated += chunk.deduplicated;
@@ -779,7 +844,7 @@ pub fn scan_strings(root: &Path, parts: &[(&str, &str)], opts: ScanOptions) -> R
 
     Ok(ScanResult {
         findings,
-        scanned_paths: parts.iter().map(|(path, _)| path.to_string()).collect(),
+        scanned_paths: parts.iter().map(|part| part.label.to_string()).collect(),
         policy,
         policy_path,
         exit_threshold,
@@ -795,9 +860,9 @@ pub fn scan_staged(cwd: &Path, opts: ScanOptions) -> Result<ScanResult> {
         bail!("shk scan --staged requires a Git repository");
     }
     let blobs = git::staged_blobs(&repo)?;
-    let sizes = blobs
+    let staged = blobs
         .iter()
-        .map(|blob| (blob.path.clone(), blob.size))
+        .map(|blob| (blob.path.clone(), (blob.oid.clone(), blob.size)))
         .collect::<std::collections::HashMap<_, _>>();
     let paths = blobs.into_iter().map(|blob| blob.path).collect();
     scan_git_rel_paths(
@@ -805,11 +870,8 @@ pub fn scan_staged(cwd: &Path, opts: ScanOptions) -> Result<ScanResult> {
         paths,
         &opts,
         |repo, rel, prepared, include_context| {
-            let size = sizes
-                .get(rel)
-                .copied()
-                .context("missing staged blob size")?;
-            scan_staged_blob(repo, rel, size, prepared, include_context)
+            let (oid, size) = staged.get(rel).context("missing staged blob metadata")?;
+            scan_staged_blob(repo, rel, oid, *size, prepared, include_context)
         },
     )
 }
@@ -1005,6 +1067,26 @@ fn select_git_history(cwd: &Path, opts: &ScanOptions) -> Result<GitHistorySelect
     })
 }
 
+/// What tells two spellings of one file apart from two files.
+#[cfg(unix)]
+type FileIdentity = (u64, u64);
+#[cfg(not(unix))]
+type FileIdentity = String;
+
+#[cfg(unix)]
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::metadata(path).ok()?;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+/// Without inode numbers, names that differ only in letter case count as
+/// the same file.
+#[cfg(not(unix))]
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    Some(path.to_string_lossy().to_lowercase())
+}
+
 pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
     if opts.staged {
         return scan_staged(target, opts);
@@ -1108,6 +1190,9 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
     walk.hidden(false);
     walk.git_ignore(true);
     walk.git_exclude(true);
+    // `.ignore` files are a ripgrep convention, not a Git one: honouring them
+    // would let the scanned tree switch the scan off with a one-line file.
+    walk.ignore(false);
     // With hidden files included, keep the walker out of .git itself.
     walk.filter_entry(|e| e.file_name() != std::ffi::OsStr::new(".git"));
     if policy.scan.follow_symlinks {
@@ -1141,6 +1226,40 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
         let rel = rel_normalized(&full, &policy_root);
         if filters.allows(&rel) {
             scanned_files.push(full);
+        }
+    }
+    // A tracked file is part of the repository even when a `.gitignore` rule
+    // matches it (`git add -f`), so ignore rules must not hide it.
+    {
+        let seen: HashSet<PathBuf> = scanned_files.iter().cloned().collect();
+        let mut missing = Vec::new();
+        for rel in git::tracked_files_under(&scan_root) {
+            let full = scan_root.join(&rel);
+            if seen.contains(&full) || !filters.allows(&rel_normalized(&full, &policy_root)) {
+                continue;
+            }
+            let metadata = if policy.scan.follow_symlinks {
+                fs::metadata(&full)
+            } else {
+                fs::symlink_metadata(&full)
+            };
+            if metadata.is_ok_and(|m| m.is_file()) {
+                missing.push(full);
+            }
+        }
+        if !missing.is_empty() {
+            // Git may spell a name differently from the directory listing
+            // (Unicode normalisation, letter case): the same file must not be
+            // scanned twice.
+            let mut identities: HashSet<FileIdentity> = scanned_files
+                .iter()
+                .filter_map(|path| file_identity(path))
+                .collect();
+            for full in missing {
+                if file_identity(&full).is_none_or(|identity| identities.insert(identity)) {
+                    scanned_files.push(full);
+                }
+            }
         }
     }
 
