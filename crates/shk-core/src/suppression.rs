@@ -163,6 +163,38 @@ fn trailing_html_ignore(trimmed_end: &str) -> Option<IgnoreDirective<'_>> {
 
 /// Parse `#`, `//`, and HTML standalone/trailing `shk-ignore` comments.
 pub fn parse_inline_suppressions(content: &str) -> InlineSuppressions {
+    parse_suppressions(content, |_, _| true)
+}
+
+/// Like [`parse_inline_suppressions`], but a marker only counts when the line
+/// that carries it is, text for text, a line of `trusted`.
+///
+/// `content` is a file as an AI tool call would leave it (edits applied, text
+/// to be written appended) and `trusted` the file as it is on disk. Markers
+/// the file already has keep working, also for a line the call changes under
+/// a next-line marker; text the tool call adds cannot bring a marker of its
+/// own.
+pub fn parse_inline_suppressions_trusting(content: &str, trusted: &str) -> InlineSuppressions {
+    let trusted_lines: HashSet<&str> = trusted.lines().map(str::trim_end).collect();
+    let lines: Vec<&str> = content.lines().map(str::trim_end).collect();
+    // In a patch an unchanged or removed line of the file follows a one
+    // character prefix.
+    let is_trusted = |line_no: usize| {
+        line_no
+            .checked_sub(1)
+            .and_then(|idx| lines.get(idx))
+            .is_some_and(|line| {
+                [Some(*line), line.strip_prefix(' '), line.strip_prefix('-')]
+                    .into_iter()
+                    .flatten()
+                    .any(|text| trusted_lines.contains(text))
+            })
+    };
+    parse_suppressions(content, |marker_line, _| is_trusted(marker_line))
+}
+
+/// `accept(marker_line, target_line)` decides whether a marker applies.
+fn parse_suppressions(content: &str, accept: impl Fn(usize, usize) -> bool) -> InlineSuppressions {
     let mut out = InlineSuppressions::default();
 
     for (idx, raw_line) in content.lines().enumerate() {
@@ -170,7 +202,10 @@ pub fn parse_inline_suppressions(content: &str) -> InlineSuppressions {
         let trimmed_end = raw_line.trim_end();
 
         if let Some(rest_kw) = parse_standalone_ignore_line(trimmed_end) {
-            out.suppress_line(line_no.saturating_add(1), rest_kw);
+            let target_line = line_no.saturating_add(1);
+            if accept(line_no, target_line) {
+                out.suppress_line(target_line, rest_kw);
+            }
             continue;
         }
 
@@ -182,7 +217,9 @@ pub fn parse_inline_suppressions(content: &str) -> InlineSuppressions {
                 IgnoreTarget::SameLine => line_no,
                 IgnoreTarget::NextLine => line_no.saturating_add(1),
             };
-            out.suppress_line(target_line, directive.rest);
+            if accept(line_no, target_line) {
+                out.suppress_line(target_line, directive.rest);
+            }
         }
     }
 

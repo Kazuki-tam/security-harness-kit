@@ -297,6 +297,9 @@ pub struct HookSegment {
     pub text: String,
     /// Whether `label` is a referenced file rather than the virtual label.
     pub file: bool,
+    /// For a file segment, the file as it is on disk: before the tool call's
+    /// edits are applied and without the payload text scanned under its path.
+    pub on_disk: Option<String>,
 }
 
 impl HookBody {
@@ -365,6 +368,7 @@ pub fn hook_body_from_stdin(
     let edit_targets: Vec<_> = writes.edits.iter().map(|e| file_target(e.path)).collect();
     let text_targets: Vec<_> = writes.texts.iter().map(|t| file_target(t.path)).collect();
     let mut files = candidates.files;
+    let on_disk: Vec<String> = files.iter().map(|file| file.text.clone()).collect();
     let mut edit_work = 0usize;
     for (index, file) in files.iter_mut().enumerate() {
         apply_text_edits(
@@ -424,8 +428,9 @@ pub fn hook_body_from_stdin(
 
     let mut segments: Vec<HookSegment> = files
         .iter()
+        .zip(on_disk)
         .enumerate()
-        .map(|(index, file)| {
+        .map(|(index, (file, on_disk))| {
             let mut text = file.text.clone();
             for blob in texts.blobs_for(Some(index)) {
                 text.push_str("\n---\n");
@@ -435,20 +440,41 @@ pub fn hook_body_from_stdin(
                 label: file.rel.clone(),
                 text,
                 file: true,
+                on_disk: Some(on_disk),
             }
         })
         .collect();
     let payload_text: Vec<&str> = texts.blobs_for(None).collect();
     if !payload_text.is_empty() || segments.is_empty() {
-        segments.push(HookSegment {
-            label: tool.virtual_path_label().to_string(),
-            file: false,
-            text: if payload_text.is_empty() {
-                "{}".to_string()
-            } else {
-                payload_text.join("\n---\n")
-            },
-        });
+        let label = tool.virtual_path_label().to_string();
+        let text = if payload_text.is_empty() {
+            "{}".to_string()
+        } else {
+            payload_text.join("\n---\n")
+        };
+        // A patch quotes unchanged lines of the file it updates as context.
+        // Each such section is checked against that file for inline ignores;
+        // everything else in a payload has none of its own.
+        let sections = if !post && crate::action_guard::is_patch_tool_payload(v) {
+            patch_sections(&text, cwd, repo_root)
+        } else {
+            Vec::new()
+        };
+        if sections.is_empty() {
+            segments.push(HookSegment {
+                label,
+                file: false,
+                on_disk: None,
+                text,
+            });
+        } else {
+            segments.extend(sections.into_iter().map(|(text, on_disk)| HookSegment {
+                label: label.clone(),
+                file: false,
+                on_disk,
+                text,
+            }));
+        }
     }
 
     Ok(HookBody {
@@ -831,6 +857,60 @@ fn read_candidate_files(
         }
     }
     Ok(CandidateFiles { files, read_paths })
+}
+
+/// Splits a patch (Codex `apply_patch`) into its per-file sections, each with
+/// the on-disk content of the file it updates or deletes. Text in front of
+/// the first section and sections that add a file have none. Only regular
+/// text files inside the repository are read, a bounded number of bounded
+/// size. Empty when the text has no section or more than are worth splitting.
+fn patch_sections(text: &str, cwd: &Path, repo_root: &Path) -> Vec<(String, Option<String>)> {
+    const MAX_SECTIONS: usize = 256;
+    const MAX_FILES: usize = 16;
+    const MAX_FILE_BYTES: u64 = 1024 * 1024;
+    const SECTION_HEADERS: [&str; 3] = ["*** Update File: ", "*** Delete File: ", "*** Add File: "];
+    let repo_root = fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    let mut files_read = 0;
+    let mut read_target = |target: &str| {
+        if files_read >= MAX_FILES {
+            return None;
+        }
+        let abs = fs::canonicalize(resolve_path(target.trim(), cwd)).ok()?;
+        let small_file = fs::metadata(&abs)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= MAX_FILE_BYTES);
+        if !abs.starts_with(&repo_root) || !small_file {
+            return None;
+        }
+        files_read += 1;
+        let bytes = fs::read(&abs).ok()?;
+        (!bytes.iter().take(8192).any(|byte| *byte == 0))
+            .then(|| String::from_utf8_lossy(&bytes).into_owned())
+    };
+
+    let mut sections: Vec<(String, Option<String>)> = vec![(String::new(), None)];
+    for line in text.split_inclusive('\n') {
+        if let Some(header) = SECTION_HEADERS
+            .iter()
+            .find(|header| line.starts_with(**header))
+        {
+            if sections.len() > MAX_SECTIONS {
+                return Vec::new();
+            }
+            // A file the patch adds has no content of its own yet.
+            let on_disk = (!header.starts_with("*** Add"))
+                .then(|| read_target(&line[header.len()..]))
+                .flatten();
+            sections.push((String::new(), on_disk));
+        }
+        if let Some((section, _)) = sections.last_mut() {
+            section.push_str(line);
+        }
+    }
+    if sections.len() == 1 {
+        return Vec::new();
+    }
+    sections.retain(|(section, _)| !section.is_empty());
+    sections
 }
 
 fn resolve_path(s: &str, cwd: &Path) -> PathBuf {

@@ -101,7 +101,74 @@ const SENSITIVE_FILE_ACCESS_COMMANDS: &[&str] = &[
     "type",
     "powershell",
     "pwsh",
+    // The `.` builtin is `source`.
+    ".",
 ];
+
+/// Commands that take a dotenv file as an argument without printing what it
+/// holds. In a shell command every other command is denied a dotenv argument:
+/// a list of readers can never be complete (`paste`, `busybox cat`, a custom
+/// script), and the file exists to be kept out of the conversation.
+const DOTENV_ARGUMENT_SAFE_COMMANDS: &[&str] = &[
+    "ls",
+    "stat",
+    "test",
+    "[",
+    "[[",
+    "touch",
+    "rm",
+    "mkdir",
+    "rmdir",
+    "chmod",
+    "cd",
+    "pushd",
+    "echo",
+    "printf",
+    "which",
+    "basename",
+    "dirname",
+    "realpath",
+    "readlink",
+    "true",
+    ":",
+    "du",
+    "file",
+    "md5sum",
+    "sha256sum",
+    "shasum",
+];
+
+/// Git subcommands that take a path without showing the file's content.
+const GIT_PATH_SAFE_SUBCOMMANDS: &[&str] = &[
+    "add",
+    "rm",
+    "status",
+    "check-ignore",
+    "ls-files",
+    "restore",
+    "checkout",
+    "reset",
+    "clean",
+    "update-index",
+];
+
+/// shk subcommands that use a dotenv file without printing its values.
+/// `mask` prints the file with only the configured findings redacted.
+const SHK_SAFE_SUBCOMMANDS: &[&str] = &["env", "scan", "doctor", "hooks", "policy", "init"];
+
+/// dotenvx subcommands that use a dotenv file without printing its values.
+/// `run` hands them to a command, which is scanned on its own.
+const DOTENVX_SAFE_SUBCOMMANDS: &[&str] = &["run", "encrypt", "set", "ls", "rotate"];
+
+/// dotenvx subcommands that print decrypted values or private keys.
+const DOTENVX_REVEALING_SUBCOMMANDS: &[&str] = &["get", "decrypt", "keypair"];
+
+/// Shells: `-c` runs an argument, and without a script they run what they
+/// read from standard input.
+const SHELL_COMMANDS: &[&str] = &["bash", "sh", "zsh", "dash", "ksh", "ash", "fish"];
+
+/// Interpreters that run a script given on standard input.
+const SCRIPT_INTERPRETER_COMMANDS: &[&str] = &["node", "ruby", "perl", "php"];
 const ENVIRONMENT_DUMP_COMMANDS: &[&str] = &["printenv"];
 const PYTHON_ENV_READ_PATTERNS: &[&str] = &[
     "os.environ",
@@ -420,7 +487,17 @@ const TARGET_PATH_KEYS: &[&str] = &[
     "path",
     "uri",
     "fileName",
+    "filename",
+    "notebook_path",
+    // MCP filesystem tools that take several files.
+    "paths",
+    // Antigravity search tools.
+    "SearchPath",
 ];
+
+/// Keys of search tools that select files by glob (Claude Code Grep `glob`,
+/// OpenCode `include`).
+const TARGET_GLOB_KEYS: &[&str] = &["glob", "include"];
 
 /// Working-directory metadata used only to resolve the policy root.
 const REPOSITORY_CONTEXT_KEYS: &[&str] = &[
@@ -445,6 +522,13 @@ pub fn payload_path_hints(stdin: &str) -> Vec<String> {
     }
     let mut seen = HashSet::new();
     out.retain(|path| seen.insert(path.clone()));
+    // Each hint costs the caller a walk up the directory tree. A payload with
+    // thousands of paths, or one enormous string, gets no more roots than an
+    // ordinary one.
+    const MAX_HINTS: usize = 64;
+    const MAX_HINT_BYTES: usize = 4096;
+    out.retain(|path| path.len() <= MAX_HINT_BYTES);
+    out.truncate(MAX_HINTS);
     out
 }
 
@@ -480,26 +564,50 @@ pub fn detect_dangerous_action_with_config(
     let v = parse_hook_payload(stdin).context("hook stdin must be valid JSON")?;
     let profile = ActionGuardProfile::parse(&config.profile);
 
-    for path in candidate_paths(&v) {
-        if let Some(access) = access_kind_for_path(&v) {
-            let action = format!("{}({path})", action_access_name(access));
-            if action_allowed(&action, &config.allow) {
-                continue;
-            }
-            if action_denied(&action, &config.deny) {
+    if profile.includes(ActionCategory::SecretFileAccess) {
+        let mut globs = Vec::new();
+        collect_strings_for_keys(&v, TARGET_GLOB_KEYS, &mut globs);
+        if let Some(glob) = globs.iter().find(|glob| glob_selects_dotenv(glob)) {
+            let action = format!("Read({glob})");
+            if !action_allowed(&action, &config.allow) {
                 return Ok(Some(guard_match(
-                    ActionCategory::CustomPolicy,
-                    format!("shk action guard: `{action}` denied by project policy"),
+                    ActionCategory::SecretFileAccess,
+                    format!("shk action guard: search of sensitive path `{glob}`"),
                 )));
             }
-            if !is_secret_path(&path) || !profile.includes(ActionCategory::SecretFileAccess) {
-                continue;
-            }
+        }
+    }
+
+    let (access, stated) = access_kind_for_path(&v);
+    // A payload that does not say what it does with the path is only denied
+    // the paths that are secret whatever their surroundings. The broader name
+    // patterns (`*key*`, `*token*`) would deny searches of ordinary source
+    // directories.
+    let is_guarded_path = |path: &str| {
+        if stated {
+            is_secret_path(path)
+        } else {
+            is_always_secret_path(path)
+        }
+    };
+    for path in candidate_paths(&v) {
+        let action = format!("{}({path})", action_access_name(access));
+        if action_allowed(&action, &config.allow) {
+            continue;
+        }
+        if action_denied(&action, &config.deny) {
             return Ok(Some(guard_match(
-                ActionCategory::SecretFileAccess,
-                format!("shk action guard: {access} of sensitive path `{path}`"),
+                ActionCategory::CustomPolicy,
+                format!("shk action guard: `{action}` denied by project policy"),
             )));
         }
+        if !is_guarded_path(&path) || !profile.includes(ActionCategory::SecretFileAccess) {
+            continue;
+        }
+        return Ok(Some(guard_match(
+            ActionCategory::SecretFileAccess,
+            format!("shk action guard: {access} of sensitive path `{path}`"),
+        )));
     }
 
     // One budget for the whole payload, so nested re-parsing stays bounded no
@@ -849,16 +957,70 @@ impl ActionGuardProfile {
     }
 }
 
-fn access_kind_for_path(v: &Value) -> Option<&'static str> {
+/// How a payload that names a target path uses it, and whether the payload
+/// says so itself. A payload that says neither read nor write is a read: a
+/// tool handed a file path (a search tool, an MCP `get_file_contents`) returns
+/// what the file holds whatever it is called.
+fn access_kind_for_path(v: &Value) -> (&'static str, bool) {
     let hay = compact_json_text(v);
     if contains_any(&hay, &["write", "edit", "create", "update", "delete"]) {
-        Some("write")
-    } else if contains_any(&hay, &["read", "open", "view"]) {
-        // "view" covers Antigravity's view_file tool.
-        Some("read")
+        ("write", true)
     } else {
-        None
+        // "view" covers Antigravity's view_file tool.
+        ("read", contains_any(&hay, &["read", "open", "view"]))
     }
+}
+
+/// True when a search tool's file glob can select a dotenv file.
+fn glob_selects_dotenv(glob: &str) -> bool {
+    // A leading `!` excludes what the glob matches.
+    if glob.starts_with('!') {
+        return false;
+    }
+    brace_expansions(glob).iter().any(|form| {
+        let lower = form.to_ascii_lowercase();
+        if is_dotenv_path(&lower) {
+            return true;
+        }
+        // Search tools match a leading dot with `*` (`*.env`, `*.e?v`), unlike
+        // the shell. A glob that also matches ordinary file names (`*`,
+        // `**/*`) is a search of everything, not of dotenv files.
+        let name = lower.rsplit('/').next().unwrap_or(&lower);
+        glob_matches_any(name, DOTENV_GLOB_CANDIDATES)
+            && !glob_matches_any(name, ORDINARY_FILE_NAMES)
+    })
+}
+
+/// Dotenv file names a glob is tried against.
+const DOTENV_GLOB_CANDIDATES: &[&str] = &[
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.development",
+    ".env.staging",
+    ".env.test",
+    ".env.prod",
+    ".env.dev",
+];
+
+/// File names no dotenv-specific glob matches.
+const ORDINARY_FILE_NAMES: &[&str] = &[
+    "a",
+    "x1",
+    "main.rs",
+    "readme.md",
+    "notes.txt",
+    "index.test.ts",
+    "file.exe",
+    "environment.ts",
+    ".gitignore",
+];
+
+fn glob_matches_any(pattern: &str, names: &[&str]) -> bool {
+    let pattern = pattern.chars().collect::<Vec<_>>();
+    names
+        .iter()
+        .any(|name| glob_match(&pattern, &name.chars().collect::<Vec<_>>()))
 }
 
 fn candidate_paths(v: &Value) -> Vec<String> {
@@ -902,8 +1064,12 @@ fn candidate_command_strings(v: &Value) -> Vec<CommandCandidate> {
     for text in generic {
         by_text.insert(text, false);
     }
+    // The body of a patch tool's patch is file content. It arrives under a
+    // command key, but none of its lines is run.
+    let patch_tool = is_patch_tool_payload(v);
     for text in typed {
-        by_text.insert(text, true);
+        let command_typed = !(patch_tool && is_patch_body(&text));
+        by_text.insert(text, command_typed);
     }
     by_text
         .into_iter()
@@ -912,6 +1078,59 @@ fn candidate_command_strings(v: &Value) -> Vec<CommandCandidate> {
             command_typed,
         })
         .collect()
+}
+
+const PATCH_TOOL_NAME: &str = "apply_patch";
+const PATCH_BODY_START: &str = "*** Begin Patch";
+
+/// True when the payload is a call of the patch tool: by tool name, or as an
+/// argument vector that runs it (`["apply_patch", "<patch>"]`). A shell
+/// command string that merely starts like a patch does not count: its later
+/// lines would run.
+pub fn is_patch_tool_payload(v: &Value) -> bool {
+    let named = ["tool_name", "tool", "name"].iter().any(|key| {
+        v.get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|name| name.eq_ignore_ascii_case(PATCH_TOOL_NAME))
+    });
+    named || {
+        let mut found = false;
+        visit_values_for_keys(v, COMMAND_KEYS, &mut |value| {
+            found |= value
+                .as_array()
+                .and_then(|argv| argv.first())
+                .and_then(Value::as_str)
+                == Some(PATCH_TOOL_NAME);
+        });
+        found
+    }
+}
+
+fn is_patch_body(text: &str) -> bool {
+    let text = text.trim_start();
+    let text = text
+        .strip_prefix(PATCH_TOOL_NAME)
+        .map_or(text, str::trim_start);
+    text.starts_with(PATCH_BODY_START)
+}
+
+fn visit_values_for_keys(v: &Value, keys: &[&str], visit: &mut impl FnMut(&Value)) {
+    match v {
+        Value::Object(map) => {
+            for (key, value) in map {
+                if keys.contains(&key.as_str()) {
+                    visit(value);
+                }
+                visit_values_for_keys(value, keys, visit);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                visit_values_for_keys(item, keys, visit);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn candidate_commands(v: &Value) -> Vec<String> {
@@ -1526,6 +1745,8 @@ fn plainly_spaced_words(text: &str) -> bool {
                 || SHELL_SPECIAL_CHARS.contains(&ch)
         })
         && !text.contains("/proc/self/environ")
+        // Any command may be denied a dotenv argument.
+        && last_dotenv_like(text).is_none()
         // Dropped when the text is normalised for matching.
         && !text.ends_with(":*")
 }
@@ -1543,6 +1764,8 @@ struct PlainTailScreen {
     /// A deny entry can only match a command that holds a certain text; this
     /// is the offset of the last word such a command can start at.
     deny_needles: Vec<usize>,
+    /// Offset in the base text of the last word that may name a dotenv file.
+    last_dotenv_like: Option<usize>,
 }
 
 impl PlainTailScreen {
@@ -1558,6 +1781,7 @@ impl PlainTailScreen {
             unwrap_prefixes: scan.unwrap_prefixes,
             deny_prefixes: Vec::new(),
             deny_needles: Vec::new(),
+            last_dotenv_like: last_dotenv_like(tail).map(|offset| tail_start + offset),
         };
         for pattern in &scan.policy.deny.patterns {
             if screen.every_word {
@@ -1615,6 +1839,8 @@ impl PlainTailScreen {
         if self.every_word
             // Characters the guard's other word splitters treat specially.
             || word.contains([',', '=', '*'])
+            // Any command may be denied a dotenv argument behind it.
+            || self.last_dotenv_like.is_some_and(|last| last >= start)
             || guarded_command_word(word, self.unwrap_prefixes)
         {
             return true;
@@ -1651,7 +1877,7 @@ fn guarded_command_word(word: &str, unwrap_prefixes: bool) -> bool {
         || (unwrap_prefixes
             && (listed(EXEC_WRAPPER_COMMANDS)
                 || listed(SHELL_RESERVED_PREFIX_WORDS)
-                || listed(&["function", "coproc"])))
+                || listed(&["function", "coproc", "find", "dotenvx", "shk"])))
 }
 
 fn detect_command_at_depth(
@@ -1711,6 +1937,13 @@ fn detect_command(
     let mut recent = [("", 0); 4];
     let mut next_recent = 0;
     for raw_segment in split_command_segments(&filtered, &scan.comments) {
+        if scan.unwrap_prefixes
+            && scan.profile.includes(ActionCategory::OpaqueExecution)
+            && bare_shell_segment(raw_segment, &scan.comments)
+            && follows_a_pipe(&filtered, raw_segment)
+        {
+            return Some(shell_reads_unseen_script());
+        }
         let short = raw_segment.len() <= MAX_REMEMBERED_SEGMENT_BYTES;
         let remembered = recent
             .iter()
@@ -1755,6 +1988,28 @@ fn detect_command(
         return None;
     }
 
+    // A heredoc handed to a shell or an interpreter is a script, not data.
+    if scan.unwrap_prefixes && command.contains("<<") {
+        let (owners, scripts) = heredoc_scripts(command, &scan.comments);
+        // Several heredocs may hang off one line; it is read once.
+        let consumers = owners
+            .iter()
+            .map(|owner| heredoc_consumer(owner))
+            .collect::<Vec<_>>();
+        for (owner, body) in scripts {
+            let matched = match consumers[owner] {
+                Some(HeredocConsumer::Shell) => scan.detect_additional(&body, depth + 1),
+                Some(HeredocConsumer::Interpreter(name)) => {
+                    interpreter_script_match(name, &body, scan.profile)
+                }
+                None => None,
+            };
+            if matched.is_some() {
+                return matched;
+            }
+        }
+    }
+
     // The scans above read quotes the way the segment splitter does. The
     // shell does not always: these look again at the substitutions it runs
     // where the splitter's reading hides them. Each adds denials only.
@@ -1790,9 +2045,19 @@ fn detect_segment(
     let normalized = normalize_shell(&segment);
     if !shallow {
         let mut unclosed = Vec::new();
+        // `eval "$(cat <<EOF … EOF)"` runs the heredoc's body.
+        let evaluated = scan.unwrap_prefixes && normalized.trim_start().starts_with("eval ");
         for embedded in substitution_bodies(&normalized, ansi_c, Some(&mut unclosed)) {
             if let Some(matched) = detect_command_at_depth(&embedded, scan, depth + 1) {
                 return Some(matched);
+            }
+            if evaluated && embedded.contains("<<") {
+                for (_, body) in heredoc_scripts(&embedded, &scan.comments).1 {
+                    let matched = scan.detect_additional(&body, depth + 1);
+                    if matched.is_some() {
+                        return matched;
+                    }
+                }
             }
         }
         // A `$(` without a closing parenthesis of its own: an escaped or
@@ -1840,6 +2105,34 @@ fn detect_segment(
         let words = shell_tokens(&normalized);
         let raw_command = words.first().map(String::as_str).unwrap_or_default();
         let command_name = command_basename(raw_command);
+        if scan.unwrap_prefixes {
+            let shell = SHELL_COMMANDS.contains(&command_name);
+            let from_stdin = || reads_program_from_stdin(words.get(1..).unwrap_or_default());
+            let matched = match here_string_text(&words) {
+                // `. /dev/stdin <<< '…'`, `bash <<< '…'`.
+                Some(text)
+                    if words.iter().any(|word| word == "/dev/stdin") || (shell && from_stdin()) =>
+                {
+                    scan.detect_reassembled(text, depth + 1)
+                }
+                Some(text) if from_stdin() => interpreter_name(command_name)
+                    .and_then(|name| interpreter_script_match(name, text, profile)),
+                Some(_) => None,
+                None if shell
+                    && profile.includes(ActionCategory::OpaqueExecution)
+                    && matches!(
+                        shell_stdin_script(&words),
+                        StdinScript::Unseen { redirected: true }
+                    ) =>
+                {
+                    Some(shell_reads_unseen_script())
+                }
+                None => None,
+            };
+            if matched.is_some() {
+                return matched;
+            }
+        }
         let nested = nested_command_payloads(raw_command, command_name, &words);
         let matched = match nested.starts.first() {
             None => scan.detect_wrapped(&nested.texts, "", &[], depth + 1, shallow),
@@ -1911,11 +2204,313 @@ fn detect_segment(
         }
     }
     for variant in &variants {
-        if let Some(matched) = detect_builtin_command(variant, profile, ansi_c) {
+        if let Some(matched) =
+            detect_builtin_command(variant, profile, ansi_c, scan.unwrap_prefixes)
+        {
             return Some(matched);
         }
     }
     None
+}
+
+fn shell_reads_unseen_script() -> ActionGuardMatch {
+    guard_match(
+        ActionCategory::OpaqueExecution,
+        "shk action guard: a shell that reads its commands from standard input cannot be analysed",
+    )
+}
+
+/// Where a shell invocation gets the commands it runs.
+enum StdinScript {
+    /// From an argument (`-c`, a script file), a heredoc or a here-string,
+    /// which are scanned elsewhere.
+    Elsewhere,
+    /// From standard input, which the guard does not see: a pipe
+    /// (`… | bash`) or, when `redirected`, a file (`bash < file`). Without
+    /// either the shell is interactive or reads nothing.
+    Unseen { redirected: bool },
+}
+
+fn shell_stdin_script(words: &[String]) -> StdinScript {
+    if let Some(option) = shell_exec_option_index(words) {
+        // `bash -c bash` is a shell without a script again.
+        let runs_bare_shell = words.get(option + 1).is_some_and(|text| {
+            !text.contains(char::is_whitespace) && SHELL_COMMANDS.contains(&command_basename(text))
+        });
+        return if runs_bare_shell {
+            StdinScript::Unseen { redirected: false }
+        } else {
+            StdinScript::Elsewhere
+        };
+    }
+    let mut index = 1;
+    let mut redirected = false;
+    while index < words.len() {
+        let word = words[index].as_str();
+        if word.starts_with("<<") {
+            return StdinScript::Elsewhere;
+        }
+        let redirection = word.trim_start_matches(|c: char| c.is_ascii_digit());
+        if redirection.starts_with(['<', '>']) {
+            redirected |= redirection.starts_with('<');
+            let target = redirection.trim_start_matches(['<', '>', '&', '|']);
+            index += if target.is_empty() { 2 } else { 1 };
+        } else if matches!(word, "-o" | "+o" | "--rcfile" | "--init-file") {
+            // These options take a value (`-O` is lowercased to `-o`).
+            index += 2;
+        } else if word.starts_with(['-', '+']) || word == "/dev/stdin" {
+            index += 1;
+        } else {
+            // A script file.
+            return StdinScript::Elsewhere;
+        }
+    }
+    StdinScript::Unseen { redirected }
+}
+
+/// The text of a here-string (`<<< '…'`) among a command's words.
+fn here_string_text(words: &[String]) -> Option<&str> {
+    words.iter().enumerate().find_map(|(index, word)| {
+        let text = word.strip_prefix("<<<")?;
+        if text.is_empty() {
+            words.get(index + 1).map(String::as_str)
+        } else {
+            Some(text)
+        }
+    })
+}
+
+/// True when `segment`, a slice of `text`, is what a pipe feeds: the command
+/// right behind the `|`, also inside a group opened there (`… | (bash)`,
+/// `… | { bash; }`). A `case` pattern is not a command (`bash|zsh)`).
+fn follows_a_pipe(text: &str, segment: &str) -> bool {
+    let offset = (segment.as_ptr() as usize).wrapping_sub(text.as_ptr() as usize);
+    let (Some(before), Some(after)) = (text.get(..offset), text.get(offset + segment.len()..))
+    else {
+        return false;
+    };
+    let mut before = before.trim_end();
+    let grouped = before.ends_with(['(', '{']);
+    if after.trim_start().starts_with(')') && !grouped {
+        return false;
+    }
+    while let Some(outer) = before.strip_suffix(['(', '{']) {
+        before = outer.trim_end();
+    }
+    before.ends_with("|&") || (before.ends_with('|') && !before.ends_with("||"))
+}
+
+/// True for a segment that is nothing but a shell without a script of its
+/// own (`bash`, `sh -s`, `env bash`, `then bash`): behind a pipe it runs
+/// whatever the pipe carries.
+fn bare_shell_segment(segment: &str, comments: &CommentReading) -> bool {
+    // Every shell name holds `sh`; nearly every segment is ruled out here.
+    if segment.len() > 128 || !segment.contains("sh") {
+        return false;
+    }
+    let decoded = comments.decoded(segment);
+    let words = shell_tokens(&normalize_shell(&decoded));
+    let Some(start) = words.iter().position(|word| {
+        !is_env_assignment(word)
+            && !SHELL_RESERVED_PREFIX_WORDS.contains(&word.as_str())
+            && !matches!(
+                command_basename(word),
+                "command" | "exec" | "nohup" | "env" | "time" | "nice"
+            )
+    }) else {
+        return false;
+    };
+    let words = &words[start..];
+    SHELL_COMMANDS.contains(&command_basename(&words[0]))
+        && matches!(shell_stdin_script(words), StdinScript::Unseen { .. })
+}
+
+/// What reads a heredoc as a program.
+#[derive(Clone, Copy)]
+enum HeredocConsumer {
+    Shell,
+    Interpreter(&'static str),
+}
+
+/// The shell or interpreter on the line a heredoc is attached to
+/// (`bash <<EOF`, `cat <<EOF | sh`, `python3 - <<'PY'`), if any.
+fn heredoc_consumer(owner_line: &str) -> Option<HeredocConsumer> {
+    let lower = owner_line.to_ascii_lowercase();
+    let words = shell_words(&lower);
+    let mut consumer = None;
+    for (index, word) in words.iter().enumerate() {
+        // The operator may be attached to the command (`bash<<EOF`).
+        let attached = word.contains('<');
+        let word = word.split('<').next().unwrap_or(word);
+        let name = command_basename(word);
+        // `eval "$(cat <<EOF …)"` and `source /dev/stdin <<EOF` run the body
+        // in the current shell.
+        if word == "eval" || word == "/dev/stdin" {
+            return Some(HeredocConsumer::Shell);
+        }
+        let from_stdin = || attached || reads_program_from_stdin(&words[index + 1..]);
+        if SHELL_COMMANDS.contains(&name) && from_stdin() {
+            return Some(HeredocConsumer::Shell);
+        }
+        if consumer.is_none()
+            && let Some(interpreter) = interpreter_name(name)
+            && from_stdin()
+        {
+            consumer = Some(HeredocConsumer::Interpreter(interpreter));
+        }
+    }
+    consumer
+}
+
+/// True when a shell or interpreter followed by `arguments` takes its program
+/// from standard input: no script file, module or inline program is named
+/// before the redirection. `python3 - <<EOF` does; with `python3 gen.py
+/// <<EOF` and `python3 -m json.tool <<EOF` the heredoc is the program's data.
+fn reads_program_from_stdin<S: AsRef<str>>(arguments: &[S]) -> bool {
+    for word in arguments {
+        let word = word.as_ref();
+        if word
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .starts_with(['<', '>'])
+        {
+            return true;
+        }
+        if matches!(word, "-c" | "-m" | "-e" | "--eval" | "-p" | "-r") {
+            return false;
+        }
+        if !word.starts_with(['-', '+']) {
+            // A script file.
+            return false;
+        }
+    }
+    true
+}
+
+/// The interpreter family a command name belongs to, if it runs scripts from
+/// standard input.
+fn interpreter_name(name: &str) -> Option<&'static str> {
+    if name.starts_with("python") {
+        return Some("python");
+    }
+    SCRIPT_INTERPRETER_COMMANDS
+        .iter()
+        .find(|known| **known == name)
+        .copied()
+}
+
+/// Checks a script an interpreter reads from a heredoc or a here-string.
+///
+/// Such scripts are how agents do everyday work, so this is much narrower
+/// than the check of a `-c` / `-e` argument: only a dotenv file counts as a
+/// sensitive path, and only the plain ways of printing the whole environment
+/// count as a dump. Reading, copying or testing variables is allowed.
+fn interpreter_script_match(
+    interpreter: &str,
+    body: &str,
+    profile: ActionGuardProfile,
+) -> Option<ActionGuardMatch> {
+    let lower = body.to_ascii_lowercase();
+    if profile.includes(ActionCategory::SecretDumpCommand)
+        && last_dotenv_like(&lower).is_some()
+        && shell_words(&lower).iter().any(|word| is_dotenv_path(word))
+    {
+        return Some(guard_match(
+            ActionCategory::SecretDumpCommand,
+            "shk action guard: command accesses sensitive local files",
+        ));
+    }
+    if !profile.includes(ActionCategory::EnvironmentDump) {
+        return None;
+    }
+    // Matched without blanks, so spacing does not matter.
+    let patterns: &[&str] = match interpreter {
+        "python" => &[
+            "print(os.environ)",
+            "print(dict(os.environ",
+            "print(environ)",
+            "print(dict(environ",
+            "pprint(os.environ",
+            "dumps(dict(os.environ",
+        ],
+        "node" => &[
+            "console.log(process.env)",
+            "console.dir(process.env)",
+            "stringify(process.env",
+        ],
+        "ruby" => &["env.each", "env.to_h", "env.inspect"],
+        "perl" => &["%env"],
+        _ => &[
+            "getenv()",
+            "print_r($_env",
+            "var_dump($_env",
+            "print_r($_server",
+            "var_dump($_server",
+        ],
+    };
+    let compact: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
+    // `puts ENV` on a line of its own; `puts ENV["HOME"]` is one variable.
+    let ruby_prints_env = interpreter == "ruby"
+        && lower
+            .lines()
+            .any(|line| matches!(line.trim(), "puts env" | "p env" | "pp env"));
+    (ruby_prints_env || contains_any(&compact, patterns)).then(|| {
+        guard_match(
+            ActionCategory::EnvironmentDump,
+            "shk action guard: command can expose process environment variables",
+        )
+    })
+}
+
+/// Every heredoc of `command`: the lines heredocs are attached to, and each
+/// heredoc's body with the index of its line.
+fn heredoc_scripts(
+    command: &str,
+    comments: &CommentReading,
+) -> (Vec<String>, Vec<(usize, String)>) {
+    let mut owners = Vec::new();
+    let mut scripts = Vec::new();
+    let mut pending = std::collections::VecDeque::<(HeredocDelimiter, usize)>::new();
+    let mut state = ShellLineState::default();
+    let mut body = String::new();
+    // The lines a backslash joins to the one being read.
+    let mut continued = String::new();
+    for line_with_newline in command.split_inclusive('\n') {
+        let line = line_with_newline
+            .strip_suffix('\n')
+            .unwrap_or(line_with_newline);
+        if let Some((delimiter, _)) = pending.front() {
+            let candidate = if delimiter.strip_tabs {
+                line.trim_start_matches('\t')
+            } else {
+                line
+            };
+            if candidate == delimiter.value {
+                if let Some((_, owner)) = pending.pop_front() {
+                    scripts.push((owner, std::mem::take(&mut body)));
+                }
+            } else {
+                body.push_str(line_with_newline);
+            }
+            continue;
+        }
+        let (delimiters, _) = heredoc_delimiters(line, &mut state, comments);
+        continued.push_str(line.strip_suffix('\\').unwrap_or(line));
+        if !delimiters.is_empty() {
+            let owner = owners.len();
+            owners.push(continued.clone());
+            pending.extend(delimiters.into_iter().map(|delimiter| (delimiter, owner)));
+        }
+        if line.ends_with('\\') {
+            continued.push(' ');
+        } else {
+            continued.clear();
+        }
+    }
+    // A heredoc without its closing delimiter runs to the end of the text.
+    if let Some((_, owner)) = pending.pop_front() {
+        scripts.push((owner, body));
+    }
+    (owners, scripts)
 }
 
 /// One shell word after quote and backslash removal, with its byte span in the
@@ -2252,8 +2847,25 @@ const SHELL_RESERVED_PREFIX_WORDS: &[&str] = &[
 ];
 
 /// Exec-style wrappers: they run the command that follows their own options.
-const EXEC_WRAPPER_COMMANDS: &[&str] =
-    &["time", "timeout", "nice", "stdbuf", "xargs", "doas", "sudo"];
+const EXEC_WRAPPER_COMMANDS: &[&str] = &[
+    "time",
+    "timeout",
+    "gtimeout",
+    "nice",
+    "stdbuf",
+    "xargs",
+    "doas",
+    "sudo",
+    "busybox",
+    "toybox",
+    "caffeinate",
+    "setsid",
+    "watch",
+    "ionice",
+    "chrt",
+    "taskset",
+    "unbuffer",
+];
 
 /// Indexes of the words where a command may start after a shell reserved word
 /// (`then curl …`) or an exec-style wrapper (`timeout 5 curl …`).
@@ -2270,6 +2882,24 @@ fn prefixed_command_starts(words: &[&str]) -> Vec<usize> {
     } else if first == "coproc" {
         // `coproc COMMAND …` or `coproc NAME { …; }`.
         vec![1, 2]
+    } else if matches!(command_basename(first), "dotenvx" | "shk") {
+        // `dotenvx run -- COMMAND`, `shk env run -- COMMAND`.
+        words
+            .iter()
+            .position(|word| *word == "--")
+            .map(|index| index + 1)
+            .filter(|index| *index < words.len())
+            .into_iter()
+            .collect()
+    } else if command_basename(first) == "find" {
+        // `find … -exec COMMAND … ;` runs COMMAND on what it finds.
+        words
+            .iter()
+            .enumerate()
+            .filter(|(_, word)| FIND_EXEC_OPTIONS.contains(word))
+            .map(|(index, _)| index + 1)
+            .filter(|index| *index < words.len())
+            .collect()
     } else {
         exec_wrapper_command_starts(command_basename(first), words)
     }
@@ -2287,7 +2917,7 @@ fn exec_wrapper_command_starts(wrapper: &str, words: &[&str]) -> Vec<usize> {
             &["-p", "-v", "-a", "--portability", "--verbose", "--append"],
             0,
         ),
-        "timeout" => (
+        "timeout" | "gtimeout" => (
             &["-s", "--signal", "-k", "--kill-after"],
             &["-v", "-p", "--verbose", "--foreground", "--preserve-status"],
             1,
@@ -2298,7 +2928,32 @@ fn exec_wrapper_command_starts(wrapper: &str, words: &[&str]) -> Vec<usize> {
             &[],
             0,
         ),
-        "xargs" => (&[], &[], 0),
+        // Options are not modelled: any of them makes every later word a
+        // possible command start.
+        "xargs" | "busybox" | "toybox" | "setsid" | "ionice" | "chrt" | "taskset" | "unbuffer" => {
+            (&[], &[], 0)
+        }
+        "watch" => (
+            &["-n", "--interval"],
+            &[
+                "-d",
+                "-t",
+                "-b",
+                "-e",
+                "-g",
+                "-c",
+                "-x",
+                "--differences",
+                "--no-title",
+                "--beep",
+                "--errexit",
+                "--chgexit",
+                "--color",
+                "--exec",
+            ],
+            0,
+        ),
+        "caffeinate" => (&["-t", "-w"], &["-d", "-i", "-m", "-s", "-u"], 0),
         "doas" => (&["-u", "-c"], &["-n", "-s", "-l"], 0),
         "sudo" => (
             &[
@@ -2386,6 +3041,7 @@ fn detect_builtin_command(
     command: &str,
     profile: ActionGuardProfile,
     ansi_c: bool,
+    command_typed: bool,
 ) -> Option<ActionGuardMatch> {
     let normalized = normalize_shell(command);
     let words = shell_words(&normalized);
@@ -2394,7 +3050,8 @@ fn detect_builtin_command(
     let cmd = command_basename(words.first().copied().unwrap_or_default());
 
     if profile.includes(ActionCategory::SecretDumpCommand)
-        && sensitive_file_access_command(&normalized, cmd, &words, ansi_c)
+        && (sensitive_file_access_command(&normalized, cmd, &words, ansi_c, command_typed)
+            || (command_typed && secret_reveal_command(cmd, &words)))
     {
         return Some(guard_match(
             ActionCategory::SecretDumpCommand,
@@ -2960,7 +3617,7 @@ fn shell_exec_option_index(words: &[String]) -> Option<usize> {
 
 /// Commands that run whatever their arguments spell out.
 const NESTED_COMMAND_WRAPPERS: &[&str] = &[
-    "bash", "sh", "zsh", "eval", "command", "exec", "nohup", "env",
+    "bash", "sh", "zsh", "dash", "ksh", "ash", "fish", "eval", "command", "exec", "nohup", "env",
 ];
 
 /// What a command may run through its arguments.
@@ -2998,7 +3655,7 @@ fn nested_command_payloads(raw_command: &str, command: &str, words: &[String]) -
                 .collect(),
         );
     }
-    if matches!(command, "bash" | "sh" | "zsh") {
+    if SHELL_COMMANDS.contains(&command) {
         return NestedCommands::text(
             shell_exec_option_index(words).and_then(|index| words.get(index + 1).cloned()),
         );
@@ -3871,9 +4528,36 @@ fn normalize_action_pattern(raw: &str) -> String {
     }
 }
 
-fn sensitive_file_access_command(command: &str, cmd: &str, words: &[&str], ansi_c: bool) -> bool {
-    if !SENSITIVE_FILE_ACCESS_COMMANDS.contains(&cmd) {
+/// `command_typed`: the text is known to be a shell command, not prose or a
+/// file body that merely reads like one.
+fn sensitive_file_access_command(
+    command: &str,
+    cmd: &str,
+    words: &[&str],
+    ansi_c: bool,
+    command_typed: bool,
+) -> bool {
+    let listed_reader = SENSITIVE_FILE_ACCESS_COMMANDS.contains(&cmd);
+    let redirection = command_typed && command.contains('<');
+    let any_command = command_typed
+        && !listed_reader
+        && last_dotenv_like(command).is_some()
+        && !dotenv_argument_safe_command(cmd, words);
+    // Nearly every command ends here, before its words are read again.
+    if !listed_reader && !any_command && !redirection {
         return false;
+    }
+    let unquoted = shell_words_unquoted(command, ansi_c);
+    if redirection && reads_secret_through_redirection(&unquoted) {
+        return true;
+    }
+    if !listed_reader && !any_command {
+        return false;
+    }
+    if !listed_reader {
+        return unquoted.iter().enumerate().any(|(index, word)| {
+            !is_output_redirection_target(&unquoted, index) && names_dotenv_file(word)
+        });
     }
     // A redirection operator may be attached to its target (`<.env`).
     let is_secret_argument =
@@ -3883,18 +4567,269 @@ fn sensitive_file_access_command(command: &str, cmd: &str, words: &[&str], ansi_
             .iter()
             .skip(1)
             .any(|word| is_secret_argument(word))
-        || shell_words_unquoted(command, ansi_c)
+        || unquoted.iter().skip(1).any(|word| {
+            // These words end where an attached redirection starts
+            // (`.env>/dev/null`), and know whether a glob is unquoted.
+            let text = strip_redirection_operator(&word.text).unwrap_or(&word.text);
+            brace_expansions(text)
+                .iter()
+                .any(|form| is_secret_path(form) || (word.glob && dotenv_glob_word(form)))
+        })
+}
+
+/// True when the word at `index` is where an output redirection writes
+/// (`>.env`, `> .env`, `2>>.env`).
+fn is_output_redirection_target(words: &[ShellWord], index: usize) -> bool {
+    let operator = |text: &str| {
+        let rest = text.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&');
+        rest.starts_with('>')
+            .then(|| rest.trim_start_matches(['>', '|', '&']).is_empty())
+    };
+    match operator(&words[index].text) {
+        // Attached to its target.
+        Some(false) => true,
+        Some(true) => false,
+        None => index
+            .checked_sub(1)
+            .is_some_and(|previous| operator(&words[previous].text) == Some(true)),
+    }
+}
+
+/// True when a word of a command that is not a listed reader names a dotenv
+/// file. Such a command is denied dotenv files only: the broader name
+/// patterns (`*key*`, `*token*`) match too many ordinary source paths.
+///
+/// The word is taken whole, as the shell passes it: a quoted sentence that
+/// mentions a dotenv file (a commit message, a pull request title) is one
+/// word and names no file. The value of `--option=VALUE` and of a variable
+/// assignment counts. So does the command word: nothing runs a dotenv file,
+/// but a substitution in front of the argument (`paste $(true) .env`) leaves
+/// the argument at the start of its own segment.
+fn names_dotenv_file(word: &ShellWord) -> bool {
+    let text = strip_redirection_operator(&word.text).unwrap_or(&word.text);
+    let value = text.rsplit_once('=').map(|(_, value)| value);
+    [Some(text), value].into_iter().flatten().any(|candidate| {
+        brace_expansions(candidate)
             .iter()
-            .skip(1)
-            .any(|word| {
-                // These words end where an attached redirection starts
-                // (`.env>/dev/null`), and know whether a glob is unquoted.
-                is_secret_argument(&word.text)
-                    || (word.glob
-                        && dotenv_glob_word(
-                            strip_redirection_operator(&word.text).unwrap_or(&word.text),
-                        ))
+            .any(|form| is_dotenv_path(form) || (word.glob && dotenv_glob_word(form)))
+    })
+}
+
+/// Byte offset of the last place in `text` where a word may name a dotenv
+/// file: a `.` that starts a word or a path component and is followed by `e`,
+/// or by a character through which the shell can still produce one (a glob,
+/// a brace group, a quote, an escape, an expansion). `None` rules out a
+/// dotenv argument without splitting the text into words.
+fn last_dotenv_like(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    (0..bytes.len()).rev().find(|&index| {
+        bytes[index] == b'.'
+            && (index == 0
+                || matches!(
+                    bytes[index - 1],
+                    b' ' | b'\t'
+                        | b'\n'
+                        | b'/'
+                        | b'\''
+                        | b'"'
+                        | b'='
+                        | b'<'
+                        | b'>'
+                        | b'{'
+                        | b','
+                        | b'('
+                        | b'`'
+                        | b'\\'
+                        | b':'
+                        | b';'
+                        | b'|'
+                        | b'&'
+                ))
+            && bytes.get(index + 1).is_some_and(|next| {
+                matches!(
+                    next,
+                    b'e' | b'E' | b'{' | b'[' | b'?' | b'*' | b'\'' | b'"' | b'\\' | b'$'
+                )
             })
+    })
+}
+
+/// True when an input redirection (`<.env`, `< .env`, `0<.env`) reads a
+/// path that is secret by what it is. The command it feeds does not matter: `while read … done
+/// <file`, `"$(<file)"` and `tee <file` all get the content.
+fn reads_secret_through_redirection(words: &[ShellWord]) -> bool {
+    words.iter().enumerate().any(|(index, word)| {
+        let rest = word.text.trim_start_matches(|c: char| c.is_ascii_digit());
+        let Some(target) = rest.strip_prefix('<') else {
+            return false;
+        };
+        // `<<` is a heredoc or here-string, `<(` a process substitution.
+        if target.starts_with(['<', '(']) {
+            return false;
+        }
+        let target = target.trim_start_matches('&');
+        let target = if target.is_empty() {
+            words.get(index + 1).map(|next| next.text.as_str())
+        } else {
+            Some(target)
+        };
+        target.is_some_and(is_always_secret_path)
+    })
+}
+
+/// True for a command that may be handed a dotenv file: one that does not
+/// print it, or a wrapper or reserved word whose command is scanned on its own.
+fn dotenv_argument_safe_command(cmd: &str, words: &[&str]) -> bool {
+    if DOTENV_ARGUMENT_SAFE_COMMANDS.contains(&cmd)
+        || SHELL_RESERVED_PREFIX_WORDS.contains(&cmd)
+        // `xargs -a FILE` reads the file itself.
+        || (EXEC_WRAPPER_COMMANDS.contains(&cmd) && cmd != "xargs")
+        || NESTED_COMMAND_WRAPPERS.contains(&cmd)
+        || matches!(cmd, "function" | "coproc")
+    {
+        return true;
+    }
+    let arguments = words.get(1..).unwrap_or_default();
+    match cmd {
+        // Options that add a diff to the output show the file.
+        "git" => git_subcommand(arguments).is_some_and(|subcommand| {
+            GIT_PATH_SAFE_SUBCOMMANDS.contains(&subcommand)
+                // Options that add a diff to the output show the file.
+                && !arguments.iter().any(|word| {
+                    matches!(*word, "-p" | "--patch")
+                        || (subcommand == "status"
+                            && (word.starts_with("-v") || *word == "--verbose"))
+                })
+        }),
+        "shk" => subcommand_word(arguments)
+            .is_some_and(|subcommand| SHK_SAFE_SUBCOMMANDS.contains(&subcommand)),
+        "dotenvx" => subcommand_word(arguments)
+            .is_some_and(|subcommand| DOTENVX_SAFE_SUBCOMMANDS.contains(&subcommand)),
+        // `find` only names files, unless it runs a command on them.
+        "find" => !arguments
+            .iter()
+            .any(|word| FIND_EXEC_OPTIONS.contains(word)),
+        _ => false,
+    }
+}
+
+/// The first word that is not an option.
+fn subcommand_word<'w>(arguments: &[&'w str]) -> Option<&'w str> {
+    arguments
+        .iter()
+        .copied()
+        .find(|word| !word.starts_with('-'))
+}
+
+/// The git subcommand behind git's own options (`git -C dir -c k=v add`).
+fn git_subcommand<'w>(arguments: &[&'w str]) -> Option<&'w str> {
+    let mut index = 0;
+    while let Some(word) = arguments.get(index).copied() {
+        if matches!(word, "-c" | "--git-dir" | "--work-tree" | "--namespace") {
+            // `-C` is lowercased with the rest of the command.
+            index += 2;
+        } else if word.starts_with('-') {
+            index += 1;
+        } else {
+            return Some(word);
+        }
+    }
+    None
+}
+
+/// True for a command that prints stored secrets: dotenvx subcommands that
+/// output decrypted values or keys, `shk … --reveal` and `shk env decrypt`.
+fn secret_reveal_command(cmd: &str, words: &[&str]) -> bool {
+    let arguments = words.get(1..).unwrap_or_default();
+    match cmd {
+        "dotenvx" => subcommand_word(arguments)
+            .is_some_and(|subcommand| DOTENVX_REVEALING_SUBCOMMANDS.contains(&subcommand)),
+        "shk" => {
+            arguments.contains(&"--reveal")
+                || (arguments.contains(&"env") && arguments.contains(&"decrypt"))
+        }
+        _ => false,
+    }
+}
+
+/// `find` options followed by a command to run.
+const FIND_EXEC_OPTIONS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
+
+/// The forms a word takes after brace expansion (`.e{nv,}` is `.env` and
+/// `.e`). Nested braces are expanded too; the word itself is returned when it
+/// has none or would expand into more forms than a real command line uses.
+fn brace_expansions(word: &str) -> Vec<String> {
+    const MAX_FORMS: usize = 64;
+    // Longer than any path worth expanding; keeps the work per word bounded.
+    const MAX_WORD_BYTES: usize = 4096;
+    if word.len() > MAX_WORD_BYTES || !word.contains('{') {
+        return vec![word.to_string()];
+    }
+    let mut done = Vec::new();
+    let mut pending = vec![word.to_string()];
+    while let Some(form) = pending.pop() {
+        let Some((open, close)) = first_brace_group(&form) else {
+            if !done.contains(&form) {
+                done.push(form);
+            }
+            continue;
+        };
+        for alternative in split_top_level_commas(&form[open + 1..close]) {
+            pending.push(format!(
+                "{}{}{}",
+                &form[..open],
+                alternative,
+                &form[close + 1..]
+            ));
+        }
+        if done.len() + pending.len() > MAX_FORMS {
+            return vec![word.to_string()];
+        }
+    }
+    done
+}
+
+/// Byte offsets of the first `{…}` group to close that holds a comma at its
+/// own level.
+fn first_brace_group(text: &str) -> Option<(usize, usize)> {
+    // Open braces not yet closed, each with whether a comma followed at its
+    // own level. One pass: the first group to close with a comma is returned.
+    let mut open = Vec::<(usize, bool)>::new();
+    for (index, byte) in text.bytes().enumerate() {
+        match byte {
+            b'{' => open.push((index, false)),
+            b',' => {
+                if let Some(group) = open.last_mut() {
+                    group.1 = true;
+                }
+            }
+            b'}' => {
+                if let Some((start, true)) = open.pop() {
+                    return Some((start, index));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_top_level_commas(text: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let (mut depth, mut start) = (0usize, 0);
+    for (index, byte) in text.bytes().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                parts.push(&text[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&text[start..]);
+    parts
 }
 
 fn environment_dump_command(command: &str, words: &[&str]) -> bool {
@@ -3916,6 +4851,19 @@ fn environment_dump_command(command: &str, words: &[&str]) -> bool {
 
     if base == "set" {
         return shell_builtin_dumps(command, cmd, &[]);
+    }
+
+    // `declare -p` / `declare -x` / `typeset -x` list variables with their
+    // values, as does either builtin without arguments; `compgen -e` names
+    // the exported ones.
+    if matches!(base, "declare" | "typeset") {
+        return words.len() == 1
+            || words[1..]
+                .iter()
+                .all(|word| word.starts_with('-') && word.contains(['p', 'x']));
+    }
+    if base == "compgen" {
+        return words[1..].iter().any(|word| matches!(*word, "-e" | "-v"));
     }
 
     interpreter_environment_read(command, base, words) || command.contains("/proc/self/environ")
@@ -4149,13 +5097,8 @@ fn chmod_world_writable(command: &str, ansi_c: bool) -> bool {
 /// the pattern itself starts with a dot.
 fn dotenv_glob_word(word: &str) -> bool {
     let name = word.rsplit('/').next().unwrap_or(word);
-    if !name.starts_with('.') {
-        return false;
-    }
-    let pattern = name.chars().collect::<Vec<_>>();
-    [".env", ".env.local"]
-        .iter()
-        .any(|candidate| glob_match(&pattern, &candidate.chars().collect::<Vec<_>>()))
+    // The shell does not match a leading dot with a wildcard.
+    name.starts_with('.') && glob_matches_any(name, DOTENV_GLOB_CANDIDATES)
 }
 
 /// Minimal shell glob matcher: `*`, `?` and bracket classes (with ranges and
@@ -4251,6 +5194,87 @@ fn opaque_execution(words: &[&str]) -> bool {
     )
 }
 
+/// True for a dotenv file other than a template (`.env`, `.env.local`,
+/// `config/.env.production`). The dotenv part of `is_secret_path`.
+fn is_dotenv_path(raw: &str) -> bool {
+    if !raw
+        .as_bytes()
+        .windows(4)
+        .any(|window| window.eq_ignore_ascii_case(b".env"))
+    {
+        return false;
+    }
+    let path = raw
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == ':' || c == ';')
+        .trim_start_matches("file://");
+    let lower = path.to_ascii_lowercase().replace('\\', "/");
+    // `git show HEAD:.env` names the file behind a revision.
+    let lower = lower.rsplit(':').next().unwrap_or(&lower);
+    let lower = lower.strip_prefix("./").unwrap_or(lower);
+    let (directory, name) = lower.rsplit_once('/').unwrap_or(("", lower));
+    let dotenv_part = |part: &str| part == ".env" || part.starts_with(".env.");
+    if directory.split('/').any(dotenv_part) {
+        return true;
+    }
+    dotenv_part(name) && !DOTENV_TEMPLATE_NAMES.contains(&name)
+}
+
+/// True for the paths that are secret by what they are, not by a word in
+/// their name: dotenv files, token stores and shell history.
+fn is_always_secret_path(raw: &str) -> bool {
+    if is_dotenv_path(raw) {
+        return true;
+    }
+    let path = raw
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == ':' || c == ';')
+        .trim_start_matches("file://");
+    let lower = path.to_ascii_lowercase().replace('\\', "/");
+    (lower.contains("/tokens/") && lower.ends_with(".json"))
+        || ["tokens/*.json", "./tokens/*.json"]
+            .iter()
+            .chain(SHELL_HISTORY_PATH_PATTERNS.iter())
+            .any(|pattern| wildcard_match(pattern, &lower))
+}
+
+/// File extensions of data files, for a bare file name that holds a secret
+/// marker (`credentials.json`). Source files (`token_parser.rs`) and search
+/// patterns (`process.env.SECRET_KEY`) are left alone.
+const SECRET_DATA_FILE_EXTENSIONS: &[&str] = &[
+    "json",
+    "yaml",
+    "yml",
+    "toml",
+    "ini",
+    "cfg",
+    "conf",
+    "txt",
+    "csv",
+    "xml",
+    "pem",
+    "key",
+    "p12",
+    "pfx",
+    "jks",
+    "keystore",
+    "kdbx",
+    "properties",
+];
+
+/// True for a file name without a directory that the `**/*name*` patterns
+/// would match behind one: `credentials.json` next to `./credentials.json`.
+fn is_bare_secret_data_file(lower: &str) -> bool {
+    if lower.contains('/') {
+        return false;
+    }
+    let Some((stem, extension)) = lower.rsplit_once('.') else {
+        return false;
+    };
+    SECRET_DATA_FILE_EXTENSIONS.contains(&extension)
+        && ["token", "key", "secret", "password", "credential"]
+            .iter()
+            .any(|marker| stem.contains(marker) || extension == *marker)
+}
+
 fn is_secret_path(raw: &str) -> bool {
     // This runs for every argument of a file-reading command, nearly all of
     // which hold no marker: rule those out without allocating.
@@ -4278,6 +5302,9 @@ fn is_secret_path(raw: &str) -> bool {
         return true;
     }
     if lower.ends_with("/tokens") || (lower.contains("/tokens/") && lower.ends_with(".json")) {
+        return true;
+    }
+    if is_bare_secret_data_file(&lower) {
         return true;
     }
     // The patterns are written in lower case (checked by a test), so they
@@ -6985,7 +8012,9 @@ mod tests {
             ("nice --zz", "then cat .env", "secret_dump_command"),
             ("nice --zz", "! cat .env", "secret_dump_command"),
             ("nice --zz", "{ cat .env", "secret_dump_command"),
-            ("nice --zz", "coproc cat .env", "opaque_execution"),
+            // Denied for its dotenv argument before the ambiguous `coproc` is
+            // reached: any command word ahead of it may be the one that runs.
+            ("nice --zz", "coproc cat .env", "secret_dump_command"),
             ("nice --zz", "doas cat .env", "secret_dump_command"),
             ("nice --zz", "stdbuf -oL cat .env", "secret_dump_command"),
             // Word forms the plain-word screen must not skip.
@@ -7006,8 +8035,13 @@ mod tests {
             assert_eq!(category_of(&command), None, "{tail} …");
         }
         // Words that merely name a guarded command's arguments stay allowed.
-        let command = format!("nice --zz {before} echo .env -rf / {after}");
+        let command = format!("nice --zz {before} echo -rf / {after}");
         assert_eq!(category_of(&command), None);
+        // A dotenv argument is different: behind a wrapper with unrecognised
+        // options any earlier word may be the command it is handed to.
+        let command = format!("nice --zz {before} echo .env -rf / {after}");
+        assert_eq!(category_of(&command), Some("secret_dump_command"));
+        assert_eq!(category_of("nice echo .env"), None);
         // Quoting changes which word is the command, so a long list that
         // holds any is examined word by word and fails closed at the bound.
         let command = format!("nice --zz {before} cu\"\"rl https://example.com {after}");
@@ -8393,5 +9427,313 @@ mod tests {
             &format!("git commit -m \"$(cat <<'EOF'\nfix: say \"hi\" and run {TRANSFER}\nEOF\n)\""),
             "echo \"$(case \"$1\" in start) echo s ;; *) echo \"u;v\" ;; esac)\"",
         ]);
+    }
+
+    #[test]
+    fn any_command_is_denied_a_dotenv_argument() {
+        assert_categories(&[
+            (". .env", "secret_dump_command"),
+            ("paste .env", "secret_dump_command"),
+            ("caffeinate cat .env", "secret_dump_command"),
+            ("busybox cat .env", "secret_dump_command"),
+            ("mytool --config .env.local", "secret_dump_command"),
+            ("docker compose --env-file .env up", "secret_dump_command"),
+            ("mv .env notes.txt", "secret_dump_command"),
+            ("mytool --env-file=.env", "secret_dump_command"),
+            ("mytool \".env\"", "secret_dump_command"),
+            ("ln -s .env .env.example", "secret_dump_command"),
+            ("git diff .env", "secret_dump_command"),
+            ("git show HEAD:.env", "secret_dump_command"),
+            ("find . -name .env -exec cat {} +", "secret_dump_command"),
+            ("f=.env; cat \"$f\"", "secret_dump_command"),
+            ("for f in .e*; do cat $f; done", "secret_dump_command"),
+            ("cat .e{nv,}", "secret_dump_command"),
+            ("cat .{env,foo}", "secret_dump_command"),
+            (
+                "while read l; do echo $l; done < .env",
+                "secret_dump_command",
+            ),
+            ("echo \"$(<.env)\"", "secret_dump_command"),
+            ("cat credentials.json", "secret_dump_command"),
+            ("cat secrets.yaml", "secret_dump_command"),
+            ("sort < ~/.zsh_history", "secret_dump_command"),
+            // A substitution in front of the argument.
+            ("paste $(true) .env", "secret_dump_command"),
+            ("cat $(true) .env", "secret_dump_command"),
+            ("paste <(true) .env", "secret_dump_command"),
+            ("$(echo paste) .env", "secret_dump_command"),
+            // Globs the shell expands to a dotenv file.
+            ("paste .en*.staging", "secret_dump_command"),
+            ("paste .e*production", "secret_dump_command"),
+            // Safe commands in a form that prints the file.
+            ("git status -v .env", "secret_dump_command"),
+            ("git add -p .env", "secret_dump_command"),
+            ("git stash show -p -- .env", "secret_dump_command"),
+            ("xargs -a .env echo", "secret_dump_command"),
+            ("dotenvx run -f .env -- paste .env", "secret_dump_command"),
+            ("dotenvx run -- printenv", "environment_dump"),
+            ("dotenvx get -f .env", "secret_dump_command"),
+            ("dotenvx get", "secret_dump_command"),
+            ("shk env key show --reveal", "secret_dump_command"),
+            (
+                "shk env decrypt -f .env -o /dev/stdout",
+                "secret_dump_command",
+            ),
+            (
+                "shk mask --min-severity critical .env",
+                "secret_dump_command",
+            ),
+            ("git log -p -- .env", "secret_dump_command"),
+        ]);
+        assert_unguarded(&[
+            "ls -la .env",
+            "test -f .env && echo yes",
+            "if [ -f .env ]; then echo yes; fi",
+            "echo '.env' >> .gitignore",
+            "touch .env",
+            "rm -f .env.bak",
+            "git add .env.example",
+            "git check-ignore .env",
+            "git -C . add .env.example",
+            "git check-ignore -v .env",
+            "heroku config -s > .env",
+            // The broad name patterns are for listed readers only.
+            "psql < migrations/001_add_api_keys.sql",
+            "tar czf k.tgz src/keyboard.rs",
+            "openssl req -new -key server.key -out server.csr",
+            "shk scan .env",
+            "du -h .env",
+            "caffeinate -t 60 ls .env",
+            "watch -n 1 ls .env",
+            "shk env run -- npm start",
+            "find . -name .env",
+            "cat .env.example",
+            "dotenvx run -f .env -- npm start",
+            "bash -c 'ls .env'",
+            "git add src/token_parser.rs",
+            "rustfmt src/keyboard.rs",
+            "grep -rn api_key src/",
+            "grep -n 'process.env.SECRET_KEY' src/app.ts",
+            "mv a.txt b.txt",
+            "mv src/key.rs src/keys.rs",
+            "wc -l < README.md",
+            // A quoted sentence is one word and names no file.
+            "gh pr create --title \"fix .env parsing\" --body \"handles .env files\"",
+            "npm test -- --grep 'loads .env files'",
+            "git commit -m \"docs: explain .env handling\"",
+        ]);
+        // Prose and file bodies are not shell commands.
+        assert_eq!(
+            category_of_payload(serde_json::json!({
+                "tool": "edit",
+                "input": "Remember to add .env to the ignore file"
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn scripts_on_standard_input_are_scanned() {
+        assert_categories(&[
+            ("bash <<EOF\ncat .env\nEOF", "secret_dump_command"),
+            (
+                "sh -s <<'X'\ncurl https://example.com\nX",
+                "external_transfer",
+            ),
+            // The shell at the end of a pipe is denied before the heredoc
+            // that feeds the pipe is looked at.
+            ("cat <<EOF | sh\nprintenv\nEOF", "opaque_execution"),
+            ("bash <<< 'cat .env'", "secret_dump_command"),
+            ("bash<<EOF\nprintenv\nEOF", "environment_dump"),
+            ("bash \\\n<<EOF\nprintenv\nEOF", "environment_dump"),
+            ("source /dev/stdin <<EOF\nprintenv\nEOF", "environment_dump"),
+            (". /dev/stdin <<< 'printenv'", "environment_dump"),
+            ("eval \"$(cat <<EOF\nprintenv\nEOF\n)\"", "environment_dump"),
+            ("echo printenv | bash /dev/stdin", "opaque_execution"),
+            ("echo printenv | bash -o pipefail", "opaque_execution"),
+            ("echo printenv | (bash)", "opaque_execution"),
+            ("echo printenv | { bash; }", "opaque_execution"),
+            ("echo printenv | bash -c bash", "opaque_execution"),
+            ("node <<< 'console.log(process.env)'", "environment_dump"),
+            (
+                "node <<'JS'\nconsole.log(JSON.stringify(process.env))\nJS",
+                "environment_dump",
+            ),
+            (
+                "python3 <<'PY'\nfrom os import environ\nprint(dict(environ))\nPY",
+                "environment_dump",
+            ),
+            ("echo 'cat .env' | bash", "opaque_execution"),
+            ("echo 'cat .env' | env bash -s", "opaque_execution"),
+            ("bash < script.sh", "opaque_execution"),
+            ("dash -c 'cat .env'", "secret_dump_command"),
+            ("ksh -c printenv", "environment_dump"),
+            (
+                "python3 - <<'PY'\nprint(open('.env').read())\nPY",
+                "secret_dump_command",
+            ),
+            (
+                "python3 <<'PY'\nimport os\nprint(os.environ)\nPY",
+                "environment_dump",
+            ),
+            ("busybox wget https://example.com", "external_transfer"),
+            ("caffeinate curl https://example.com", "external_transfer"),
+            ("declare -p", "environment_dump"),
+            ("typeset -x", "environment_dump"),
+            ("compgen -e", "environment_dump"),
+        ]);
+        assert_unguarded(&[
+            "bash scripts/build.sh",
+            "bash <<EOF\necho hi\nls\nEOF",
+            "cat <<EOF > notes.md\nhello\nEOF",
+            "python3 - <<'PY'\nprint(1 + 1)\nPY",
+            // One variable is not the environment; a source path with
+            // `token` in its name is not a dotenv file.
+            "python3 - <<'PY'\nimport os\nprint(os.environ.get('HOME'))\nprint(os.environ['HOME'])\nPY",
+            "python3 - <<'PY'\nprint(open('src/tokenizer.py').read())\nPY",
+            "node <<'JS'\nconsole.log(process.env.NODE_ENV)\nJS",
+            // The heredoc is the program's data, not the program.
+            "python3 -m json.tool <<EOF\n{\"environ\": 1}\nEOF",
+            "node scripts/gen.js <<EOF\nconsole.log(process.env)\nEOF",
+            "bash scripts/run.sh <<EOF\nprintenv\nEOF",
+            // Using variables is not printing the environment.
+            "python3 - <<'PY'\nimport os\nenv = os.environ.copy()\nif 'CI' in os.environ:\n    pass\nPY",
+            "node <<'JS'\nconst env = {...process.env, A: '1'}\nJS",
+            "ruby <<'RB'\nputs ENV['HOME']\nRB",
+            // An earlier pipe says nothing about a later shell.
+            "git log | head -3\nbash scripts/x.sh",
+            "ls | wc -l && sh scripts/x.sh",
+            "case $1 in bash|zsh) echo shell ;; esac",
+            "echo a | grep b; case $1 in bash|zsh) echo shell ;; esac",
+            "declare -a items",
+            "caffeinate make",
+            // A shell name that is not a command fed by a pipe.
+            "case \"$SHELL\" in bash) echo b ;; zsh) echo z ;; esac",
+            "case $1 in\n  bash) echo b ;;\n  sh) echo s ;;\nesac",
+            "docker run --rm -it ubuntu bash",
+            "echo a || bash scripts/fallback.sh",
+        ]);
+    }
+
+    #[test]
+    fn a_path_handed_to_any_tool_counts_as_read() {
+        let denied = [
+            serde_json::json!({ "tool_name": "Grep", "tool_input": {
+                "pattern": ".", "path": "/repo/.env", "output_mode": "content" } }),
+            serde_json::json!({ "tool_name": "Grep", "tool_input": {
+                "pattern": ".", "glob": ".env*" } }),
+            serde_json::json!({ "tool_name": "grep", "args": {
+                "pattern": ".", "include": "**/.env" } }),
+            serde_json::json!({ "tool_name": "mcp__fs__get_file_contents", "tool_input": {
+                "path": "/repo/.env" } }),
+            serde_json::json!({ "tool_name": "mcp__fs__get_many", "tool_input": {
+                "paths": ["/repo/a.txt", "/repo/.env"] } }),
+            // ripgrep's `*` matches a leading dot.
+            serde_json::json!({ "tool_name": "Grep", "tool_input": {
+                "pattern": ".", "glob": "*.env" } }),
+            serde_json::json!({ "tool_name": "Grep", "tool_input": {
+                "pattern": ".", "glob": "**/*.env*" } }),
+            serde_json::json!({ "tool_name": "Grep", "tool_input": {
+                "pattern": ".", "glob": "*.e?v" } }),
+            serde_json::json!({ "tool_name": "Grep", "tool_input": {
+                "pattern": ".", "path": "/home/u/.zsh_history" } }),
+        ];
+        for payload in denied {
+            assert_eq!(
+                category_of_payload(payload.clone()),
+                Some("secret_file_access"),
+                "{payload}"
+            );
+        }
+        let allowed = [
+            serde_json::json!({ "tool_name": "Grep", "tool_input": {
+                "pattern": "token", "path": "/repo/src", "glob": "*.rs" } }),
+            serde_json::json!({ "tool_name": "Glob", "tool_input": { "pattern": "**/*.md" } }),
+            serde_json::json!({ "tool_name": "Grep", "tool_input": {
+                "pattern": "x", "glob": "*" } }),
+            serde_json::json!({ "tool_name": "Grep", "tool_input": {
+                "pattern": "x", "glob": "*.???" } }),
+            serde_json::json!({ "tool_name": "Grep", "tool_input": {
+                "pattern": "x", "glob": "**/.*" } }),
+            serde_json::json!({ "tool_name": "Grep", "tool_input": {
+                "pattern": "x", "glob": "*env*" } }),
+            // Without a stated read, only paths that are secret by what they
+            // are count: a source directory with `key` in its name is not.
+            serde_json::json!({ "tool_name": "Grep", "tool_input": {
+                "pattern": "x", "path": "/repo/src/keyboard" } }),
+            serde_json::json!({ "tool_name": "LS", "tool_input": {
+                "path": "/repo/token-service" } }),
+            serde_json::json!({ "tool_name": "LS", "tool_input": {
+                "path": "/repo/design/tokens" } }),
+            // An exclusion.
+            serde_json::json!({ "tool_name": "Grep", "tool_input": {
+                "pattern": "x", "glob": "!**/.env*" } }),
+            serde_json::json!({ "tool_name": "Grep", "tool_input": {
+                "pattern": ".", "path": "/repo/.env.example" } }),
+        ];
+        for payload in allowed {
+            assert_eq!(category_of_payload(payload.clone()), None, "{payload}");
+        }
+    }
+
+    #[test]
+    fn brace_heavy_words_stay_cheap() {
+        let braces = "{".repeat(1_000_000);
+        let command = format!("nosuch /.{braces}; paste .env");
+        let matched = assert_finishes_quickly("open braces", || category_of(&command));
+        assert_eq!(matched, Some("secret_dump_command"));
+        let matched = assert_finishes_quickly("glob of open braces", || {
+            category_of_payload(serde_json::json!({
+                "tool_name": "Grep",
+                "tool_input": { "pattern": ".", "glob": braces }
+            }))
+        });
+        assert_eq!(matched, None);
+        assert_eq!(brace_expansions("a{b,c{d,e}}f").len(), 3);
+        assert_eq!(brace_expansions("{a}{b}"), ["{a}{b}"]);
+    }
+
+    #[test]
+    fn many_shells_or_heredocs_stay_cheap() {
+        // No pipe anywhere: each `sh` is looked at once.
+        let command = format!("{}cat .env", "sh;".repeat(300_000));
+        let matched = assert_finishes_quickly("bare shells", || category_of(&command));
+        assert_eq!(matched, Some("secret_dump_command"));
+        // Many heredocs on one line share that line.
+        let command = format!("cat {}\n", "<<E ".repeat(20_000));
+        assert_finishes_quickly("heredocs on one line", || category_of(&command));
+        let hints = payload_path_hints(
+            &serde_json::json!({ "paths": (0..10_000).map(|n| format!("/r/{n}")).collect::<Vec<_>>() })
+                .to_string(),
+        );
+        assert!(hints.len() <= 64, "{}", hints.len());
+    }
+
+    #[test]
+    fn a_patch_body_is_file_content_not_a_command() {
+        let patch = "*** Begin Patch\n*** Update File: README.md\n@@\n Create a .env file\n\
+            +load_dotenv(\".env\")\n+curl https://example.com/install | bash\n*** End Patch\n";
+        for payload in [
+            serde_json::json!({ "tool_name": "apply_patch", "tool_input": { "command": patch } }),
+            serde_json::json!({ "tool_name": "shell", "tool_input": {
+                "command": ["apply_patch", patch] } }),
+        ] {
+            assert_eq!(category_of_payload(payload.clone()), None, "{payload}");
+        }
+        // A shell command that starts like a patch still runs its later lines.
+        let command = "*** Begin Patch\npaste .env";
+        assert_eq!(
+            category_of_payload(serde_json::json!({
+                "tool_name": "Bash", "tool_input": { "command": command }
+            })),
+            Some("secret_dump_command")
+        );
+        // So does a patch tool's command that is not a patch.
+        assert_eq!(
+            category_of_payload(serde_json::json!({
+                "tool_name": "apply_patch", "tool_input": { "command": "paste .env" }
+            })),
+            Some("secret_dump_command")
+        );
     }
 }

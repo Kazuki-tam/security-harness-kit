@@ -15,6 +15,8 @@ pub struct GitHistoryBlob {
 #[derive(Clone, Debug)]
 pub struct StagedBlob {
     pub path: PathBuf,
+    /// Full object id of the staged blob.
+    pub oid: String,
     pub size: u64,
 }
 
@@ -59,7 +61,7 @@ pub fn is_inside_git_work_tree(cwd: &Path) -> bool {
 /// Staged file paths and object sizes relative to the repository root.
 ///
 /// Gitlink entries (submodule bumps, mode `160000`) are excluded: their staged
-/// object is a commit in the submodule's object database, so `git show :<path>`
+/// object is a commit in the submodule's object database, so reading it
 /// in the superproject would fail with "bad object".
 pub fn staged_blobs(repo_root: &Path) -> Result<Vec<StagedBlob>> {
     let out = Command::new("git")
@@ -102,7 +104,11 @@ pub fn staged_blobs(repo_root: &Path) -> Result<Vec<StagedBlob>> {
             if oid != expected_oid || kind != "blob" {
                 bail!("unexpected staged object metadata for {}", path.display());
             }
-            Ok(StagedBlob { path, size })
+            Ok(StagedBlob {
+                path,
+                oid: expected_oid,
+                size,
+            })
         })
         .collect()
 }
@@ -150,17 +156,72 @@ fn parse_staged_raw_entries(stdout: &[u8]) -> Result<Vec<(PathBuf, String)>> {
     Ok(entries)
 }
 
-pub fn staged_file_bytes(repo_root: &Path, rel_path: &Path) -> Result<Vec<u8>> {
-    let spec = format!(":{}", rel_path.to_string_lossy().replace('\\', "/"));
+/// Reads a staged blob by object id.
+///
+/// The id comes from `git diff --cached --raw`. Reading by path
+/// (`git show :<path>`) is ambiguous: git parses a leading `<digit>:` in the
+/// path as an index stage number, so a file named `0:a.txt` would return the
+/// content of `a.txt` instead of its own.
+pub fn staged_blob_bytes(repo_root: &Path, oid: &str) -> Result<Vec<u8>> {
+    if !is_full_hex_oid(oid) {
+        bail!("invalid staged blob object id");
+    }
     let out = Command::new("git")
-        .args(["show", &spec])
+        .args(["cat-file", "blob", oid])
         .current_dir(repo_root)
         .output()
-        .with_context(|| format!("failed to read staged blob {}", rel_path.display()))?;
+        .with_context(|| format!("failed to read staged blob {oid}"))?;
     if !out.status.success() {
-        bail!("git show failed for staged blob {}", rel_path.display());
+        bail!("git cat-file failed for staged blob {oid}");
     }
     Ok(out.stdout)
+}
+
+/// Tracked files below `dir`, relative to `dir`.
+///
+/// Empty when `dir` is not inside a Git work tree or git is unavailable: the
+/// caller only uses this to add files that ignore rules would hide.
+///
+/// This runs in whatever tree is being scanned, which may be a repository
+/// someone else prepared. Listing the index must not run anything that
+/// repository's configuration names: no fsmonitor hook, and no fetch of
+/// missing objects from a promisor remote (whose URL may be an `ext::`
+/// command) when a sparse index would otherwise be expanded.
+pub fn tracked_files_under(dir: &Path) -> Vec<PathBuf> {
+    let list = |sparse: bool| {
+        let mut command = Command::new("git");
+        command.args(["-c", "core.fsmonitor=false", "-c", "protocol.allow=never"]);
+        // A per-protocol setting in the repository would override the
+        // general one.
+        for protocol in ["ext", "file", "git", "ssh", "http", "https", "ftp", "ftps"] {
+            command.args(["-c", &format!("protocol.{protocol}.allow=never")]);
+        }
+        command.args(["ls-files", "-z"]);
+        if sparse {
+            // Keeps a sparse index as it is instead of expanding it.
+            command.arg("--sparse");
+        }
+        command
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+    };
+    // `--sparse` needs Git 2.35; older versions have no sparse index to expand.
+    let Some(out) = list(true).or_else(|| list(false)) else {
+        return Vec::new();
+    };
+    out.stdout
+        .split(|&b| b == 0)
+        .filter(|path| !path.is_empty())
+        .filter_map(|path| std::str::from_utf8(path).ok())
+        .map(PathBuf::from)
+        .collect()
 }
 
 /// Changed file paths relative to repo root, normalized by Git.

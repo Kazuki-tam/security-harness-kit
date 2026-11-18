@@ -362,6 +362,8 @@ SECRET=synthetic-example-value
 SECRET=synthetic-example-value
 ```
 
+Inline markers are honored in file content only. In AI hook mode, text that comes from the tool call itself (a shell command, tool arguments, fetched content) or from a user prompt cannot suppress its own findings with a marker. When a tool call edits or overwrites a file, a marker counts only when the line that carries it is, text for text, already in the file on disk (for a patch, in the file it updates). A marker on a line the call adds or rewrites is not honored. A line the call changes under an existing `shk-ignore-next-line` marker stays suppressed, and so does a line under a copy of such a marker line, so keep markers specific (`# shk-ignore-next-line <rule_id>`). An agent can therefore not write a new marked fixture: add it yourself, or use an `[[allowlist]]` entry.
+
 A marker without a rule id (`# shk-ignore`, `# shk-ignore-next-line`) suppresses every rule on that line, and `//` comments work the same way as `#`. A `shk-ignore-next-line` marker always targets the following line, also when it trails code.
 
 Policy allowlists can suppress by path and rule:
