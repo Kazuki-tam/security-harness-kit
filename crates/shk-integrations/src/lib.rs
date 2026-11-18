@@ -17,7 +17,7 @@ pub use action_guard::{
 };
 pub use ai_hooks::{
     AiHookTool, HookBody, HookSegment, USER_PROMPT_HOOK_FAIL_ON, extract_user_prompt,
-    hook_body_from_stdin, stdin_to_hook_body,
+    hook_body_from_stdin, stdin_to_hook_body, user_prompt_text,
 };
 pub use codex::{
     CONFIG_REL_PATH, HOOKS_FEATURE_KEY, LEGACY_HOOKS_FEATURE_KEY, RECOMMENDED_APPROVAL_POLICY,
