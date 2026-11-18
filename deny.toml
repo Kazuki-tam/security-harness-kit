@@ -3,7 +3,14 @@ version = 2
 db-urls = ["https://github.com/RustSec/advisory-db"]
 unmaintained = "workspace"
 yanked = "deny"
-ignore = []
+ignore = [
+  # chrono is flagged unmaintained; no vulnerability is reported. It is used
+  # for UTC timestamps and `YYYY-MM-DD` allowlist expiry dates only (no
+  # local-time or time-zone database code paths). Remove this entry when the
+  # workspace has moved to `jiff` or `time`, or if a vulnerability advisory is
+  # published for chrono.
+  { id = "RUSTSEC-2026-0543", reason = "unmaintained notice only, no vulnerability reported; used for UTC timestamps and date parsing" },
+]
 
 [licenses]
 version = 2
