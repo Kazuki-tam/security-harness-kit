@@ -6,3 +6,14 @@ onlyBuiltDependencies:
 
 # shk-managed npm-hardening
 minimumReleaseAge: 1440
+
+# Advisories accepted for now. Each entry needs a reason and a condition for
+# removing it; `pnpm audit --audit-level high` gates CI.
+auditConfig:
+  ignoreGhsas:
+    # picomatch ReDoS in extglob matching (<=4.0.7, no patched release yet).
+    # Reached only through the vite and vitest devDependencies, at build and
+    # test time, on glob patterns from this repository's own config, never on
+    # untrusted input and not shipped in the app. Remove once a patched
+    # picomatch is published and vite's range picks it up.
+    - GHSA-fc5q-39xc-vjpf
