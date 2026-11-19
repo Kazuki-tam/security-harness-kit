@@ -3,7 +3,8 @@ use crate::args::{
     EnvKeyExportArgs, EnvKeyImportArgs, EnvKeyMigrateArgs, EnvRunArgs,
 };
 use crate::env_store::{
-    EnvStores, ProjectIdentity, SecretStore, open_env_stores, with_secret_store_lock,
+    EnvStores, ProjectIdentity, SecretStore, open_env_stores, open_pseudonymize_store,
+    with_secret_store_lock,
 };
 use crate::exit::CliExit;
 use crate::{fs_atomic, safety};
@@ -273,7 +274,14 @@ pub fn key_migrate(cwd: &Path, args: EnvKeyMigrateArgs) -> Result<()> {
     let (project_root, project) = load_env_project(cwd)?;
     let lock_project = project.clone();
     with_secret_store_lock(&lock_project, "env-project", move || {
-        key_migrate_locked(project_root, project, args)
+        // The pseudonymize key moves with the others, so no pseudonymize run
+        // may read or create one in between.
+        let operation_project = project.clone();
+        with_secret_store_lock(
+            &operation_project,
+            crate::commands::pseudonymize::OPERATION_LOCK,
+            move || key_migrate_locked(project_root, project, args),
+        )
     })
 }
 
@@ -302,6 +310,19 @@ fn key_migrate_locked(
 
     let source_stores = open_env_stores(&project, &policy)?;
     let target_stores = open_env_stores(&project, &target_policy)?;
+    // The pseudonymize key follows `env.secret_store` too. Left behind, the
+    // next pseudonymize run would find no key in the new backend and create
+    // another one: tokens would stop matching earlier output and existing
+    // restore maps could no longer be decrypted.
+    let (source_pseudonymize, _) = open_pseudonymize_store(&project, &policy)?;
+    let (target_pseudonymize, _) = open_pseudonymize_store(&project, &target_policy)?;
+    // Planned before anything is written, so a conflict stops the migration
+    // with both backends untouched.
+    let pseudonymize = plan_pseudonymize_migration(
+        source_pseudonymize.as_ref(),
+        target_pseudonymize.as_ref(),
+        &project,
+    )?;
 
     let migration = copy_keys_between_stores(
         &project_root,
@@ -311,9 +332,28 @@ fn key_migrate_locked(
         target_stores.native.as_ref(),
         target_stores.dotenvx.as_ref(),
     )?;
-    ensure_migration_has_keys(&migration, source_backend, to_backend)?;
-    let migrated = migration.migrated();
-    let found = migration.found();
+    if pseudonymize.is_empty() {
+        ensure_migration_has_keys(&migration, source_backend, to_backend)?;
+    }
+    let rollback_env_keys = || {
+        rollback_migration_copy(
+            &migration,
+            &project,
+            target_stores.native.as_ref(),
+            target_stores.dotenvx.as_ref(),
+        )
+    };
+    let pseudonymize_applied = match apply_store_migration(
+        PSEUDONYMIZE_STORE_NAME,
+        target_pseudonymize.as_ref(),
+        &project,
+        &pseudonymize,
+    ) {
+        Ok(applied) => applied,
+        Err(err) => return migration_error_with_rollback(err, rollback_env_keys()),
+    };
+    let migrated = migration.migrated() + pseudonymize_applied.len();
+    let found = migration.found() + pseudonymize.len();
 
     if migrated == 0 {
         println!(
@@ -333,11 +373,17 @@ fn key_migrate_locked(
             .and_then(|()| update_policy_secret_store(&path, to_backend.as_config_value()));
         if let Err(err) = update_result {
             if migrated > 0 {
-                let rollback = rollback_migration_copy(
-                    &migration,
+                let pseudonymize_rollback = rollback_store_migration(
+                    target_pseudonymize.as_ref(),
                     &project,
-                    target_stores.native.as_ref(),
-                    target_stores.dotenvx.as_ref(),
+                    &pseudonymize,
+                    &pseudonymize_applied,
+                );
+                let rollback = finish_rollback(
+                    [pseudonymize_rollback, rollback_env_keys()]
+                        .into_iter()
+                        .filter_map(Result::err)
+                        .collect(),
                 );
                 return migration_error_with_rollback(
                     err.context("update shk.toml after copying destination keys"),
@@ -406,6 +452,20 @@ struct MigrationEntry {
     key: String,
     source_value: Zeroizing<String>,
     needs_write: bool,
+}
+
+const PSEUDONYMIZE_STORE_NAME: &str = "pseudonymize";
+
+/// What copying the project's pseudonymize key from one backend to the other
+/// involves: nothing when there is no key, an error when the destination
+/// already holds a different one.
+fn plan_pseudonymize_migration(
+    from: &dyn SecretStore,
+    to: &dyn SecretStore,
+    project: &ProjectIdentity,
+) -> Result<Vec<MigrationEntry>> {
+    let item = BTreeSet::from([crate::commands::pseudonymize::STORE_ITEM.to_string()]);
+    plan_store_migration(PSEUDONYMIZE_STORE_NAME, from, to, project, &item)
 }
 
 fn copy_keys_between_stores(
@@ -3498,6 +3558,63 @@ mod tests {
             Some("DOTENV_PRIVATE_KEY_PRODUCTION")
         );
         assert!(public_to_private_key_name("DOTENV_PUBLIC_KEY_production").is_none());
+    }
+
+    #[test]
+    fn the_pseudonymize_key_is_planned_and_copied_like_an_env_key() {
+        let project = test_project(Path::new("/repo/app"));
+        let item = crate::commands::pseudonymize::STORE_ITEM;
+        let source = MockSecretStore::keyring();
+        let target = MockSecretStore::keyring();
+
+        // No key: nothing to do.
+        assert!(
+            plan_pseudonymize_migration(&source, &target, &project)
+                .unwrap()
+                .is_empty()
+        );
+
+        source.put(&project, item, "key-material").unwrap();
+        let plan = plan_pseudonymize_migration(&source, &target, &project).unwrap();
+        assert_eq!(plan.len(), 1);
+        let applied =
+            apply_store_migration(PSEUDONYMIZE_STORE_NAME, &target, &project, &plan).unwrap();
+        assert_eq!(applied, [0]);
+        assert_eq!(
+            target.get(&project, item).unwrap().as_deref(),
+            Some("key-material")
+        );
+        // The source copy stays until the user deletes it.
+        assert_eq!(
+            source.get(&project, item).unwrap().as_deref(),
+            Some("key-material")
+        );
+
+        // Already there with the same value: found, nothing written.
+        let plan = plan_pseudonymize_migration(&source, &target, &project).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert!(
+            apply_store_migration(PSEUDONYMIZE_STORE_NAME, &target, &project, &plan)
+                .unwrap()
+                .is_empty()
+        );
+
+        // A different key in the destination stops the migration before any
+        // write.
+        let other = MockSecretStore::keyring();
+        other.put(&project, item, "another-key").unwrap();
+        let err = plan_pseudonymize_migration(&source, &other, &project)
+            .err()
+            .expect("conflicting destination key");
+        assert!(format!("{err:#}").contains("different value"), "{err:#}");
+
+        // Rolling back removes only what this migration wrote.
+        let fresh = MockSecretStore::keyring();
+        let plan = plan_pseudonymize_migration(&source, &fresh, &project).unwrap();
+        let applied =
+            apply_store_migration(PSEUDONYMIZE_STORE_NAME, &fresh, &project, &plan).unwrap();
+        rollback_store_migration(&fresh, &project, &plan, &applied).unwrap();
+        assert_eq!(fresh.get(&project, item).unwrap(), None);
     }
 
     #[test]

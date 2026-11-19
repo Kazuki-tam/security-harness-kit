@@ -1974,15 +1974,15 @@ mod tests {
         for (rel_path, content) in [
             (
                 ".claude/settings.json",
-                r#"{"hooks":{"PreToolUse":[{"_shk_managed":true,"matcher":"Bash","hooks":[]}]}}"#,
+                r#"{"hooks":{"PreToolUse":[{"_shk_managed":true,"matcher":"Bash","hooks":[{"type":"command","command":"shk scan --hook-mode claude-code"}]}]}}"#,
             ),
             (
                 ".cursor/hooks.json",
-                r#"{"version":1,"hooks":{"beforeShellExecution":[{"command":"x","_shk_managed":true}]}}"#,
+                r#"{"version":1,"hooks":{"beforeShellExecution":[{"command":"shk scan . --hook-mode cursor","_shk_managed":true}]}}"#,
             ),
             (
                 ".agents/hooks.json",
-                r#"{"shk-security":{"PreToolUse":[{"_shk_managed":true,"matcher":".*","hooks":[]}]}}"#,
+                r#"{"shk-security":{"PreToolUse":[{"_shk_managed":true,"matcher":".*","hooks":[{"command":"shk scan --hook-mode antigravity"}]}]}}"#,
             ),
         ] {
             let dir = tempdir().unwrap();

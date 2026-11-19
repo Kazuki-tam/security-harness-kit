@@ -561,48 +561,100 @@ fn remove_managed_claude(root: &mut Value, key: &str) -> Result<usize> {
 }
 
 /// True when `content`, the text of `tool`'s hook config file, holds
-/// shk-managed hooks. JSON configs are parsed, so a file reformatted after
-/// install (compact, re-indented, keys reordered) is still recognized. A JSON
-/// file that does not parse falls back to the textual marker.
+/// shk-managed hooks that run the scan. JSON configs are parsed, so a file
+/// reformatted after install (compact, re-indented, keys reordered) is still
+/// recognized. A JSON file that does not parse falls back to the text.
+///
+/// The managed marker alone is not enough: a repository can ship a config
+/// with the marker on a hook that runs something else, or nothing, and would
+/// otherwise be reported as protected.
 pub(crate) fn has_managed_hooks(tool: AiTool, content: &str) -> bool {
-    let has_scan_command = || {
+    let has_scan_command_text = || {
         content.contains("shk scan")
             && content.contains(&format!("--hook-mode {}", tool.kebab_str()))
     };
     let parsed = || serde_json::from_str::<Value>(content).ok();
-    let marked = |is_managed: fn(&Value) -> bool| {
+    // A marked entry that runs the scan, or the textual fallback.
+    let marked = |entries: fn(&Value) -> Vec<&Value>, is_managed: fn(&Value) -> bool| {
         parsed().map_or_else(
-            || content.contains(MANAGED_MARKER_JSON),
-            |root| is_managed(&root),
+            || content.contains(MANAGED_MARKER_JSON) && has_scan_command_text(),
+            |root| {
+                entries(&root)
+                    .into_iter()
+                    .any(|entry| is_managed(entry) && runs_shk_scan(tool, entry))
+            },
         )
     };
     match tool {
         AiTool::Codex => content.contains(MANAGED_MARKER_SH),
         AiTool::Opencode => is_managed_opencode_plugin(content),
-        AiTool::ClaudeCode => {
-            marked(|root| hook_list_entries(root.get("hooks")).any(is_managed_claude_block))
-        }
-        AiTool::Cursor => {
-            marked(|root| hook_list_entries(root.get("hooks")).any(is_managed_cursor_entry))
-        }
+        AiTool::ClaudeCode => marked(
+            |root| hook_list_entries(root.get("hooks")).collect(),
+            is_managed_claude_block,
+        ),
+        AiTool::Cursor => marked(
+            |root| hook_list_entries(root.get("hooks")).collect(),
+            is_managed_cursor_entry,
+        ),
         // Antigravity maps hook names to event configurations whose blocks
         // share Claude's `_shk_managed` shape.
-        AiTool::Antigravity => marked(|root| {
-            root.as_object()
-                .into_iter()
-                .flat_map(|hooks| hooks.values())
-                .any(|config| hook_list_entries(Some(config)).any(is_managed_claude_block))
-        }),
-        // Copilot entries written before the command-string identification
-        // still carry `_shk_managed`.
-        AiTool::Copilot => {
-            has_scan_command()
-                || parsed().is_some_and(|root| {
-                    hook_list_entries(root.get("hooks")).any(is_managed_copilot_entry)
-                })
+        AiTool::Antigravity => marked(
+            |root| {
+                root.as_object()
+                    .into_iter()
+                    .flat_map(|hooks| hooks.values())
+                    .flat_map(|config| hook_list_entries(Some(config)))
+                    .collect()
+            },
+            is_managed_claude_block,
+        ),
+        // Copilot, Windsurf and Grok entries are identified by their command.
+        AiTool::Copilot | AiTool::Windsurf | AiTool::Grok => {
+            parsed().map_or_else(has_scan_command_text, |root| runs_shk_scan(tool, &root))
         }
-        AiTool::Windsurf | AiTool::Grok => has_scan_command(),
     }
+}
+
+/// True when a command string anywhere in `value` runs `shk scan` in `tool`'s
+/// hook mode.
+fn runs_shk_scan(tool: AiTool, value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            let command = matches!(key.as_str(), "command" | "bash" | "powershell");
+            match value.as_str() {
+                Some(text) if command => is_shk_scan_command(tool, text),
+                _ => runs_shk_scan(tool, value),
+            }
+        }),
+        Value::Array(items) => items.iter().any(|item| runs_shk_scan(tool, item)),
+        _ => false,
+    }
+}
+
+/// True for a command that is one `shk scan … --hook-mode <tool>` call and
+/// nothing else: no second command chained to it, no output piped or
+/// redirected away (the verdict of a blocking hook is its output), and no
+/// option that prints help or the version instead of scanning.
+fn is_shk_scan_command(tool: AiTool, command: &str) -> bool {
+    if command.contains([';', '|', '&', '`', '<', '>', '\n']) {
+        return false;
+    }
+    let words = command.split_whitespace().collect::<Vec<_>>();
+    if words
+        .iter()
+        .any(|word| matches!(*word, "--help" | "-h" | "--version" | "-V"))
+    {
+        return false;
+    }
+    let program = words.first().map(|word| {
+        let word = word.trim_matches(['"', '\'']);
+        word.rsplit(['/', '\\']).next().unwrap_or(word)
+    });
+    matches!(program, Some("shk" | "shk.exe"))
+        && words.get(1) == Some(&"scan")
+        && words
+            .windows(2)
+            .any(|pair| pair[0] == "--hook-mode" && pair[1] == tool.kebab_str())
 }
 
 /// Entries of every event list in a JSON object mapping event names to arrays.
@@ -3169,22 +3221,22 @@ sandbox_mode = "danger-full-access"
         for (tool, managed, unmanaged) in [
             (
                 AiTool::ClaudeCode,
-                r#"{"hooks":{"PreToolUse":[{"_shk_managed":true,"matcher":"Bash","hooks":[]}]}}"#,
-                r#"{"hooks":{"PreToolUse":[{"_shk_managed":false,"matcher":"Bash","hooks":[]}]}}"#,
+                r#"{"hooks":{"PreToolUse":[{"_shk_managed":true,"matcher":"Bash","hooks":[{"type":"command","command":"shk scan --hook-mode claude-code"}]}]}}"#,
+                r#"{"hooks":{"PreToolUse":[{"_shk_managed":false,"matcher":"Bash","hooks":[{"type":"command","command":"shk scan --hook-mode claude-code"}]}]}}"#,
             ),
             (
                 AiTool::Cursor,
-                r#"{"version":1,"hooks":{"beforeShellExecution":[{"command":"x","_shk_managed":true}]}}"#,
-                r#"{"version":1,"hooks":{"beforeShellExecution":[{"command":"x"}]}}"#,
+                r#"{"version":1,"hooks":{"beforeShellExecution":[{"command":"shk scan . --hook-mode cursor","_shk_managed":true}]}}"#,
+                r#"{"version":1,"hooks":{"beforeShellExecution":[{"command":"shk scan . --hook-mode cursor"}]}}"#,
             ),
             (
                 AiTool::Antigravity,
-                r#"{"shk-security":{"PreToolUse":[{"_shk_managed":true,"matcher":".*","hooks":[]}]}}"#,
-                r#"{"my-hook":{"PreToolUse":[{"matcher":".*","hooks":[]}]}}"#,
+                r#"{"shk-security":{"PreToolUse":[{"_shk_managed":true,"matcher":".*","hooks":[{"command":"shk scan --hook-mode antigravity"}]}]}}"#,
+                r#"{"my-hook":{"PreToolUse":[{"matcher":".*","hooks":[{"command":"shk scan --hook-mode antigravity"}]}]}}"#,
             ),
             (
                 AiTool::Copilot,
-                r#"{"version":1,"hooks":{"preToolUse":[{"type":"command","command":"x","_shk_managed":true}]}}"#,
+                r#"{"version":1,"hooks":{"preToolUse":[{"type":"command","command":"shk scan --hook-mode copilot"}]}}"#,
                 r#"{"version":1,"hooks":{"preToolUse":[{"type":"command","command":"x"}]}}"#,
             ),
         ] {
@@ -3202,11 +3254,62 @@ sandbox_mode = "danger-full-access"
         ] {
             assert!(!has_managed_hooks(AiTool::ClaudeCode, content), "{content}");
         }
-        // Unparseable JSON keeps the textual marker check.
+        // Unparseable JSON keeps the textual check: the marker and the scan
+        // command both have to be there.
         assert!(has_managed_hooks(
+            AiTool::ClaudeCode,
+            "{\"hooks\": {\"PreToolUse\": [{\"_shk_managed\": true, \"hooks\": [{\"command\": \"shk scan --hook-mode claude-code\"}"
+        ));
+        assert!(!has_managed_hooks(
             AiTool::ClaudeCode,
             "{\"hooks\": {\"PreToolUse\": [{\"_shk_managed\": true,"
         ));
+    }
+
+    #[test]
+    fn a_managed_marker_on_another_command_is_not_a_managed_hook() {
+        // A repository can ship a config that carries the marker on a hook
+        // that does not run the scan.
+        for (tool, content) in [
+            (
+                AiTool::ClaudeCode,
+                r#"{"hooks":{"PreToolUse":[{"_shk_managed":true,"matcher":"Bash","hooks":[{"type":"command","command":"true"}]}]}}"#,
+            ),
+            (
+                AiTool::ClaudeCode,
+                r#"{"hooks":{"PreToolUse":[{"_shk_managed":true,"matcher":"Bash","hooks":[]}]}}"#,
+            ),
+            (
+                AiTool::ClaudeCode,
+                r#"{"hooks":{"PreToolUse":[{"_shk_managed":true,"hooks":[{"command":"shk scan --hook-mode claude-code || true"}]}]}}"#,
+            ),
+            (
+                AiTool::ClaudeCode,
+                r#"{"hooks":{"PreToolUse":[{"_shk_managed":true,"hooks":[{"command":"echo shk scan --hook-mode claude-code"}]}]}}"#,
+            ),
+            (
+                AiTool::ClaudeCode,
+                r#"{"hooks":{"PreToolUse":[{"_shk_managed":true,"hooks":[{"command":"shk scan --hook-mode claude-code > /dev/null"}]}]}}"#,
+            ),
+            (
+                AiTool::ClaudeCode,
+                r#"{"hooks":{"PreToolUse":[{"_shk_managed":true,"hooks":[{"command":"shk scan --hook-mode claude-code --help"}]}]}}"#,
+            ),
+            (
+                AiTool::Cursor,
+                r#"{"version":1,"hooks":{"beforeShellExecution":[{"command":"shk scan --hook-mode claude-code","_shk_managed":true}]}}"#,
+            ),
+            (
+                AiTool::Grok,
+                r#"{"hooks":{"PreToolUse":[{"note":"shk scan --hook-mode grok","command":"true"}]}}"#,
+            ),
+            (
+                AiTool::Windsurf,
+                r#"{"hooks":{"pre_run_command":[{"command":"true # shk scan --hook-mode windsurf"}]}}"#,
+            ),
+        ] {
+            assert!(!has_managed_hooks(tool, content), "{tool:?}: {content}");
+        }
     }
 
     fn features_header_count(body: &str) -> usize {

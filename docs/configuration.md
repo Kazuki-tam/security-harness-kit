@@ -171,7 +171,7 @@ The `--fail-on` CLI option overrides the configured threshold for that command i
 | `mode` | `strict` | Only `strict` is supported. Other values are rejected. |
 | `min_severity` | `medium` | Minimum finding severity to redact. Use `info`, `low`, `medium`, `high`, or `critical`. |
 | `redaction` | `match` | `match` redacts only matched values; `full` redacts entire lines; `partial` preserves configured matched-value edges. |
-| `preserve_prefix` | `4` | Characters preserved at the start of a matched value when `redaction = "partial"`. |
+| `preserve_prefix` | `4` | Characters preserved at the start of a matched value when `redaction = "partial"`. A value is redacted whole when `preserve_prefix + preserve_suffix` would keep more than half of it, so short values (phone numbers) and large settings do not leave most of a value visible. |
 | `preserve_suffix` | `4` | Characters preserved at the end of a matched value when `redaction = "partial"`. |
 
 ## Action Guard Settings
