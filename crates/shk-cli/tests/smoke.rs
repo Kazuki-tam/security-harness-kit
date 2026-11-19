@@ -8428,3 +8428,109 @@ fn audit_output_holds_no_control_characters_from_the_log() {
         String::from_utf8_lossy(&out.stdout).escape_debug()
     );
 }
+
+// not real credential: synthetic detector fixture value only. Split so the
+// source line itself is not a finding.
+const MEDIUM_SCAN_FIXTURE_KEY: &str = concat!("sk-proj-", "abcdefghijklmnopqrstuvwxyz0123456789");
+
+#[test]
+fn mask_removes_a_secret_from_input_that_is_not_utf8() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let input = dir.path().join("legacy.txt");
+    let output = dir.path().join("masked.txt");
+    let bytes = [
+        b"caf\xe9\n",
+        format!("key={MEDIUM_SCAN_FIXTURE_KEY}\n").as_bytes(),
+    ]
+    .concat();
+    std::fs::write(&input, &bytes).unwrap();
+
+    let out = shk_cmd()
+        .args(["mask", "legacy.txt", "--output", "masked.txt"])
+        .current_dir(dir.path())
+        .output()
+        .expect("shk mask");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let needle = MEDIUM_SCAN_FIXTURE_KEY.as_bytes();
+    let holds = |bytes: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+    let written = std::fs::read(&output).unwrap();
+    assert!(!holds(&written) && !holds(&out.stdout));
+    assert!(written.starts_with(b"caf\xe9\n"), "{written:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not UTF-8"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// A path with a line break used to shift every later blob onto the wrong
+// path. Line breaks are not valid in Windows file names.
+#[cfg(unix)]
+#[test]
+fn scan_git_history_handles_a_path_with_a_line_break() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    std::fs::write(dir.path().join("a\nb.txt"), "clean\n").unwrap();
+    std::fs::write(
+        dir.path().join("m.txt"),
+        format!("{MEDIUM_SCAN_FIXTURE_KEY}\n"),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("z.txt"), "clean too\n").unwrap();
+    git_commit_all(dir.path(), "add files");
+
+    let out = shk_cmd()
+        .args(["scan", "--git-history", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("shk scan --git-history");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let files = report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["rule_id"] == "secret.openai_api_key")
+        .map(|finding| finding["file"].as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        !files.is_empty() && files.iter().all(|file| file.ends_with("m.txt")),
+        "{files:?}"
+    );
+}
+
+#[test]
+fn scan_says_when_findings_were_suppressed() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("shk.toml"),
+        "[[allowlist]]\npath = \"**\"\nreason = \"everything\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("a.txt"),
+        format!("{MEDIUM_SCAN_FIXTURE_KEY}\n"),
+    )
+    .unwrap();
+    let out = shk_cmd()
+        .args(["scan", "--", "."])
+        .current_dir(dir.path())
+        .output()
+        .expect("shk scan");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("suppressed by allowlist"), "{stdout}");
+    assert!(
+        stdout.contains("policy.allowlist_matches_everything"),
+        "{stdout}"
+    );
+}

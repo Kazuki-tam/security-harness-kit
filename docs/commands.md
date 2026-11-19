@@ -354,7 +354,7 @@ When no `FILE` is provided, `shk mask` reads stdin until EOF. In an interactive
 terminal, run it with input redirection (`shk mask < prompt.txt`) or provide a
 file path (`shk mask prompt.txt`).
 
-`mask --output` refuses sensitive env files and protected home configuration files. Binary or non-UTF-8 input is passed through unchanged in human-readable output and reported as `mask.binary_passthrough` in JSON output.
+`mask --output` refuses sensitive env files and protected home configuration files. Input that is not UTF-8 text is masked as well and written back in its own encoding: UTF-16 with a byte order mark is decoded and re-encoded, anything else is masked byte by byte, so every byte outside a redacted value is unchanged and input with nothing to mask comes back as it was. In that case text in other encodings (Shift-JIS, UTF-16 without a mark) is only recognised where it is ASCII, a warning is printed on stderr, and JSON output carries a `mask.non_utf8_input` info finding with the masked bytes decoded lossily as `masked_content`.
 
 Office document masking supports `.docx`, `.xlsx`, and `.pptx` files and always requires `--output` so the original document is left unchanged. JSON output reports `[DOCUMENT_WRITTEN]` as `masked_content` and includes findings from the rewritten document. PDF masking is not supported; use `shk scan` to detect text-layer PDF findings and convert or redact PDFs with a dedicated PDF tool.
 

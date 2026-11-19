@@ -146,6 +146,14 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
                 inv.color_enabled,
             )
         );
+        // A scan that found nothing because everything was suppressed must
+        // not read like a clean one.
+        if res.suppressed > 0 {
+            println!(
+                "{} finding(s) suppressed by allowlist entries or inline shk-ignore markers.",
+                res.suppressed
+            );
+        }
     }
     if !inv.audit && res.should_fail() {
         return Err(CliExit::silent(1).into());

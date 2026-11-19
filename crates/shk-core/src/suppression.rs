@@ -314,6 +314,20 @@ pub fn expired_allowlist_warnings(entries: &[AllowlistEntry]) -> Vec<Finding> {
                 ),
             ));
         }
+        // An entry for every path, every rule and every value switches the
+        // scan off. It loads (a policy that fails to load would make blocking
+        // hooks deny everything) but must not do so quietly.
+        let every_path = matches!(e.path.as_str(), "**" | "**/*" | "*" | "**/**");
+        let in_force = e.expires.as_deref().is_none_or(|exp| !is_expired(exp));
+        if every_path && in_force && e.rule_id.is_none() && e.value_hash.is_none() {
+            out.push(warning(
+                "policy.allowlist_matches_everything",
+                format!(
+                    "[[allowlist]] entry {number} (path={}) has no `rule_id` or `value_hash` and suppresses every finding in every file — narrow the path or name the rule",
+                    e.path
+                ),
+            ));
+        }
         let Some(exp) = &e.expires else { continue };
         if !is_expired(exp) {
             continue;
@@ -599,5 +613,28 @@ mod tests {
         let ig = parse_inline_suppressions("// shk-ignore pii.email\nnext\n");
         assert!(ig.is_suppressed(2, "pii.email"));
         assert!(!ig.is_suppressed(1, "pii.email"));
+    }
+
+    #[test]
+    fn an_allowlist_entry_for_everything_is_reported() {
+        let entry = |path: &str, rule_id: Option<&str>| AllowlistEntry {
+            rule_id: rule_id.map(str::to_string),
+            path: path.to_string(),
+            value_hash: None,
+            reason: None,
+            expires: None,
+            unknown: Default::default(),
+        };
+        let ids = |entries: &[AllowlistEntry]| {
+            expired_allowlist_warnings(entries)
+                .into_iter()
+                .map(|finding| finding.rule_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(&[entry("**", None), entry("**/*", None)]),
+            ["policy.allowlist_matches_everything"; 2]
+        );
+        assert!(ids(&[entry("**", Some("pii.email")), entry("fixtures/**", None)]).is_empty());
     }
 }
