@@ -2590,10 +2590,12 @@ fn build_doctor_status_from(checks: &ProjectCheckStatus) -> DoctorStatus {
         });
     }
     if !checks.claude.managed_hooks_current() {
-        let message = if checks.claude.pre_tool_matcher_ok {
-            "Claude Code managed hooks let actions proceed when shk cannot run — refresh them via Setup"
-        } else {
+        let message = if !checks.claude.pre_tool_matcher_ok {
             "Claude Code managed PreToolUse matcher is outdated — refresh it via Setup"
+        } else if !checks.claude.post_tool_matcher_ok {
+            "Claude Code managed PostToolUse matcher is outdated — refresh it via Setup"
+        } else {
+            "Claude Code managed hooks let actions proceed when shk cannot run — refresh them via Setup"
         };
         issues.push(DoctorIssue {
             id: "ai_claude_hook_matcher".into(),

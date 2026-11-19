@@ -3849,6 +3849,64 @@ fn hook_mode_scans_a_read_file_outside_repo_root() {
 }
 
 #[test]
+fn hook_mode_path_allowlist_covers_a_read_file_outside_the_repo() {
+    use std::io::Write;
+    let outside = tempfile::tempdir().unwrap();
+    let file = outside.path().join("notes.txt");
+    std::fs::write(&file, format!("key={MEDIUM_SCAN_FIXTURE_KEY}\n")).unwrap();
+    // The path as policy sees it: canonical, with forward slashes.
+    let policy_path = std::fs::canonicalize(&file)
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/");
+    let policy_path = policy_path.trim_start_matches("//?/");
+
+    // Cursor sends the body it reads as `content`; an empty one must not
+    // keep the file from being read.
+    let stdin = serde_json::json!({
+        "hook_event_name": "beforeReadFile",
+        "file_path": file.to_str().unwrap(),
+        "content": ""
+    })
+    .to_string();
+    let exit_code = |policy: &str| {
+        let repo = tempfile::tempdir().unwrap();
+        init_git_repo(repo.path());
+        std::fs::write(repo.path().join("shk.toml"), policy).unwrap();
+        let out = shk_cmd()
+            .args(["scan", ".", "--hook-mode", "cursor"])
+            .current_dir(repo.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                child.stdin.as_mut().unwrap().write_all(stdin.as_bytes())?;
+                child.wait_with_output()
+            })
+            .expect("hook scan");
+        assert!(
+            matches!(out.status.code(), Some(0 | 2)),
+            "{policy}: stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.status.code()
+    };
+
+    assert_eq!(exit_code(""), Some(2));
+    let absolute = format!(
+        "[[allowlist]]\npath = \"{policy_path}\"\nrule_id = \"secret.openai_api_key\"\nreason = \"synthetic test values\"\n"
+    );
+    assert_eq!(exit_code(&absolute), Some(0), "{absolute}");
+    let any_dir = "[[allowlist]]\npath = \"**/*\"\nrule_id = \"secret.openai_api_key\"\nreason = \"synthetic test values\"\n";
+    assert_eq!(exit_code(any_dir), Some(0));
+    // Another file's entry does not cover it.
+    let other = "[[allowlist]]\npath = \"/elsewhere/notes.txt\"\nrule_id = \"secret.openai_api_key\"\nreason = \"synthetic test values\"\n";
+    assert_eq!(exit_code(other), Some(2));
+}
+
+#[test]
 fn hook_mode_audit_creates_audit_log_in_isolated_tmp() {
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
@@ -8405,12 +8463,12 @@ fn audit_output_holds_no_control_characters_from_the_log() {
     let entry = serde_json::json!({
         "ts": "2026-11-18T00:00:00Z",
         "event": "blocked",
-        "tool": "claude\u{1b}]0;title\u{7}\u{1b}[2J",
+        "tool": "claude\u{1b}]0;title\u{7}\u{1b}[2J\u{202e}",
         "hook": "pre",
         "reason": "finding_threshold",
         "max_severity": "high",
-        "rule_ids": ["x\u{1b}[31mred"],
-        "display_path": "a\rb",
+        "rule_ids": ["x\u{1b}[31mred\u{202e}\u{2028}"],
+        "display_path": "a\rb\u{061c}",
         "finding_count": 1
     });
     std::fs::write(dir.path().join(".shk/audit.log"), format!("{entry}\n")).unwrap();
@@ -8426,6 +8484,20 @@ fn audit_output_holds_no_control_characters_from_the_log() {
             .any(|byte| matches!(byte, 0x1b | 0x07 | b'\r')),
         "{}",
         String::from_utf8_lossy(&out.stdout).escape_debug()
+    );
+    // Nor characters that reorder text or fake a line break, in the event
+    // rows or in the By rule / By tool counts.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains(['\u{202e}', '\u{2028}', '\u{061c}']),
+        "{}",
+        stdout.escape_debug()
+    );
+    assert!(stdout.contains("x?[31mred??"), "{}", stdout.escape_debug());
+    assert!(
+        stdout.contains("claude?]0;title??[2J?"),
+        "{}",
+        stdout.escape_debug()
     );
 }
 
