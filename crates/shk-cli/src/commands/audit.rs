@@ -514,18 +514,22 @@ fn print_count_section(title: &str, rows: &[CountRow]) {
 }
 
 /// `text` with control characters and the invisible formatting characters
-/// that reorder, hide, or break up text (bidi controls, zero-width marks,
-/// Unicode line separators) replaced, for printing to a terminal.
+/// that reorder, hide, or break up text (bidi controls, zero-width and other
+/// invisible marks, Unicode line separators, tag characters) replaced, for
+/// printing to a terminal.
 fn printable(text: &str) -> String {
     text.chars()
         .map(|c| {
             let hidden = matches!(
                 c,
-                '\u{061c}'
+                '\u{00ad}'
+                    | '\u{061c}'
                     | '\u{200b}'..='\u{200f}'
                     | '\u{2028}'..='\u{202e}'
-                    | '\u{2066}'..='\u{2069}'
+                    | '\u{2060}'..='\u{206f}'
                     | '\u{feff}'
+                    | '\u{fff9}'..='\u{fffb}'
+                    | '\u{e0000}'..='\u{e007f}'
             );
             if c.is_control() || hidden { '?' } else { c }
         })
@@ -771,8 +775,8 @@ mod tests {
     #[test]
     fn printable_replaces_characters_that_reorder_or_break_lines() {
         assert_eq!(
-            printable("a\u{202e}b\u{061c}c\u{2028}d\u{2029}e\u{1b}f\u{200b}g"),
-            "a?b?c?d?e?f?g"
+            printable("a\u{202e}b\u{061c}c\u{2028}d\u{2029}e\u{1b}f\u{200b}g\u{2060}h\u{e0041}i"),
+            "a?b?c?d?e?f?g?h?i"
         );
         assert_eq!(
             printable("plain path/to file.txt"),

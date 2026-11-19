@@ -6425,6 +6425,38 @@ fn doctor_warns_when_managed_claude_pre_tool_matcher_is_outdated() {
         stdout.contains("rerun `shk hooks install-ai --tool claude-code`"),
         "{stdout}"
     );
+    assert!(!stdout.contains("PostToolUse matcher"), "{stdout}");
+
+    // The post matcher is checked on its own: here, the one written before
+    // Grep output was scanned.
+    assert_eq!(
+        fresh["claudePermissions"]["post_tool_matcher_ok"], true,
+        "{fresh}"
+    );
+    settings["hooks"]["PostToolUse"][0]["matcher"] =
+        "WebFetch|WebSearch|Bash|mcp__.*|Skill|Agent".into();
+    std::fs::write(&settings_path, serde_json::to_string(&settings).unwrap()).unwrap();
+    let both_stale = doctor_json();
+    assert_eq!(
+        both_stale["claudePermissions"]["post_tool_matcher_ok"], false,
+        "{both_stale}"
+    );
+    assert_eq!(
+        both_stale["warningCount"].as_u64().unwrap(),
+        fresh["warningCount"].as_u64().unwrap() + 2,
+        "{both_stale}"
+    );
+    let out = shk_cmd()
+        .arg("doctor")
+        .env("PATH", path_dir.path())
+        .current_dir(dir.path())
+        .output()
+        .expect("doctor");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("shk-managed PostToolUse matcher that differs"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -8499,6 +8531,26 @@ fn audit_output_holds_no_control_characters_from_the_log() {
         "{}",
         stdout.escape_debug()
     );
+}
+
+// Windows has no file names with control characters, and macOS refuses some
+// byte sequences; a bidi override is valid UTF-8 and allowed on both.
+#[cfg(unix)]
+#[test]
+fn audit_output_sanitises_the_log_path() {
+    let parent = tempfile::tempdir().unwrap();
+    let dir = parent.path().join("repo\u{202e}txt.exe");
+    std::fs::create_dir_all(dir.join(".shk")).unwrap();
+    std::fs::write(dir.join(".shk/audit.log"), "").unwrap();
+    let out = shk_cmd()
+        .args(["audit"])
+        .current_dir(&dir)
+        .output()
+        .expect("shk audit");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("repo?txt.exe"), "{}", stdout.escape_debug());
+    assert!(!stdout.contains('\u{202e}'), "{}", stdout.escape_debug());
 }
 
 // not real credential: synthetic detector fixture value only. Split so the
