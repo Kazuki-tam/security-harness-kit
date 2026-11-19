@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 /// Fail threshold embedded in managed user-prompt hook install commands.
@@ -97,9 +98,23 @@ const CODEX_POST_TEXT_KEYS: &[&str] = &[
     "body",
     "tool_response",
 ];
+// `tool_response` is the whole tool result, whatever its shape: a plain string
+// or keys not listed here (Grep `filenames`) would otherwise only reach the
+// scan through the large-string fallback, which skips short strings.
 const CLAUDE_POST_TEXT_KEYS: &[&str] = &[
-    "stdout", "stderr", "content", "response", "text", "body", "data", "result", "message",
-    "messages", "items", "value",
+    "stdout",
+    "stderr",
+    "content",
+    "response",
+    "text",
+    "body",
+    "data",
+    "result",
+    "message",
+    "messages",
+    "items",
+    "value",
+    "tool_response",
 ];
 // Cursor afterShellExecution payload: { command, output, duration, sandbox };
 // afterMCPExecution payload: { tool_name, tool_input, result_json, duration }.
@@ -241,9 +256,12 @@ impl AiHookTool {
 
 /// Extracts the user prompt from a `UserPromptSubmit` JSON payload.
 ///
-/// Recognizes the top-level `prompt` field used by most tools, and falls back
-/// to Cascade's (Windsurf) nested `tool_info.user_prompt`.
-/// Returns `None` when neither field is present or the payload is not valid JSON.
+/// Recognizes the top-level `prompt` field used by most tools, its
+/// `userPrompt` / `user_prompt` aliases, and Cascade's (Windsurf) nested
+/// `tool_info.user_prompt`: the first of them that is not blank, so an empty
+/// `prompt` cannot hide the text under another one.
+/// Returns `None` when none of them holds text or the payload is not valid
+/// JSON.
 pub fn extract_user_prompt(stdin: &str) -> Option<Cow<'_, str>> {
     #[derive(Deserialize)]
     struct ToolInfo<'a> {
@@ -263,19 +281,50 @@ pub fn extract_user_prompt(stdin: &str) -> Option<Cow<'_, str>> {
     }
 
     let payload = serde_json::from_str::<UserPromptPayload<'_>>(stdin).ok()?;
-    payload
-        .prompt
-        .or(payload.user_prompt_camel)
-        .or(payload.user_prompt)
-        .or_else(|| payload.tool_info.and_then(|info| info.user_prompt))
+    [
+        payload.prompt,
+        payload.user_prompt_camel,
+        payload.user_prompt,
+        payload.tool_info.and_then(|info| info.user_prompt),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|candidate| !candidate.trim().is_empty())
 }
+
+// Top-level fields of a prompt payload that describe the session, not what
+// the user typed. When the prompt has to be searched for, they are left out:
+// a finding in one of them (the account's email address, a directory name)
+// would block every prompt, and no edit to the prompt could clear it.
+const PROMPT_METADATA_KEYS: &[&str] = &[
+    "hook_event_name",
+    "hookEventName",
+    "agent_action_name",
+    "session_id",
+    "sessionId",
+    "conversation_id",
+    "generation_id",
+    "trajectory_id",
+    "execution_id",
+    "transcript_path",
+    "transcriptPath",
+    "cwd",
+    "workspace_roots",
+    "user_email",
+    "model",
+    "cursor_version",
+    "permission_mode",
+    "timestamp",
+];
 
 /// The text of a user-prompt payload to scan.
 ///
-/// The prompt string where the payload has one. A prompt in another shape (a
-/// list of parts, an object) contributes every string inside it. A payload
-/// with no prompt field at all contributes every string it holds: a prompt
-/// hook that cannot find the prompt must not wave the payload through.
+/// The prompt string where the payload has one that is not blank. A prompt in
+/// another shape (a list of parts, an object) contributes every string inside
+/// it. A payload with no prompt text at all, because the field is missing or
+/// blank, contributes every string it holds outside its session metadata
+/// (`PROMPT_METADATA_KEYS`): a prompt hook that cannot find the prompt must
+/// not wave the payload through.
 pub fn user_prompt_text(stdin: &str) -> String {
     if let Some(prompt) = extract_user_prompt(stdin) {
         return prompt.into_owned();
@@ -295,8 +344,16 @@ pub fn user_prompt_text(stdin: &str) -> String {
     for value in prompt_values {
         collect_all_strings(value, &mut strings);
     }
+    strings.retain(|text| !text.trim().is_empty());
     if strings.is_empty() {
-        collect_all_strings(&payload, &mut strings);
+        match &payload {
+            Value::Object(map) => map
+                .iter()
+                .filter(|(key, _)| !PROMPT_METADATA_KEYS.contains(&key.as_str()))
+                .for_each(|(_, value)| collect_all_strings(value, &mut strings)),
+            other => collect_all_strings(other, &mut strings),
+        }
+        strings.retain(|text| !text.trim().is_empty());
     }
     strings.join("\n")
 }
@@ -407,7 +464,11 @@ pub fn hook_body_from_stdin(
     // content reaches the model like any other file's. It is logged under
     // the virtual label and matched against path-scoped policy by its
     // absolute path.
-    let read_only = writes.edits.is_empty() && writes.texts.is_empty();
+    // Cursor `beforeReadFile` sends the body it reads as `content`, which is
+    // collected like written text so it is scanned with the file; the call
+    // still only reads.
+    let read_only =
+        (writes.edits.is_empty() && writes.texts.is_empty()) || is_cursor_file_read(tool, v);
     let candidates = read_candidate_files(tool, v, cwd, repo_root, read_only)?;
     let file_target = |path: Option<&str>| {
         local_write
@@ -445,7 +506,18 @@ pub fn hook_body_from_stdin(
     // Text written to a file that was read is scanned under that file's path,
     // like the file itself.
     for (text, target) in writes.texts.iter().zip(&text_targets) {
-        texts.push_bound(*target, text.text);
+        // The body Cursor read, sent with its NUL bytes, is the file again
+        // once it is read the way the file was. Only for that read: what a
+        // write tool sends is new text, scanned as sent.
+        let is_file_body = is_cursor_file_read(tool, v)
+            && text.text.contains('\0')
+            && target
+                .is_some_and(|index| decode_file_text(text.text.as_bytes()) == files[index].text);
+        if is_file_body {
+            texts.bind(text.text);
+        } else {
+            texts.push_bound(*target, text.text);
+        }
     }
     for (edit, target) in writes.edits.iter().zip(&edit_targets) {
         if edit.applied {
@@ -610,7 +682,7 @@ impl<'a> HookTexts<'a> {
     }
 }
 
-/// A text file inside the repository named by a payload path argument.
+/// A file named by a payload path argument, read for the scan.
 struct CandidateFile {
     abs: PathBuf,
     /// Repo-relative path, or the tool's virtual label for a file outside
@@ -801,10 +873,16 @@ fn writes_local_file(tool: AiHookTool, v: &Value) -> bool {
         AiHookTool::Windsurf => field("agent_action_name") == Some("pre_write_code"),
         // `beforeReadFile` is a read: binding ties its `content` (the file
         // body) to the file. MCP calls never count.
-        AiHookTool::Cursor => field("hook_event_name") == Some("beforeReadFile"),
+        AiHookTool::Cursor => is_cursor_file_read(tool, v),
         // Codex edits go through `apply_patch`, whose patch is a `command`.
         AiHookTool::Codex => false,
     }
+}
+
+/// Cursor's `beforeReadFile` event: a read whose payload carries the file body.
+fn is_cursor_file_read(tool: AiHookTool, v: &Value) -> bool {
+    tool == AiHookTool::Cursor
+        && v.get("hook_event_name").and_then(Value::as_str) == Some("beforeReadFile")
 }
 
 /// Applies the edits that target file `index` to its body in order, marking
@@ -866,11 +944,32 @@ fn match_count(text: &str, old: &str, replace_all: bool) -> usize {
     }
 }
 
-/// Reads every distinct text file inside the repository that a payload path
-/// argument names.
-/// Largest file outside the repository that is read for scanning.
-const MAX_OUTSIDE_FILE_BYTES: u64 = 16 * 1024 * 1024;
+/// How much of a file is read for scanning when the whole file is not.
+const MAX_PARTIAL_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
+/// The bytes of a file to scan.
+///
+/// A file up to `MAX_PARTIAL_FILE_BYTES` is read whole, and so is a larger
+/// text file inside the repository. Of a larger file outside the repository,
+/// or one inside it that looks binary (a NUL byte in its first 8 KiB: a
+/// database, an archive, a model), only the start is read. Decoding such a
+/// file whole can take longer than the hook timeout and several times its
+/// size in memory, and skipping it would leave its start unscanned.
+fn read_scan_bytes(abs: &Path, outside: bool) -> io::Result<Vec<u8>> {
+    let mut file = fs::File::open(abs)?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(MAX_PARTIAL_FILE_BYTES)
+        .read_to_end(&mut bytes)?;
+    let text = !bytes.iter().take(8192).any(|byte| *byte == 0);
+    if !outside && text {
+        file.read_to_end(&mut bytes)?;
+    }
+    Ok(bytes)
+}
+
+/// Reads every distinct file that a payload path argument names: those inside
+/// the repository, and with `scan_outside` those outside it.
 fn read_candidate_files(
     tool: AiHookTool,
     v: &Value,
@@ -891,10 +990,7 @@ fn read_candidate_files(
             && abs.is_file()
         {
             let outside = !abs.starts_with(&repo_root);
-            if outside
-                && !(scan_outside
-                    && fs::metadata(&abs).is_ok_and(|m| m.len() <= MAX_OUTSIDE_FILE_BYTES))
-            {
+            if outside && !scan_outside {
                 continue;
             }
             if let Some(read) = seen.get(&abs) {
@@ -904,7 +1000,7 @@ fn read_candidate_files(
                 continue;
             }
             seen.insert(abs.clone(), false);
-            let bytes = match fs::read(&abs) {
+            let bytes = match read_scan_bytes(&abs, outside) {
                 Ok(bytes) => bytes,
                 // A file outside the repository that cannot be read is not
                 // the project's to judge; the tool will fail on it too.
@@ -997,16 +1093,16 @@ fn policy_path_of(abs: &Path) -> String {
 
 /// The text of a file body to scan.
 ///
-/// A file without a NUL byte in its first 8 KiB is text: UTF-8 with invalid
-/// bytes replaced. That is every file an ordinary scan reads too, whatever
-/// its encoding.
+/// A file is read as UTF-8 with invalid bytes replaced, whatever its
+/// encoding, and with its NUL bytes resolved (see `resolve_nul_bytes`): a
+/// file with one used to be skipped as binary, so a single NUL byte hid a
+/// text file.
 ///
-/// A file with one used to be skipped as binary, so a single NUL byte hid a
-/// text file. It is read with its NUL characters dropped, which also turns
-/// UTF-16 without a byte order mark back into its ASCII. If what remains
-/// still is not text (an image, an archive, a compiled object), it is reduced
-/// to its runs of printable ASCII, like `strings`: scanning random bytes as
-/// text is slow and finds invisible characters in them.
+/// A file without a NUL byte in its first 8 KiB is text, and scanned whole;
+/// that is every file an ordinary scan reads too. If a file with one still is
+/// not text (an image, an archive, a compiled object), it is reduced to its
+/// runs of printable ASCII, like `strings`: scanning random bytes as text is
+/// slow and finds invisible characters in them.
 ///
 /// With a UTF-16 byte order mark the UTF-16 reading comes first and the bytes
 /// are read as above as well: a tool that ignores the mark shows the model
@@ -1014,8 +1110,10 @@ fn policy_path_of(abs: &Path) -> String {
 fn decode_file_text(bytes: &[u8]) -> String {
     let utf16 = |body: &[u8], unit: fn([u8; 2]) -> u16| {
         let units = body
-            .chunks_exact(2)
-            .map(|pair| unit([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| unit(*pair))
             .collect::<Vec<_>>();
         text_or_printable_runs(String::from_utf16_lossy(&units), 0)
     };
@@ -1026,23 +1124,68 @@ fn decode_file_text(bytes: &[u8]) -> String {
         [0xfe, 0xff, body @ ..] => Some(utf16(body, u16::from_be_bytes)),
         _ => None,
     };
-    let lossy = String::from_utf8_lossy(bytes);
-    let plain = if bytes.iter().take(8192).any(|byte| *byte == 0) {
-        let nul_bytes = bytes.iter().filter(|byte| **byte == 0).count();
-        // So many NULs that the file is UTF-16 text without a byte order
-        // mark (every other byte of its ASCII): they are encoding, not data.
-        let utf16_like = nul_bytes * 10 >= bytes.len() * 3;
-        text_or_printable_runs(
-            lossy.replace('\0', ""),
-            if utf16_like { 0 } else { nul_bytes },
-        )
+    let plain = if !bytes.contains(&0) {
+        String::from_utf8_lossy(bytes).into_owned()
     } else {
-        lossy.into_owned()
+        let looks_binary = bytes.iter().take(8192).any(|byte| *byte == 0);
+        let (resolved, separators) = resolve_nul_bytes(bytes);
+        let text = String::from_utf8_lossy(&resolved).into_owned();
+        if looks_binary {
+            text_or_printable_runs(text, separators)
+        } else {
+            text
+        }
     };
     match marked {
         Some(marked) => format!("{marked}\n{plain}"),
         None => plain,
     }
+}
+
+/// `bytes` without their NUL bytes, and how many of those separated data.
+///
+/// A lone NUL, or a run of exactly three, with a run of the same length one
+/// code unit before or after it is the empty part of a UTF-16 or UTF-32 code
+/// unit (`k\0e\0y\0`): it is dropped, which turns such text without a byte
+/// order mark back into its ASCII.
+///
+/// Any other run of NULs separates what is around it: values
+/// (`/proc/<pid>/environ`, `find -print0` output), C strings, padding. It
+/// becomes one line break, so one value is not joined to the next, which
+/// would hide it from a rule that needs a word boundary. A run in front of
+/// everything else or next to a line break separates nothing more and is
+/// dropped, which keeps the line numbers of NUL-terminated lines.
+fn resolve_nul_bytes(bytes: &[u8]) -> (Vec<u8>, usize) {
+    let nul_run = |start: Option<usize>, len: usize| {
+        start
+            .and_then(|start| bytes.get(start..start + len))
+            .is_some_and(|run| run.iter().all(|byte| *byte == 0))
+    };
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut separators = 0;
+    let mut index = 0;
+    while let Some(byte) = bytes.get(index) {
+        if *byte != 0 {
+            out.push(*byte);
+            index += 1;
+            continue;
+        }
+        let len = bytes[index..].iter().take_while(|byte| **byte == 0).count();
+        let end = index + len;
+        let unit = len + 1;
+        let in_code_units = matches!(len, 1 | 3)
+            && (nul_run(index.checked_sub(unit), len) || nul_run(Some(index + unit), len));
+        if !in_code_units {
+            separators += len;
+            let at_line_break = matches!(bytes.get(end), Some(b'\n' | b'\r'))
+                || out.last().is_none_or(|last| *last == b'\n');
+            if !at_line_break {
+                out.push(b'\n');
+            }
+        }
+        index = end;
+    }
+    (out, separators)
 }
 
 /// `text` itself when it is text, otherwise its printable runs. `dropped` is
@@ -1077,6 +1220,10 @@ fn printable_runs(text: &str) -> String {
     for c in text.chars().chain(std::iter::once('\0')) {
         if c == ' ' || c == '\t' || c.is_ascii_graphic() {
             runs.push(c);
+            // One run with no end (a base64 or minified blob) is cut too.
+            if runs.len() >= MAX_RUN_BYTES {
+                break;
+            }
             continue;
         }
         if runs.len() - run_start >= MIN_RUN {
@@ -3304,5 +3451,244 @@ mod tests {
         binary.extend_from_slice(b"\x01\x02token=abcdef\x03short\x04second line here\x05");
         let text = decode_file_text(&binary);
         assert_eq!(text, "token=abcdef\nsecond line here\n");
+    }
+
+    #[test]
+    fn cursor_before_read_file_scans_a_file_outside_the_repo() {
+        let repo = tempdir().expect("temp repo");
+        let outside = tempdir().expect("outside temp dir");
+        let path = outside.path().join("notes.txt");
+        std::fs::write(&path, "outside body").expect("write outside file");
+
+        // The payload repeats the body, or sends none: the file is read
+        // either way, and matched against policy by its own path.
+        for content in ["outside body", ""] {
+            let payload = serde_json::json!({
+                "hook_event_name": "beforeReadFile",
+                "file_path": path,
+                "content": content
+            });
+            let hook = hook_body_from_stdin(
+                AiHookTool::Cursor,
+                false,
+                &payload.to_string(),
+                repo.path(),
+                repo.path(),
+            )
+            .unwrap();
+            let [segment] = hook.segments.as_slice() else {
+                panic!("{content:?}: {:?}", hook.segments);
+            };
+            assert_eq!(segment.text, "outside body", "{content:?}");
+            let policy_path = segment.outside_path.as_deref().expect("policy path");
+            assert!(policy_path.ends_with("/notes.txt"), "{policy_path}");
+        }
+    }
+
+    #[test]
+    fn printable_runs_cut_a_run_that_never_ends() {
+        let blob = "A".repeat(1024 * 1024);
+        assert_eq!(printable_runs(&blob).len(), 256 * 1024);
+    }
+
+    #[test]
+    fn a_blank_prompt_does_not_hide_prompt_text_under_another_key() {
+        let aliased = r#"{"prompt":"","userPrompt":"the real prompt"}"#;
+        assert_eq!(
+            extract_user_prompt(aliased).as_deref(),
+            Some("the real prompt")
+        );
+        assert_eq!(user_prompt_text(aliased), "the real prompt");
+
+        // No prompt text anywhere it is expected: every string is scanned.
+        let elsewhere =
+            r#"{"hook_event_name":"UserPromptSubmit","prompt":" ","message":"typed text"}"#;
+        assert!(user_prompt_text(elsewhere).contains("typed text"));
+
+        assert!(extract_user_prompt(r#"{"prompt":""}"#).is_none());
+
+        // Session metadata is not prompt text: nothing the user could edit.
+        let metadata_only = r#"{"hook_event_name":"beforeSubmitPrompt","prompt":"","user_email":"the account","cwd":"/work","workspace_roots":["/work"]}"#;
+        assert_eq!(user_prompt_text(metadata_only), "");
+        let no_prompt_key =
+            r#"{"hook_event_name":"UserPromptSubmit","cwd":"/work","input":"typed text"}"#;
+        assert_eq!(user_prompt_text(no_prompt_key), "typed text");
+    }
+
+    #[test]
+    fn nul_bytes_neither_join_values_nor_hide_text_late_in_a_file() {
+        // NUL-separated values keep their boundaries, and the file is not
+        // repeated: edits and line numbers apply to one reading.
+        assert_eq!(
+            decode_file_text(b"FIRST=one\0SECOND=two\0THIRD=three\0"),
+            "FIRST=one\nSECOND=two\nTHIRD=three\n"
+        );
+        // Padding separates too, however long, and so do NULs in a file that
+        // is mostly NULs (a sparse archive), which is not UTF-16.
+        assert_eq!(
+            decode_file_text(b"\0\0\0\0FIRST=one\0\0\0\0\0\0\0\0SECOND=two\0\0\0\0\0\0\0\0"),
+            "FIRST=one\nSECOND=two\n"
+        );
+        // A NUL that ends a line adds none.
+        assert_eq!(
+            decode_file_text(b"one\0\ntwo\0\r\nthree"),
+            "one\ntwo\r\nthree"
+        );
+        // UTF-32 without a byte order mark, either byte order.
+        for unit in [u32::to_le_bytes, u32::to_be_bytes] {
+            let utf32: Vec<u8> = "key = value".chars().flat_map(|c| unit(c as u32)).collect();
+            assert_eq!(decode_file_text(&utf32), "key = value");
+        }
+        // UTF-16 inside other text is put back together, either byte order.
+        assert_eq!(
+            decode_file_text(b"name: k\0e\0y\0=\0v\0\nnext: \0k\0e\0y\n"),
+            "name: key=v\nnext: key\n"
+        );
+
+        // A value written with NULs between its characters, past the first
+        // 8 KiB of ordinary text.
+        let spaced: Vec<u8> = "token=abcdef"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let late = [b"plain text\n".repeat(1000), spaced].concat();
+        assert!(decode_file_text(&late).contains("token=abcdef"));
+
+        // Text with binary data only past its first 8 KiB is still scanned
+        // whole, not as the start of its printable runs.
+        let mut mixed = b"plain text\n".repeat(40_000);
+        mixed.extend((0..20_000u32).flat_map(|n| [0, (n * 7 + 3) as u8 | 0x80]));
+        mixed.extend_from_slice(b"\ntoken=abcdef\n");
+        assert!(decode_file_text(&mixed).ends_with("\ntoken=abcdef\n"));
+    }
+
+    #[test]
+    fn an_edit_that_removes_text_from_a_file_with_a_nul_removes_all_of_it() {
+        let repo = tempdir().expect("temp repo");
+        std::fs::write(repo.path().join("app.txt"), b"A=1\0B=old value\nC=3\n").expect("write");
+        let stdin = serde_json::json!({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": "app.txt",
+                "old_string": "B=old value",
+                "new_string": "B=${B}"
+            }
+        });
+
+        let (_display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
+
+        assert_eq!(body, "// ---- app.txt\nA=1\nB=${B}\nC=3\n");
+    }
+
+    #[test]
+    fn cursor_content_with_nul_bytes_is_the_file_it_repeats() {
+        let repo = tempdir().expect("temp repo");
+        // Larger than the payload text budget, with a NUL late in it.
+        let mut body = "plain text\n".repeat(MAX_HOOK_TEXT_BYTES / 8);
+        body.push_str("A=1\0B=2\n");
+        std::fs::write(repo.path().join("big.txt"), &body).expect("write");
+        let payload = serde_json::json!({
+            "hook_event_name": "beforeReadFile",
+            "file_path": "big.txt",
+            "content": body
+        });
+
+        let hook = hook_body_from_stdin(
+            AiHookTool::Cursor,
+            false,
+            &payload.to_string(),
+            repo.path(),
+            repo.path(),
+        )
+        .unwrap();
+
+        assert!(!hook.truncated);
+        let [segment] = hook.segments.as_slice() else {
+            panic!("{} segments", hook.segments.len());
+        };
+        assert!(segment.text.ends_with("A=1\nB=2\n"));
+    }
+
+    #[test]
+    fn written_text_with_nul_bytes_is_scanned_as_sent() {
+        let repo = tempdir().expect("temp repo");
+        std::fs::write(repo.path().join("app.txt"), b"A=1\0B=2\n").expect("write");
+        let stdin = serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": { "file_path": "app.txt", "content": "A=1\0B=2\n" }
+        });
+
+        let (_display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
+
+        // Once in the file as read, once as the text being written.
+        assert!(body.contains("A=1\nB=2\n"), "{body:?}");
+        assert!(body.contains("A=1\0B=2\n"), "{body:?}");
+    }
+
+    #[test]
+    fn the_start_of_a_large_file_outside_the_repo_is_scanned() {
+        let repo = tempdir().expect("temp repo");
+        let outside = tempdir().expect("outside temp dir");
+        let path = outside.path().join("big.log");
+        let mut bytes = b"token=abcdef\n".to_vec();
+        bytes.resize(MAX_PARTIAL_FILE_BYTES as usize + 1024, b'a');
+        std::fs::write(&path, bytes).expect("write outside file");
+        let payload = serde_json::json!({ "tool_input": { "file_path": path } });
+
+        let hook = hook_body_from_stdin(
+            AiHookTool::ClaudeCode,
+            false,
+            &payload.to_string(),
+            repo.path(),
+            repo.path(),
+        )
+        .unwrap();
+
+        let [segment] = hook.segments.as_slice() else {
+            panic!("{} segments", hook.segments.len());
+        };
+        assert!(segment.text.starts_with("token=abcdef\n"));
+        assert_eq!(segment.text.len(), MAX_PARTIAL_FILE_BYTES as usize);
+    }
+
+    #[test]
+    fn only_the_start_of_a_large_binary_or_outside_file_is_read() {
+        let dir = tempdir().expect("temp dir");
+        let limit = MAX_PARTIAL_FILE_BYTES as usize;
+        let text = dir.path().join("big.txt");
+        std::fs::write(&text, vec![b'a'; limit + 1024]).expect("write text");
+        let binary = dir.path().join("big.bin");
+        let mut bytes = vec![b'a'; limit + 1024];
+        bytes[0] = 0;
+        std::fs::write(&binary, bytes).expect("write binary");
+
+        assert_eq!(read_scan_bytes(&text, false).unwrap().len(), limit + 1024);
+        assert_eq!(read_scan_bytes(&binary, false).unwrap().len(), limit);
+        assert_eq!(read_scan_bytes(&text, true).unwrap().len(), limit);
+    }
+
+    #[test]
+    fn claude_post_scans_a_short_tool_response() {
+        let repo = tempdir().expect("temp repo");
+        for response in [
+            serde_json::json!("k=short"),
+            serde_json::json!({ "filenames": ["k=short"] }),
+        ] {
+            let stdin = serde_json::json!({
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Grep",
+                "tool_response": response
+            })
+            .to_string();
+            let (_display, body) = stdin_to_hook_body(
+                AiHookTool::ClaudeCode,
+                true,
+                &stdin,
+                repo.path(),
+                repo.path(),
+            )
+            .unwrap();
+            assert!(body.contains("k=short"), "{stdin}: {body:?}");
+        }
     }
 }

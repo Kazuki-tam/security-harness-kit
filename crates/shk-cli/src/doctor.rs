@@ -89,6 +89,8 @@ pub struct ClaudePermissionsStatus {
     /// `false` when a shk-managed `PreToolUse` block carries a matcher other
     /// than the one `shk hooks install-ai` writes today (older install or hand edit).
     pub pre_tool_matcher_ok: bool,
+    /// The same for shk-managed `PostToolUse` blocks.
+    pub post_tool_matcher_ok: bool,
     /// `false` when a blocking shk-managed handler would let the action proceed
     /// if `shk` cannot run (older install or hand edit).
     pub hook_on_failure_ok: bool,
@@ -98,7 +100,7 @@ impl ClaudePermissionsStatus {
     /// `true` when re-running `shk hooks install-ai` would not change the
     /// behavior of the managed hooks.
     pub fn managed_hooks_current(&self) -> bool {
-        self.pre_tool_matcher_ok && self.hook_on_failure_ok
+        self.pre_tool_matcher_ok && self.post_tool_matcher_ok && self.hook_on_failure_ok
     }
 }
 
@@ -464,6 +466,7 @@ pub fn collect_claude_permissions_status(root: &Path) -> ClaudePermissionsStatus
             sandbox_ok: true,
             missing_entries: Vec::new(),
             pre_tool_matcher_ok: true,
+            post_tool_matcher_ok: true,
             hook_on_failure_ok: true,
         };
     }
@@ -475,6 +478,7 @@ pub fn collect_claude_permissions_status(root: &Path) -> ClaudePermissionsStatus
             sandbox_ok: false,
             missing_entries: vec!["unable to read .claude/settings.json".into()],
             pre_tool_matcher_ok: true,
+            post_tool_matcher_ok: true,
             hook_on_failure_ok: true,
         };
     };
@@ -485,6 +489,7 @@ pub fn collect_claude_permissions_status(root: &Path) -> ClaudePermissionsStatus
             sandbox_ok: false,
             missing_entries: vec!["unable to parse .claude/settings.json".into()],
             pre_tool_matcher_ok: true,
+            post_tool_matcher_ok: true,
             hook_on_failure_ok: true,
         };
     };
@@ -512,7 +517,16 @@ pub fn collect_claude_permissions_status(root: &Path) -> ClaudePermissionsStatus
         deny_ok: missing_entries.is_empty(),
         sandbox_ok: claude_sandbox_ok(&value),
         missing_entries,
-        pre_tool_matcher_ok: claude_pre_tool_matcher_ok(&value),
+        pre_tool_matcher_ok: claude_tool_matcher_ok(
+            &value,
+            "/hooks/PreToolUse",
+            crate::hooks::CLAUDE_PRE_TOOL_USE_MATCHER,
+        ),
+        post_tool_matcher_ok: claude_tool_matcher_ok(
+            &value,
+            "/hooks/PostToolUse",
+            crate::hooks::CLAUDE_POST_TOOL_USE_MATCHER,
+        ),
         hook_on_failure_ok: claude_hook_on_failure_ok(&value),
     }
 }
@@ -538,23 +552,24 @@ fn claude_hook_on_failure_ok(value: &Value) -> bool {
         })
 }
 
-/// Every shk-managed `PreToolUse` block must use the current matcher; settings
-/// without managed blocks pass (missing hooks are reported separately).
-fn claude_pre_tool_matcher_ok(value: &Value) -> bool {
+/// Every shk-managed block of the event at `pointer` must use the `current`
+/// matcher; settings without managed blocks pass (missing hooks are reported
+/// separately).
+fn claude_tool_matcher_ok(value: &Value, pointer: &str, current: &str) -> bool {
     value
-        .pointer("/hooks/PreToolUse")
+        .pointer(pointer)
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter(|block| crate::hooks::is_managed_claude_block(block))
-        .all(|block| {
-            block.get("matcher").and_then(Value::as_str)
-                == Some(crate::hooks::CLAUDE_PRE_TOOL_USE_MATCHER)
-        })
+        .all(|block| block.get("matcher").and_then(Value::as_str) == Some(current))
 }
 
 /// Advisory text for an outdated managed Claude Code `PreToolUse` matcher.
 const CLAUDE_PRE_TOOL_MATCHER_WARNING: &str = ".claude/settings.json has a shk-managed PreToolUse matcher that differs from the current one (older install or hand edit), so some tools may go unscanned; rerun `shk hooks install-ai --tool claude-code` (with `--audit` or `--log-blocked` if the hooks were installed that way)";
+
+/// Advisory text for an outdated managed Claude Code `PostToolUse` matcher.
+const CLAUDE_POST_TOOL_MATCHER_WARNING: &str = ".claude/settings.json has a shk-managed PostToolUse matcher that differs from the current one (older install or hand edit), so the output of some tools may go unscanned; rerun `shk hooks install-ai --tool claude-code` (with `--audit` or `--log-blocked` if the hooks were installed that way)";
 
 /// Advisory text for managed Claude Code hooks that would not block when `shk` cannot run.
 const CLAUDE_HOOK_ON_FAILURE_WARNING: &str = ".claude/settings.json has shk-managed hooks without `onFailure: \"block\"` (older install or hand edit), so Claude Code lets actions proceed when `shk` is missing or cannot start; rerun `shk hooks install-ai --tool claude-code` (with `--audit` or `--log-blocked` if the hooks were installed that way)";
@@ -1403,6 +1418,9 @@ pub fn run_all(root: &Path, json: bool, strict: bool) -> Result<()> {
     if !report.claude.pre_tool_matcher_ok {
         println!("  warning: {CLAUDE_PRE_TOOL_MATCHER_WARNING}");
     }
+    if !report.claude.post_tool_matcher_ok {
+        println!("  warning: {CLAUDE_POST_TOOL_MATCHER_WARNING}");
+    }
     if !report.claude.hook_on_failure_ok {
         println!("  warning: {CLAUDE_HOOK_ON_FAILURE_WARNING}");
     }
@@ -1458,6 +1476,7 @@ fn doctor_warning_count(inputs: DoctorWarningInputs<'_>) -> usize {
         warnings += usize::from(!inputs.claude.deny_ok);
         warnings += usize::from(!inputs.claude.sandbox_ok);
         warnings += usize::from(!inputs.claude.pre_tool_matcher_ok);
+        warnings += usize::from(!inputs.claude.post_tool_matcher_ok);
         warnings += usize::from(!inputs.claude.hook_on_failure_ok);
     }
     if inputs.codex.config_exists {
@@ -1862,6 +1881,37 @@ mod tests {
             let status = collect_claude_permissions_status(dir.path());
             assert!(!status.pre_tool_matcher_ok, "{block}");
         }
+    }
+
+    #[test]
+    fn claude_post_tool_matcher_is_checked_on_its_own() {
+        let settings = |pre: &str, post: &str| {
+            serde_json::json!({ "hooks": {
+                "PreToolUse": [{ "_shk_managed": true, "matcher": pre, "hooks": [] }],
+                "PostToolUse": [
+                    { "_shk_managed": true, "matcher": post, "hooks": [] },
+                    // Unmanaged blocks keep whatever matcher the user chose.
+                    { "matcher": "Bash", "hooks": [] }
+                ]
+            } })
+        };
+        let pre = crate::hooks::CLAUDE_PRE_TOOL_USE_MATCHER;
+        let post = crate::hooks::CLAUDE_POST_TOOL_USE_MATCHER;
+        // The managed post matcher written before Grep coverage.
+        let legacy_post = "WebFetch|WebSearch|Bash|mcp__.*|Skill|Agent";
+
+        let dir = tempdir().unwrap();
+        write_claude_settings(dir.path(), &settings(pre, post));
+        let status = collect_claude_permissions_status(dir.path());
+        assert!(status.post_tool_matcher_ok && status.managed_hooks_current());
+
+        write_claude_settings(dir.path(), &settings(pre, legacy_post));
+        let status = collect_claude_permissions_status(dir.path());
+        assert!(status.pre_tool_matcher_ok);
+        assert!(!status.post_tool_matcher_ok);
+        assert!(!status.managed_hooks_current());
+        let report = collect_doctor_report(dir.path()).unwrap();
+        assert!(!report.claude.post_tool_matcher_ok);
     }
 
     #[test]

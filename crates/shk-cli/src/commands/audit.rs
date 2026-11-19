@@ -417,7 +417,7 @@ fn reason_label(reason: AuditReasonArg) -> String {
 }
 
 fn print_human(report: &AuditReport, hide_paths: bool) {
-    println!("shk audit log: {}", report.log_path);
+    println!("shk audit log: {}", printable(&report.log_path));
 
     if !report.log_exists {
         println!();
@@ -514,14 +514,22 @@ fn print_count_section(title: &str, rows: &[CountRow]) {
 }
 
 /// `text` with control characters and the invisible formatting characters
-/// that reorder or hide text (bidi overrides, zero-width marks) replaced, for
+/// that reorder, hide, or break up text (bidi controls, zero-width and other
+/// invisible marks, Unicode line separators, tag characters) replaced, for
 /// printing to a terminal.
 fn printable(text: &str) -> String {
     text.chars()
         .map(|c| {
             let hidden = matches!(
                 c,
-                '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}'
+                '\u{00ad}'
+                    | '\u{061c}'
+                    | '\u{200b}'..='\u{200f}'
+                    | '\u{2028}'..='\u{202e}'
+                    | '\u{2060}'..='\u{206f}'
+                    | '\u{feff}'
+                    | '\u{fff9}'..='\u{fffb}'
+                    | '\u{e0000}'..='\u{e007f}'
             );
             if c.is_control() || hidden { '?' } else { c }
         })
@@ -762,5 +770,17 @@ mod tests {
         );
         let json = serde_json::to_value(&audit_row).unwrap();
         assert!(json.get("event").is_none());
+    }
+
+    #[test]
+    fn printable_replaces_characters_that_reorder_or_break_lines() {
+        assert_eq!(
+            printable("a\u{202e}b\u{061c}c\u{2028}d\u{2029}e\u{1b}f\u{200b}g\u{2060}h\u{e0041}i"),
+            "a?b?c?d?e?f?g?h?i"
+        );
+        assert_eq!(
+            printable("plain path/to file.txt"),
+            "plain path/to file.txt"
+        );
     }
 }
