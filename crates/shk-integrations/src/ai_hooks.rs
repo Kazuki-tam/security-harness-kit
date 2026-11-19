@@ -50,7 +50,7 @@ const PRE_TEXT_KEYS: &[&str] = &[
 // (see `writes_local_file`), pre hooks apply each edit to the target file body read
 // via PATH_KEYS and scan the edited body, so inserted text keeps the file's
 // inline `shk-ignore` context and removed text no longer blocks. When the
-// target is not read (outside the repo, binary, or missing) or `old` is not
+// target is not read (outside the repo or missing) or `old` is not
 // found, only the new text is scanned; any other tool's edits are scanned as
 // payload text, old text included. Edits inherit the nearest enclosing path
 // key, so nested lists work.
@@ -270,6 +270,46 @@ pub fn extract_user_prompt(stdin: &str) -> Option<Cow<'_, str>> {
         .or_else(|| payload.tool_info.and_then(|info| info.user_prompt))
 }
 
+/// The text of a user-prompt payload to scan.
+///
+/// The prompt string where the payload has one. A prompt in another shape (a
+/// list of parts, an object) contributes every string inside it. A payload
+/// with no prompt field at all contributes every string it holds: a prompt
+/// hook that cannot find the prompt must not wave the payload through.
+pub fn user_prompt_text(stdin: &str) -> String {
+    if let Some(prompt) = extract_user_prompt(stdin) {
+        return prompt.into_owned();
+    }
+    let Ok(payload) = serde_json::from_str::<Value>(stdin) else {
+        return String::new();
+    };
+    let mut strings = Vec::new();
+    let prompt_values = ["prompt", "userPrompt", "user_prompt"]
+        .iter()
+        .filter_map(|key| payload.get(key))
+        .chain(
+            payload
+                .get("tool_info")
+                .and_then(|info| info.get("user_prompt")),
+        );
+    for value in prompt_values {
+        collect_all_strings(value, &mut strings);
+    }
+    if strings.is_empty() {
+        collect_all_strings(&payload, &mut strings);
+    }
+    strings.join("\n")
+}
+
+fn collect_all_strings<'v>(value: &'v Value, out: &mut Vec<&'v str>) {
+    match value {
+        Value::String(text) => out.push(text),
+        Value::Array(items) => items.iter().for_each(|item| collect_all_strings(item, out)),
+        Value::Object(map) => map.values().for_each(|item| collect_all_strings(item, out)),
+        _ => {}
+    }
+}
+
 /// Text extracted from a hook payload for scanning, split by the path label
 /// each part is scanned under.
 #[derive(Debug)]
@@ -300,6 +340,10 @@ pub struct HookSegment {
     /// For a file segment, the file as it is on disk: before the tool call's
     /// edits are applied and without the payload text scanned under its path.
     pub on_disk: Option<String>,
+    /// For a file outside the repository, its absolute path with forward
+    /// slashes. Path-scoped policy is matched against it, so an allowlist
+    /// entry can name such a file; `label` stays the virtual one for logs.
+    pub outside_path: Option<String>,
 }
 
 impl HookBody {
@@ -359,7 +403,12 @@ pub fn hook_body_from_stdin(
 
     // Referenced files are scanned whole (with pre-hook edits applied) and do
     // not spend the payload budget.
-    let candidates = read_candidate_files(tool, v, cwd, repo_root)?;
+    // A file outside the repository is scanned when the call only reads: its
+    // content reaches the model like any other file's. It is logged under
+    // the virtual label and matched against path-scoped policy by its
+    // absolute path.
+    let read_only = writes.edits.is_empty() && writes.texts.is_empty();
+    let candidates = read_candidate_files(tool, v, cwd, repo_root, read_only)?;
     let file_target = |path: Option<&str>| {
         local_write
             .then(|| target_index(&candidates.files, path?, cwd))
@@ -439,8 +488,9 @@ pub fn hook_body_from_stdin(
             HookSegment {
                 label: file.rel.clone(),
                 text,
-                file: true,
+                file: !file.outside,
                 on_disk: Some(on_disk),
+                outside_path: file.outside.then(|| policy_path_of(&file.abs)),
             }
         })
         .collect();
@@ -465,6 +515,7 @@ pub fn hook_body_from_stdin(
                 label,
                 file: false,
                 on_disk: None,
+                outside_path: None,
                 text,
             });
         } else {
@@ -472,6 +523,7 @@ pub fn hook_body_from_stdin(
                 label: label.clone(),
                 file: false,
                 on_disk,
+                outside_path: None,
                 text,
             }));
         }
@@ -561,8 +613,12 @@ impl<'a> HookTexts<'a> {
 /// A text file inside the repository named by a payload path argument.
 struct CandidateFile {
     abs: PathBuf,
+    /// Repo-relative path, or the tool's virtual label for a file outside
+    /// the repository.
     rel: String,
     text: String,
+    /// Outside the repository root (directly, or through a symlink in it).
+    outside: bool,
 }
 
 /// Files read for a payload, and the payload path strings that named them.
@@ -812,15 +868,19 @@ fn match_count(text: &str, old: &str, replace_all: bool) -> usize {
 
 /// Reads every distinct text file inside the repository that a payload path
 /// argument names.
+/// Largest file outside the repository that is read for scanning.
+const MAX_OUTSIDE_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
 fn read_candidate_files(
     tool: AiHookTool,
     v: &Value,
     cwd: &Path,
     repo_root: &Path,
+    scan_outside: bool,
 ) -> Result<CandidateFiles> {
     let mut files = Vec::new();
     let mut read_paths = HashSet::new();
-    // Whether each file seen so far was read (binary files are skipped).
+    // Whether each file seen so far was read.
     let mut seen: HashMap<PathBuf, bool> = HashMap::new();
     let repo_root = fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
 
@@ -829,8 +889,14 @@ fn read_candidate_files(
         let p = fs::canonicalize(&p).ok();
         if let Some(abs) = p
             && abs.is_file()
-            && abs.starts_with(&repo_root)
         {
+            let outside = !abs.starts_with(&repo_root);
+            if outside
+                && !(scan_outside
+                    && fs::metadata(&abs).is_ok_and(|m| m.len() <= MAX_OUTSIDE_FILE_BYTES))
+            {
+                continue;
+            }
             if let Some(read) = seen.get(&abs) {
                 if *read {
                     read_paths.insert(cand);
@@ -838,21 +904,29 @@ fn read_candidate_files(
                 continue;
             }
             seen.insert(abs.clone(), false);
-            let bytes =
-                fs::read(&abs).with_context(|| format!("read scanned file {}", abs.display()))?;
-            // Match the ordinary scanner's default NUL-in-head heuristic.
-            // Do not skip by extension: text disguised as an image still needs
-            // scanning. Lossy decoding preserves ASCII secrets in legacy text
-            // and binary formats without NUL bytes, without a UTF-8 error.
-            if bytes.iter().take(8192).any(|byte| *byte == 0) {
-                continue;
-            }
+            let bytes = match fs::read(&abs) {
+                Ok(bytes) => bytes,
+                // A file outside the repository that cannot be read is not
+                // the project's to judge; the tool will fail on it too.
+                Err(_) if outside => continue,
+                Err(err) => {
+                    return Err(err)
+                        .with_context(|| format!("read scanned file {}", abs.display()));
+                }
+            };
+            // No file is skipped as binary, by extension or by content (see
+            // `decode_file_text`).
             seen.insert(abs.clone(), true);
             read_paths.insert(cand);
             files.push(CandidateFile {
-                rel: rel_from_repo(&repo_root, &abs),
-                text: String::from_utf8_lossy(&bytes).into_owned(),
+                rel: if outside {
+                    tool.virtual_path_label().to_string()
+                } else {
+                    rel_from_repo(&repo_root, &abs)
+                },
+                text: decode_file_text(&bytes),
                 abs,
+                outside,
             });
         }
     }
@@ -882,9 +956,7 @@ fn patch_sections(text: &str, cwd: &Path, repo_root: &Path) -> Vec<(String, Opti
             return None;
         }
         files_read += 1;
-        let bytes = fs::read(&abs).ok()?;
-        (!bytes.iter().take(8192).any(|byte| *byte == 0))
-            .then(|| String::from_utf8_lossy(&bytes).into_owned())
+        fs::read(&abs).ok().map(|bytes| decode_file_text(&bytes))
     };
 
     let mut sections: Vec<(String, Option<String>)> = vec![(String::new(), None)];
@@ -911,6 +983,113 @@ fn patch_sections(text: &str, cwd: &Path, repo_root: &Path) -> Vec<(String, Opti
     }
     sections.retain(|(section, _)| !section.is_empty());
     sections
+}
+
+/// An absolute path as path-scoped policy matches it: forward slashes, and
+/// without the `\\?\` prefix Windows puts on a canonical path
+/// (`C:/Users/me/...`).
+fn policy_path_of(abs: &Path) -> String {
+    let path = abs.to_string_lossy().replace('\\', "/");
+    path.strip_prefix("//?/")
+        .map(str::to_string)
+        .unwrap_or(path)
+}
+
+/// The text of a file body to scan.
+///
+/// A file without a NUL byte in its first 8 KiB is text: UTF-8 with invalid
+/// bytes replaced. That is every file an ordinary scan reads too, whatever
+/// its encoding.
+///
+/// A file with one used to be skipped as binary, so a single NUL byte hid a
+/// text file. It is read with its NUL characters dropped, which also turns
+/// UTF-16 without a byte order mark back into its ASCII. If what remains
+/// still is not text (an image, an archive, a compiled object), it is reduced
+/// to its runs of printable ASCII, like `strings`: scanning random bytes as
+/// text is slow and finds invisible characters in them.
+///
+/// With a UTF-16 byte order mark the UTF-16 reading comes first and the bytes
+/// are read as above as well: a tool that ignores the mark shows the model
+/// those.
+fn decode_file_text(bytes: &[u8]) -> String {
+    let utf16 = |body: &[u8], unit: fn([u8; 2]) -> u16| {
+        let units = body
+            .chunks_exact(2)
+            .map(|pair| unit([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        text_or_printable_runs(String::from_utf16_lossy(&units), 0)
+    };
+    let marked = match bytes {
+        // `FF FE 00 00` is the UTF-32LE mark.
+        [0xff, 0xfe, 0x00, 0x00, ..] => None,
+        [0xff, 0xfe, body @ ..] => Some(utf16(body, u16::from_le_bytes)),
+        [0xfe, 0xff, body @ ..] => Some(utf16(body, u16::from_be_bytes)),
+        _ => None,
+    };
+    let lossy = String::from_utf8_lossy(bytes);
+    let plain = if bytes.iter().take(8192).any(|byte| *byte == 0) {
+        let nul_bytes = bytes.iter().filter(|byte| **byte == 0).count();
+        // So many NULs that the file is UTF-16 text without a byte order
+        // mark (every other byte of its ASCII): they are encoding, not data.
+        let utf16_like = nul_bytes * 10 >= bytes.len() * 3;
+        text_or_printable_runs(
+            lossy.replace('\0', ""),
+            if utf16_like { 0 } else { nul_bytes },
+        )
+    } else {
+        lossy.into_owned()
+    };
+    match marked {
+        Some(marked) => format!("{marked}\n{plain}"),
+        None => plain,
+    }
+}
+
+/// `text` itself when it is text, otherwise its printable runs. `dropped` is
+/// the number of bytes already removed from it as not being text.
+fn text_or_printable_runs(text: String, dropped: usize) -> String {
+    // Characters text does not hold: undecodable bytes and control codes.
+    let (mut total, mut foreign) = (dropped, dropped);
+    for c in text.chars() {
+        total += 1;
+        let layout = matches!(c, '\t' | '\n' | '\r' | '\u{c}' | '\u{1b}');
+        foreign += usize::from(c == char::REPLACEMENT_CHARACTER || (c.is_control() && !layout));
+    }
+    // A few stray bytes do not make a file binary; one in fifty does.
+    if foreign <= 16 || foreign * 50 <= total {
+        return text;
+    }
+    printable_runs(&text)
+}
+
+/// The runs of printable ASCII in `text` that are long enough to mean
+/// something, one per line and in order, so multi-line values stay together.
+///
+/// Only the first `MAX_RUN_BYTES` of them: the random-looking strings of a
+/// binary are the slowest input the rules have, and a blocking hook has to
+/// answer within its timeout. A tool shows the model the start of a file.
+fn printable_runs(text: &str) -> String {
+    const MIN_RUN: usize = 6;
+    const MAX_RUN_BYTES: usize = 256 * 1024;
+    let mut runs = String::new();
+    let mut run_start = 0;
+    // A character past the end closes the last run.
+    for c in text.chars().chain(std::iter::once('\0')) {
+        if c == ' ' || c == '\t' || c.is_ascii_graphic() {
+            runs.push(c);
+            continue;
+        }
+        if runs.len() - run_start >= MIN_RUN {
+            runs.push('\n');
+        } else {
+            runs.truncate(run_start);
+        }
+        run_start = runs.len();
+        if run_start >= MAX_RUN_BYTES {
+            break;
+        }
+    }
+    runs
 }
 
 fn resolve_path(s: &str, cwd: &Path) -> PathBuf {
@@ -3053,31 +3232,77 @@ mod tests {
     }
 
     #[test]
-    fn ignores_candidate_files_outside_repo() {
+    fn scans_a_read_file_outside_the_repo_under_the_virtual_label() {
         let repo = tempdir().expect("temp repo");
         let outside = tempdir().expect("outside temp dir");
-        std::fs::write(outside.path().join("secret.txt"), "outside body")
-            .expect("write outside file");
-        let stdin = serde_json::json!({
-            "tool_input": {
-                "file_path": outside.path().join("secret.txt")
-            },
-            "prompt": "fallback prompt"
-        })
-        .to_string();
+        let path = outside.path().join("notes.txt");
+        std::fs::write(&path, "outside body").expect("write outside file");
+        let body_of = |payload: serde_json::Value| {
+            hook_body_from_stdin(
+                AiHookTool::ClaudeCode,
+                false,
+                &payload.to_string(),
+                repo.path(),
+                repo.path(),
+            )
+            .unwrap()
+        };
 
-        let (display, body) = stdin_to_hook_body(
-            AiHookTool::ClaudeCode,
-            false,
-            &stdin,
-            repo.path(),
-            repo.path(),
-        )
-        .unwrap();
+        let hook = body_of(serde_json::json!({ "tool_input": { "file_path": path } }));
+        assert_eq!(hook.display, "<claude-hook>");
+        let [segment] = hook.segments.as_slice() else {
+            panic!("{:?}", hook.segments);
+        };
+        assert_eq!(segment.label, "<claude-hook>");
+        assert!(!segment.file);
+        assert!(segment.text.contains("outside body"), "{}", segment.text);
+        let policy_path = segment.outside_path.as_deref().expect("policy path");
+        assert!(policy_path.ends_with("/notes.txt"), "{policy_path}");
+        assert!(!policy_path.contains('\\'), "{policy_path}");
 
-        assert_eq!(display, "<claude-hook>");
-        assert!(!body.contains("outside body"), "{body}");
-        // The unread path is ordinary argument text.
-        assert!(body.starts_with("fallback prompt\n---\n"), "{body}");
+        // A write is judged by what it writes.
+        let hook = body_of(serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": { "file_path": path, "content": "new text" }
+        }));
+        assert!(
+            hook.segments
+                .iter()
+                .all(|segment| !segment.text.contains("outside body")),
+            "{:?}",
+            hook.segments
+        );
+    }
+
+    #[test]
+    fn file_text_is_content_for_text_and_printable_runs_for_binaries() {
+        // Text, also behind a NUL or as UTF-16 with or without a mark.
+        assert_eq!(decode_file_text(b"\0key = value\n"), "key = value\n");
+        let utf16: Vec<u8> = "key = value"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(decode_file_text(&utf16), "key = value");
+        let marked = [&[0xff, 0xfe][..], &utf16].concat();
+        assert!(decode_file_text(&marked).starts_with("key = value\n"));
+        // A mark in front of plain ASCII: both readings are scanned.
+        assert!(decode_file_text(b"\xff\xfekey = value").contains("key = value"));
+        // A few stray bytes leave a text file a text file.
+        assert_eq!(
+            decode_file_text(b"caf\xe9 au lait\n"),
+            "caf\u{fffd} au lait\n"
+        );
+
+        // Legacy-encoded text without a NUL is scanned whole, as before.
+        let latin1 = [b"caf\xe9 ".repeat(1000), b"token=abcdef".to_vec()].concat();
+        assert!(decode_file_text(&latin1).ends_with("token=abcdef"));
+
+        // Random-looking bytes behind a NUL are reduced to their printable
+        // runs.
+        let mut binary: Vec<u8> = vec![0];
+        binary.extend((0..4096u32).map(|n| (n * 7 + 3) as u8 | 0x80));
+        binary.extend_from_slice(b"\x01\x02token=abcdef\x03short\x04second line here\x05");
+        let text = decode_file_text(&binary);
+        assert_eq!(text, "token=abcdef\nsecond line here\n");
     }
 }
