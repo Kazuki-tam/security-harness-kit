@@ -146,7 +146,13 @@ trusted publishing.
    `docs/release-notes/vX.Y.Z.md`; the publish job puts it above the generated
    release body.
 2. Run `.github/scripts/release/test.sh` locally or rely on the CI
-   `release-scripts` job.
+   `release-scripts` job. After a cargo-dist bump, `DIST_VERSION` in
+   `release.yml` must match `cargo-dist-version` in `dist-workspace.toml`, and
+   `DIST_INSTALLER_SH_SHA256` / `DIST_INSTALLER_PS1_SHA256` must be the SHA-256
+   of that version's `cargo-dist-installer.sh` / `.ps1` release assets (the
+   release page and `gh api repos/axodotdev/cargo-dist/releases/tags/vX.Y.Z`
+   list them as `digest`). The installers are checked against these values
+   before they run, and the `release-scripts` job compares them with upstream.
 3. Confirm on npmjs.com that every platform package has a valid trusted
    publisher (see [npm packages](#npm-packages)), and that
    `HOMEBREW_TAP_TOKEN` has not expired.

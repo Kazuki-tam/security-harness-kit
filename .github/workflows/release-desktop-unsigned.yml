@@ -34,7 +34,7 @@ jobs:
       release_tag: ${{ steps.resolve.outputs.release_tag }}
       source_sha: ${{ steps.source.outputs.source_sha }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
@@ -87,12 +87,8 @@ jobs:
     defaults:
       run:
         working-directory: apps/shk-desktop
-    env:
-      TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
           ref: ${{ needs.prepare.outputs.source_sha }}
@@ -124,6 +120,17 @@ jobs:
 
       - name: install frontend dependencies
         run: pnpm install --frozen-lockfile
+
+      # The updater key exists from here on only: the actions and the
+      # dependency installation above run without it.
+      - name: load updater signing secrets
+        shell: bash
+        working-directory: .
+        env:
+          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: ./.github/scripts/release/export-signing-env.sh updater
 
       - name: check updater signing config
         shell: bash
@@ -190,7 +197,7 @@ jobs:
         needs.build-desktop-artifacts.result == 'success'
       }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
           ref: ${{ needs.prepare.outputs.source_sha }}

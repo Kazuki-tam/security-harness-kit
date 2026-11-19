@@ -1499,4 +1499,92 @@ assert_contains "combined release body includes the desktop notes" \
   "$(<"$release_body_dir/body.md")" "## Desktop notes stub"
 assert_output "release body without notes starts with the dist announcement" "## Install stub" release_body_first_line cli 9.9.9
 
+assert_eq() {
+  local description="$1"
+  local actual="$2"
+  local expected="$3"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "FAIL: ${description}" >&2
+    echo "expected: ${expected}" >&2
+    echo "actual:   ${actual}" >&2
+    exit 1
+  fi
+}
+
+# The cargo-dist installers are checked against pinned hashes before they run.
+for key in DIST_INSTALLER_SH_SHA256 DIST_INSTALLER_PS1_SHA256; do
+  pinned_hash="$(awk -F'"' -v key="  ${key}: " 'index($0, key) == 1 { print $2; exit }' .github/workflows/release.yml)"
+  if [[ ! "$pinned_hash" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "FAIL: release.yml ${key} is not a SHA-256 hex digest" >&2
+    exit 1
+  fi
+done
+if grep -nE 'cargo-dist-installer\.(sh|ps1)"? *\| *(sh|iex)' .github/workflows/*.yml; then
+  echo "FAIL: a workflow pipes the cargo-dist installer into a shell without checking its hash" >&2
+  exit 1
+fi
+echo "ok: cargo-dist installers are hash-pinned"
+
+# export-signing-env.sh hands the signing secrets to later steps through
+# GITHUB_ENV: every name is exported, only this runner's platform has values,
+# and multi-line values survive.
+signing_env_file="$(mktemp)"
+read_signing_env() {
+  # Prints the value GITHUB_ENV holds for a name, as the runner would read it.
+  awk -v name="$1" '
+    !open && index($0, name "<<") == 1 { open = 1; delimiter = substr($0, length(name) + 3); first = 1; next }
+    open && $0 == delimiter { exit }
+    open { printf "%s%s", (first ? "" : "\n"), $0; first = 0 }
+  ' "$signing_env_file"
+}
+: > "$signing_env_file"
+GITHUB_ENV="$signing_env_file" RUNNER_OS=macOS \
+  TAURI_SIGNING_PRIVATE_KEY=$'line one\nline two' APPLE_ID="apple-id" TAURI_WINDOWS_TSP="true" \
+  ./.github/scripts/release/export-signing-env.sh all
+assert_eq "signing env keeps a multi-line value" "$(read_signing_env TAURI_SIGNING_PRIVATE_KEY)" $'line one\nline two'
+assert_eq "signing env exports the platform's secrets" "$(read_signing_env APPLE_ID)" "apple-id"
+assert_eq "signing env leaves another platform's secrets empty" "$(read_signing_env TAURI_WINDOWS_TSP)" ""
+assert_eq "signing env exports an unset secret as empty" "$(read_signing_env APPLE_TEAM_ID)" ""
+assert_eq "signing env exports every name" "$(grep -c '<<shk_signing_env_' "$signing_env_file")" "15"
+: > "$signing_env_file"
+GITHUB_ENV="$signing_env_file" RUNNER_OS=Linux APPLE_ID="apple-id" TAURI_UPDATER_PUBKEY="pub" \
+  ./.github/scripts/release/export-signing-env.sh all
+assert_eq "signing env gives a Linux runner no Apple secrets" "$(read_signing_env APPLE_ID)" ""
+assert_eq "signing env gives every runner the updater key" "$(read_signing_env TAURI_UPDATER_PUBKEY)" "pub"
+: > "$signing_env_file"
+GITHUB_ENV="$signing_env_file" RUNNER_OS=macOS APPLE_ID="apple-id" TAURI_UPDATER_PUBKEY="pub" \
+  ./.github/scripts/release/export-signing-env.sh updater
+assert_eq "updater mode exports only the updater names" "$(grep -c '<<shk_signing_env_' "$signing_env_file")" "3"
+rm -f "$signing_env_file"
+# No job hands signing secrets to every step any more.
+if awk '/^    env:$/ { job_env = 1; next } /^    [a-z]/ { job_env = 0 } job_env && /secrets\.(TAURI_SIGNING|TAURI_UPDATER|APPLE_|KEYCHAIN|TAURI_WINDOWS)/' \
+  .github/workflows/release.yml .github/workflows/release-desktop-unsigned.yml | grep -q .; then
+  echo "FAIL: a job-level env block holds signing secrets; set them on the load step only" >&2
+  exit 1
+fi
+# The names a load step sets are exactly the names the script exports: one
+# missing on either side would be exported empty or dropped without a word.
+load_step_names() {
+  # $1 workflow file, $2 mode passed to export-signing-env.sh
+  awk -v mode="$2" '
+    /^        env:$/ { names = ""; in_env = 1; next }
+    in_env && /^          [A-Z_]+: / { name = $1; sub(/:$/, "", name); names = names name "\n"; next }
+    in_env && index($0, "export-signing-env.sh " mode) { printf "%s", names; exit }
+    in_env && !/^          / && !/^        run:/ { in_env = 0 }
+  ' "$1" | sort
+}
+script_names() {
+  # $1 mode: the names export-signing-env.sh writes for it on a macOS runner.
+  local env_file
+  env_file="$(mktemp)"
+  GITHUB_ENV="$env_file" RUNNER_OS=macOS ./.github/scripts/release/export-signing-env.sh "$1"
+  sed -n 's/<<shk_signing_env_.*//p' "$env_file" | sort
+  rm -f "$env_file"
+}
+assert_eq "release.yml load step and export-signing-env.sh agree on the secret names" \
+  "$(load_step_names .github/workflows/release.yml all)" "$(script_names all)"
+assert_eq "unsigned workflow load step and export-signing-env.sh agree on the secret names" \
+  "$(load_step_names .github/workflows/release-desktop-unsigned.yml updater)" "$(script_names updater)"
+echo "ok: signing secrets are loaded by one step per job"
+
 echo "release script tests passed"
