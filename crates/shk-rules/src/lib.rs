@@ -2,6 +2,7 @@
 
 mod gitleaks_rules;
 
+use aho_corasick::AhoCorasick;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
@@ -1571,17 +1572,56 @@ fn scan_ai_context_content<'a>(
     out
 }
 
-fn any_keyword_matches(lowercase_content: &str, keywords: &[&str]) -> bool {
-    if keywords.is_empty() {
-        return true;
-    }
-    keywords.iter().any(|keyword| {
-        if keyword.bytes().any(|b| b.is_ascii_uppercase()) {
-            lowercase_content.contains(&keyword.to_ascii_lowercase())
-        } else {
-            lowercase_content.contains(keyword)
+/// Every gitleaks keyword in one automaton, with the rule each belongs to.
+struct GitleaksKeywordIndex {
+    automaton: AhoCorasick,
+    /// Rule index (into `gitleaks_rules::rules()`) per automaton pattern.
+    pattern_rule: Vec<usize>,
+    /// Rules without keywords always run.
+    always: Vec<bool>,
+}
+
+static GITLEAKS_KEYWORDS: Lazy<GitleaksKeywordIndex> = Lazy::new(|| {
+    let rules = gitleaks_rules::rules();
+    let mut patterns = Vec::new();
+    let mut pattern_rule = Vec::new();
+    let mut always = vec![false; rules.len()];
+    for (idx, rule) in rules.iter().enumerate() {
+        if rule.keywords.is_empty() {
+            always[idx] = true;
         }
-    })
+        for keyword in rule.keywords {
+            patterns.push(*keyword);
+            pattern_rule.push(idx);
+        }
+    }
+    let automaton = AhoCorasick::builder()
+        .ascii_case_insensitive(true)
+        .build(&patterns)
+        .expect("gitleaks keywords build into an automaton");
+    GitleaksKeywordIndex {
+        automaton,
+        pattern_rule,
+        always,
+    }
+});
+
+/// The gitleaks rules worth running on `content`: those with a keyword in it
+/// (ASCII case-insensitive), in rule order. One pass over the content instead
+/// of one substring search per keyword.
+fn gitleaks_candidate_rules(content: &str) -> Vec<&'static GitleaksRule> {
+    let index = &*GITLEAKS_KEYWORDS;
+    let mut hits = index.always.clone();
+    // Overlapping search: keywords can be substrings of one another, and
+    // each rule must see its own.
+    for found in index.automaton.find_overlapping_iter(content) {
+        hits[index.pattern_rule[found.pattern().as_usize()]] = true;
+    }
+    gitleaks_rules::rules()
+        .iter()
+        .zip(hits)
+        .filter_map(|(rule, hit)| hit.then_some(rule))
+        .collect()
 }
 
 fn allowlist_regex_target<'a>(
@@ -1647,11 +1687,7 @@ fn scan_gitleaks_content<'a>(
         return Vec::new();
     }
     let mut out = Vec::new();
-    let lowercase_content = content.to_ascii_lowercase();
-    for r in gitleaks_rules::rules().iter() {
-        if !any_keyword_matches(&lowercase_content, r.keywords) {
-            continue;
-        }
+    for r in gitleaks_candidate_rules(content) {
         if let Some(path) = &r.path
             && !path.is_match(rel_path)
         {
@@ -1737,11 +1773,7 @@ pub fn redact_line_for_display(line: &str, cfg: &RuleEngineConfig) -> String {
         s = redacted.into_owned();
     }
     if cfg.secrets {
-        let lowercase_line = s.to_ascii_lowercase();
-        for r in gitleaks_rules::rules().iter() {
-            if !any_keyword_matches(&lowercase_line, r.keywords) {
-                continue;
-            }
+        for r in gitleaks_candidate_rules(&s) {
             s = r.re.replace_all(&s, "[REDACTED]").to_string();
         }
     }
@@ -2905,18 +2937,128 @@ jobs:
 
     #[test]
     fn gitleaks_keyword_filter_is_case_insensitive() {
-        assert!(any_keyword_matches(
-            &"token AKIA0123456789ABCDEF".to_ascii_lowercase(),
-            &["akia"]
-        ));
-        assert!(any_keyword_matches(
-            &"token AKIA0123456789ABCDEF".to_ascii_lowercase(),
-            &["AKIA"]
-        ));
-        assert!(!any_keyword_matches(
-            &"token without marker".to_ascii_lowercase(),
-            &["akia"]
-        ));
+        let is_candidate = |content: &str| {
+            gitleaks_candidate_rules(content)
+                .iter()
+                .any(|r| r.id == "secret.gitleaks.aws-access-token")
+        };
+        assert!(is_candidate("token AKIA0123456789ABCDEF"));
+        assert!(is_candidate("token akia0123456789abcdef"));
+        assert!(!is_candidate("token without marker"));
+    }
+
+    #[test]
+    fn gitleaks_word_boundary_is_ascii_like_upstream() {
+        // gitleaks patterns are written for Go's RE2, where `\b` is
+        // ASCII-only: kana and kanji next to a token are not word characters,
+        // so the token still starts and ends at a word boundary.
+        let cfg = RuleEngineConfig::default();
+        // not real credential: synthetic detector fixture value only
+        let key = ["AKIA", "Q7RT2MXB", "4NZP6WKD"].concat();
+        for content in [
+            format!("key {key} here"),
+            format!("キーは{key}です"),
+            format!("鍵{key}。"),
+        ] {
+            let m = scan_content(&content, "notes.md", &cfg);
+            assert!(
+                m.iter()
+                    .any(|x| x.rule_id == "secret.gitleaks.aws-access-token"),
+                "{content:?}: {m:?}"
+            );
+        }
+        // A full-width letter is not an ASCII word character either, so it
+        // does not extend the token into something the pattern rejects.
+        let m = scan_content(&format!("Ａ{key}Ｚ"), "notes.md", &cfg);
+        assert!(
+            m.iter()
+                .any(|x| x.rule_id == "secret.gitleaks.aws-access-token"),
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn gitleaks_generic_rules_keep_matching_around_non_ascii_text() {
+        // The generated patterns no longer use the Unicode word table; text
+        // that it let through between a service name and its value, and
+        // Unicode whitespace around the value, must keep matching.
+        let cfg = RuleEngineConfig::default();
+        // not real credential: synthetic detector fixture value only
+        let value = ["q7rt2mxb4nzp6wkd", "h3vy9cse5jfa8gu1"].concat();
+        for content in [
+            format!("adafruit_key = {value}"),
+            format!("adafruitのキー: {value}"),
+            format!("adafruit_clé = \"{value}\""),
+            format!("adafruit_key:\u{3000}{value}\u{3000}次の文"),
+            format!("adafruit_key = {value}\u{a0}"),
+        ] {
+            let m = scan_content(&content, "notes.md", &cfg);
+            assert!(
+                m.iter()
+                    .any(|x| x.rule_id == "secret.gitleaks.adafruit-api-key"),
+                "{content:?}: {m:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gitleaks_private_key_block_spans_unicode_whitespace() {
+        let cfg = RuleEngineConfig::default();
+        // not real key material: synthetic detector fixture value only
+        let body = "MIIBVgIBADANBgkqhkiG9w0BAQEFAASCAUAwggE8AgEAAkEAq7BFUpkGp3";
+        let content = [
+            "-----BEGIN PRIVATE",
+            " KEY-----\n",
+            body,
+            "\u{3000}\u{a0}\u{2028}",
+            body,
+            "\n",
+            "-----END PRIVATE",
+            " KEY-----\n",
+        ]
+        .concat();
+        let m = scan_content(&content, "notes.md", &cfg);
+        assert!(
+            m.iter().any(|x| x.rule_id == "secret.gitleaks.private-key"),
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn gitleaks_candidate_rules_agree_with_per_keyword_search() {
+        // Keywords that are substrings of other keywords, mixed case, and
+        // multibyte neighbours.
+        let every_keyword: String = gitleaks_rules::rules()
+            .iter()
+            .flat_map(|r| r.keywords.iter())
+            .map(|k| format!("{k}\n"))
+            .collect();
+        for content in [
+            "",
+            "plain text with nothing in it",
+            "日本語のSK と Ey と TEST_ と hooks.slack.com",
+            "curl -H 'Authorization: Bearer x' https://api.github.com ghp_ glpat-",
+            every_keyword.as_str(),
+            every_keyword.to_ascii_uppercase().as_str(),
+        ] {
+            let candidates: Vec<&str> = gitleaks_candidate_rules(content)
+                .iter()
+                .map(|r| r.id)
+                .collect();
+            let lowercase = content.to_ascii_lowercase();
+            let expected: Vec<&str> = gitleaks_rules::rules()
+                .iter()
+                .filter(|rule| {
+                    rule.keywords.is_empty()
+                        || rule
+                            .keywords
+                            .iter()
+                            .any(|k| lowercase.contains(&k.to_ascii_lowercase()))
+                })
+                .map(|r| r.id)
+                .collect();
+            assert_eq!(candidates, expected, "on {content:?}");
+        }
     }
 
     #[test]

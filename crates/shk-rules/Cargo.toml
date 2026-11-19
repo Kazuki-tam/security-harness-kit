@@ -8,5 +8,6 @@ description = "Built-in detection rules for shk"
 publish = false
 
 [dependencies]
+aho-corasick = "1.1"
 regex.workspace = true
 once_cell = "1.19"

@@ -4517,6 +4517,7 @@ dependencies = [
 name = "shk-rules"
 version = "0.7.7"
 dependencies = [
+ "aho-corasick",
  "once_cell",
  "regex",
 ]
