@@ -454,7 +454,7 @@ fn rule_expr(rule: &GitleaksTomlRule, skipped: &mut Vec<String>) -> Option<Strin
         skipped.push(format!("rule skipped without content regex: {}", rule.id));
         return None;
     };
-    let pattern = adapt_regex(pattern);
+    let pattern = adapt_content_regex(pattern);
     if let Some(reason) = validate_regex(&pattern) {
         skipped.push(format!("rule skipped ({reason}): {}", rule.id));
         return None;
@@ -596,6 +596,115 @@ fn has_backreference(pattern: &str) -> bool {
 fn adapt_regex(pattern: &str) -> String {
     let pattern = replace_unescaped(pattern, "{{", r"\{\{");
     replace_unescaped(&pattern, "}}", r"\}\}")
+}
+
+/// A rule's content regex: adapted, then made cheap to compile and match.
+///
+/// Only content regexes get [`rewrite_word_classes`]. It widens `\w`, which
+/// is safe where a match reports a finding but not in an allowlist or path
+/// regex, where a wider match would suppress one.
+fn adapt_content_regex(pattern: &str) -> String {
+    rewrite_word_classes(&adapt_regex(pattern))
+}
+
+/// ASCII word characters, as a class body.
+const ASCII_WORD: &str = "0-9A-Za-z_";
+/// Any non-ASCII character. Case folding is switched off because folding
+/// this one huge range is what makes a class containing it slow to compile.
+const NON_ASCII: &str = r"(?-i:[^\x00-\x7F])";
+
+/// Rewrite `\w` and `\b` so the generated patterns compile and match quickly.
+///
+/// Rust's `regex` makes `\w` Unicode-aware. The gitleaks patterns repeat it
+/// inside bounded repetitions (`[\w.-]{0,50}`), and the Unicode word table
+/// multiplied that way dominated scan time: roughly 20x the compile time and
+/// 10x the match time of the forms written here.
+///
+/// - `\w` becomes "an ASCII word character or any non-ASCII character". That
+///   is a superset of the Unicode class, so nothing that matched before stops
+///   matching, and it needs no Unicode table. Inside a bracket class the
+///   non-ASCII half moves into an alternation: `[\w.-]` becomes
+///   `(?:[0-9A-Za-z_.-]|(?-i:[^\x00-\x7F]))`.
+/// - `\b` becomes the ASCII word boundary, as in Go's RE2, which the
+///   patterns are written for. A token directly next to non-ASCII text (kana,
+///   kanji) then still starts and ends at a boundary.
+///
+/// `\d` and `\s` are small classes and stay Unicode-aware. `\w` inside a
+/// negated or nested class is left alone: widening it there would narrow the
+/// class.
+fn rewrite_word_classes(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len() + 32);
+    let mut chars = pattern.chars().peekable();
+    let mut class_depth = 0usize;
+    // State of the outermost open bracket class.
+    let mut class_start = 0usize;
+    let mut class_negated = false;
+    let mut class_has_word = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                let Some(escaped) = chars.next() else {
+                    out.push(c);
+                    break;
+                };
+                match (class_depth, escaped) {
+                    (0, 'w') => {
+                        out.push_str(&format!("(?:[{ASCII_WORD}]|{NON_ASCII})"));
+                    }
+                    (0, 'b') => out.push_str(r"(?-u:\b)"),
+                    (1, 'w') if !class_negated => {
+                        out.push_str(ASCII_WORD);
+                        class_has_word = true;
+                    }
+                    _ => {
+                        out.push(c);
+                        out.push(escaped);
+                    }
+                }
+            }
+            '[' if class_depth > 0 && chars.peek() == Some(&':') => {
+                // POSIX class such as `[:alnum:]`: copy through its `:]`.
+                out.push(c);
+                let mut previous = c;
+                for inner in chars.by_ref() {
+                    out.push(inner);
+                    if previous == ':' && inner == ']' {
+                        break;
+                    }
+                    previous = inner;
+                }
+            }
+            '[' => {
+                class_depth += 1;
+                let negated = chars.peek() == Some(&'^');
+                if class_depth == 1 {
+                    class_start = out.len();
+                    class_negated = negated;
+                    class_has_word = false;
+                }
+                out.push(c);
+                if negated {
+                    out.push('^');
+                    chars.next();
+                }
+                // A `]` right after the opening bracket is a literal.
+                if chars.peek() == Some(&']') {
+                    out.push(']');
+                    chars.next();
+                }
+            }
+            ']' if class_depth > 0 => {
+                class_depth -= 1;
+                out.push(c);
+                if class_depth == 0 && class_has_word {
+                    out.insert_str(class_start, "(?:");
+                    out.push_str(&format!("|{NON_ASCII})"));
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn replace_unescaped(input: &str, needle: &str, replacement: &str) -> String {
@@ -849,6 +958,87 @@ regex = '''demo-[a-z]+'''
 
         assert!(skipped.is_empty(), "{skipped:?}");
         assert!(generated.contains("use super::{"));
+    }
+
+    #[test]
+    fn rewrite_word_classes_rewrites_outside_and_inside_classes() {
+        assert_eq!(
+            rewrite_word_classes(r"\b\w+"),
+            r"(?-u:\b)(?:[0-9A-Za-z_]|(?-i:[^\x00-\x7F]))+"
+        );
+        assert_eq!(
+            rewrite_word_classes(r"[\w.-]{0,50}?x[ \t\w]"),
+            r"(?:[0-9A-Za-z_.-]|(?-i:[^\x00-\x7F])){0,50}?x(?:[ \t0-9A-Za-z_]|(?-i:[^\x00-\x7F]))"
+        );
+    }
+
+    #[test]
+    fn rewrite_word_classes_leaves_other_syntax_alone() {
+        // Escaped backslashes, `\d` / `\s`, negated forms, negated and nested
+        // classes, POSIX classes, literal brackets.
+        for pattern in [
+            r"\\w\\b",
+            r"\d\s[\d\s]",
+            r"\W\D\S\B[\s\S]",
+            r"[^\w-]",
+            r"[^]\w]",
+            r"[a[\w]]",
+            r"[[:alnum:]_]+",
+            r"[]\]]\[",
+            r"\x60\.\-",
+        ] {
+            assert_eq!(rewrite_word_classes(pattern), pattern);
+        }
+        assert_eq!(
+            rewrite_word_classes(r"[[:alpha:]\w][^\w]"),
+            r"(?:[[:alpha:]0-9A-Za-z_]|(?-i:[^\x00-\x7F]))[^\w]"
+        );
+    }
+
+    #[test]
+    fn rewritten_word_class_matches_everything_the_unicode_class_did() {
+        for pattern in [r"^\w+$", r"^[\w.-]+$", r"(?i)^[\w.-]{1,}$"] {
+            let before = Regex::new(pattern).unwrap();
+            let after = Regex::new(&rewrite_word_classes(pattern)).unwrap();
+            // ASCII, kana, kanji, full-width letters and digits, accents.
+            for text in ["ab_1", "キー", "鍵", "ｂ１", "éßK", "aのb"] {
+                assert!(before.is_match(text), "{pattern} {text}");
+                assert!(after.is_match(text), "{pattern} {text}");
+            }
+            for text in ["a b", "a=b", "a\tb"] {
+                assert!(!before.is_match(text), "{pattern} {text:?}");
+                assert!(!after.is_match(text), "{pattern} {text:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn rewritten_word_boundary_is_ascii() {
+        let before = Regex::new(r"\bAB12\b").unwrap();
+        let after = Regex::new(&rewrite_word_classes(r"\bAB12\b")).unwrap();
+        assert!(before.is_match("x AB12 y") && after.is_match("x AB12 y"));
+        assert!(!before.is_match("xAB12") && !after.is_match("xAB12"));
+        // Kana on both sides: a word character to Unicode, not to ASCII.
+        assert!(!before.is_match("はAB12です"));
+        assert!(after.is_match("はAB12です"));
+    }
+
+    #[test]
+    fn generate_rewrites_content_regexes_but_not_allowlist_or_path_regexes() {
+        let input = r#"
+[[rules]]
+id = "demo-token"
+regex = '''demo-\w+'''
+path = '''\w+\.env'''
+[[rules.allowlists]]
+regexes = ['''^\$\w+$''']
+"#;
+        let (generated, skipped) = generate(input, "test", "test-ref").expect("generate rules");
+
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert!(generated.contains(r"demo-(?:[0-9A-Za-z_]|"), "{generated}");
+        assert!(generated.contains(r"\w+\.env"), "{generated}");
+        assert!(generated.contains(r"^\$\w+$"), "{generated}");
     }
 
     #[test]
