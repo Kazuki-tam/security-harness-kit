@@ -506,9 +506,11 @@ pub fn hook_body_from_stdin(
     // Text written to a file that was read is scanned under that file's path,
     // like the file itself.
     for (text, target) in writes.texts.iter().zip(&text_targets) {
-        // A body sent with its NUL bytes is the file again once it is read
-        // the way the file was.
-        let is_file_body = text.text.contains('\0')
+        // The body Cursor read, sent with its NUL bytes, is the file again
+        // once it is read the way the file was. Only for that read: what a
+        // write tool sends is new text, scanned as sent.
+        let is_file_body = is_cursor_file_read(tool, v)
+            && text.text.contains('\0')
             && target
                 .is_some_and(|index| decode_file_text(text.text.as_bytes()) == files[index].text);
         if is_file_body {
@@ -1142,32 +1144,46 @@ fn decode_file_text(bytes: &[u8]) -> String {
 
 /// `bytes` without their NUL bytes, and how many of those separated data.
 ///
-/// A NUL between two other bytes, with another NUL two bytes before or after
-/// it, is the empty half of a UTF-16 code unit (`k\0e\0y\0`): it is dropped,
-/// which turns UTF-16 without a byte order mark back into its ASCII.
+/// A lone NUL, or a run of exactly three, with a run of the same length one
+/// code unit before or after it is the empty part of a UTF-16 or UTF-32 code
+/// unit (`k\0e\0y\0`): it is dropped, which turns such text without a byte
+/// order mark back into its ASCII.
 ///
-/// Any other NUL separates what is around it: values (`/proc/<pid>/environ`,
-/// `find -print0` output), C strings, padding. Each run of them becomes one
-/// line break, so one value is not joined to the next, which would hide it
-/// from a rule that needs a word boundary. A run in front of everything else
-/// separates nothing and is dropped.
+/// Any other run of NULs separates what is around it: values
+/// (`/proc/<pid>/environ`, `find -print0` output), C strings, padding. It
+/// becomes one line break, so one value is not joined to the next, which
+/// would hide it from a rule that needs a word boundary. A run in front of
+/// everything else or next to a line break separates nothing more and is
+/// dropped, which keeps the line numbers of NUL-terminated lines.
 fn resolve_nul_bytes(bytes: &[u8]) -> (Vec<u8>, usize) {
-    let is_nul = |index: Option<usize>| index.and_then(|index| bytes.get(index)) == Some(&0);
+    let nul_run = |start: Option<usize>, len: usize| {
+        start
+            .and_then(|start| bytes.get(start..start + len))
+            .is_some_and(|run| run.iter().all(|byte| *byte == 0))
+    };
     let mut out = Vec::with_capacity(bytes.len());
     let mut separators = 0;
-    for (index, byte) in bytes.iter().enumerate() {
+    let mut index = 0;
+    while let Some(byte) = bytes.get(index) {
         if *byte != 0 {
             out.push(*byte);
+            index += 1;
             continue;
         }
-        let alone = !is_nul(index.checked_sub(1)) && !is_nul(Some(index + 1));
-        if alone && (is_nul(index.checked_sub(2)) || is_nul(Some(index + 2))) {
-            continue;
+        let len = bytes[index..].iter().take_while(|byte| **byte == 0).count();
+        let end = index + len;
+        let unit = len + 1;
+        let in_code_units = matches!(len, 1 | 3)
+            && (nul_run(index.checked_sub(unit), len) || nul_run(Some(index + unit), len));
+        if !in_code_units {
+            separators += len;
+            let at_line_break = matches!(bytes.get(end), Some(b'\n' | b'\r'))
+                || out.last().is_none_or(|last| *last == b'\n');
+            if !at_line_break {
+                out.push(b'\n');
+            }
         }
-        separators += 1;
-        if out.last().is_some_and(|last| *last != b'\n') {
-            out.push(b'\n');
-        }
+        index = end;
     }
     (out, separators)
 }
@@ -3513,6 +3529,16 @@ mod tests {
             decode_file_text(b"\0\0\0\0FIRST=one\0\0\0\0\0\0\0\0SECOND=two\0\0\0\0\0\0\0\0"),
             "FIRST=one\nSECOND=two\n"
         );
+        // A NUL that ends a line adds none.
+        assert_eq!(
+            decode_file_text(b"one\0\ntwo\0\r\nthree"),
+            "one\ntwo\r\nthree"
+        );
+        // UTF-32 without a byte order mark, either byte order.
+        for unit in [u32::to_le_bytes, u32::to_be_bytes] {
+            let utf32: Vec<u8> = "key = value".chars().flat_map(|c| unit(c as u32)).collect();
+            assert_eq!(decode_file_text(&utf32), "key = value");
+        }
         // UTF-16 inside other text is put back together, either byte order.
         assert_eq!(
             decode_file_text(b"name: k\0e\0y\0=\0v\0\nnext: \0k\0e\0y\n"),
@@ -3581,6 +3607,22 @@ mod tests {
             panic!("{} segments", hook.segments.len());
         };
         assert!(segment.text.ends_with("A=1\nB=2\n"));
+    }
+
+    #[test]
+    fn written_text_with_nul_bytes_is_scanned_as_sent() {
+        let repo = tempdir().expect("temp repo");
+        std::fs::write(repo.path().join("app.txt"), b"A=1\0B=2\n").expect("write");
+        let stdin = serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": { "file_path": "app.txt", "content": "A=1\0B=2\n" }
+        });
+
+        let (_display, body) = pre_body(AiHookTool::ClaudeCode, repo.path(), &stdin);
+
+        // Once in the file as read, once as the text being written.
+        assert!(body.contains("A=1\nB=2\n"), "{body:?}");
+        assert!(body.contains("A=1\0B=2\n"), "{body:?}");
     }
 
     #[test]
