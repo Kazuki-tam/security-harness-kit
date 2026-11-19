@@ -252,13 +252,30 @@ fn strip_line_decoration(line: &str) -> &str {
     }
 }
 
+/// Hand-tuned rules.
+///
+/// Word boundaries are written out instead of using a bare `\b`, because
+/// Rust's `\b` is Unicode-aware: kana, kanji and full-width letters count as
+/// word characters, so `キーはAKIA…です` has no boundary on either side of the
+/// token and a bare `\b` misses it.
+///
+/// - `(?-u:\b)` (ASCII boundary) where the neighbouring pattern element
+///   only matches ASCII, such as a token prefix or an `[A-Za-z0-9]` class.
+///   Japanese text next to the value then behaves like whitespace.
+/// - `(?:\b|(?-u:\b))` (either boundary) where the neighbouring element is
+///   `\d`, which also matches full-width digits. The ASCII boundary alone
+///   would stop matching `４１１１…` followed by a space, and the Unicode
+///   boundary alone misses ASCII digits followed by `です`.
+///
+/// Rules whose edge is a Japanese label or a literal such as `〒` carry no
+/// boundary on that side.
 static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
     vec![
         CompiledRule {
             id: "secret.openai_api_key",
             severity: Severity::High,
             kind: Kind::Secret,
-            re: Regex::new(r"(?i)\bsk-(?:proj-)?[a-zA-Z0-9_-]{20,}\b")
+            re: Regex::new(r"(?i)(?-u:\b)sk-(?:proj-)?[a-zA-Z0-9_-]{20,}(?-u:\b)")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible OpenAI API key detected",
             confidence: 0.9,
@@ -268,7 +285,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "secret.aws_access_key",
             severity: Severity::High,
             kind: Kind::Secret,
-            re: Regex::new(r"(?m)\b(AKIA|ASIA)[0-9A-Z]{16}\b")
+            re: Regex::new(r"(?m)(?-u:\b)(AKIA|ASIA)[0-9A-Z]{16}(?-u:\b)")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible AWS access key id",
             confidence: 0.88,
@@ -278,7 +295,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "secret.anthropic_api_key",
             severity: Severity::High,
             kind: Kind::Secret,
-            re: Regex::new(r"\bsk-ant-[a-zA-Z0-9_-]{20,}\b")
+            re: Regex::new(r"(?-u:\b)sk-ant-[a-zA-Z0-9_-]{20,}(?-u:\b)")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible Anthropic API key detected",
             confidence: 0.9,
@@ -288,7 +305,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "secret.google_api_key",
             severity: Severity::High,
             kind: Kind::Secret,
-            re: Regex::new(r"\bAIza[a-zA-Z0-9_-]{30,}\b")
+            re: Regex::new(r"(?-u:\b)AIza[a-zA-Z0-9_-]{30,}(?-u:\b)")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible Google API key detected",
             confidence: 0.9,
@@ -298,7 +315,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "secret.github_token",
             severity: Severity::High,
             kind: Kind::Secret,
-            re: Regex::new(r"\bgh[ps]_[a-zA-Z0-9]{30,}\b")
+            re: Regex::new(r"(?-u:\b)gh[ps]_[a-zA-Z0-9]{30,}(?-u:\b)")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible GitHub token detected",
             confidence: 0.9,
@@ -308,7 +325,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "secret.slack_token",
             severity: Severity::High,
             kind: Kind::Secret,
-            re: Regex::new(r"\bxox[bprs]-[a-zA-Z0-9-]{20,}\b")
+            re: Regex::new(r"(?-u:\b)xox[bprs]-[a-zA-Z0-9-]{20,}(?-u:\b)")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible Slack token detected",
             confidence: 0.9,
@@ -318,7 +335,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "secret.stripe_api_key",
             severity: Severity::High,
             kind: Kind::Secret,
-            re: Regex::new(r"\b[rs]k_(?:live|test)_[a-zA-Z0-9]{20,}\b")
+            re: Regex::new(r"(?-u:\b)[rs]k_(?:live|test)_[a-zA-Z0-9]{20,}(?-u:\b)")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible Stripe API key detected",
             confidence: 0.9,
@@ -328,7 +345,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "secret.huggingface_token",
             severity: Severity::High,
             kind: Kind::Secret,
-            re: Regex::new(r"\bhf_[A-Za-z0-9]{34,}\b")
+            re: Regex::new(r"(?-u:\b)hf_[A-Za-z0-9]{34,}(?-u:\b)")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible Hugging Face token detected",
             confidence: 0.9,
@@ -339,7 +356,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             severity: Severity::High,
             kind: Kind::Secret,
             re: Regex::new(
-                r#"(?i)\btwilio[_-]?auth[_-]?token\s*[=:]\s*['"]?[0-9a-f]{32}\b"#,
+                r#"(?i)(?-u:\b)twilio[_-]?auth[_-]?token\s*[=:]\s*['"]?[0-9a-f]{32}(?-u:\b)"#,
             )
             .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible Twilio auth token detected",
@@ -350,7 +367,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "secret.sendgrid_api_key",
             severity: Severity::High,
             kind: Kind::Secret,
-            re: Regex::new(r"\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b")
+            re: Regex::new(r"(?-u:\b)SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}(?-u:\b)")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible SendGrid API key detected",
             confidence: 0.9,
@@ -360,7 +377,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "secret.shopify_token",
             severity: Severity::High,
             kind: Kind::Secret,
-            re: Regex::new(r"\bshp(?:at|ca|ss|ua)_[a-fA-F0-9]{32}\b")
+            re: Regex::new(r"(?-u:\b)shp(?:at|ca|ss|ua)_[a-fA-F0-9]{32}(?-u:\b)")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible Shopify token detected",
             confidence: 0.9,
@@ -371,7 +388,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             severity: Severity::High,
             kind: Kind::Secret,
             re: Regex::new(
-                r#"(?i)\b(?:supabase[_-]?)?service[_-]?role(?:[_-]?key)?\s*[=:]\s*['"]?eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"#,
+                r#"(?i)(?-u:\b)(?:supabase[_-]?)?service[_-]?role(?:[_-]?key)?\s*[=:]\s*['"]?eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}(?-u:\b)"#,
             )
             .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible Supabase service role key detected",
@@ -383,7 +400,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             severity: Severity::High,
             kind: Kind::Secret,
             re: Regex::new(
-                r#"(?i)\bvercel(?:[_-]?(?:api[_-]?)?token|[_-]?auth[_-]?token)\s*[=:]\s*['"]?[A-Za-z0-9_-]{24,}\b"#,
+                r#"(?i)(?-u:\b)vercel(?:[_-]?(?:api[_-]?)?token|[_-]?auth[_-]?token)\s*[=:]\s*['"]?[A-Za-z0-9_-]{24,}(?-u:\b)"#,
             )
             .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible Vercel token detected",
@@ -394,7 +411,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "secret.npm_token",
             severity: Severity::High,
             kind: Kind::Secret,
-            re: Regex::new(r"\bnpm_[A-Za-z0-9]{36}\b")
+            re: Regex::new(r"(?-u:\b)npm_[A-Za-z0-9]{36}(?-u:\b)")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible npm token detected",
             confidence: 0.9,
@@ -404,7 +421,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "secret.gitlab_pat",
             severity: Severity::High,
             kind: Kind::Secret,
-            re: Regex::new(r"\bglpat-[A-Za-z0-9_-]{20,}\b")
+            re: Regex::new(r"(?-u:\b)glpat-[A-Za-z0-9_-]{20,}(?-u:\b)")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible GitLab personal access token detected",
             confidence: 0.9,
@@ -425,7 +442,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             severity: Severity::High,
             kind: Kind::Secret,
             re: Regex::new(
-                r#"(?i)\bcloudflare[_-]?(?:api[_-]?)?token\s*[=:]\s*['"]?[A-Za-z0-9_-]{30,}\b"#,
+                r#"(?i)(?-u:\b)cloudflare[_-]?(?:api[_-]?)?token\s*[=:]\s*['"]?[A-Za-z0-9_-]{30,}(?-u:\b)"#,
             )
             .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible Cloudflare API token detected",
@@ -437,7 +454,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             severity: Severity::High,
             kind: Kind::Secret,
             re: Regex::new(
-                r#"(?i)\bnotion(?:[_-]?(?:integration[_-]?)?token|[_-]?secret)\s*[=:]\s*['"]?secret_[A-Za-z0-9]{43}\b"#,
+                r#"(?i)(?-u:\b)notion(?:[_-]?(?:integration[_-]?)?token|[_-]?secret)\s*[=:]\s*['"]?secret_[A-Za-z0-9]{43}(?-u:\b)"#,
             )
             .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible Notion integration token detected",
@@ -448,7 +465,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "secret.linear_api_key",
             severity: Severity::High,
             kind: Kind::Secret,
-            re: Regex::new(r"\blin_api_[A-Za-z0-9]{40,}\b")
+            re: Regex::new(r"(?-u:\b)lin_api_[A-Za-z0-9]{40,}(?-u:\b)")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible Linear API key detected",
             confidence: 0.9,
@@ -459,7 +476,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             severity: Severity::High,
             kind: Kind::Secret,
             re: Regex::new(
-                r#"(?i)\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|rediss?)://[^@\s"']+@[^\s"'<>]+"#,
+                r#"(?i)(?-u:\b)(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|rediss?)://[^@\s"']+@[^\s"'<>]+"#,
             )
             .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible database connection URL detected",
@@ -470,7 +487,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "secret.jwt",
             severity: Severity::Medium,
             kind: Kind::Secret,
-            re: Regex::new(r"\beyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\b")
+            re: Regex::new(r"(?-u:\b)eyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}(?-u:\b)")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible JWT detected",
             confidence: 0.75,
@@ -480,7 +497,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "secret.bearer_token",
             severity: Severity::Medium,
             kind: Kind::Secret,
-            re: Regex::new(r"(?i)\bBearer\s+[a-zA-Z0-9._~+/=-]{20,}\b")
+            re: Regex::new(r"(?i)(?-u:\b)Bearer\s+[a-zA-Z0-9._~+/=-]{20,}(?-u:\b)")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible bearer token detected",
             confidence: 0.7,
@@ -490,7 +507,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "secret.dotenvx_private_key",
             severity: Severity::High,
             kind: Kind::Secret,
-            re: Regex::new(r##"(?m)\bDOTENV_PRIVATE_KEY(?:_[A-Z0-9_]+)?\s*=\s*['"]?[^\s'"#]+"##)
+            re: Regex::new(r##"(?m)(?-u:\b)DOTENV_PRIVATE_KEY(?:_[A-Z0-9_]+)?\s*=\s*['"]?[^\s'"#]+"##)
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "dotenvx private key detected",
             confidence: 0.95,
@@ -501,7 +518,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             severity: Severity::Medium,
             kind: Kind::Secret,
             re: Regex::new(
-                r#"(?i)(api[_-]?key|apikey|secret[_-]?key)\s*[=:]\s*['"]?([a-zA-Z0-9_-]{16,})['"]?\b"#,
+                r#"(?i)(api[_-]?key|apikey|secret[_-]?key)\s*[=:]\s*['"]?([a-zA-Z0-9_-]{16,})['"]?(?-u:\b)"#,
             )
             .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible API key assignment",
@@ -548,7 +565,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             // widths, word-bounded so identifiers like `email_template` do not
             // match) on the same line as a real email or a delimited phone.
             re: Regex::new(
-                r"\b(?:email|phone|name)_[a-z2-7]{13,26}\b[^\n]{0,240}?(?:[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}|\+[1-9][0-9]{7,14}\b|0[0-9]{1,4}-[0-9]{1,4}-[0-9]{4}\b)|(?:[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}|\+[1-9][0-9]{7,14}\b|0[0-9]{1,4}-[0-9]{1,4}-[0-9]{4}\b)[^\n]{0,240}?\b(?:email|phone|name)_[a-z2-7]{13,26}\b",
+                r"(?-u:\b)(?:email|phone|name)_[a-z2-7]{13,26}(?-u:\b)[^\n]{0,240}?(?:[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}|\+[1-9][0-9]{7,14}(?-u:\b)|0[0-9]{1,4}-[0-9]{1,4}-[0-9]{4}(?-u:\b))|(?:[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}|\+[1-9][0-9]{7,14}(?-u:\b)|0[0-9]{1,4}-[0-9]{1,4}-[0-9]{4}(?-u:\b))[^\n]{0,240}?(?-u:\b)(?:email|phone|name)_[a-z2-7]{13,26}(?-u:\b)",
             )
             .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Possible plaintext restore map (token plus original value)",
@@ -561,7 +578,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             kind: Kind::Pii,
             // Ends on a digit so the matched text (and thus allowlist value
             // hashes) never carries a trailing separator.
-            re: Regex::new(r"\b\d(?:[ -]?\d){12,18}\b")
+            re: Regex::new(r"(?:\b|(?-u:\b))\d(?:[ -]?\d){12,18}(?:\b|(?-u:\b))")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Credit card number pattern detected",
             confidence: 0.9,
@@ -572,7 +589,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             severity: Severity::Low,
             kind: Kind::Pii,
             re: Regex::new(
-                r"\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b",
+                r"(?:\b|(?-u:\b))(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\b|(?-u:\b))",
             )
             .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "IPv4 address detected",
@@ -583,7 +600,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "pii.ipv6",
             severity: Severity::Low,
             kind: Kind::Pii,
-            re: Regex::new(r"\b(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b")
+            re: Regex::new(r"(?-u:\b)(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}(?-u:\b)")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "IPv6 address detected",
             confidence: 0.6,
@@ -593,7 +610,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "pii.en.phone",
             severity: Severity::Medium,
             kind: Kind::Pii,
-            re: Regex::new(r"(?:\+1[-.\s]?)?(?:\(\d{3}\)|\d{3})[-.\s]\d{3}[-.\s]\d{4}\b")
+            re: Regex::new(r"(?:\+1[-.\s]?)?(?:\(\d{3}\)|\d{3})[-.\s]\d{3}[-.\s]\d{4}(?:\b|(?-u:\b))")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "US/international phone number pattern detected",
             confidence: 0.75,
@@ -603,7 +620,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "pii.en.ein",
             severity: Severity::Low,
             kind: Kind::Pii,
-            re: Regex::new(r"(?i)\b(?:ein|employer identification number)\s*[:#]?\s*\d{2}-\d{7}\b")
+            re: Regex::new(r"(?i)(?-u:\b)(?:ein|employer identification number)\s*[:#]?\s*\d{2}-\d{7}(?:\b|(?-u:\b))")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "US EIN pattern detected",
             confidence: 0.7,
@@ -613,7 +630,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "pii.en.postal_code",
             severity: Severity::Low,
             kind: Kind::Pii,
-            re: Regex::new(r"(?i)\b(?:zip|postal(?: code)?)\s*[:#]?\s*\d{5}(?:-\d{4})?\b")
+            re: Regex::new(r"(?i)(?-u:\b)(?:zip|postal(?: code)?)\s*[:#]?\s*\d{5}(?:-\d{4})?(?:\b|(?-u:\b))")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "US ZIP/postal code pattern detected",
             confidence: 0.6,
@@ -623,7 +640,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "pii.en.passport",
             severity: Severity::Low,
             kind: Kind::Pii,
-            re: Regex::new(r"(?i)\bpassport(?:\s+(?:no|number))?\s*[:#]?\s*[A-Z0-9]{9}\b")
+            re: Regex::new(r"(?i)(?-u:\b)passport(?:\s+(?:no|number))?\s*[:#]?\s*[A-Z0-9]{9}(?-u:\b)")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "US passport number pattern detected",
             confidence: 0.65,
@@ -637,7 +654,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             // one line; otherwise structural config keys like `- name: build` in
             // YAML/CI files produce false positives.
             re: Regex::new(
-                r"\b(?i:name|full name|author|by)[ \t]*[:#][ \t]*[A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){1,3}\b",
+                r"(?-u:\b)(?i:name|full name|author|by)[ \t]*[:#][ \t]*[A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){1,3}(?-u:\b)",
             )
             .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "English personal name label detected",
@@ -649,7 +666,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             severity: Severity::Info,
             kind: Kind::Pii,
             re: Regex::new(
-                r"\b(?i:address|street address|mailing address)[ \t]*[:#][ \t]*\d{1,6}[ \t]+[A-Z][A-Za-z0-9.'-]*(?:[ \t]+[A-Z][A-Za-z0-9.'-]*){0,5}[ \t]+(?i:street|st|avenue|ave|road|rd|drive|dr|lane|ln|boulevard|blvd|court|ct|way)\b",
+                r"(?-u:\b)(?i:address|street address|mailing address)[ \t]*[:#][ \t]*\d{1,6}[ \t]+[A-Z][A-Za-z0-9.'-]*(?:[ \t]+[A-Z][A-Za-z0-9.'-]*){0,5}[ \t]+(?i:street|st|avenue|ave|road|rd|drive|dr|lane|ln|boulevard|blvd|court|ct|way)(?-u:\b)",
             )
             .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "English street address label detected",
@@ -661,7 +678,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             severity: Severity::Medium,
             kind: Kind::Pii,
             re: Regex::new(
-                r"(?i)\b(?:ssn|social security(?: number)?|social security no\.?)\s*[:#]?\s*\d{3}-\d{2}-\d{4}\b",
+                r"(?i)(?-u:\b)(?:ssn|social security(?: number)?|social security no\.?)\s*[:#]?\s*\d{3}-\d{2}-\d{4}(?:\b|(?-u:\b))",
             )
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "US SSN pattern detected",
@@ -688,7 +705,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             id: "pii.ja.postal_code",
             severity: Severity::Medium,
             kind: Kind::Pii,
-            re: Regex::new(r"(?i)(?:〒\d{3}-\d{4}\b|(?:郵便番号|郵便|postal(?: code)?)\s*[:：]?\s*\d{3}-\d{4}\b)")
+            re: Regex::new(r"(?i)(?:〒\d{3}-\d{4}(?:\b|(?-u:\b))|(?:郵便番号|郵便|postal(?: code)?)\s*[:：]?\s*\d{3}-\d{4}(?:\b|(?-u:\b)))")
                 .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Japanese postal code pattern detected",
             confidence: 0.8,
@@ -699,7 +716,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             severity: Severity::Medium,
             kind: Kind::Pii,
             re: Regex::new(
-                r"(?i)(?:旅券番号|パスポート(?:番号|ナンバー)?|passport(?:\s+(?:no|number))?)\s*[:：#]?\s*[A-Z]{2}\d{7}\b",
+                r"(?i)(?:旅券番号|パスポート(?:番号|ナンバー)?|passport(?:\s+(?:no|number))?)\s*[:：#]?\s*[A-Z]{2}\d{7}(?:\b|(?-u:\b))",
             )
             .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Japanese passport number pattern detected",
@@ -741,7 +758,7 @@ static RULES: Lazy<Vec<CompiledRule>> = Lazy::new(|| {
             severity: Severity::Low,
             kind: Kind::Pii,
             re: Regex::new(
-                r"(?:銀行|金融機関|支店|口座番号|口座)\s*[:：]?\s*[^\n]{0,40}\d{7}\b",
+                r"(?:銀行|金融機関|支店|口座番号|口座)\s*[:：]?\s*[^\n]{0,40}\d{7}(?:\b|(?-u:\b))",
             )
             .unwrap_or_else(|_| Regex::new("^$").unwrap()),
             message: "Japanese bank account pattern detected",
@@ -2558,6 +2575,436 @@ secret_key = "0123456789abcdef0123456789abcdef""#;
         assert_eq!(phone, "電話[REDACTED]です");
     }
 
+    fn rule_hits(text: &str, rule_id: &str) -> Vec<String> {
+        let cfg = RuleEngineConfig::default();
+        scan_content(text, "notes.md", &cfg)
+            .into_iter()
+            .filter(|x| x.rule_id == rule_id)
+            .map(|x| x.matched_text)
+            .collect()
+    }
+
+    #[test]
+    fn aws_access_key_between_kana_is_detected_and_redacted() {
+        // not real credential: synthetic detector fixture value only
+        let key = ["AKIA", "QRSTUVWX", "23456789"].concat();
+        let line = format!("キーは{key}です");
+        assert_eq!(rule_hits(&line, "secret.aws_access_key"), vec![key.clone()]);
+
+        let cfg = RuleEngineConfig::default();
+        let shown = redact_line_for_display(&line, &cfg);
+        assert_eq!(shown, "キーは[REDACTED]です");
+    }
+
+    /// Text that touches a value with no space: kana, kanji, full-width
+    /// letters and digits (all Unicode word characters), and full-width
+    /// punctuation (never a word character).
+    const JAPANESE_WRAPPERS: [(&str, &str); 5] = [
+        ("キーは", "です"),
+        ("鍵", "漏洩"),
+        ("ＡＢ", "１２"),
+        ("「", "」"),
+        ("：", "、"),
+    ];
+
+    #[test]
+    fn secret_tokens_touching_japanese_text_are_detected() {
+        // not real credentials: synthetic detector fixture values only
+        let samples = [
+            (
+                "secret.openai_api_key",
+                ["sk-", "proj-", "abcdefghijklmnopqrstuvwxyz0123456789"].concat(),
+            ),
+            (
+                "secret.aws_access_key",
+                ["ASIA", "QRSTUVWX", "23456789"].concat(),
+            ),
+            (
+                "secret.anthropic_api_key",
+                ["sk-", "ant-", "api03AbcdefghijKLMNOPqrstu"].concat(),
+            ),
+            (
+                "secret.google_api_key",
+                ["AI", "za", "SyAbcdefghijklmnopqrstuvwxyz0123456"].concat(),
+            ),
+            (
+                "secret.github_token",
+                ["gh", "p_", "abcdefghijklmnopqrstuvwxyzABCDEF0123"].concat(),
+            ),
+            (
+                "secret.slack_token",
+                ["xo", "xb-", "123456789012-abcdefghijklmnop"].concat(),
+            ),
+            (
+                "secret.stripe_api_key",
+                ["sk", "_live_", "abcdefghijklmnopqrstuvwx"].concat(),
+            ),
+            (
+                "secret.huggingface_token",
+                ["hf_", "abcdefghijklmnopqrstuvwxyzABCDEFGH123456"].concat(),
+            ),
+            (
+                "secret.twilio_auth_token",
+                ["TWILIO_AUTH_TOKEN=", "0123456789abcdef", "0123456789abcdef"].concat(),
+            ),
+            (
+                "secret.sendgrid_api_key",
+                [
+                    "SG.",
+                    "abcdefghijklmnopQRSTUV",
+                    ".abcdefghijklmnopqrstuvwxyz0123456789",
+                ]
+                .concat(),
+            ),
+            (
+                "secret.shopify_token",
+                ["sh", "pat_", "0123456789abcdef", "0123456789abcdef"].concat(),
+            ),
+            (
+                "secret.supabase_service_role_key",
+                [
+                    "SERVICE_ROLE_KEY=",
+                    "eyJabcdefghijklmnopqrstuvwxyz",
+                    ".ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+                    ".abcdefghijklmnopqrstuvwxyz0123456789",
+                ]
+                .concat(),
+            ),
+            (
+                "secret.vercel_token",
+                ["VERCEL_TOKEN=", "vercelSyntheticToken", "0123456789"].concat(),
+            ),
+            (
+                "secret.npm_token",
+                ["npm_", "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ"].concat(),
+            ),
+            (
+                "secret.gitlab_pat",
+                ["glpat-", "abcdefghijklmnopQRSTUV012345"].concat(),
+            ),
+            (
+                "secret.cloudflare_api_token",
+                [
+                    "CLOUDFLARE_API_TOKEN=",
+                    "cloudflareSyntheticToken",
+                    "0123456789AB",
+                ]
+                .concat(),
+            ),
+            (
+                "secret.notion_integration_token",
+                [
+                    "NOTION_TOKEN=",
+                    "sec",
+                    "ret_",
+                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO12",
+                ]
+                .concat(),
+            ),
+            (
+                "secret.linear_api_key",
+                ["lin", "_api_", "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN"].concat(),
+            ),
+            (
+                "secret.jwt",
+                [
+                    "eyJ",
+                    "abcdefghijklmnopqrstuvwxyz",
+                    ".ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+                    ".abcdefghijklmnopqrstuvwxyz0123456789",
+                ]
+                .concat(),
+            ),
+            (
+                "secret.bearer_token",
+                ["Bearer ", "abcdefghijklmnop", "QRSTUVWX01234567"].concat(),
+            ),
+            (
+                "secret.generic_api_key",
+                ["api_key=", "Ab3dEf7hIj1kLm5n", "Op9qRs2t"].concat(),
+            ),
+        ];
+        let cfg = RuleEngineConfig::default();
+        for (id, sample) in &samples {
+            for (before, after) in JAPANESE_WRAPPERS {
+                let line = format!("{before}{sample}{after}");
+                assert_eq!(
+                    rule_hits(&line, id),
+                    vec![sample.clone()],
+                    "{id} in {before}…{after}"
+                );
+                let shown = redact_line_for_display(&line, &cfg);
+                let value = sample.rsplit(['=', ' ']).next().unwrap_or(sample);
+                assert!(!shown.contains(value), "{id} left in context line: {shown}");
+            }
+        }
+    }
+
+    #[test]
+    fn secret_rules_with_open_ended_values_start_after_japanese_text() {
+        // These two patterns end on "anything but whitespace or a quote", so
+        // only the leading boundary is in play.
+        // not real credentials: synthetic detector fixture values only
+        let url = [
+            "postgres",
+            "://",
+            "app:",
+            "pw4Synthetic",
+            "@",
+            "db.internal/app",
+        ]
+        .concat();
+        for before in ["接続先は", "鍵", "：", "ＡＢ"] {
+            let hits = rule_hits(&format!("{before}{url}"), "secret.database_url");
+            assert_eq!(hits, vec![url.clone()], "{before}");
+        }
+        let assignment = ["DOTENV_", "PRIVATE_KEY", "=", "dotenvx-secret-demo-value"].concat();
+        for before in ["設定は", "鍵", "：", "ＡＢ"] {
+            let hits = rule_hits(
+                &format!("{before}{assignment}"),
+                "secret.dotenvx_private_key",
+            );
+            assert_eq!(hits, vec![assignment.clone()], "{before}");
+        }
+    }
+
+    #[test]
+    fn secret_token_boundaries_still_reject_ascii_word_neighbours() {
+        // not real credentials: synthetic detector fixture values only
+        let aws = ["AKIA", "QRSTUVWX", "23456789"].concat();
+        for line in [
+            format!("x{aws}"),
+            format!("_{aws}"),
+            format!("9{aws}"),
+            format!("{aws}Z"),
+            format!("{aws}_suffix"),
+            format!("キーはx{aws}です"),
+            format!("キーは{aws}0です"),
+        ] {
+            assert!(
+                rule_hits(&line, "secret.aws_access_key").is_empty(),
+                "{line}"
+            );
+        }
+        let github = ["gh", "p_", "abcdefghijklmnopqrstuvwxyzABCDEF0123"].concat();
+        for line in [format!("my{github}"), format!("キーはmy{github}です")] {
+            assert!(rule_hits(&line, "secret.github_token").is_empty(), "{line}");
+        }
+        let npm = ["npm_", "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ"].concat();
+        for line in [format!("{npm}K"), format!("キーは{npm}Kです")] {
+            assert!(rule_hits(&line, "secret.npm_token").is_empty(), "{line}");
+        }
+    }
+
+    #[test]
+    fn pii_values_touching_japanese_text_are_detected() {
+        // not real personal data: synthetic detector fixture values only
+        let token = ["email_", "abcdefghijklm"].concat();
+        let map_line = format!("対応表{token}は090-1234-5678です");
+        let cases: [(&str, &str, &str); 17] = [
+            (
+                "pii.credit_card",
+                "カード番号は4111111111111111です",
+                "4111111111111111",
+            ),
+            (
+                "pii.credit_card",
+                "カード4111 1111 1111 1111まで",
+                "4111 1111 1111 1111",
+            ),
+            ("pii.ipv4", "サーバー192.168.10.5に接続", "192.168.10.5"),
+            (
+                "pii.ipv6",
+                "宛先2001:db8:0:0:0:0:0:1へ",
+                "2001:db8:0:0:0:0:0:1",
+            ),
+            ("pii.en.phone", "電話は415-555-0123です", "415-555-0123"),
+            ("pii.en.ein", "番号EIN: 12-3456789です", "EIN: 12-3456789"),
+            ("pii.en.postal_code", "住所ZIP: 94105です", "ZIP: 94105"),
+            (
+                "pii.en.passport",
+                "旅券passport number: A12345678を確認",
+                "passport number: A12345678",
+            ),
+            (
+                "pii.en.name",
+                "担当name: John Smithさん",
+                "name: John Smith",
+            ),
+            (
+                "pii.en.address",
+                "住所address: 123 Main Streetです",
+                "address: 123 Main Street",
+            ),
+            ("pii.en.ssn", "本人SSN: 123-45-6789です", "SSN: 123-45-6789"),
+            (
+                "pii.ja.postal_code",
+                "〒100-0001東京都千代田区",
+                "〒100-0001",
+            ),
+            (
+                "pii.ja.postal_code",
+                "郵便番号100-0001です",
+                "郵便番号100-0001",
+            ),
+            (
+                "pii.ja.passport",
+                "旅券番号TK1234567を確認",
+                "旅券番号TK1234567",
+            ),
+            (
+                "pii.ja.bank_account",
+                "口座番号1234567です",
+                "口座番号1234567",
+            ),
+            ("pii.shk_plaintext_map", map_line.as_str(), ""),
+            ("pii.ja.phone", "電話090-1234-5678です", "090-1234-5678"),
+        ];
+        let cfg = RuleEngineConfig::default();
+        for (id, line, expected) in cases {
+            let hits = rule_hits(line, id);
+            assert_eq!(hits.len(), 1, "{id}: {line} -> {hits:?}");
+            if !expected.is_empty() {
+                assert_eq!(hits[0], expected, "{id}: {line}");
+            }
+            let shown = redact_line_for_display(line, &cfg);
+            assert!(
+                !shown.contains(hits[0].as_str()),
+                "{id} left in context line: {shown}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_width_digits_keep_their_unicode_boundary() {
+        // `\d` also matches full-width digits, which are not ASCII word
+        // characters: an ASCII-only boundary would drop these.
+        // not real personal data: synthetic detector fixture values only
+        for (id, line) in [
+            (
+                "pii.credit_card",
+                "カード番号: ４１１１１１１１１１１１１１１１ です",
+            ),
+            (
+                "pii.credit_card",
+                "card ４１１１ １１１１ １１１１ １１１１.",
+            ),
+            ("pii.ja.passport", "旅券番号: TK１２３４５６７ を確認"),
+            ("pii.ja.bank_account", "口座番号: １２３４５６７ です"),
+            ("pii.en.ssn", "SSN: １２３-４５-６７８９ ok"),
+            ("pii.en.postal_code", "ZIP: １２３４５ ok"),
+            ("pii.en.ein", "EIN: １２-３４５６７８９ ok"),
+            ("pii.en.phone", "call ４１５-５５５-０１２３ now"),
+        ] {
+            assert_eq!(rule_hits(line, id).len(), 1, "{id}: {line}");
+        }
+    }
+
+    #[test]
+    fn pii_boundaries_still_reject_longer_runs_and_identifiers() {
+        // not real personal data: synthetic detector fixture values only
+        for (id, line) in [
+            // Part of a longer digit run or an identifier, with and without
+            // Japanese text around it.
+            ("pii.credit_card", "id_4111111111111111"),
+            ("pii.credit_card", "x4111111111111111"),
+            ("pii.credit_card", "番号はx4111111111111111です"),
+            ("pii.credit_card", "41111111111111111111111"),
+            ("pii.credit_card", "番号は41111111111111111111111です"),
+            ("pii.ipv4", "v192.168.10.5"),
+            ("pii.ipv4", "192.168.10.5000"),
+            ("pii.ipv4", "版192.168.10.5000です"),
+            ("pii.en.phone", "415-555-01234"),
+            ("pii.en.phone", "電話は415-555-01234です"),
+            ("pii.en.ssn", "SSN: 123-45-67890"),
+            ("pii.en.ssn", "myssn: 123-45-6789"),
+            ("pii.en.ein", "protein: 12-3456789"),
+            ("pii.en.postal_code", "unzip: 94105"),
+            ("pii.en.postal_code", "ZIP: 941050"),
+            ("pii.en.passport", "passport A123456789"),
+            ("pii.en.name", "filename: John Smith"),
+            ("pii.en.name", "担当name: John Smithson3"),
+            ("pii.ja.postal_code", "〒100-00012"),
+            ("pii.ja.postal_code", "郵便番号100-00012です"),
+            ("pii.ja.passport", "旅券番号TK12345678"),
+            ("pii.ja.bank_account", "口座番号1234567a"),
+            ("pii.shk_plaintext_map", "email_template_id = 12345678"),
+            (
+                "pii.shk_plaintext_map",
+                "テンプレemail_template_idは12345678",
+            ),
+        ] {
+            let hits = rule_hits(line, id);
+            assert!(hits.is_empty(), "{id}: {line} -> {hits:?}");
+        }
+    }
+
+    /// The pattern as it was before the boundaries were written out.
+    fn unicode_boundary_pattern(rule: &CompiledRule) -> String {
+        rule.re
+            .as_str()
+            .replace(r"(?:\b|(?-u:\b))", r"\b")
+            .replace(r"(?-u:\b)", r"\b")
+    }
+
+    fn fixture_texts(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                fixture_texts(&path, out);
+            } else if let Ok(text) = std::fs::read_to_string(&path) {
+                out.push((path.display().to_string(), text));
+            }
+        }
+    }
+
+    #[test]
+    fn written_out_boundaries_keep_every_fixture_match() {
+        let mut texts = Vec::new();
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+        fixture_texts(&fixtures, &mut texts);
+        assert!(!texts.is_empty(), "no fixtures under {fixtures:?}");
+        // Sample values of the other tests, in plain ASCII surroundings.
+        texts.push((
+            "inline".to_string(),
+            "card: 4111 1111 1111 1111 ok\nSSN: 123-45-6789\nphone: (555) 555-5555\n\
+             passport AB1234567\nName: John Smith\nhost 192.168.10.5 up\n"
+                .to_string(),
+        ));
+
+        let mut compared = 0usize;
+        for rule in RULES.iter() {
+            let pattern = unicode_boundary_pattern(rule);
+            if pattern == rule.re.as_str() {
+                continue;
+            }
+            let legacy = Regex::new(&pattern).expect("legacy pattern compiles");
+            for (name, text) in &texts {
+                let old: Vec<_> = legacy.find_iter(text).map(|m| m.range()).collect();
+                let new: Vec<_> = rule.re.find_iter(text).map(|m| m.range()).collect();
+                compared += old.len();
+                if text.is_ascii() {
+                    // Both boundaries agree on ASCII text.
+                    assert_eq!(old, new, "{} in {name}", rule.id);
+                    continue;
+                }
+                for range in &old {
+                    assert!(
+                        new.iter()
+                            .any(|n| n.start <= range.start && range.end <= n.end),
+                        "{} lost {:?} in {name}",
+                        rule.id,
+                        &text[range.clone()]
+                    );
+                }
+            }
+        }
+        assert!(compared > 0, "fixtures exercised no rewritten rule");
+    }
+
     #[test]
     fn english_name_rule_ignores_structural_config_keys() {
         let cfg = RuleEngineConfig::default();
@@ -2670,7 +3117,11 @@ jobs:
 
     #[test]
     fn credit_card_match_excludes_trailing_separator() {
-        let re = Regex::new(r"\b\d(?:[ -]?\d){12,18}\b").unwrap();
+        let re = &RULES
+            .iter()
+            .find(|rule| rule.id == "pii.credit_card")
+            .expect("credit card rule exists")
+            .re;
         // not real credential or personal data: synthetic detector fixture value only
         let text = "card: 4111 1111 1111 1111 ok";
         let m = re.find(text).expect("card pattern should match");
