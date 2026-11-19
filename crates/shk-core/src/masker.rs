@@ -364,7 +364,10 @@ fn mask_line_values(
 
 fn partial_value(value: &str, preserve_prefix: usize, preserve_suffix: usize) -> String {
     let chars: Vec<char> = value.chars().collect();
-    if chars.len() <= preserve_prefix + preserve_suffix {
+    // Never more than half of a value is kept: with a short value (a phone
+    // number, a PIN) or large settings, what is kept would be most of it.
+    let kept = preserve_prefix.saturating_add(preserve_suffix);
+    if kept.saturating_mul(2) > chars.len() {
         return "[REDACTED]".into();
     }
 
@@ -447,6 +450,24 @@ mod tests {
         let cfg = RuleEngineConfig::default();
         let (out, _) = mask_text("no newline at end", &cfg, "x.txt", MaskRedaction::FullLine);
         assert_eq!(out, "no newline at end");
+    }
+
+    #[test]
+    fn partial_redaction_keeps_at_most_half_of_a_value() {
+        // 4 + 4 of 16 characters is half: kept.
+        assert_eq!(
+            partial_value("0123456789abcdef", 4, 4),
+            "0123[REDACTED]cdef"
+        );
+        // 4 + 4 of 10 would leave two characters hidden: redacted whole.
+        assert_eq!(partial_value("0901234567", 4, 4), "[REDACTED]");
+        // Settings larger than the value cannot reveal it.
+        assert_eq!(partial_value("0123456789abcdef", 100, 0), "[REDACTED]");
+        assert_eq!(
+            partial_value("0123456789abcdef", usize::MAX, usize::MAX),
+            "[REDACTED]"
+        );
+        assert_eq!(partial_value("0123456789abcdef", 0, 0), "[REDACTED]");
     }
 
     #[test]

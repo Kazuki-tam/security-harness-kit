@@ -4118,7 +4118,7 @@ mod tests {
         fs::create_dir_all(dir.path().join(".claude")).unwrap();
         fs::write(
             dir.path().join(".claude/settings.json"),
-            r#"{"hooks":{"PreToolUse":[{"_shk_managed":true}]}}"#,
+            r#"{"hooks":{"PreToolUse":[{"_shk_managed":true,"hooks":[{"type":"command","command":"shk scan --hook-mode claude-code"}]}]}}"#,
         )
         .unwrap();
 

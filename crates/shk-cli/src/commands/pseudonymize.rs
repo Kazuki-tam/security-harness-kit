@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 use tempfile::TempPath;
 use zeroize::Zeroizing;
 
-const STORE_ITEM: &str = "v1";
-const OPERATION_LOCK: &str = "pseudonymize-v1-operation";
+pub(crate) const STORE_ITEM: &str = "v1";
+pub(crate) const OPERATION_LOCK: &str = "pseudonymize-v1-operation";
 const MAX_MAP_BYTES: u64 = 64 * 1024 * 1024;
 const NOT_UTF8_HINT: &str = "input is not valid UTF-8. Convert it first, for example: iconv -f SHIFT_JIS -t UTF-8 src.csv > utf8.csv";
 
