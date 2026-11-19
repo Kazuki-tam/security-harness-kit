@@ -128,6 +128,17 @@ The Windows **signed** release job fails unless Authenticode signing is configur
 bundling, the workflow verifies every generated `.exe` and `.msi` with
 `Get-AuthenticodeSignature` and fails the release when any signature is invalid.
 
+The desktop build jobs do not put the signing secrets in the job environment.
+A `load signing secrets` step (`load updater signing secrets` in the unsigned
+workflow), placed after the third-party actions and `pnpm install`, writes
+them to `GITHUB_ENV` through `.github/scripts/release/export-signing-env.sh`.
+The main part of those actions and the dependency installation therefore run
+without them, and the build steps only get the secrets of their own platform
+(Apple secrets on macOS, Windows signing settings on Windows). The post-job
+phase of the earlier actions (cache saves, checkout cleanup) runs after the
+build and does see them. A new signing secret has to be added to that step's
+`env:` and to the script's name list; `test.sh` compares the two.
+
 Pull request CI runs desktop `tauri build --no-bundle` smoke tests on Linux,
 macOS, and Windows. Signed installer bundling remains release-only because it
 needs production signing secrets.
