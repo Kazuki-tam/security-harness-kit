@@ -26,8 +26,10 @@ const CURSOR_PROJECT_DIR_ARG: &str = r#""${CURSOR_PROJECT_DIR:-.}""#;
 /// keep the matcher they were written with, so `shk doctor` warns when a managed
 /// block's matcher differs from this one.
 pub(crate) const CLAUDE_PRE_TOOL_USE_MATCHER: &str =
-    "Read|Write|Edit|MultiEdit|NotebookEdit|Bash|WebFetch|mcp__.*";
-pub(crate) const CLAUDE_POST_TOOL_USE_MATCHER: &str = "WebFetch|WebSearch|Bash|mcp__.*|Skill|Agent";
+    "Read|Write|Edit|MultiEdit|NotebookEdit|Bash|Grep|Glob|WebFetch|WebSearch|Agent|Task|mcp__.*";
+/// `Grep` is here because its output is file content that no pre hook sees.
+pub(crate) const CLAUDE_POST_TOOL_USE_MATCHER: &str =
+    "WebFetch|WebSearch|Bash|Grep|mcp__.*|Skill|Agent";
 /// `onFailure` value on managed Claude Code handlers for events that can block.
 /// Existing installs keep what they were written with, so `shk doctor` warns
 /// when a blocking handler lacks it.
