@@ -282,7 +282,9 @@ Value hashes are deterministic and keyed by public rule IDs. They are not raw va
 - `redaction = "full"` replaces each line with at least one finding with `[REDACTED_LINE]`.
 - `redaction = "partial"` replaces matched values with a `[REDACTED]` marker while preserving `preserve_prefix` and `preserve_suffix` characters.
 
-Binary or non-UTF-8 input is not scanned by `shk mask`. Human output passes it through unchanged; JSON output reports `mask.binary_passthrough` and uses `[BINARY_PASSTHROUGH]` as masked content.
+Input that is not UTF-8 text is masked too. UTF-16 with a byte order mark is decoded, masked and re-encoded; any other input is masked byte by byte: the rules see only its ASCII, and every byte outside a redacted value is kept, so ASCII secrets are removed from Latin-1, Shift-JIS or binary input while text in those encodings is not otherwise recognised. Input with nothing to mask is written back unchanged. `shk mask` reports this with a stderr warning and a `mask.non_utf8_input` info finding.
+
+Masking works line by line, then masks whatever a scan of the whole text still reports: a value that a rule matches across a line break, or only because of a keyword elsewhere in the file. Such a match is replaced by a `[REDACTED]` on each line it spans (partial redaction keeps nothing of it), or by a `[REDACTED_LINE]` for each line it touches with `redaction = "full"`. Line breaks and the number of lines are kept. Where a scan rule over-matches (an empty `PASSWORD=` followed by another assignment), the mask follows it. In an Office document this works within one paragraph, cell, or shared string: a key name in one paragraph and its value in the next is still reported by `shk scan` and left in place by `shk mask`.
 
 Office document masking supports `.docx`, `.xlsx`, and `.pptx` with `--output`; it writes a new document and leaves the original unchanged. PDF masking is not supported.
 

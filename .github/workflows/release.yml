@@ -37,6 +37,11 @@ concurrency:
 
 env:
   DIST_VERSION: "0.34.0"
+  # SHA-256 of the cargo-dist installers for DIST_VERSION. They are checked
+  # before an installer runs; CI (release-scripts) checks them against
+  # upstream, so a dist bump must update all three values.
+  DIST_INSTALLER_SH_SHA256: "abb014a8486f08a3c2d9dd8bbf2c646c62fab61b1f1c9ff5bf2811ab305d17b1"
+  DIST_INSTALLER_PS1_SHA256: "71ba4767a6fc2c0a553bb098cfab3c233e23558d2a21b598e2feb56427b113d3"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
@@ -51,7 +56,7 @@ jobs:
       release_tag: ${{ steps.resolve.outputs.release_tag }}
       make_latest: ${{ steps.resolve.outputs.make_latest }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
@@ -100,19 +105,27 @@ jobs:
       SHK_ALLOW_MISSING_UPDATER_PUBKEY: "1"
       BUILD_MANIFEST_NAME: target/distrib/${{ matrix.target }}-dist-manifest.json
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
       - name: install dist
         if: runner.os != 'Windows'
         shell: bash
-        run: curl --retry 3 --retry-all-errors --proto '=https' --tlsv1.2 -LsSf "https://github.com/axodotdev/cargo-dist/releases/download/v${DIST_VERSION}/cargo-dist-installer.sh" | sh
+        run: ./.github/scripts/release/install-dist.sh
 
       - name: install dist
         if: runner.os == 'Windows'
         shell: pwsh
-        run: irm "https://github.com/axodotdev/cargo-dist/releases/download/v${env:DIST_VERSION}/cargo-dist-installer.ps1" | iex
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "cargo-dist-installer.ps1"
+          Invoke-WebRequest -UseBasicParsing -MaximumRetryCount 3 -RetryIntervalSec 5 -OutFile $installer `
+            "https://github.com/axodotdev/cargo-dist/releases/download/v${env:DIST_VERSION}/cargo-dist-installer.ps1"
+          $actual = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          if ($actual -ne $env:DIST_INSTALLER_PS1_SHA256) {
+            throw "cargo-dist installer for v${env:DIST_VERSION} has SHA-256 $actual, expected ${env:DIST_INSTALLER_PS1_SHA256}"
+          }
+          Get-Content -Raw $installer | Invoke-Expression
 
       - name: install Linux build dependencies
         if: runner.os == 'Linux'
@@ -177,24 +190,9 @@ jobs:
       run:
         working-directory: apps/shk-desktop
     env:
-      TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
       SHK_ALLOW_UNSIGNED_WINDOWS: ${{ vars.SHK_ALLOW_UNSIGNED_WINDOWS }}
-      TAURI_WINDOWS_SIGN_COMMAND: ${{ secrets.TAURI_WINDOWS_SIGN_COMMAND }}
-      TAURI_WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.TAURI_WINDOWS_CERTIFICATE_THUMBPRINT }}
-      TAURI_WINDOWS_DIGEST_ALGORITHM: ${{ secrets.TAURI_WINDOWS_DIGEST_ALGORITHM }}
-      TAURI_WINDOWS_TIMESTAMP_URL: ${{ secrets.TAURI_WINDOWS_TIMESTAMP_URL }}
-      TAURI_WINDOWS_TSP: ${{ secrets.TAURI_WINDOWS_TSP }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
@@ -225,6 +223,30 @@ jobs:
 
       - name: install frontend dependencies
         run: pnpm install --frozen-lockfile
+
+      # The signing secrets exist from here on only: the actions and the
+      # dependency installation above run without them, and each runner gets
+      # the secrets of its own platform.
+      - name: load signing secrets
+        shell: bash
+        working-directory: .
+        env:
+          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          TAURI_WINDOWS_SIGN_COMMAND: ${{ secrets.TAURI_WINDOWS_SIGN_COMMAND }}
+          TAURI_WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.TAURI_WINDOWS_CERTIFICATE_THUMBPRINT }}
+          TAURI_WINDOWS_DIGEST_ALGORITHM: ${{ secrets.TAURI_WINDOWS_DIGEST_ALGORITHM }}
+          TAURI_WINDOWS_TIMESTAMP_URL: ${{ secrets.TAURI_WINDOWS_TIMESTAMP_URL }}
+          TAURI_WINDOWS_TSP: ${{ secrets.TAURI_WINDOWS_TSP }}
+        run: ./.github/scripts/release/export-signing-env.sh all
 
       - name: check desktop signing config
         shell: bash
@@ -304,13 +326,13 @@ jobs:
     needs: [prepare, build-local-artifacts]
     if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.prepare.outputs.build_cli == 'true' && needs.build-local-artifacts.result == 'success' }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
       - name: install dist
         shell: bash
-        run: curl --retry 3 --retry-all-errors --proto '=https' --tlsv1.2 -LsSf "https://github.com/axodotdev/cargo-dist/releases/download/v${DIST_VERSION}/cargo-dist-installer.sh" | sh
+        run: ./.github/scripts/release/install-dist.sh
 
       - name: download local artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -398,14 +420,14 @@ jobs:
         )
       }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
       - name: install dist
         if: needs.prepare.outputs.build_cli == 'true'
         shell: bash
-        run: curl --retry 3 --retry-all-errors --proto '=https' --tlsv1.2 -LsSf "https://github.com/axodotdev/cargo-dist/releases/download/v${DIST_VERSION}/cargo-dist-installer.sh" | sh
+        run: ./.github/scripts/release/install-dist.sh
 
       - name: download release artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -543,7 +565,7 @@ jobs:
       RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - name: checkout tap
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: Kazuki-tam/homebrew-tap
           persist-credentials: false
@@ -610,7 +632,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
@@ -650,7 +672,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7

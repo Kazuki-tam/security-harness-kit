@@ -494,6 +494,10 @@ fn print_human(report: &AuditReport, hide_paths: bool) {
             .finding_count
             .map(|n| format!(" findings={n}"))
             .unwrap_or_default();
+        // The log may come with a cloned repository: nothing in it reaches
+        // the terminal as a control sequence.
+        let (ts, tool, hook) = (printable(&ts), printable(tool), printable(hook));
+        let (reason, detail) = (printable(reason), printable(&detail));
         println!("  {ts}  {tool:<12} {hook:<12} {reason:<20} {detail}{count}");
     }
 }
@@ -505,8 +509,23 @@ fn print_count_section(title: &str, rows: &[CountRow]) {
     println!();
     println!("{title}");
     for row in rows {
-        println!("  {:<28} {}", row.label, row.count);
+        println!("  {:<28} {}", printable(&row.label), row.count);
     }
+}
+
+/// `text` with control characters and the invisible formatting characters
+/// that reorder or hide text (bidi overrides, zero-width marks) replaced, for
+/// printing to a terminal.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            let hidden = matches!(
+                c,
+                '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}'
+            );
+            if c.is_control() || hidden { '?' } else { c }
+        })
+        .collect()
 }
 
 fn format_ts_short(ts: &str) -> String {

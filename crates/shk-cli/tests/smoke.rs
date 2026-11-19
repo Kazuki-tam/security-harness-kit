@@ -2399,12 +2399,12 @@ fn hooks_install_ai_claude_apply_deny_merges_without_duplicates() {
     let pre_hooks = settings["hooks"]["PreToolUse"].as_array().unwrap();
     assert_eq!(
         pre_hooks[0]["matcher"],
-        "Read|Write|Edit|MultiEdit|NotebookEdit|Bash|WebFetch|mcp__.*"
+        "Read|Write|Edit|MultiEdit|NotebookEdit|Bash|Grep|Glob|WebFetch|WebSearch|Agent|Task|mcp__.*"
     );
     let post_hooks = settings["hooks"]["PostToolUse"].as_array().unwrap();
     assert_eq!(
         post_hooks[0]["matcher"],
-        "WebFetch|WebSearch|Bash|mcp__.*|Skill|Agent"
+        "WebFetch|WebSearch|Bash|Grep|mcp__.*|Skill|Agent"
     );
 }
 
@@ -3810,7 +3810,7 @@ fn hook_mode_claude_edit_scans_the_edited_file() {
 }
 
 #[test]
-fn hook_mode_ignores_file_paths_outside_repo_root() {
+fn hook_mode_scans_a_read_file_outside_repo_root() {
     use std::io::Write;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let outside = tempfile::NamedTempFile::new().unwrap();
@@ -3836,14 +3836,16 @@ fn hook_mode_ignores_file_paths_outside_repo_root() {
             c.wait_with_output()
         })
         .expect("hook scan");
-    assert!(
-        out.status.success(),
+    // The file's content reaches the model wherever the file lives.
+    assert_eq!(
+        out.status.code(),
+        Some(2),
         "stdout={} stderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(stdout["permission"], "allow");
+    assert_eq!(stdout["permission"], "deny");
 }
 
 #[test]
@@ -8279,4 +8281,256 @@ fn codex_patch_context_keeps_the_files_inline_ignores() {
         }),
     );
     assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn hook_read_scans_files_a_binary_check_would_skip() {
+    let dir = tempfile::tempdir().unwrap();
+    init_plain_repo(dir.path());
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let line = format!("key={REVIEW_FIXTURE_KEY}\n");
+    let read_exit = |name: &str, bytes: &[u8]| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        run_hook_payload(
+            dir.path(),
+            "claude-code",
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Read",
+                "tool_input": { "file_path": path }
+            }),
+        )
+        .status
+        .code()
+    };
+
+    let utf16 = |bom: [u8; 2], unit: fn(u16) -> [u8; 2]| {
+        let mut bytes = bom.to_vec();
+        bytes.extend(line.encode_utf16().flat_map(unit));
+        bytes
+    };
+    assert_eq!(
+        read_exit("le.txt", &utf16([0xff, 0xfe], u16::to_le_bytes)),
+        Some(2)
+    );
+    assert_eq!(
+        read_exit("be.txt", &utf16([0xfe, 0xff], u16::to_be_bytes)),
+        Some(2)
+    );
+    // UTF-16 without a byte order mark.
+    let bare: Vec<u8> = line.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    assert_eq!(read_exit("bare.txt", &bare), Some(2));
+    // A NUL in front of ordinary text.
+    assert_eq!(
+        read_exit("nul.txt", &[b"\0header\n", line.as_bytes()].concat()),
+        Some(2)
+    );
+    assert_eq!(
+        read_exit("clean.bin", b"\0\x01\x02 nothing here\n"),
+        Some(0)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn hook_read_follows_a_symlink_out_of_the_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_plain_repo(&repo);
+    std::fs::write(repo.join("shk.toml"), "").unwrap();
+    let outside = dir.path().join("notes.txt");
+    std::fs::write(&outside, format!("key={REVIEW_FIXTURE_KEY}\n")).unwrap();
+    std::os::unix::fs::symlink(&outside, repo.join("link.txt")).unwrap();
+
+    let hook = |tool: &str, input: serde_json::Value| {
+        run_hook_payload(
+            &repo,
+            "claude-code",
+            serde_json::json!({
+                "hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": input
+            }),
+        )
+    };
+    let out = hook(
+        "Read",
+        serde_json::json!({ "file_path": repo.join("link.txt") }),
+    );
+    assert_eq!(out.status.code(), Some(2));
+    // The location of a file outside the repository stays out of the output.
+    let shown = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!shown.contains("notes.txt"), "{shown}");
+
+    // A write is judged by what it writes, not by what the target holds.
+    let out = hook(
+        "Write",
+        serde_json::json!({ "file_path": outside, "content": "clean\n" }),
+    );
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn prompt_hook_scans_a_prompt_that_is_not_a_plain_string() {
+    let dir = tempfile::tempdir().unwrap();
+    init_plain_repo(dir.path());
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let blocked = |payload: serde_json::Value| {
+        let out = run_hook_payload(dir.path(), "claude-code", payload);
+        String::from_utf8_lossy(&out.stdout).contains("\"decision\":\"block\"")
+    };
+    let text = format!("use {REVIEW_FIXTURE_KEY}");
+    assert!(blocked(serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": [{ "type": "text", "text": text }]
+    })));
+    assert!(blocked(serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "message": text
+    })));
+    assert!(!blocked(serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": [{ "type": "text", "text": "hello" }]
+    })));
+}
+
+#[test]
+fn audit_output_holds_no_control_characters_from_the_log() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".shk")).unwrap();
+    let entry = serde_json::json!({
+        "ts": "2026-11-18T00:00:00Z",
+        "event": "blocked",
+        "tool": "claude\u{1b}]0;title\u{7}\u{1b}[2J",
+        "hook": "pre",
+        "reason": "finding_threshold",
+        "max_severity": "high",
+        "rule_ids": ["x\u{1b}[31mred"],
+        "display_path": "a\rb",
+        "finding_count": 1
+    });
+    std::fs::write(dir.path().join(".shk/audit.log"), format!("{entry}\n")).unwrap();
+    let out = shk_cmd()
+        .args(["audit"])
+        .current_dir(dir.path())
+        .output()
+        .expect("shk audit");
+    assert!(out.status.success());
+    assert!(
+        !out.stdout
+            .iter()
+            .any(|byte| matches!(byte, 0x1b | 0x07 | b'\r')),
+        "{}",
+        String::from_utf8_lossy(&out.stdout).escape_debug()
+    );
+}
+
+// not real credential: synthetic detector fixture value only. Split so the
+// source line itself is not a finding.
+const MEDIUM_SCAN_FIXTURE_KEY: &str = concat!("sk-proj-", "abcdefghijklmnopqrstuvwxyz0123456789");
+
+#[test]
+fn mask_removes_a_secret_from_input_that_is_not_utf8() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let input = dir.path().join("legacy.txt");
+    let output = dir.path().join("masked.txt");
+    let bytes = [
+        b"caf\xe9\n",
+        format!("key={MEDIUM_SCAN_FIXTURE_KEY}\n").as_bytes(),
+    ]
+    .concat();
+    std::fs::write(&input, &bytes).unwrap();
+
+    let out = shk_cmd()
+        .args(["mask", "legacy.txt", "--output", "masked.txt"])
+        .current_dir(dir.path())
+        .output()
+        .expect("shk mask");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let needle = MEDIUM_SCAN_FIXTURE_KEY.as_bytes();
+    let holds = |bytes: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+    let written = std::fs::read(&output).unwrap();
+    assert!(!holds(&written) && !holds(&out.stdout));
+    assert!(written.starts_with(b"caf\xe9\n"), "{written:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not UTF-8"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// A path with a line break used to shift every later blob onto the wrong
+// path. Line breaks are not valid in Windows file names.
+#[cfg(unix)]
+#[test]
+fn scan_git_history_handles_a_path_with_a_line_break() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    std::fs::write(dir.path().join("a\nb.txt"), "clean\n").unwrap();
+    std::fs::write(
+        dir.path().join("m.txt"),
+        format!("{MEDIUM_SCAN_FIXTURE_KEY}\n"),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("z.txt"), "clean too\n").unwrap();
+    git_commit_all(dir.path(), "add files");
+
+    let out = shk_cmd()
+        .args(["scan", "--git-history", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("shk scan --git-history");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let files = report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["rule_id"] == "secret.openai_api_key")
+        .map(|finding| finding["file"].as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        !files.is_empty() && files.iter().all(|file| file.ends_with("m.txt")),
+        "{files:?}"
+    );
+}
+
+#[test]
+fn scan_says_when_findings_were_suppressed() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("shk.toml"),
+        "[[allowlist]]\npath = \"**\"\nreason = \"everything\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("a.txt"),
+        format!("{MEDIUM_SCAN_FIXTURE_KEY}\n"),
+    )
+    .unwrap();
+    let out = shk_cmd()
+        .args(["scan", "--", "."])
+        .current_dir(dir.path())
+        .output()
+        .expect("shk scan");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("suppressed by allowlist"), "{stdout}");
+    assert!(
+        stdout.contains("policy.allowlist_matches_everything"),
+        "{stdout}"
+    );
 }

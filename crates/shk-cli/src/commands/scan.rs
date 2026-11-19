@@ -146,6 +146,14 @@ pub fn run(inv: ScanInvocation) -> Result<()> {
                 inv.color_enabled,
             )
         );
+        // A scan that found nothing because everything was suppressed must
+        // not read like a clean one.
+        if res.suppressed > 0 {
+            println!(
+                "{} finding(s) suppressed by allowlist entries or inline shk-ignore markers.",
+                res.suppressed
+            );
+        }
     }
     if !inv.audit && res.should_fail() {
         return Err(CliExit::silent(1).into());
@@ -576,7 +584,9 @@ fn run_hook_mode_inner(
     let policy_labels: Vec<String> = segments
         .iter()
         .map(|segment| {
-            if segment.file {
+            if let Some(path) = &segment.outside_path {
+                path.clone()
+            } else if segment.file {
                 hook_policy_path(&repo_root, &segment.label)
             } else {
                 segment.label.clone()
@@ -939,7 +949,7 @@ fn run_user_prompt_mode(
     stdin_trim: &str,
 ) -> Result<()> {
     let event = hook_output::HookEvent::UserPromptSubmit;
-    let prompt = shk_integrations::extract_user_prompt(stdin_trim).unwrap_or_default();
+    let prompt = shk_integrations::user_prompt_text(stdin_trim);
 
     if prompt.is_empty() {
         println!("{}", hook_output::allow_stdout_for_event(tool, event, None));
@@ -952,7 +962,7 @@ fn run_user_prompt_mode(
         repo_root,
         &[ScanPart {
             label: "<user-prompt>",
-            text: prompt.as_ref(),
+            text: prompt.as_str(),
             inline_ignores: InlineIgnores::Ignored,
         }],
         opts,

@@ -108,36 +108,32 @@ pub fn run(inv: MaskInvocation) -> Result<()> {
     let (rel_label, mut bytes) = read_mask_input(inv.file.as_ref())?;
 
     if is_binary_or_non_utf8(&bytes, policy.scan.binary_detection_bytes) {
-        let findings = vec![binary_passthrough_finding(&rel_label)];
+        // Nothing is passed through unmasked: text that is not UTF-8 still
+        // carries ASCII secrets, and one NUL byte must not switch masking off.
+        let masked = mask_non_utf8(&bytes, &policy, &rel_label);
+        bytes.zeroize();
+        let (mut masked, mut findings) = masked?;
+        findings.insert(0, non_utf8_input_finding(&rel_label));
         let result: Result<()> = if inv.json {
             let out = MaskJsonOutput {
-                masked_content: "[BINARY_PASSTHROUGH]".into(),
+                masked_content: String::from_utf8_lossy(&masked).into_owned(),
                 findings,
             };
-            match serde_json::to_string_pretty(&out) {
-                Ok(s) => {
-                    println!("{s}");
-                    Ok(())
-                }
-                Err(e) => Err(e.into()),
-            }
+            serde_json::to_string_pretty(&out)
+                .map(|json| println!("{json}"))
+                .map_err(Into::into)
         } else {
-            // stdout stays a clean passthrough; warn on stderr so secrets in
-            // non-UTF-8 input (Shift-JIS, UTF-16, …) do not flow out silently.
             eprintln!(
-                "shk mask: warning: binary or non-UTF-8 input passed through unchanged (not scanned)"
+                "shk mask: warning: input is not UTF-8 text; it was masked byte by byte, and text \
+                 in other encodings is only recognised where it is ASCII"
             );
-            match io::stdout().write_all(&bytes) {
-                Ok(()) => Ok(()),
-                Err(e) => Err(e.into()),
-            }
+            io::stdout().write_all(&masked).map_err(Into::into)
         };
-        let output_result: Result<()> = if let Some(outp) = inv.output {
-            crate::fs_atomic::write_atomic(&outp, &bytes)
-        } else {
-            Ok(())
+        let output_result: Result<()> = match inv.output {
+            Some(outp) => crate::fs_atomic::write_atomic(&outp, &masked),
+            None => Ok(()),
         };
-        bytes.zeroize();
+        masked.zeroize();
         result?;
         output_result?;
         return Ok(());
@@ -339,15 +335,116 @@ fn is_binary_or_non_utf8(bytes: &[u8], binary_detection_bytes: usize) -> bool {
     bytes[..take].contains(&0) || std::str::from_utf8(bytes).is_err()
 }
 
-fn binary_passthrough_finding(file: &str) -> Finding {
+/// Masks input that is not UTF-8 text and returns it in its own encoding.
+/// Input with nothing to mask comes back byte for byte.
+///
+/// UTF-16 with a byte order mark is decoded, masked and encoded again. Any
+/// other input is masked byte by byte: ASCII bytes are read as themselves and
+/// every other byte as a private-use character that no rule matches, so the
+/// rules see the ASCII in the input and nothing else, and every byte outside
+/// a redacted value comes back as it was, whatever the encoding (Latin-1,
+/// Shift-JIS, a binary format).
+fn mask_non_utf8(
+    bytes: &[u8],
+    policy: &Policy,
+    rel_label: &str,
+) -> Result<(Vec<u8>, Vec<Finding>)> {
+    let utf16 = match bytes {
+        // `FF FE 00 00` is the UTF-32LE mark.
+        [0xff, 0xfe, 0x00, 0x00, ..] => None,
+        [0xff, 0xfe, body @ ..] => Some((body, true)),
+        [0xfe, 0xff, body @ ..] => Some((body, false)),
+        _ => None,
+    };
+    let (mut text, encode): (String, Encoder) = match utf16 {
+        Some((body, little_endian)) => {
+            let pairs = body.chunks_exact(2);
+            // An odd last byte is no code unit; it is kept as it is.
+            let tail = pairs.remainder().to_vec();
+            let units = pairs
+                .map(|pair| {
+                    let pair = [pair[0], pair[1]];
+                    if little_endian {
+                        u16::from_le_bytes(pair)
+                    } else {
+                        u16::from_be_bytes(pair)
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mark = bytes[..2].to_vec();
+            let encode = move |masked: &str| {
+                let mut out = mark.clone();
+                for unit in masked.encode_utf16() {
+                    out.extend(if little_endian {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    });
+                }
+                out.extend(&tail);
+                out
+            };
+            (String::from_utf16_lossy(&units), Box::new(encode))
+        }
+        None => {
+            let text = bytes.iter().map(|byte| opaque_char(*byte)).collect();
+            let encode = |masked: &str| masked.chars().map(opaque_byte).collect();
+            (text, Box::new(encode))
+        }
+    };
+    let masked = shk_core::masker::mask_from_policy(&text, policy, rel_label);
+    text.zeroize();
+    let (mut masked, findings) = masked?;
+    let out = if findings.is_empty() {
+        // Decoding may not round-trip (a lone surrogate): with nothing
+        // masked, nothing is rewritten.
+        bytes.to_vec()
+    } else {
+        encode(&masked)
+    };
+    masked.zeroize();
+    Ok((out, findings))
+}
+
+/// Turns masked text back into the encoding of the input.
+type Encoder = Box<dyn Fn(&str) -> Vec<u8>>;
+
+/// First of the 128 private-use characters that stand for the bytes
+/// `0x80..=0xFF` while input is masked byte by byte.
+const OPAQUE_BYTE_BASE: u32 = 0xE000;
+
+/// The character a byte is masked as: itself for ASCII, otherwise a
+/// private-use character. Those are not letters, digits, whitespace or
+/// invisible formatting characters, so no rule matches one or treats it as
+/// part of a word.
+fn opaque_char(byte: u8) -> char {
+    if byte.is_ascii() {
+        char::from(byte)
+    } else {
+        char::from_u32(OPAQUE_BYTE_BASE + u32::from(byte)).unwrap_or(char::REPLACEMENT_CHARACTER)
+    }
+}
+
+/// The byte a character of byte-wise masked text stands for. Redaction
+/// markers are ASCII, so nothing else can occur.
+fn opaque_byte(c: char) -> u8 {
+    let code = u32::from(c);
+    u8::try_from(code)
+        .or_else(|_| u8::try_from(code.wrapping_sub(OPAQUE_BYTE_BASE)))
+        .unwrap_or(b'?')
+}
+
+fn non_utf8_input_finding(file: &str) -> Finding {
     Finding {
-        rule_id: "mask.binary_passthrough".into(),
+        rule_id: "mask.non_utf8_input".into(),
         severity: "info".into(),
         kind: "ignore".into(),
         file: file.into(),
         line: 1,
         column: 1,
-        message: "Binary or non-UTF-8 input was passed through unchanged and not scanned".into(),
+        message: "Input is not UTF-8 text: it was masked byte by byte, and text in other \
+                  encodings is only recognised where it is ASCII"
+            .into(),
         redacted_value: "[REDACTED]".into(),
         value_hash: None,
         confidence: 1.0,
@@ -424,9 +521,66 @@ mod tests {
     }
 
     #[test]
-    fn binary_passthrough_finding_reports_unscanned_input() {
-        let f = binary_passthrough_finding("data.bin");
-        assert_eq!(f.rule_id, "mask.binary_passthrough");
+    fn non_utf8_input_is_masked_in_its_own_encoding() {
+        let policy = Policy::default();
+        // not real credential: synthetic detector fixture value only
+        let key = concat!("sk-proj-", "abcdefghijklmnopqrstuvwxyz0123456789");
+        let mask = |bytes: &[u8]| mask_non_utf8(bytes, &policy, "input").unwrap();
+        let holds = |bytes: &[u8], needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+
+        // Latin-1 text and a binary with a NUL: the value goes, every other
+        // byte stays.
+        for prefix in [&b"caf\xe9 "[..], &b"\0\x01\xff "[..]] {
+            let input = [prefix, b"key=", key.as_bytes(), b" \xfctail\n"].concat();
+            let (masked, findings) = mask(&input);
+            assert!(!holds(&masked, key.as_bytes()));
+            assert!(masked.starts_with(prefix) && masked.ends_with(b" \xfctail\n"));
+            assert!(!findings.is_empty());
+        }
+
+        // UTF-16 keeps its byte order mark and encoding.
+        for (bom, unit) in [
+            ([0xff, 0xfe], u16::to_le_bytes as fn(u16) -> [u8; 2]),
+            ([0xfe, 0xff], u16::to_be_bytes),
+        ] {
+            let encode = |text: &str| {
+                let mut bytes = bom.to_vec();
+                bytes.extend(text.encode_utf16().flat_map(unit));
+                bytes
+            };
+            let (masked, findings) = mask(&encode(&format!("名前 key={key}\n")));
+            assert_eq!(masked, encode("名前 key=[REDACTED]\n"));
+            assert!(!findings.is_empty());
+        }
+
+        // Nothing to mask: the input comes back byte for byte, whatever
+        // bytes it holds (0xAD would be a soft hyphen in Latin-1).
+        let clean = b"abc\0def\xff".to_vec();
+        assert_eq!(mask(&clean).0, clean);
+        let every_byte: Vec<u8> = (0..=255u8).cycle().take(1024).collect();
+        let (masked, findings) = mask(&every_byte);
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(masked, every_byte);
+        // Around a masked value too: EUC-JP kana next to a key.
+        let kana = [b"\xa4\xad\xa5\xad key=", key.as_bytes(), b" \xa4\xad\n"].concat();
+        let (masked, _) = mask(&kana);
+        assert_eq!(masked, b"\xa4\xad\xa5\xad key=[REDACTED] \xa4\xad\n");
+        // An odd last byte of UTF-16 input survives masking.
+        let odd = [
+            &[0xff, 0xfe][..],
+            &"k".encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+            b"\x41",
+        ]
+        .concat();
+        assert_eq!(mask(&odd).0, odd);
+    }
+
+    #[test]
+    fn non_utf8_input_finding_says_how_the_input_was_masked() {
+        let f = non_utf8_input_finding("data.bin");
+        assert_eq!(f.rule_id, "mask.non_utf8_input");
         assert_eq!(f.file, "data.bin");
         assert_eq!(f.severity, "info");
         assert_eq!(f.kind, "ignore");
