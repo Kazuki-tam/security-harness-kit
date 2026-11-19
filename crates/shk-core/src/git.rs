@@ -373,6 +373,11 @@ fn resolve_history_blobs(
         .map(|(commit, path)| format!("{}:{}", commit, path.to_string_lossy().replace('\\', "/")))
         .collect::<Vec<_>>();
     let lines = cat_file_batch_check(repo_root, &queries)?;
+    if lines.len() != queries.len() {
+        // One answer per query, in order: anything else would pair blobs
+        // with the wrong paths.
+        bail!("git cat-file returned an unexpected history blob count");
+    }
 
     let mut all_oids = HashSet::new();
     let mut listed_oids = HashSet::new();
@@ -414,11 +419,18 @@ fn cat_file_batch_check(repo_root: &Path, queries: &[String]) -> Result<Vec<Stri
     if queries.is_empty() {
         return Ok(Vec::new());
     }
-    let mut child = Command::new("git")
-        .args([
-            "cat-file",
-            "--batch-check=%(objectname) %(objecttype) %(objectsize)",
-        ])
+    // A path may hold a line break, which would end its query early and add
+    // an answer line. Such queries are separated by NUL instead (Git 2.38).
+    let nul_separated = queries.iter().any(|query| query.contains('\n'));
+    let mut command = Command::new("git");
+    command.args([
+        "cat-file",
+        "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+    ]);
+    if nul_separated {
+        command.arg("-z");
+    }
+    let mut child = command
         .current_dir(repo_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -429,8 +441,9 @@ fn cat_file_batch_check(repo_root: &Path, queries: &[String]) -> Result<Vec<Stri
     // Writing everything before reading would deadlock once the queries and
     // responses both exceed the OS pipe buffer (large histories).
     let mut stdin = child.stdin.take().context("git cat-file stdin")?;
-    let mut query_body = queries.join("\n");
-    query_body.push('\n');
+    let separator = if nul_separated { "\0" } else { "\n" };
+    let mut query_body = queries.join(separator);
+    query_body.push_str(separator);
     let writer = std::thread::spawn(move || -> std::io::Result<()> {
         stdin.write_all(query_body.as_bytes())?;
         // Drop stdin to close the pipe so git can finish.
@@ -444,6 +457,11 @@ fn cat_file_batch_check(repo_root: &Path, queries: &[String]) -> Result<Vec<Stri
         .join()
         .map_err(|_| anyhow::anyhow!("git cat-file writer thread panicked"))?;
     if !out.status.success() {
+        if nul_separated {
+            bail!(
+                "git cat-file --batch-check failed (a path in the history holds a line break, which needs Git 2.38 or newer to query)"
+            );
+        }
         bail!("git cat-file --batch-check failed");
     }
     write_result.context("write git cat-file query")?;

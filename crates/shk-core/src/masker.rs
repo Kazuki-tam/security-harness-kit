@@ -123,7 +123,149 @@ fn mask_text_with_custom(
         }
         out.push_str(ending);
     }
+    mask_remaining_matches(
+        &mut out,
+        &mut findings,
+        cfg,
+        custom,
+        rel_path,
+        &redaction,
+        min_severity,
+    );
     (out, findings)
+}
+
+/// Masks what a scan of the whole text still finds in it.
+///
+/// The pass above works line by line. A scan does not: a rule may match a key
+/// name on one line and its value on the next, or decide by a keyword
+/// elsewhere in the file whether to run at all. Without this pass such a
+/// value is reported by `shk scan` and left in place by `shk mask`.
+///
+/// The matched text is replaced by a marker on each line it spans, without
+/// the whitespace and line breaks at its ends, so the line count does not
+/// change. In full-line mode every line the match touches becomes a
+/// `[REDACTED_LINE]`. Partial redaction keeps nothing of such a value.
+fn mask_remaining_matches(
+    out: &mut String,
+    findings: &mut Vec<crate::finding::Finding>,
+    cfg: &RuleEngineConfig,
+    custom: &[custom_rules::CompiledCustomRule],
+    rel_path: &str,
+    redaction: &MaskRedaction,
+    min_severity: Severity,
+) {
+    // A marker does not match again, so one pass is normally all there is;
+    // the bound is for matches that overlap each other.
+    for _ in 0..4 {
+        let mut matches = scan_content(out, rel_path, cfg);
+        matches.retain(|m| Severity::from(m.severity).meets_threshold(min_severity));
+        let mut custom_matches = custom_rules::scan_content(out, custom);
+        custom_matches.retain(|m| m.severity.meets_threshold(min_severity));
+        if matches.is_empty() && custom_matches.is_empty() {
+            return;
+        }
+
+        let line_starts: Vec<usize> = std::iter::once(0)
+            .chain(out.match_indices('\n').map(|(index, _)| index + 1))
+            .collect();
+        // Where the text of a match starts: at its line and column (counted
+        // in characters), or wherever else it occurs if that is not it.
+        let locate = |line: usize, column: usize, text: &str| {
+            let start = line_starts
+                .get(line.wrapping_sub(1))
+                .and_then(|line_start| {
+                    let rest = &out[*line_start..];
+                    rest.char_indices()
+                        .nth(column.saturating_sub(1))
+                        .map(|(offset, _)| line_start + offset)
+                });
+            start
+                .filter(|start| out[*start..].starts_with(text))
+                .or_else(|| out.find(text))
+        };
+        let mut ranges = Vec::new();
+        let mut cover = |line: usize, column: usize, text: &str| {
+            let core = text.trim();
+            if core.is_empty() {
+                return;
+            }
+            if let Some(start) = locate(line, column, text) {
+                let start = start + (text.len() - text.trim_start().len());
+                ranges.push(start..start + core.len());
+            }
+        };
+        for m in &matches {
+            cover(m.line, m.column, &m.matched_text);
+        }
+        for m in &custom_matches {
+            cover(m.line, m.column, &m.matched_text);
+        }
+        if ranges.is_empty() {
+            return;
+        }
+        for m in &matches {
+            findings.push(
+                crate::finding::Finding::from_rule_match_with_custom_context(
+                    rel_path, m, None, "", cfg, custom,
+                ),
+            );
+        }
+        for m in &custom_matches {
+            findings.push(crate::finding::Finding::from_custom_match(
+                rel_path, m, None, "", cfg, custom,
+            ));
+        }
+        for m in &mut matches {
+            m.matched_text.zeroize();
+        }
+        for m in &mut custom_matches {
+            m.matched_text.zeroize();
+        }
+
+        let full_lines = matches!(redaction, MaskRedaction::FullLine);
+        if full_lines {
+            // Widen each range to the lines it touches, line endings left out.
+            for range in &mut ranges {
+                range.start = out[..range.start].rfind('\n').map_or(0, |index| index + 1);
+                let line_end = out[range.end..]
+                    .find('\n')
+                    .map_or(out.len(), |index| range.end + index);
+                range.end = if out[..line_end].ends_with('\r') {
+                    line_end - 1
+                } else {
+                    line_end
+                };
+            }
+        }
+        ranges.sort_by_key(|range| (range.start, std::cmp::Reverse(range.end)));
+        let mut masked = String::with_capacity(out.len());
+        let mut copied = 0;
+        for range in ranges {
+            if range.end <= copied {
+                continue;
+            }
+            let start = range.start.max(copied);
+            masked.push_str(&out[copied..start]);
+            // One marker per line the match spans, each line keeping its
+            // indentation and its own ending, so the line count is unchanged.
+            for line in out[start..range.end].split_inclusive('\n') {
+                let content = line.trim_end_matches(['\r', '\n']);
+                let text = content.trim_start();
+                if full_lines {
+                    masked.push_str("[REDACTED_LINE]");
+                } else if !text.is_empty() {
+                    masked.push_str(&content[..content.len() - text.len()]);
+                    masked.push_str("[REDACTED]");
+                }
+                masked.push_str(&line[content.len()..]);
+            }
+            copied = range.end;
+        }
+        masked.push_str(&out[copied..]);
+        std::mem::swap(out, &mut masked);
+        masked.zeroize();
+    }
 }
 
 const BYTE_ORDER_MARK: char = '\u{feff}';
@@ -658,5 +800,62 @@ mod tests {
         assert!(out.starts_with('\u{feff}'), "{out:?}");
         assert!(!out.contains("abcdefghijklmnop1234"), "{out}");
         assert!(out.ends_with("plain\n"), "{out}");
+    }
+
+    #[test]
+    fn a_value_matched_across_lines_is_masked() {
+        let cfg = RuleEngineConfig::default();
+        // not real credential: synthetic detector fixture value only
+        let value = "0123456789abcdef".repeat(2);
+        let value = value.as_str();
+        // The value means nothing on its own line: only the key name on the
+        // line above makes it a finding.
+        let content = format!("datadog_api_key:\n  \"{value}\"\ntail\n");
+        assert!(!scan_content(&content, "c.yaml", &cfg).is_empty());
+        assert!(scan_content(&format!("  \"{value}\"\n"), "c.yaml", &cfg).is_empty());
+
+        for redaction in [
+            MaskRedaction::Match,
+            MaskRedaction::FullLine,
+            MaskRedaction::Partial {
+                preserve_prefix: 4,
+                preserve_suffix: 4,
+            },
+        ] {
+            let (masked, findings) = mask_text(&content, &cfg, "c.yaml", redaction);
+            assert!(!masked.contains(value), "{masked}");
+            assert!(masked.ends_with("tail\n"), "{masked}");
+            assert!(!findings.is_empty());
+            // Nothing a scan still reports is left in the masked text.
+            let left = scan_content(&masked, "c.yaml", &cfg);
+            assert!(left.is_empty(), "{left:?}");
+            // No lines are joined or lost.
+            assert_eq!(masked.lines().count(), content.lines().count(), "{masked}");
+        }
+    }
+
+    #[test]
+    fn a_match_that_ends_in_a_line_break_keeps_the_break() {
+        let cfg = RuleEngineConfig::default();
+        // A rule that only runs because of a keyword elsewhere in the file,
+        // and whose match takes the line break behind the value with it.
+        let hex = "0123456789abcdef".repeat(3);
+        let value = &hex[..40];
+        for ending in ["\n", "\r\n"] {
+            let content = format!("ref: {value}{ending}next_line: 1{ending}# sourcegraph{ending}");
+            if scan_content(&content, "c.yaml", &cfg).is_empty() {
+                // The rule set no longer flags this shape; nothing to pin.
+                continue;
+            }
+            for redaction in [MaskRedaction::Match, MaskRedaction::FullLine] {
+                let (masked, _) = mask_text(&content, &cfg, "c.yaml", redaction);
+                assert!(!masked.contains(value), "{masked:?}");
+                assert_eq!(masked.matches(ending).count(), 3, "{masked:?}");
+                assert!(
+                    masked.contains(&format!("{ending}next_line: 1{ending}")),
+                    "{masked:?}"
+                );
+            }
+        }
     }
 }
