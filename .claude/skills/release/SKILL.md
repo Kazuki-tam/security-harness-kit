@@ -118,10 +118,10 @@ workflow is re-enabled: `gh workflow enable release.yml`. Background in
 
 ## 6. Follow-ups
 
-- PR bumping the CLI pin in **both** workflows to the new tag. This can only
-  happen *after* the release ships (both download a released binary), and the
-  PR touches `.github/workflows/`, so the maintainer must merge it from the
-  GitHub web UI.
+- PR bumping the CLI pin in **both** workflows and the Cloud Agent install
+  script to the new tag. This can only happen *after* the release ships (each
+  downloads a released binary), and the PR touches `.github/workflows/`, so
+  the maintainer must merge it from the GitHub web UI.
   - `.github/workflows/ci.yml` — `shk-version:` in the composite-action smoke
     step. Edit in place.
   - `.github/workflows/shk.yml` — `SHK_VERSION=` in the self-scan job. This
@@ -129,6 +129,8 @@ workflow is re-enabled: `gh workflow enable release.yml`. Background in
     `shk ci init github --force --shk-version vX.Y.Z --fail-on high`.
     It is not in `xtask bump-version`'s file list, so nothing else moves it —
     it had silently drifted to `v0.3.14` by the v0.6.3 release.
+  - `.cursor/install-shk.sh` — `SHK_VERSION="${SHK_VERSION:-vX.Y.Z}"` for
+    Cursor Cloud Agent Builds. Edit in place.
 - A new CLI subcommand may only be enabled in ci.yml's smoke step after the
   release carrying it ships (same reason).
 - Desktop releases: sanity-check `desktop-latest/latest.json` points at the new

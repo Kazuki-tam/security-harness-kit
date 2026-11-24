@@ -301,7 +301,7 @@ Coverage differs by tool. This table reflects each vendor's documentation as of 
 | Tool | Install `shk` with | Project hooks | If `shk` cannot run | Cloud limits |
 |------|--------------------|---------------|---------------------|--------------------------|
 | [Claude Code](#claude-code-cloud-sessions) | Setup script | `.claude/settings.json` | Prompts and matched tool calls are blocked (Claude Code v2.1.295 or later) | Not scanned: sessions with several repositories, and cloud threads in a project |
-| [Cursor](#cursor-cloud-agents) | Dockerfile | `.cursor/hooks.json` | The action proceeds, unless you use `--fail-closed` | Not scanned: MCP tool calls, and early read-only turns |
+| [Cursor](#cursor-cloud-agents) | `install` (or Dockerfile) | `.cursor/hooks.json` | The action proceeds, unless you use `--fail-closed` | Not scanned: MCP tool calls, and early read-only turns |
 | [GitHub Copilot](#github-copilot-cloud-agent) | `copilot-setup-steps.yml` (GitHub Actions sessions only) | `.github/hooks/shk-security.json` | `preToolUse` denies on a non-zero exit; a timeout proceeds | No documented way to preinstall `shk` in cloud sandbox sessions |
 
 Before relying on these steps, run the check below in your own environment. Antigravity, Codex, Grok Build, OpenCode, and Windsurf are not covered here.
@@ -364,13 +364,25 @@ These steps apply to Anthropic-hosted environments.
 
 ### Cursor Cloud Agents
 
+This repository ships `.cursor/environment.json` and `.cursor/install-shk.sh` so Cursor [Builds](https://cursor.com/docs/cloud-agent/setup) put a SHA-256-verified `shk` binary on the default `PATH` before agents start. Without `shk` on `PATH`, committed `--fail-closed` hooks exit `127` and block tool calls.
+
 1. Install the project hooks with `--fail-closed`, then commit and push `.cursor/hooks.json` and `shk.toml`:
 
    ```bash
    shk hooks install-ai --tool cursor --fail-closed
    ```
 
-2. Add `shk` to the Dockerfile of your environment, before any `USER` instruction. This example assumes a Debian or Ubuntu base image:
+2. Add an idempotent install script (see [`.cursor/install-shk.sh`](../.cursor/install-shk.sh) in this repository) and commit `.cursor/environment.json` to run it during Builds without a custom base image:
+
+   ```json
+   {
+     "install": "bash .cursor/install-shk.sh"
+   }
+   ```
+
+   The script checks whether the pinned release is already installed, installs missing prerequisites (`ca-certificates`, `coreutils`, `curl`, `tar`, `xz-utils`) on Debian/Ubuntu, downloads the release archive and its `.sha256` file over HTTPS, verifies the checksum, and installs `shk` into `/usr/local/bin` (override the release with `SHK_VERSION=vX.Y.Z` or the destination with `SHK_CLI_UNMANAGED_INSTALL`).
+
+3. **Optional Dockerfile** (when you already maintain a custom image): add `shk` before any `USER` instruction, then point `build.dockerfile` in `.cursor/environment.json` at it (path is relative to `.cursor`, e.g. `.cursor/Dockerfile`):
 
    ```dockerfile
    RUN apt-get update \
@@ -380,18 +392,17 @@ These steps apply to Anthropic-hosted environments.
      && shk --version
    ```
 
-3. Point `.cursor/environment.json` at that file, then commit both and push them to the default branch. The path is relative to `.cursor`, so this example uses `.cursor/Dockerfile`:
-
    ```json
    {
      "build": { "dockerfile": "Dockerfile" }
    }
    ```
 
-4. Start an agent and [check that the hooks run](#check-that-hooks-run) after it has started working in a writable environment.
+4. In the Cloud Agents dashboard, point the saved environment's **environment.json location** at `.cursor/environment.json` (or set the `install` field directly on the saved environment), create and activate a Build, then start an agent and [check that the hooks run](#check-that-hooks-run) after it has started working in a writable environment.
 
-[Cursor builds](https://cursor.com/docs/cloud-agent/setup) use the configuration on the environment's default branch. Cursor checks a personal saved environment first, then a team saved environment, and then `.cursor/environment.json`, which it uses only for single-repository runs. A saved environment reads the committed file only if its **environment.json location** points at it, and new environments start with that set to **None**. Self-hosted machines never read the file. Cursor does not document which user the `install` command runs as, which is why this guide uses a Dockerfile. Cursor manages the checkout, so do not `COPY` the project into the image.
+[Cursor builds](https://cursor.com/docs/cloud-agent/setup) use the configuration on the environment's default branch. Cursor checks a personal saved environment first, then a team saved environment, and then `.cursor/environment.json`, which it uses only for single-repository runs. A saved environment reads the committed file only if its **environment.json location** points at it, and new environments start with that set to **None**. When a cloud agent start creates a saved environment for a single repository that does not have one yet, Cursor points the new environment at a valid committed `.cursor/environment.json` automatically. Self-hosted machines never read the file. Cursor manages the checkout, so do not `COPY` the project into a Dockerfile image.
 
+- **Why `/usr/local/bin`:** AI hooks run `shk` by name. The default script install location (`~/.cargo/bin`) reaches `PATH` only through shell profiles; Cloud Agent hooks do not load those, so install under `/usr/local/bin` (see [Containers And Sandboxes](#containers-and-sandboxes)).
 - **Why `--fail-closed`:** by default, [Cursor lets an action proceed](https://cursor.com/docs/agent/hooks) when a hook crashes, times out, or exits with a code other than `2`, so without `shk` the agent keeps working with no scan. The flag blocks the action instead, for everyone who uses the committed file, so install `shk` for your team first. Re-running `shk hooks install-ai --tool cursor` without the flag turns it off.
 - **MCP tool calls:** `beforeMCPExecution` and `afterMCPExecution` do not run in cloud agents, so `shk` does not scan MCP calls there.
 - **Early turns:** hooks do not run during early exploratory turns in a read-only environment.
