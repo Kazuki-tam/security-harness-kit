@@ -3798,10 +3798,28 @@ fn hook_mode_claude_edit_scans_the_edited_file() {
     let (code, log) = run_edit("API_KEY=placeholder\n", "placeholder", "still-clean");
     assert_eq!(code, Some(0), "clean edit: {log}");
 
-    // The file's inline suppression still covers the edited line.
-    let suppressed = "# shk-ignore-next-line secret.openai_api_key\nAPI_KEY=placeholder\n";
-    let (code, log) = run_edit(suppressed, "placeholder", &key);
+    // The file's inline suppression keeps covering the line it was written
+    // for while the edit changes another one.
+    let suppressed =
+        format!("# shk-ignore-next-line secret.openai_api_key\nAPI_KEY={key}\nMODE=placeholder\n");
+    let (code, log) = run_edit(&suppressed, "MODE=placeholder", "MODE=fast");
     assert_eq!(code, Some(0), "suppressed line: {log}");
+
+    // It does not cover a value the edit puts under the marker, and the
+    // marker line cannot be repeated above new text either.
+    let marker = "# shk-ignore-next-line secret.openai_api_key";
+    let (code, log) = run_edit(
+        &format!("{marker}\nAPI_KEY=placeholder\n"),
+        "placeholder",
+        &key,
+    );
+    assert_eq!(code, Some(2), "value under an existing marker: {log}");
+    let (code, log) = run_edit(
+        &format!("{marker}\nAPI_KEY=placeholder\nMODE=fast\n"),
+        "MODE=fast",
+        &format!("{marker}\nOTHER_KEY={key}"),
+    );
+    assert_eq!(code, Some(2), "repeated marker line: {log}");
 
     // Removing a key from a file is allowed: the edited body is clean.
     let leaked = format!("API_KEY={key}\n");

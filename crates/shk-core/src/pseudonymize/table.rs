@@ -390,7 +390,7 @@ fn ensure_fields_not_merged(
         if selected.iter().any(|column| column.index == index) {
             continue;
         }
-        let found = if looks_like_merged_rows(field, delimiter, column_count, row.len()) {
+        let found = if looks_like_merged_rows(field, delimiter, index, column_count, row.len()) {
             "line breaks that look like other rows"
         } else if delimiter == b'\t' && field.contains('\t') {
             "a tab"
@@ -411,26 +411,44 @@ fn ensure_fields_not_merged(
 /// - its record does not have the table's number of fields (`field_count`
 ///   against `column_count`): the quote took part of a row with it, leaving
 ///   the record short or too wide;
-/// - the field holds, over all its lines, as many delimiters as a whole row
-///   of the table has (at least one): parts of two rows add up to a record
-///   of a plausible width; or
+/// - its lines hold the delimiters a swallowed run of rows would: a stray
+///   quote in column `column_index` takes the rest of its own row (the
+///   delimiters of the columns behind it, on the field's first line) and the
+///   start of the row its closing quote sits in (the delimiters of the
+///   columns before it, on the field's last line); or
 /// - its double quotes do not pair up.
 ///
-/// A notes cell with several delimiters in a wide table is refused as well;
-/// the price of not writing a swallowed value out raw.
+/// A notes cell whose delimiters fall on those lines is refused as well; the
+/// price of not writing a swallowed value out raw. In a two-column table that
+/// is a delimiter on the last line of a cell in the second column, or on the
+/// first line of a cell in the first.
 fn looks_like_merged_rows(
     field: &str,
     delimiter: u8,
+    column_index: usize,
     column_count: usize,
     field_count: usize,
 ) -> bool {
     if !field.contains(['\n', '\r']) {
         return false;
     }
-    let row_delimiters = column_count.saturating_sub(1).max(1);
-    field_count != column_count
-        || field.bytes().filter(|&byte| byte == delimiter).count() >= row_delimiters
-        || field.bytes().filter(|&byte| byte == b'"').count() % 2 == 1
+    if field_count != column_count || field.bytes().filter(|&byte| byte == b'"').count() % 2 == 1 {
+        return true;
+    }
+    let delimiters = |line: &str| line.bytes().filter(|&byte| byte == delimiter).count();
+    let row_delimiters = column_count.saturating_sub(1);
+    let first = field.split(['\n', '\r']).next().unwrap_or_default();
+    // A quote that is never closed runs to the end of the input, which ends
+    // in a line break or blank lines: the last row it took is the last line
+    // with text.
+    let last = field
+        .trim_end()
+        .rsplit(['\n', '\r'])
+        .next()
+        .unwrap_or_default();
+    delimiters(first) >= row_delimiters.saturating_sub(column_index)
+        && delimiters(last) >= column_index.min(row_delimiters)
+        && delimiters(field) >= row_delimiters.max(1)
 }
 
 /// The csv reader already strips a leading UTF-8 BOM, so fields are used as-is.
@@ -760,6 +778,55 @@ mod tests {
         assert_eq!(result.meta.columns[0].name, "0");
         let meta = serde_json::to_string(&result.meta).unwrap();
         assert!(!meta.contains("Sato"), "{meta}");
+    }
+
+    #[test]
+    fn multi_line_cell_is_judged_by_where_its_delimiters_fall() {
+        // (field, column index, column count) of a record of the right width.
+        let merged = |field: &str, index: usize, columns: usize| {
+            looks_like_merged_rows(field, b',', index, columns, columns)
+        };
+        // A notes cell in the second of two columns: a delimiter on an
+        // earlier line cannot be a swallowed row, one on the last line can.
+        assert!(!merged("Called, left a message\nFollow up Monday", 1, 2));
+        assert!(!merged("a, b, c\nd, e\nplain last line", 1, 2));
+        assert!(merged("note\n2,Grace Hopper", 1, 2));
+        assert!(merged("note\n2,Grace Hopper\n3,", 1, 2));
+        // Never closed: the rows run to the end of the input.
+        assert!(merged("note\n2,Grace Hopper\n", 1, 2));
+        assert!(merged("note\r\n2,Grace Hopper\r\n \r\n", 1, 2));
+        // In the first column the rest of the row is on the first line.
+        assert!(merged("1,Ada Lovelace\n2", 0, 2));
+        assert!(!merged("first line\nsecond, with a comma", 0, 2));
+        // Three columns, middle one: one delimiter on each end.
+        assert!(merged("b,c\n4,e", 1, 3));
+        assert!(!merged("b\n4,e,f", 1, 3));
+        assert!(!merged("one\ntwo", 1, 3));
+        // The other two signs are unchanged.
+        assert!(looks_like_merged_rows("one\ntwo", b',', 0, 2, 1));
+        assert!(merged("one \"\ntwo", 1, 2));
+        assert!(!merged("no line break, here", 1, 2));
+    }
+
+    #[test]
+    fn quoted_multi_line_note_in_a_two_column_table_is_copied() {
+        let material = material();
+        let csv = "Name,Notes\nAda Lovelace,\"Called, left a message\nFollow up Monday\"\n";
+        let mut out = Vec::new();
+        run_table(
+            csv.as_bytes(),
+            Some(&mut out),
+            &options("Name:name", false),
+            Some(&material),
+            None,
+        )
+        .unwrap();
+        let written = String::from_utf8(out).unwrap();
+        assert!(!written.contains("Lovelace"), "{written}");
+        assert!(
+            written.contains("\"Called, left a message\nFollow up Monday\""),
+            "{written}"
+        );
     }
 
     #[test]

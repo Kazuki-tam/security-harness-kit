@@ -30,15 +30,10 @@ impl HooksDirManagedElsewhere {
     /// The file the user should edit: husky's user-facing `pre-commit` when
     /// the directory looks husky-managed, else `pre-commit` in the directory.
     fn user_hook(&self) -> (PathBuf, bool) {
-        let name = |path: &Path| path.file_name().and_then(|n| n.to_str()).map(str::to_owned);
-        let parent = self.hooks_dir.parent();
-        if name(&self.hooks_dir).as_deref() == Some("_")
-            && parent.and_then(name).as_deref() == Some(".husky")
-            && let Some(parent) = parent
-        {
-            return (parent.join("pre-commit"), true);
+        if let Some(user_hook) = husky_user_hook(&self.hooks_dir) {
+            return (user_hook, true);
         }
-        let husky = name(&self.hooks_dir).as_deref() == Some(".husky");
+        let husky = dir_name(&self.hooks_dir) == Some(".husky");
         (self.hooks_dir.join("pre-commit"), husky)
     }
 }
@@ -146,9 +141,28 @@ fn git_hook_dirs(repo_root: &Path) -> Option<HookDirs> {
     })
 }
 
+fn dir_name(path: &Path) -> Option<&str> {
+    path.file_name().and_then(|name| name.to_str())
+}
+
+/// The hook file a husky user edits (`.husky/pre-commit`) when `hooks_dir` is
+/// husky's generated directory (`.husky/_`, husky v9). Each file there is a
+/// stub that runs the file of the same name one level up.
+fn husky_user_hook(hooks_dir: &Path) -> Option<PathBuf> {
+    let parent = hooks_dir.parent()?;
+    (dir_name(hooks_dir) == Some("_") && dir_name(parent) == Some(".husky"))
+        .then(|| parent.join("pre-commit"))
+}
+
 /// True when the hook git would run for `repo_root` invokes
 /// `shk scan --staged` on a line that is not commented out and, on Unix, the
-/// hook file is executable (git skips hooks that are not).
+/// hook file is executable (git skips a hook that is not).
+///
+/// With husky v9 (`core.hooksPath` = `.husky/_`) git runs a generated stub
+/// that hands over to `.husky/pre-commit`, which is where `shk hooks install`
+/// tells the user to add the scan: the stub has to be runnable and the scan
+/// line is looked for in the user's file, which husky runs with `sh` whether
+/// or not it is executable.
 pub fn has_shk_pre_commit(repo_root: &Path) -> bool {
     let hook_path = pre_commit_hook_path(repo_root);
     let Ok(meta) = fs::metadata(&hook_path) else {
@@ -157,7 +171,11 @@ pub fn has_shk_pre_commit(repo_root: &Path) -> bool {
     if !meta.is_file() || !is_executable(&meta) {
         return false;
     }
-    fs::read_to_string(&hook_path)
+    let script = hook_path
+        .parent()
+        .and_then(husky_user_hook)
+        .unwrap_or(hook_path);
+    fs::read_to_string(&script)
         .unwrap_or_default()
         .lines()
         .any(|line| !line.trim_start().starts_with('#') && line.contains("shk scan --staged"))
@@ -561,6 +579,32 @@ shk scan --staged\n\
         assert!(message.contains("husky's pre-commit file"), "{message}");
         assert!(message.contains(user_hook.to_str().unwrap()), "{message}");
         assert!(!repo.path().join(".husky/_/pre-commit").exists());
+    }
+
+    #[test]
+    fn detection_follows_husky_stub_to_the_user_hook() {
+        let repo = git_repo();
+        git(repo.path(), &["config", "core.hooksPath", ".husky/_"]);
+        fs::create_dir_all(repo.path().join(".husky/_")).unwrap();
+        let user_hook = repo.path().join(".husky/pre-commit");
+        let stub = repo.path().join(".husky/_/pre-commit");
+
+        // The user's file alone is not run: git needs husky's stub.
+        fs::write(&user_hook, "npm test\nshk scan --staged\n").unwrap();
+        assert!(!has_shk_pre_commit(repo.path()));
+
+        // husky runs the user's file with `sh`; it need not be executable.
+        fs::write(&stub, "#!/usr/bin/env sh\n. \"$(dirname \"$0\")/h\"\n").unwrap();
+        #[cfg(unix)]
+        make_executable(&stub);
+        assert!(has_shk_pre_commit(repo.path()));
+
+        fs::write(&user_hook, "npm test\n# shk scan --staged\n").unwrap();
+        assert!(!has_shk_pre_commit(repo.path()));
+
+        // A scan line in the stub is not what husky's user file runs.
+        fs::write(&user_hook, "npm test\n").unwrap();
+        assert!(!has_shk_pre_commit(repo.path()));
     }
 
     #[test]
