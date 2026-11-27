@@ -1,0 +1,29 @@
+{
+  "id": "MAL-9999-0001",
+  "modified": "2026-01-02T03:04:05Z",
+  "published": "2026-01-01T00:00:00Z",
+  "aliases": [],
+  "related": [],
+  "schema_version": "1.5.0",
+  "summary": "Malicious code in fx-malware (crates.io)",
+  "details": "Synthetic record for shk tests. Not a real advisory.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "crates.io",
+        "name": "fx-malware"
+      },
+      "ranges": [],
+      "versions": [
+        "0.1.0",
+        "0.1.1"
+      ]
+    }
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://example.invalid/advisory"
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "id": "RUSTSEC-9999-0010",
+  "modified": "2026-01-02T03:04:05Z",
+  "published": "2026-01-01T00:00:00Z",
+  "aliases": [],
+  "related": [],
+  "summary": "fx-unsound exposes an unsound API",
+  "details": "Synthetic record for shk tests. Not a real advisory.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "crates.io",
+        "name": "fx-unsound",
+        "purl": "pkg:cargo/fx-unsound"
+      },
+      "ranges": [
+        {
+          "type": "SEMVER",
+          "events": [
+            {
+              "introduced": "0.0.0-0"
+            },
+            {
+              "fixed": "0.9.0"
+            }
+          ]
+        }
+      ],
+      "versions": [],
+      "ecosystem_specific": {
+        "affects": {
+          "arch": [],
+          "os": [],
+          "functions": []
+        },
+        "affected_functions": null
+      },
+      "database_specific": {
+        "categories": [],
+        "cvss": null,
+        "informational": "unsound",
+        "source": "https://example.invalid/advisory"
+      }
+    }
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://example.invalid/advisory"
+    }
+  ]
+}

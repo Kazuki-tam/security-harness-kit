@@ -1,0 +1,44 @@
+{
+  "id": "GHSA-fx01-0001-aaaa",
+  "modified": "2026-01-02T03:04:05Z",
+  "published": "2026-01-01T00:00:00Z",
+  "aliases": [
+    "CVE-9999-0001"
+  ],
+  "related": [],
+  "schema_version": "1.4.0",
+  "summary": "fx-simple reads out of bounds",
+  "details": "Synthetic record for shk tests. Not a real advisory.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "crates.io",
+        "name": "fx-simple"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "1.2.0"
+            }
+          ]
+        }
+      ],
+      "versions": []
+    }
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://example.invalid/advisory"
+    }
+  ],
+  "database_specific": {
+    "severity": "CRITICAL",
+    "github_reviewed": true
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "id": "RUSTSEC-9999-0007",
+  "modified": "2026-01-02T03:04:05Z",
+  "published": "2026-01-01T00:00:00Z",
+  "aliases": [],
+  "related": [],
+  "summary": "fx-prerelease pre-release bug",
+  "details": "Synthetic record for shk tests. Not a real advisory.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "crates.io",
+        "name": "fx-prerelease",
+        "purl": "pkg:cargo/fx-prerelease"
+      },
+      "ranges": [
+        {
+          "type": "SEMVER",
+          "events": [
+            {
+              "introduced": "1.0.0-alpha.2"
+            },
+            {
+              "fixed": "1.0.0-rc.1"
+            }
+          ]
+        }
+      ],
+      "versions": [],
+      "ecosystem_specific": {
+        "affects": {
+          "arch": [],
+          "os": [],
+          "functions": []
+        },
+        "affected_functions": null
+      },
+      "database_specific": {
+        "categories": [],
+        "cvss": null,
+        "informational": null,
+        "source": "https://example.invalid/advisory"
+      }
+    }
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://example.invalid/advisory"
+    }
+  ]
+}

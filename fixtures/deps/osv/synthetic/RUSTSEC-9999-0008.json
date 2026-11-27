@@ -1,0 +1,60 @@
+{
+  "id": "RUSTSEC-9999-0008",
+  "modified": "2026-01-02T03:04:05Z",
+  "published": "2026-01-01T00:00:00Z",
+  "aliases": [],
+  "related": [],
+  "summary": "fx-bad-semver has an unusual range",
+  "details": "Synthetic record for shk tests. Not a real advisory.",
+  "severity": [
+    {
+      "type": "CVSS_V3",
+      "score": "CVSS:3.1/not-a-vector"
+    }
+  ],
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "crates.io",
+        "name": "fx-bad-semver",
+        "purl": "pkg:cargo/fx-bad-semver"
+      },
+      "ranges": [
+        {
+          "type": "SEMVER",
+          "events": [
+            {
+              "introduced": "not-a-version"
+            },
+            {
+              "fixed": "1.0"
+            }
+          ]
+        }
+      ],
+      "versions": [
+        "0.3.1"
+      ],
+      "ecosystem_specific": {
+        "affects": {
+          "arch": [],
+          "os": [],
+          "functions": []
+        },
+        "affected_functions": null
+      },
+      "database_specific": {
+        "categories": [],
+        "cvss": null,
+        "informational": null,
+        "source": "https://example.invalid/advisory"
+      }
+    }
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://example.invalid/advisory"
+    }
+  ]
+}

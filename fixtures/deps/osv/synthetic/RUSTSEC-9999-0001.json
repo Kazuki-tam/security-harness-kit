@@ -1,0 +1,62 @@
+{
+  "id": "RUSTSEC-9999-0001",
+  "modified": "2026-01-02T03:04:05Z",
+  "published": "2026-01-01T00:00:00Z",
+  "aliases": [
+    "CVE-9999-0001"
+  ],
+  "related": [],
+  "summary": "Out-of-bounds read in fx-simple",
+  "details": "Synthetic record for shk tests. Not a real advisory.",
+  "severity": [
+    {
+      "type": "CVSS_V3",
+      "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+    }
+  ],
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "crates.io",
+        "name": "fx-simple",
+        "purl": "pkg:cargo/fx-simple"
+      },
+      "ranges": [
+        {
+          "type": "SEMVER",
+          "events": [
+            {
+              "introduced": "0.0.0-0"
+            },
+            {
+              "fixed": "1.2.0"
+            }
+          ]
+        }
+      ],
+      "versions": [],
+      "ecosystem_specific": {
+        "affects": {
+          "arch": [],
+          "os": [],
+          "functions": []
+        },
+        "affected_functions": null
+      },
+      "database_specific": {
+        "categories": [
+          "memory-corruption"
+        ],
+        "cvss": null,
+        "informational": null,
+        "source": "https://example.invalid/advisory"
+      }
+    }
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://example.invalid/advisory"
+    }
+  ]
+}

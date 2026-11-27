@@ -1,0 +1,84 @@
+{
+  "id": "GHSA-fx03-0003-cccc",
+  "modified": "2026-01-02T03:04:05Z",
+  "published": "2026-01-01T00:00:00Z",
+  "aliases": [],
+  "related": [],
+  "schema_version": "1.4.0",
+  "summary": "Shared parser bug in fx-multi-a and fx-multi-b",
+  "details": "Synthetic record for shk tests. Not a real advisory.",
+  "severity": [
+    {
+      "type": "CVSS_V3",
+      "score": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:L/I:N/A:N"
+    }
+  ],
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "crates.io",
+        "name": "fx-multi-a"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "3.0.0"
+            }
+          ]
+        }
+      ],
+      "versions": []
+    },
+    {
+      "package": {
+        "ecosystem": "crates.io",
+        "name": "fx-multi-b"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "1.0.0"
+            },
+            {
+              "fixed": "1.1.0"
+            }
+          ]
+        }
+      ],
+      "versions": []
+    },
+    {
+      "package": {
+        "ecosystem": "npm",
+        "name": "fx-multi-a"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "9.9.9"
+            }
+          ]
+        }
+      ],
+      "versions": []
+    }
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://example.invalid/advisory"
+    }
+  ]
+}

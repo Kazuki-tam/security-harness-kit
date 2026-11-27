@@ -1,0 +1,76 @@
+{
+  "id": "RUSTSEC-9999-0003",
+  "modified": "2026-01-02T03:04:05Z",
+  "published": "2026-01-01T00:00:00Z",
+  "aliases": [],
+  "related": [],
+  "summary": "Segfault in fx-multi-introduced",
+  "details": "Synthetic record for shk tests. Not a real advisory.",
+  "severity": [
+    {
+      "type": "CVSS_V3",
+      "score": "CVSS:3.0/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+    }
+  ],
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "crates.io",
+        "name": "fx-multi-introduced",
+        "purl": "pkg:cargo/fx-multi-introduced"
+      },
+      "ranges": [
+        {
+          "type": "SEMVER",
+          "events": [
+            {
+              "introduced": "0.2.1-0"
+            },
+            {
+              "fixed": "0.2.1"
+            },
+            {
+              "introduced": "0.0.0-0"
+            },
+            {
+              "fixed": "0.2.0"
+            },
+            {
+              "introduced": "0.2.2-0"
+            },
+            {
+              "fixed": "0.2.2"
+            },
+            {
+              "introduced": "0.3.0-0"
+            },
+            {
+              "fixed": "0.3.5"
+            }
+          ]
+        }
+      ],
+      "versions": [],
+      "ecosystem_specific": {
+        "affects": {
+          "arch": [],
+          "os": [],
+          "functions": []
+        },
+        "affected_functions": null
+      },
+      "database_specific": {
+        "categories": [],
+        "cvss": null,
+        "informational": null,
+        "source": "https://example.invalid/advisory"
+      }
+    }
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://example.invalid/advisory"
+    }
+  ]
+}
