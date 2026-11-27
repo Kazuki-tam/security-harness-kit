@@ -200,6 +200,15 @@ pub fn path_is_excluded(policy: &Policy, rel: &str) -> Result<bool> {
     Ok(!PathFilters::from_policy(policy)?.allows(rel))
 }
 
+/// Whether the policy's `[scan].exclude` patterns alone match `rel`, a
+/// policy-root-relative path using `/` separators. Unlike
+/// [`path_is_excluded`], `[scan].include` is not consulted: callers that look
+/// for one specific file (a lockfile, say) must not lose it to an include
+/// list written for source files.
+pub fn path_matches_exclude(policy: &Policy, rel: &str) -> Result<bool> {
+    Ok(build_exclude_set(policy.scan.effective_exclude())?.is_match(rel))
+}
+
 impl PathFilters {
     fn from_policy(policy: &Policy) -> Result<Self> {
         Ok(Self {
@@ -258,7 +267,11 @@ fn scan_root_for_target(target: &Path) -> PathBuf {
     }
 }
 
-fn policy_root_for_scan(target_root: &Path) -> PathBuf {
+/// The directory whose `shk.toml` applies to a filesystem scan of
+/// `target_root`: the working directory when the target lies inside it,
+/// otherwise the target itself, so a local policy never applies to a project
+/// outside the working directory.
+pub fn policy_root_for_scan(target_root: &Path) -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let cwd = canonical_or_same(&cwd);
     let target_root = canonical_or_same(target_root);
@@ -1087,6 +1100,101 @@ fn file_identity(path: &Path) -> Option<FileIdentity> {
     Some(path.to_string_lossy().to_lowercase())
 }
 
+/// Files found below a directory by [`list_files`].
+pub struct FileListing {
+    /// Absolute paths (`root` joined with the relative path), in walk order,
+    /// followed by tracked files that ignore rules had hidden.
+    pub files: Vec<PathBuf>,
+    /// Directory walk errors (permission denied, broken links, …).
+    pub walk_errors: Vec<String>,
+}
+
+/// Lists the regular files below `root` the way `shk scan` does, keeping the
+/// ones `keep` accepts.
+///
+/// Git ignore rules apply, with two deliberate exceptions that stop the
+/// listed tree from hiding its own files: `.ignore` files are not honoured,
+/// and a file Git tracks is listed even when an ignore rule matches it.
+/// Hidden files are included and `.git` is skipped. Symlinked files are
+/// listed only when `follow_symlinks` is set.
+pub fn list_files(
+    root: &Path,
+    follow_symlinks: bool,
+    mut keep: impl FnMut(&Path) -> bool,
+) -> FileListing {
+    let mut walk = WalkBuilder::new(root);
+    // standard_filters must come first: it resets every filter (including
+    // hidden) and would otherwise override hidden(false) below.
+    walk.standard_filters(true);
+    walk.hidden(false);
+    walk.git_ignore(true);
+    walk.git_exclude(true);
+    // `.ignore` files are a ripgrep convention, not a Git one: honouring them
+    // would let the scanned tree switch the scan off with a one-line file.
+    walk.ignore(false);
+    // With hidden files included, keep the walker out of .git itself.
+    walk.filter_entry(|e| e.file_name() != std::ffi::OsStr::new(".git"));
+    if follow_symlinks {
+        walk.follow_links(true);
+    }
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut walk_errors: Vec<String> = Vec::new();
+    for entry in walk.build() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                walk_errors.push(err.to_string());
+                continue;
+            }
+        };
+        // DirEntry::file_type() does not follow symlinks unless the walker
+        // was built with follow_links(true), so symlinked files (which may
+        // point outside the repository) are excluded when
+        // follow_symlinks = false.
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+        let full = entry.into_path();
+        if keep(&full) {
+            files.push(full);
+        }
+    }
+    // A tracked file is part of the repository even when a `.gitignore` rule
+    // matches it (`git add -f`), so ignore rules must not hide it.
+    let seen: HashSet<PathBuf> = files.iter().cloned().collect();
+    let mut missing = Vec::new();
+    for rel in git::tracked_files_under(root) {
+        let full = root.join(&rel);
+        if seen.contains(&full) || !keep(&full) {
+            continue;
+        }
+        let metadata = if follow_symlinks {
+            fs::metadata(&full)
+        } else {
+            fs::symlink_metadata(&full)
+        };
+        if metadata.is_ok_and(|m| m.is_file()) {
+            missing.push(full);
+        }
+    }
+    if !missing.is_empty() {
+        // Git may spell a name differently from the directory listing
+        // (Unicode normalisation, letter case): the same file must not be
+        // scanned twice.
+        let mut identities: HashSet<FileIdentity> = files
+            .iter()
+            .filter_map(|path| file_identity(path))
+            .collect();
+        for full in missing {
+            if file_identity(&full).is_none_or(|identity| identities.insert(identity)) {
+                files.push(full);
+            }
+        }
+    }
+    FileListing { files, walk_errors }
+}
+
 pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
     if opts.staged {
         return scan_staged(target, opts);
@@ -1183,85 +1291,20 @@ pub fn scan_path(target: &Path, opts: ScanOptions) -> Result<ScanResult> {
         });
     }
 
-    let mut walk = WalkBuilder::new(&scan_root);
-    // standard_filters must come first: it resets every filter (including
-    // hidden) and would otherwise override hidden(false) below.
-    walk.standard_filters(true);
-    walk.hidden(false);
-    walk.git_ignore(true);
-    walk.git_exclude(true);
-    // `.ignore` files are a ripgrep convention, not a Git one: honouring them
-    // would let the scanned tree switch the scan off with a one-line file.
-    walk.ignore(false);
-    // With hidden files included, keep the walker out of .git itself.
-    walk.filter_entry(|e| e.file_name() != std::ffi::OsStr::new(".git"));
-    if policy.scan.follow_symlinks {
-        walk.follow_links(true);
-    }
-
     let mut findings = expired;
-    let mut scanned_files: Vec<PathBuf> = Vec::new();
-    for entry in walk.build() {
-        let entry = match entry {
-            Ok(entry) => entry,
-            // Surface walk errors (permission denied, broken links, …) as
-            // info findings instead of silently skipping whole subtrees.
-            Err(err) => {
-                findings.push(skipped_finding(
-                    "scan.walk_error",
-                    "<walk>".into(),
-                    format!("Skipped: directory walk error ({err})"),
-                ));
-                continue;
-            }
-        };
-        // DirEntry::file_type() does not follow symlinks unless the walker
-        // was built with follow_links(true), so symlinked files (which may
-        // point outside the repository) are excluded when
-        // follow_symlinks = false.
-        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-            continue;
-        }
-        let full = entry.into_path();
-        let rel = rel_normalized(&full, &policy_root);
-        if filters.allows(&rel) {
-            scanned_files.push(full);
-        }
+    let listing = list_files(&scan_root, policy.scan.follow_symlinks, |full| {
+        filters.allows(&rel_normalized(full, &policy_root))
+    });
+    // Surface walk errors (permission denied, broken links, …) as info
+    // findings instead of silently skipping whole subtrees.
+    for err in listing.walk_errors {
+        findings.push(skipped_finding(
+            "scan.walk_error",
+            "<walk>".into(),
+            format!("Skipped: directory walk error ({err})"),
+        ));
     }
-    // A tracked file is part of the repository even when a `.gitignore` rule
-    // matches it (`git add -f`), so ignore rules must not hide it.
-    {
-        let seen: HashSet<PathBuf> = scanned_files.iter().cloned().collect();
-        let mut missing = Vec::new();
-        for rel in git::tracked_files_under(&scan_root) {
-            let full = scan_root.join(&rel);
-            if seen.contains(&full) || !filters.allows(&rel_normalized(&full, &policy_root)) {
-                continue;
-            }
-            let metadata = if policy.scan.follow_symlinks {
-                fs::metadata(&full)
-            } else {
-                fs::symlink_metadata(&full)
-            };
-            if metadata.is_ok_and(|m| m.is_file()) {
-                missing.push(full);
-            }
-        }
-        if !missing.is_empty() {
-            // Git may spell a name differently from the directory listing
-            // (Unicode normalisation, letter case): the same file must not be
-            // scanned twice.
-            let mut identities: HashSet<FileIdentity> = scanned_files
-                .iter()
-                .filter_map(|path| file_identity(path))
-                .collect();
-            for full in missing {
-                if file_identity(&full).is_none_or(|identity| identities.insert(identity)) {
-                    scanned_files.push(full);
-                }
-            }
-        }
-    }
+    let scanned_files = listing.files;
 
     let chunk_results: Vec<Result<ScanChunk>> = scanned_files
         .par_iter()
@@ -1478,6 +1521,88 @@ mod tests {
 
         assert!(chunk.findings.is_empty(), "{:?}", chunk.findings);
         assert_eq!(chunk.suppressed, 1);
+    }
+
+    #[test]
+    fn path_matches_exclude_ignores_the_include_list() {
+        let mut p = Policy::default();
+        p.scan.include = Some(vec!["src/**".into()]);
+        p.scan.exclude = Some(vec!["vendor/**".into()]);
+        // Outside the include list: the scan filter drops it, the
+        // exclude-only check does not.
+        assert!(path_is_excluded(&p, "Cargo.lock").unwrap());
+        assert!(!path_matches_exclude(&p, "Cargo.lock").unwrap());
+        assert!(path_matches_exclude(&p, "vendor/Cargo.lock").unwrap());
+
+        // Without `[scan].exclude` the built-in defaults apply.
+        let defaults = Policy::default();
+        assert!(path_matches_exclude(&defaults, "node_modules/a/Cargo.lock").unwrap());
+        assert!(!path_matches_exclude(&defaults, "Cargo.lock").unwrap());
+
+        p.scan.exclude = Some(vec!["[".into()]);
+        assert!(path_matches_exclude(&p, "Cargo.lock").is_err());
+    }
+
+    #[test]
+    fn policy_root_for_scan_is_cwd_only_for_targets_inside_it() {
+        let cwd = canonical_or_same(&std::env::current_dir().unwrap());
+        assert_eq!(policy_root_for_scan(&cwd), cwd);
+        assert_eq!(policy_root_for_scan(&cwd.join("src")), cwd);
+
+        let outside = tempfile::tempdir().unwrap();
+        assert_eq!(
+            policy_root_for_scan(outside.path()),
+            canonical_or_same(outside.path())
+        );
+    }
+
+    #[test]
+    fn list_files_ignores_dot_ignore_and_skips_git_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join(".git/config"), "").unwrap();
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join(".ignore"), "*\n").unwrap();
+        fs::write(root.join(".hidden"), "").unwrap();
+        fs::write(root.join("a.txt"), "").unwrap();
+        fs::write(root.join("sub/b.txt"), "").unwrap();
+        fs::write(root.join("sub/c.log"), "").unwrap();
+
+        let names = |listing: FileListing| {
+            let mut names: Vec<String> = listing
+                .files
+                .iter()
+                .map(|full| rel_normalized(full, root))
+                .collect();
+            names.sort();
+            names
+        };
+
+        let all = list_files(root, false, |_| true);
+        assert!(all.walk_errors.is_empty(), "{:?}", all.walk_errors);
+        assert_eq!(
+            names(all),
+            [".hidden", ".ignore", "a.txt", "sub/b.txt", "sub/c.log"]
+        );
+
+        let kept = list_files(root, false, |full| {
+            full.extension().is_some_and(|ext| ext == "txt")
+        });
+        assert_eq!(names(kept), ["a.txt", "sub/b.txt"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_files_lists_symlinked_files_only_when_following() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("real.txt"), "").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("real.txt"), dir.path().join("link.txt"))
+            .unwrap();
+
+        assert!(list_files(dir.path(), false, |_| true).files.is_empty());
+        assert_eq!(list_files(dir.path(), true, |_| true).files.len(), 1);
     }
 
     #[test]

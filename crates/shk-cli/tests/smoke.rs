@@ -8676,3 +8676,206 @@ fn scan_says_when_findings_were_suppressed() {
         "{stdout}"
     );
 }
+
+// `shk deps` (experimental) adds `[deps]` and `[thresholds].deps_fail_on` to
+// `shk.toml`. Nothing but the `deps` commands may interpret them: a mistake
+// there must leave scans and AI hooks exactly as they were, because a policy
+// that fails to load makes every hook deny.
+const DEPS_POLICY_MISTAKES: &[&str] = &[
+    "[thresholds]\ndeps_fail_on = 5\n",
+    "[thresholds]\ndeps_fail_on = \"urgent\"\n",
+    "deps = \"not a table\"\n",
+    "[deps]\nstale_after_hours = \"soon\"\nfuture_key = true\nignore = 3\n",
+    "[thresholds]\ndeps_fail_on = \"medium\"\n\n[deps]\nstale_after_hours = 24\n\n[[deps.ignore]]\nid = 7\nexpires = false\nowner = \"team\"\n",
+];
+
+#[test]
+fn deps_policy_mistakes_do_not_change_scan_output() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), format!("{REVIEW_FIXTURE_KEY}\n")).unwrap();
+    let scan = |format: &str| {
+        let out = shk_cmd()
+            .args(["scan", format, "--", "."])
+            .current_dir(dir.path())
+            .output()
+            .expect("shk scan");
+        assert!(out.stderr.is_empty(), "{}", output_log(&out));
+        (out.status.code(), out.stdout)
+    };
+
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let baseline = [scan("--json"), scan("--sarif")];
+    assert_eq!(baseline[0].0, Some(1));
+
+    for body in DEPS_POLICY_MISTAKES {
+        std::fs::write(dir.path().join("shk.toml"), body).unwrap();
+        assert_eq!([scan("--json"), scan("--sarif")], baseline, "{body:?}");
+    }
+}
+
+#[test]
+fn deps_policy_mistakes_do_not_change_hook_decisions() {
+    let dir = tempfile::tempdir().unwrap();
+    init_plain_repo(dir.path());
+    let hook = |command: String| {
+        let out = run_hook_payload(
+            dir.path(),
+            "claude-code",
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": { "command": command }
+            }),
+        );
+        (out.status.code(), out.stdout)
+    };
+    let decisions = || {
+        [
+            hook("echo hello".into()),
+            hook(format!("echo {REVIEW_FIXTURE_KEY}")),
+        ]
+    };
+
+    std::fs::write(dir.path().join("shk.toml"), "").unwrap();
+    let baseline = decisions();
+    // A policy that failed to load would deny the harmless command too.
+    assert_eq!(baseline[0].0, Some(0));
+    assert_eq!(baseline[1].0, Some(2));
+
+    for body in DEPS_POLICY_MISTAKES {
+        std::fs::write(dir.path().join("shk.toml"), body).unwrap();
+        assert_eq!(decisions(), baseline, "{body:?}");
+    }
+}
+
+/// Compares machine-readable output with a file under `tests/snapshots/`.
+/// Only the tool version is normalised, so any other change to the shape or
+/// content of `scan` / `mcp audit` output fails here.
+fn assert_matches_snapshot(name: &str, out: &std::process::Output) {
+    let mut actual: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|err| panic!("{name}: {err}"));
+    if let Some(version) = actual.pointer_mut("/runs/0/tool/driver/semanticVersion") {
+        *version = "<version>".into();
+    }
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/snapshots")
+        .join(name);
+    let expected: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display())),
+    )
+    .unwrap_or_else(|err| panic!("{name}: {err}"));
+    assert_eq!(
+        actual,
+        expected,
+        "{name} changed; actual output:\n{}",
+        serde_json::to_string_pretty(&actual).unwrap()
+    );
+}
+
+#[test]
+fn scan_machine_output_matches_snapshots() {
+    let fixture = std::fs::canonicalize(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/basic"),
+    )
+    .unwrap();
+    // Run from an unrelated directory so the fixture is its own policy root.
+    let cwd = tempfile::tempdir().unwrap();
+    for (format, snapshot) in [
+        ("--json", "scan-basic.json"),
+        ("--sarif", "scan-basic.sarif.json"),
+    ] {
+        let out = shk_cmd()
+            .args(["scan", format, "--no-color", "--"])
+            .arg(&fixture)
+            .current_dir(cwd.path())
+            .output()
+            .expect("shk scan");
+        assert_eq!(out.status.code(), Some(1), "{}", output_log(&out));
+        assert_matches_snapshot(snapshot, &out);
+    }
+}
+
+#[test]
+fn mcp_audit_machine_output_matches_snapshots() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".mcp.json"),
+        r#"{"mcpServers":{"filesystem":{"command":"npx","args":["@modelcontextprotocol/server-filesystem@1.2.3","/"]},"pinned":{"command":"npx","args":["@scope/pkg@1.2.3"]}}}"#,
+    )
+    .unwrap();
+    for (format, snapshot) in [
+        ("--json", "mcp-audit.json"),
+        ("--sarif", "mcp-audit.sarif.json"),
+    ] {
+        let out = shk_cmd()
+            .args(["mcp", "audit", ".", format])
+            .current_dir(dir.path())
+            .output()
+            .expect("shk mcp audit");
+        assert_eq!(out.status.code(), Some(1), "{}", output_log(&out));
+        assert_matches_snapshot(snapshot, &out);
+    }
+}
+
+// The file list `shk scan` builds is shared with `shk deps audit`. This pins
+// the exact selection: hidden files in, `.git` out, `.ignore` not honoured,
+// `.gitignore` honoured except for tracked files, policy excludes applied.
+#[test]
+fn scan_file_selection_is_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    init_plain_repo(root);
+    std::fs::write(
+        root.join("shk.toml"),
+        "[scan]\nexclude = [\"skipped/**\"]\n",
+    )
+    .unwrap();
+    std::fs::write(root.join(".gitignore"), "ignored.txt\nforced.txt\n").unwrap();
+    std::fs::write(root.join(".ignore"), "*\n").unwrap();
+    for dir in ["nested", "skipped"] {
+        std::fs::create_dir(root.join(dir)).unwrap();
+    }
+    for file in [
+        ".hidden",
+        "plain.txt",
+        "ignored.txt",
+        "forced.txt",
+        "nested/deep.txt",
+        "skipped/out.txt",
+    ] {
+        std::fs::write(root.join(file), "nothing here\n").unwrap();
+    }
+    let add = git_cmd()
+        .args(["add", "-f", "forced.txt"])
+        .current_dir(root)
+        .output()
+        .expect("git add");
+    assert!(add.status.success());
+
+    let out = shk_cmd()
+        .args(["scan", "--json", "--", "."])
+        .current_dir(root)
+        .output()
+        .expect("shk scan");
+    assert!(out.status.success(), "{}", output_log(&out));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let mut scanned: Vec<&str> = report["scanned_paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|path| path.as_str().unwrap())
+        .collect();
+    scanned.sort_unstable();
+    assert_eq!(
+        scanned,
+        [
+            ".gitignore",
+            ".hidden",
+            ".ignore",
+            "forced.txt",
+            "nested/deep.txt",
+            "plain.txt",
+            "shk.toml",
+        ]
+    );
+}
