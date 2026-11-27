@@ -2282,7 +2282,8 @@ fn here_string_text(words: &[String]) -> Option<&str> {
 
 /// True when `segment`, a slice of `text`, is what a pipe feeds: the command
 /// right behind the `|`, also inside a group opened there (`… | (bash)`,
-/// `… | { bash; }`). A `case` pattern is not a command (`bash|zsh)`).
+/// `… | { bash; }`). An alternative of a `case` pattern is not a command
+/// (`case $1 in sh|bash|zsh)`).
 fn follows_a_pipe(text: &str, segment: &str) -> bool {
     let offset = (segment.as_ptr() as usize).wrapping_sub(text.as_ptr() as usize);
     let (Some(before), Some(after)) = (text.get(..offset), text.get(offset + segment.len()..))
@@ -2291,13 +2292,59 @@ fn follows_a_pipe(text: &str, segment: &str) -> bool {
     };
     let mut before = before.trim_end();
     let grouped = before.ends_with(['(', '{']);
-    if after.trim_start().starts_with(')') && !grouped {
+    if !grouped && is_case_alternative(before, after) {
         return false;
     }
     while let Some(outer) = before.strip_suffix(['(', '{']) {
         before = outer.trim_end();
     }
     before.ends_with("|&") || (before.ends_with('|') && !before.ends_with("||"))
+}
+
+/// True when the text between `before` and `after` is one alternative of a
+/// `case` pattern list: only single words joined by `|` lie between it and
+/// the closing `)`, and the list opens right behind `case <word> in` or
+/// behind the `;;` / `;&` of the clause before it. A `)` alone does not make
+/// a pattern: `(cat file | bash)` is a pipe inside a subshell.
+fn is_case_alternative(before: &str, after: &str) -> bool {
+    const WORD_END: [char; 7] = ['|', '(', ')', ';', '&', '<', '>'];
+    let is_word_end = |c: char| c.is_whitespace() || WORD_END.contains(&c);
+
+    let mut rest = after.trim_start();
+    while !rest.starts_with(')') {
+        let Some(next) = rest.strip_prefix('|') else {
+            return false;
+        };
+        let next = next.trim_start();
+        let word = next.find(is_word_end).unwrap_or(next.len());
+        if word == 0 {
+            return false;
+        }
+        rest = next[word..].trim_start();
+    }
+
+    let mut rest = before;
+    while let Some(previous) = rest.strip_suffix('|') {
+        let previous = previous.trim_end();
+        let word = previous.rfind(is_word_end).map_or(0, |index| {
+            index + previous[index..].chars().next().map_or(1, char::len_utf8)
+        });
+        if word == previous.len() {
+            return false;
+        }
+        rest = previous[..word].trim_end();
+    }
+    let rest = rest.strip_suffix('(').map_or(rest, str::trim_end);
+    if rest.ends_with(";;") || rest.ends_with(";&") {
+        return true;
+    }
+    // `case <word> in`
+    let mut words = rest.split_whitespace().rev();
+    words.next() == Some("in")
+        && words.next().is_some()
+        && words
+            .next()
+            .is_some_and(|word| word.rsplit(WORD_END).next() == Some("case"))
 }
 
 /// True for a segment that is nothing but a shell without a script of its
@@ -4857,10 +4904,9 @@ fn environment_dump_command(command: &str, words: &[&str]) -> bool {
     // values, as does either builtin without arguments; `compgen -e` names
     // the exported ones.
     if matches!(base, "declare" | "typeset") {
-        return words.len() == 1
-            || words[1..]
-                .iter()
-                .all(|word| word.starts_with('-') && word.contains(['p', 'x']));
+        return words_without_redirections(&words[1..])
+            .iter()
+            .all(|word| word.starts_with('-') && word.contains(['p', 'x']));
     }
     if base == "compgen" {
         return words[1..].iter().any(|word| matches!(*word, "-e" | "-v"));
@@ -4878,7 +4924,9 @@ fn env_invocation_dumps(command: &str, cmd: &str) -> bool {
     let Some(after) = command_tail_after_invocation(command, cmd) else {
         return false;
     };
-    let after = after.trim_start();
+    // A redirection changes where the dump goes, not what it is: `env 2>&1`,
+    // `env < /dev/null`.
+    let after = skip_leading_redirections(after);
     if after.is_empty() || starts_with_shell_output_operator(after) {
         return true;
     }
@@ -4894,20 +4942,73 @@ fn shell_builtin_dumps(command: &str, name: &str, dump_flags: &[&str]) -> bool {
     let Some(after) = command_tail_after_invocation(command, name) else {
         return false;
     };
-    let after = after.trim_start();
+    let after = skip_leading_redirections(after);
     after.is_empty()
         || starts_with_shell_output_operator(after)
         || dump_flags.iter().any(|flag| after.starts_with(flag))
 }
 
+/// `Some` for a word that is a redirection (`2>&1`, `>out`, `<`, `<<EOF`,
+/// `&>log`): whether its target is part of the word. Otherwise the target is
+/// the next word.
+fn redirection_word(word: &str) -> Option<bool> {
+    let operator = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    let operator = operator.strip_prefix('&').unwrap_or(operator);
+    if !operator.starts_with(['<', '>']) {
+        return None;
+    }
+    Some(!operator.trim_start_matches(['<', '>', '&', '|']).is_empty())
+}
+
+/// `text` behind the redirections it starts with and their targets.
+fn skip_leading_redirections(text: &str) -> &str {
+    let mut rest = text.trim_start();
+    loop {
+        let word = rest.split_whitespace().next().unwrap_or_default();
+        let Some(target_attached) = redirection_word(word) else {
+            return rest;
+        };
+        rest = rest[word.len()..].trim_start();
+        if !target_attached {
+            let target = rest.split_whitespace().next().unwrap_or_default();
+            rest = rest[target.len()..].trim_start();
+        }
+    }
+}
+
+/// `words` without redirections and their targets.
+fn words_without_redirections<'a>(words: &[&'a str]) -> Vec<&'a str> {
+    let mut kept = Vec::with_capacity(words.len());
+    let mut index = 0;
+    while let Some(word) = words.get(index) {
+        match redirection_word(word) {
+            Some(target_attached) => index += if target_attached { 1 } else { 2 },
+            None => {
+                kept.push(*word);
+                index += 1;
+            }
+        }
+    }
+    kept
+}
+
 fn first_env_command_token(after_env: &str) -> Option<&str> {
-    for token in after_env.split_whitespace() {
+    let mut tokens = after_env.split_whitespace();
+    while let Some(token) = tokens.next() {
         let token = token.trim_matches(|c: char| matches!(c, '"' | '\'' | '`'));
         if token.is_empty() {
             continue;
         }
-        if starts_with_shell_output_operator(token) {
-            return None;
+        match redirection_word(token) {
+            // What follows a heredoc operator is its body, not a command.
+            Some(_) if token.contains("<<") && !token.contains("<<<") => return None,
+            Some(true) => continue,
+            Some(false) => {
+                tokens.next();
+                continue;
+            }
+            None if starts_with_shell_output_operator(token) => return None,
+            None => {}
         }
         if token.starts_with('-') || is_env_assignment(token) {
             continue;
@@ -9581,6 +9682,27 @@ mod tests {
             ("declare -p", "environment_dump"),
             ("typeset -x", "environment_dump"),
             ("compgen -e", "environment_dump"),
+            // A redirection does not make a dump something else.
+            ("env 2>&1", "environment_dump"),
+            ("env 2>/dev/null", "environment_dump"),
+            ("env 2> /dev/null | sort", "environment_dump"),
+            ("env < /dev/null", "environment_dump"),
+            ("env &>all.log", "environment_dump"),
+            ("env <<EOF\nignored\nEOF", "environment_dump"),
+            ("set 2>&1", "environment_dump"),
+            ("export -p 2>&1", "environment_dump"),
+            ("export 2>/dev/null -p", "environment_dump"),
+            ("declare -p 2>&1", "environment_dump"),
+            ("declare 2>&1", "environment_dump"),
+            ("typeset -x > vars.txt", "environment_dump"),
+            // A closing parenthesis alone does not make a `case` pattern.
+            ("(cat notes.txt | bash)", "opaque_execution"),
+            ("(cat in notes.txt | bash)", "opaque_execution"),
+            ("(cat notes.txt | bash | tee out.log)", "opaque_execution"),
+            (
+                "case $1 in a) cat notes.txt | bash ;; esac",
+                "opaque_execution",
+            ),
         ]);
         assert_unguarded(&[
             "bash scripts/build.sh",
@@ -9605,7 +9727,16 @@ mod tests {
             "ls | wc -l && sh scripts/x.sh",
             "case $1 in bash|zsh) echo shell ;; esac",
             "echo a | grep b; case $1 in bash|zsh) echo shell ;; esac",
+            "case $1 in sh|bash|zsh) echo shell ;; esac",
+            "case $SHELL in */bash|*/zsh|*/sh) echo ok ;; esac",
+            "case $1 in\n  sh | bash | zsh | fish) echo s ;;\n  (ksh|dash) echo k ;;\n  x) : ;;\n  bash|dash|sh) : ;;\nesac",
             "declare -a items",
+            "declare -a items 2>&1",
+            "env FOO=1 make test 2>&1",
+            "env 2>/dev/null FOO=1 make test",
+            "env -i PATH=/usr/bin make 2>/dev/null",
+            "set -euo pipefail 2>&1",
+            "export FOO=1 2>/dev/null",
             "caffeinate make",
             // A shell name that is not a command fed by a pipe.
             "case \"$SHELL\" in bash) echo b ;; zsh) echo z ;; esac",

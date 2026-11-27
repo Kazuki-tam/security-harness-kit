@@ -166,31 +166,45 @@ pub fn parse_inline_suppressions(content: &str) -> InlineSuppressions {
     parse_suppressions(content, |_, _| true)
 }
 
-/// Like [`parse_inline_suppressions`], but a marker only counts when the line
-/// that carries it is, text for text, a line of `trusted`.
+/// Like [`parse_inline_suppressions`], but a marker only counts for text
+/// that `trusted` already holds under it.
 ///
 /// `content` is a file as an AI tool call would leave it (edits applied, text
-/// to be written appended) and `trusted` the file as it is on disk. Markers
-/// the file already has keep working, also for a line the call changes under
-/// a next-line marker; text the tool call adds cannot bring a marker of its
-/// own.
+/// to be written appended) and `trusted` the file as it is on disk. A marker
+/// on the line it suppresses counts when that line is, text for text, a line
+/// of `trusted`. A next-line marker counts when `trusted` holds the marker
+/// line directly above the line it suppresses: the pair has to be there
+/// already. Markers the file has keep working for the text they were written
+/// for; text the tool call adds cannot bring a marker of its own, and it
+/// cannot borrow one either, by changing the line under a marker or by
+/// repeating a marker line above new text.
 pub fn parse_inline_suppressions_trusting(content: &str, trusted: &str) -> InlineSuppressions {
-    let trusted_lines: HashSet<&str> = trusted.lines().map(str::trim_end).collect();
+    let trusted_lines: Vec<&str> = trusted.lines().map(str::trim_end).collect();
+    let trusted_single: HashSet<&str> = trusted_lines.iter().copied().collect();
+    let trusted_pairs: HashSet<(&str, &str)> = trusted_lines
+        .windows(2)
+        .map(|pair| (pair[0], pair[1]))
+        .collect();
     let lines: Vec<&str> = content.lines().map(str::trim_end).collect();
     // In a patch an unchanged or removed line of the file follows a one
     // character prefix.
-    let is_trusted = |line_no: usize| {
+    let readings = |line_no: usize| {
         line_no
             .checked_sub(1)
             .and_then(|idx| lines.get(idx))
-            .is_some_and(|line| {
-                [Some(*line), line.strip_prefix(' '), line.strip_prefix('-')]
-                    .into_iter()
-                    .flatten()
-                    .any(|text| trusted_lines.contains(text))
-            })
+            .into_iter()
+            .flat_map(|line| [Some(*line), line.strip_prefix(' '), line.strip_prefix('-')])
+            .flatten()
     };
-    parse_suppressions(content, |marker_line, _| is_trusted(marker_line))
+    parse_suppressions(content, |marker_line, target_line| {
+        if marker_line == target_line {
+            readings(marker_line).any(|text| trusted_single.contains(text))
+        } else {
+            readings(marker_line).any(|marker| {
+                readings(target_line).any(|target| trusted_pairs.contains(&(marker, target)))
+            })
+        }
+    })
 }
 
 /// `accept(marker_line, target_line)` decides whether a marker applies.
@@ -352,6 +366,51 @@ pub fn expired_allowlist_warnings(entries: &[AllowlistEntry]) -> Vec<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trusted_markers_cover_only_the_text_already_under_them() {
+        let rule = "secret.generic_api_key";
+        let disk = "# shk-ignore-next-line\nKEY=old\nMODE=a\nTOKEN=kept # shk-ignore\n";
+        let suppressed = |content: &str, line: usize| {
+            parse_inline_suppressions_trusting(content, disk).is_suppressed(line, rule)
+        };
+
+        // Unchanged pairs and same-line markers keep working, also when the
+        // file changes around them or their line moves.
+        assert!(suppressed(disk, 2));
+        assert!(suppressed(disk, 4));
+        assert!(suppressed(
+            "intro\n# shk-ignore-next-line\nKEY=old\nMODE=b\n",
+            3
+        ));
+        assert!(suppressed("MODE=b\nTOKEN=kept # shk-ignore\n", 2));
+
+        // The line under an existing marker is changed.
+        assert!(!suppressed("# shk-ignore-next-line\nKEY=new\nMODE=a\n", 2));
+        // An existing marker line is repeated above new or other text.
+        assert!(!suppressed(
+            "# shk-ignore-next-line\nKEY=old\n# shk-ignore-next-line\nOTHER=new\n",
+            4
+        ));
+        assert!(!suppressed("# shk-ignore-next-line\nMODE=a\n", 2));
+        // A marker the call brings itself.
+        assert!(!suppressed("# shk-ignore\nKEY=old\n", 2));
+        assert!(!suppressed("KEY=new # shk-ignore\n", 1));
+
+        // In a patch, context and removed lines carry a one character prefix;
+        // an added line under a context marker is new text.
+        let patch = " # shk-ignore-next-line\n-KEY=old\n+KEY=new\n MODE=a\n";
+        assert!(suppressed(patch, 2));
+        assert!(!suppressed(patch, 3));
+        assert!(suppressed(
+            " # shk-ignore-next-line\n KEY=old\n+EXTRA=1\n",
+            2
+        ));
+        assert!(!suppressed(
+            " # shk-ignore-next-line\n+KEY=new\n KEY=old\n",
+            2
+        ));
+    }
 
     #[test]
     fn inline_next_line_all_rules() {
