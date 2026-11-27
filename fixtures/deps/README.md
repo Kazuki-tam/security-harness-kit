@@ -43,7 +43,7 @@ downloaded 2026-11-28, 3,226 records). Do not edit them.
 
 | Record | Case |
 | --- | --- |
-| `RUSTSEC-2020-0071`, `GHSA-wcg3-cvx6-7396` | `time`: one group; 13 `introduced` events in one RUSTSEC range; the GHSA record lists the crate twice and, unlike RUSTSEC, covers 0.2.0 |
+| `RUSTSEC-2020-0071`, `GHSA-wcg3-cvx6-7396` | `time`: one group; 8 `introduced` events in one RUSTSEC range; the GHSA record lists the crate twice and, unlike RUSTSEC, covers 0.2.0 |
 | `RUSTSEC-2026-0543`, `RUSTSEC-2024-0370` | `unmaintained` (`chrono`, `proc-macro-error`) |
 | `RUSTSEC-2024-0429`, `GHSA-wrw7-89jp-8q8g` | `glib`: no CVSS on the RUSTSEC record, CVSS v4 on the GHSA record |
 | `RUSTSEC-2024-0393`, `GHSA-rm66-9gh4-4gp8` | Same, with a range starting at `0.0.0-0` / `0` |
