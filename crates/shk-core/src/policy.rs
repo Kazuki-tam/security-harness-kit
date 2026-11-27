@@ -279,6 +279,12 @@ pub struct ThresholdsSection {
     pub scan_fail_on: String,
     #[serde(default = "default_fail_high")]
     pub pre_commit_fail_on: String,
+    /// Threshold for `shk deps audit` (experimental). Kept untyped on purpose:
+    /// a typed field would make a mistake such as `deps_fail_on = 5` fail the
+    /// whole policy load, and a policy that does not load makes every AI hook
+    /// deny. Only the `deps` commands interpret and validate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deps_fail_on: Option<toml::Value>,
 }
 
 fn default_fail_high() -> String {
@@ -291,6 +297,7 @@ impl Default for ThresholdsSection {
             default_fail_on: default_fail_high(),
             scan_fail_on: default_fail_high(),
             pre_commit_fail_on: default_fail_high(),
+            deps_fail_on: None,
         }
     }
 }
@@ -429,6 +436,11 @@ pub struct Policy {
     /// Project-specific sensitive words or regexes.
     #[serde(default)]
     pub custom_rules: Vec<CustomRule>,
+    /// Raw `[deps]` table for the `shk deps` commands (experimental). Loading
+    /// a policy never validates it, so a mistake in this table cannot stop
+    /// scans or AI hooks; the `deps` commands interpret and validate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deps: Option<toml::Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -1221,6 +1233,50 @@ format = "dotenv"
         std::fs::write(dir.path().join("shk.toml"), "not = [valid").unwrap();
         let err = Policy::load_from_dir(dir.path()).unwrap_err();
         assert!(err.to_string().contains("parse"), "{err}");
+    }
+
+    #[test]
+    fn deps_settings_are_kept_raw_and_never_validated_on_load() {
+        let (policy, _) = Policy::load_from_dir(tempfile::tempdir().unwrap().path()).unwrap();
+        assert!(policy.deps.is_none());
+        assert!(policy.thresholds.deps_fail_on.is_none());
+        // An unset value must not show up when a policy is serialized.
+        let json = serde_json::to_value(&policy).unwrap();
+        assert!(json.get("deps").is_none(), "{json}");
+        assert!(json["thresholds"].get("deps_fail_on").is_none(), "{json}");
+
+        // Every mistake the `deps` commands reject still loads here.
+        for body in [
+            "[thresholds]\ndeps_fail_on = 5\n",
+            "[thresholds]\ndeps_fail_on = \"urgent\"\n",
+            "deps = \"not a table\"\n",
+            "[deps]\nstale_after_hours = \"soon\"\nfuture_key = true\nignore = 3\n",
+            "[[deps.ignore]]\nid = 7\nexpires = false\nowner = \"team\"\n",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("shk.toml"), body).unwrap();
+            let (policy, path) = Policy::load_from_dir(dir.path())
+                .unwrap_or_else(|err| panic!("{body:?} must load: {err:#}"));
+            assert!(path.is_some());
+            assert_eq!(policy.scan_fail_on(), Severity::High, "{body:?}");
+            assert!(
+                policy.deps.is_some() || policy.thresholds.deps_fail_on.is_some(),
+                "{body:?}"
+            );
+        }
+
+        let policy: Policy = toml::from_str(
+            "[thresholds]\ndeps_fail_on = \"medium\"\n[deps]\nstale_after_hours = 12\n",
+        )
+        .unwrap();
+        assert_eq!(
+            policy.thresholds.deps_fail_on,
+            Some(toml::Value::String("medium".into()))
+        );
+        assert_eq!(
+            policy.deps.unwrap().get("stale_after_hours"),
+            Some(&toml::Value::Integer(12))
+        );
     }
 
     #[test]

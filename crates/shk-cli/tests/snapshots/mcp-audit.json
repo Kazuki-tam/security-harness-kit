@@ -1,0 +1,40 @@
+{
+  "config_files": [
+    ".mcp.json"
+  ],
+  "exit_threshold": "high",
+  "findings": [
+    {
+      "column": 1,
+      "confidence": 1.0,
+      "file": ".mcp.json",
+      "kind": "mcp",
+      "line": 1,
+      "message": "filesystem root is exposed; MCP server \"filesystem\" (claude-code)",
+      "redacted_value": "[REDACTED]",
+      "rule_id": "mcp.broad_filesystem_scope",
+      "severity": "high"
+    }
+  ],
+  "servers": [
+    {
+      "client": "claude-code",
+      "name": "filesystem",
+      "source_file": ".mcp.json",
+      "transport": "stdio"
+    },
+    {
+      "client": "claude-code",
+      "name": "pinned",
+      "source_file": ".mcp.json",
+      "transport": "stdio"
+    }
+  ],
+  "summary": {
+    "by_severity": {
+      "high": 1
+    },
+    "total": 1
+  },
+  "version": 1
+}

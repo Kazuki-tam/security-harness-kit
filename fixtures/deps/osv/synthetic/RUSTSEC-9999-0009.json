@@ -1,0 +1,50 @@
+{
+  "id": "RUSTSEC-9999-0009",
+  "modified": "2026-01-02T03:04:05Z",
+  "published": "2026-01-01T00:00:00Z",
+  "aliases": [],
+  "related": [],
+  "schema_version": "1.7.3",
+  "summary": "fx-withdrawn was reported in error",
+  "details": "Synthetic record for shk tests. Not a real advisory.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "crates.io",
+        "name": "fx-withdrawn",
+        "purl": "pkg:cargo/fx-withdrawn"
+      },
+      "ranges": [
+        {
+          "type": "SEMVER",
+          "events": [
+            {
+              "introduced": "0.0.0-0"
+            }
+          ]
+        }
+      ],
+      "ecosystem_specific": {
+        "affects": {
+          "arch": [],
+          "os": [],
+          "functions": []
+        },
+        "affected_functions": null
+      },
+      "database_specific": {
+        "categories": [],
+        "cvss": null,
+        "informational": null,
+        "source": "https://example.invalid/advisory"
+      }
+    }
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://example.invalid/advisory"
+    }
+  ],
+  "withdrawn": "2026-02-01T00:00:00Z"
+}

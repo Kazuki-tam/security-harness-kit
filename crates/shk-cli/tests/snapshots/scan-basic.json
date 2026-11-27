@@ -1,0 +1,32 @@
+{
+  "color_mode": "never",
+  "deduplicated": 0,
+  "exit_threshold": "high",
+  "findings": [
+    {
+      "column": 15,
+      "confidence": 0.9,
+      "context_before": [
+        "// Demo fixture — not a real credential"
+      ],
+      "file": "insecure-sample.txt",
+      "kind": "secret",
+      "line": 2,
+      "message": "Possible OpenAI API key detected",
+      "redacted_value": "[REDACTED]",
+      "rule_id": "secret.openai_api_key",
+      "severity": "high"
+    }
+  ],
+  "scanned_paths": [
+    "insecure-sample.txt"
+  ],
+  "summary": {
+    "by_severity": {
+      "high": 1
+    },
+    "total": 1
+  },
+  "suppressed": 0,
+  "version": 1
+}
