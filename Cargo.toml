@@ -7,6 +7,7 @@ members = [
     "crates/shk-rules",
     "crates/shk-cli",
     "crates/shk-integrations",
+    "crates/shk-deps",
     "xtask",
 ]
 
@@ -49,6 +50,9 @@ quick-xml = "0.42"
 zip = { version = "9.0", default-features = false, features = ["deflate"] }
 pdf-extract = "0.12.0"
 encoding_rs = "0.8"
+semver = "1.0"
+# CVSS v3.x / v4.0 base scores for `shk deps` (RustSec crate; v2 vectors are not used).
+cvss = { version = "3.0", default-features = false, features = ["std", "v3", "v4"] }
 dotenvx = "0.2.2"
 # Text-only clipboard access; image-data is intentionally disabled.
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }

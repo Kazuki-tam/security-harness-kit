@@ -17,7 +17,7 @@ dependencies = [
  "fx-multi-a",
  "fx-multi-b 1.0.5",
  "fx-multi-b 2.0.2",
- "fx-multi-introduced 0.2.1",
+ "fx-multi-introduced 0.1.9",
  "fx-multi-introduced 0.3.4",
  "fx-notice",
  "fx-orphan",
@@ -87,7 +87,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "fx-multi-introduced"
-version = "0.2.1"
+version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
