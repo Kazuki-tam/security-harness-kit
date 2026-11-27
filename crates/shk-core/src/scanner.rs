@@ -1102,8 +1102,9 @@ fn file_identity(path: &Path) -> Option<FileIdentity> {
 
 /// Files found below a directory by [`list_files`].
 pub struct FileListing {
-    /// Absolute paths (`root` joined with the relative path), in walk order,
-    /// followed by tracked files that ignore rules had hidden.
+    /// `root` joined with each file's relative path (absolute when `root`
+    /// is), in walk order, followed by tracked files that ignore rules had
+    /// hidden.
     pub files: Vec<PathBuf>,
     /// Directory walk errors (permission denied, broken links, …).
     pub walk_errors: Vec<String>,
