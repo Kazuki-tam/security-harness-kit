@@ -66,14 +66,19 @@ as stated in each record), `GHSA-*` records from the
 
 ## `lockfiles/`
 
-Each directory holds one `Cargo.lock`.
+Each `<case>.lock` file is the content of a `Cargo.lock`; tests copy it to a
+temporary directory under that name. The files are deliberately not named
+`Cargo.lock`: dependency scanners (GitHub's dependency graph, Dependabot,
+Socket and the like) treat every `Cargo.lock` in a repository as a real
+manifest and would raise alerts for the vulnerable and malicious versions
+these fixtures pin on purpose.
 
-| Directory | Case |
+| File | Case |
 | --- | --- |
-| `affected/` | Every package matches a record above, except `fx-app` (local) and `fx-withdrawn` |
-| `unaffected/` | Versions just outside each range, and a package with no record |
-| `sources/` | crates.io (registry and sparse), git, another registry and local packages, including local and git packages that share a name with an affected crate |
-| `v3/`, `no-version/` | Lockfile versions read like version 4 |
-| `unsupported-version/`, `invalid-toml/` | Lockfiles that cannot be audited |
-| `empty/` | No packages |
-| `real/` | Versions of the crates in `osv/real/`, including `time` 0.2.0 (GHSA only), 0.2.22 (both) and 0.2.23 (fixed) |
+| `affected.lock` | Every package matches a record above, except `fx-app` (local) and `fx-withdrawn` |
+| `unaffected.lock` | Versions just outside each range, and a package with no record |
+| `sources.lock` | crates.io (registry and sparse), git, another registry and local packages, including local and git packages that share a name with an affected crate |
+| `v3.lock`, `no-version.lock` | Lockfile versions read like version 4 |
+| `unsupported-version.lock`, `invalid-toml.lock` | Lockfiles that cannot be audited |
+| `empty.lock` | No packages |
+| `real.lock` | Versions of the crates in `osv/real/`, including `time` 0.2.0 (GHSA only), 0.2.22 (both) and 0.2.23 (fixed) |
