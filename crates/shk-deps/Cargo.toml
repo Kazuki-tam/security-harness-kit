@@ -1,0 +1,19 @@
+[package]
+name = "shk-deps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Dependency advisory matching for shk (experimental; no network access)"
+publish = false
+
+[dependencies]
+# No version requirement: this crate is never published, and `xtask bump-version`
+# does not rewrite this manifest.
+shk-core = { path = "../shk-core" }
+anyhow.workspace = true
+cvss.workspace = true
+semver.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+zip.workspace = true

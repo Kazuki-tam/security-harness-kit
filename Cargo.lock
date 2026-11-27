@@ -1033,6 +1033,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cvss"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11147ff68f855ef1b74c07e9b64489d0967baf41047e82505e13f0a96cf41360"
+
+[[package]]
 name = "darling"
 version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4476,6 +4482,19 @@ dependencies = [
  "unicode-normalization",
  "walkdir",
  "zeroize",
+ "zip",
+]
+
+[[package]]
+name = "shk-deps"
+version = "0.7.7"
+dependencies = [
+ "anyhow",
+ "cvss",
+ "semver",
+ "serde",
+ "serde_json",
+ "shk-core",
  "zip",
 ]
 

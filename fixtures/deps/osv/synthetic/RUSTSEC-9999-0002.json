@@ -21,6 +21,9 @@
           "events": [
             {
               "introduced": "0.0.0-0"
+            },
+            {
+              "last_affected": "1.9.9"
             }
           ]
         }
