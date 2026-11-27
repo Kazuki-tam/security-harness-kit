@@ -19,6 +19,8 @@ This repository is a **local-first security harness CLI for AI coding agents** (
 
 ## Setup
 
+This repository commits `.cursor/environment.json` and `.cursor/install-shk.sh` so Cursor Cloud Agent Builds install a SHA-256-verified `shk` binary onto `PATH` before hooks run (see [Cursor Cloud Agents](docs/installation.md#cursor-cloud-agents)). Without `shk` on `PATH`, fail-closed `.cursor/hooks.json` blocks Shell/Read with exit `127`.
+
 ```bash
 # From repository root
 cargo build
