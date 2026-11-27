@@ -4,6 +4,7 @@
   "published": "2026-01-01T00:00:00Z",
   "aliases": [],
   "related": [],
+  "schema_version": "1.7.3",
   "summary": "fx-notice was renamed",
   "details": "Synthetic record for shk tests. Not a real advisory.",
   "affected": [
@@ -23,7 +24,6 @@
           ]
         }
       ],
-      "versions": [],
       "ecosystem_specific": {
         "affects": {
           "arch": [],

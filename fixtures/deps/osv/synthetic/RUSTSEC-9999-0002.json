@@ -6,6 +6,7 @@
     "GHSA-fx02-0002-bbbb"
   ],
   "related": [],
+  "schema_version": "1.7.3",
   "details": "Synthetic record for shk tests. Not a real advisory.",
   "affected": [
     {
@@ -24,7 +25,6 @@
           ]
         }
       ],
-      "versions": [],
       "ecosystem_specific": {
         "affects": {
           "arch": [],

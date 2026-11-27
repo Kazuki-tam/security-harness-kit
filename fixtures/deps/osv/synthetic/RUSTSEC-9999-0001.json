@@ -6,6 +6,7 @@
     "CVE-9999-0001"
   ],
   "related": [],
+  "schema_version": "1.7.3",
   "summary": "Out-of-bounds read in fx-simple",
   "details": "Synthetic record for shk tests. Not a real advisory.",
   "severity": [
@@ -34,7 +35,6 @@
           ]
         }
       ],
-      "versions": [],
       "ecosystem_specific": {
         "affects": {
           "arch": [],

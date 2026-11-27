@@ -6,6 +6,7 @@
     "MAL-9999-0002"
   ],
   "related": [],
+  "schema_version": "1.7.3",
   "summary": "fx-mal-alias was removed for malware",
   "details": "Synthetic record for shk tests. Not a real advisory.",
   "affected": [
@@ -25,7 +26,6 @@
           ]
         }
       ],
-      "versions": [],
       "ecosystem_specific": {
         "affects": {
           "arch": [],

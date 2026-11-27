@@ -26,7 +26,6 @@
           ]
         }
       ],
-      "versions": [],
       "ecosystem_specific": {
         "affects": {
           "arch": [],

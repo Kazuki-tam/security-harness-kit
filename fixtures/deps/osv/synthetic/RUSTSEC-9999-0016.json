@@ -4,6 +4,7 @@
   "published": "2026-01-01T00:00:00Z",
   "aliases": [],
   "related": [],
+  "schema_version": "1.7.3",
   "summary": "\u001b[31m警告\u001b[0m 長い要約のテスト。長い要約のテスト。長い要約のテスト。長い要約のテスト。長い要約のテスト。長い要約のテスト。長い要約のテスト。長い要約のテスト。長い要約のテスト。長い要約のテスト。長い要約のテスト。長い要約のテスト。\nsecond line",
   "details": "Synthetic record for shk tests. Not a real advisory.",
   "severity": [
@@ -32,7 +33,6 @@
           ]
         }
       ],
-      "versions": [],
       "ecosystem_specific": {
         "affects": {
           "arch": [],

@@ -4,7 +4,7 @@
   "published": "2026-01-01T00:00:00Z",
   "aliases": [],
   "related": [],
-  "schema_version": "1.5.0",
+  "schema_version": "1.9.0",
   "summary": "Malicious code in fx-malware (crates.io)",
   "details": "Synthetic record for shk tests. Not a real advisory.",
   "affected": [
@@ -13,7 +13,6 @@
         "ecosystem": "crates.io",
         "name": "fx-malware"
       },
-      "ranges": [],
       "versions": [
         "0.1.0",
         "0.1.1"

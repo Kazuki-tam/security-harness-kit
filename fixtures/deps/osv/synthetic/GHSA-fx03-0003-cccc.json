@@ -4,7 +4,7 @@
   "published": "2026-01-01T00:00:00Z",
   "aliases": [],
   "related": [],
-  "schema_version": "1.4.0",
+  "schema_version": "1.9.0",
   "summary": "Shared parser bug in fx-multi-a and fx-multi-b",
   "details": "Synthetic record for shk tests. Not a real advisory.",
   "severity": [
@@ -31,8 +31,7 @@
             }
           ]
         }
-      ],
-      "versions": []
+      ]
     },
     {
       "package": {
@@ -51,8 +50,26 @@
             }
           ]
         }
-      ],
-      "versions": []
+      ]
+    },
+    {
+      "package": {
+        "ecosystem": "crates.io",
+        "name": "fx-multi-b"
+      },
+      "ranges": [
+        {
+          "type": "SEMVER",
+          "events": [
+            {
+              "introduced": "2.0.0"
+            },
+            {
+              "fixed": "2.0.3"
+            }
+          ]
+        }
+      ]
     },
     {
       "package": {
@@ -71,8 +88,7 @@
             }
           ]
         }
-      ],
-      "versions": []
+      ]
     }
   ],
   "references": [

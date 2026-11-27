@@ -15,7 +15,8 @@ dependencies = [
  "fx-malware",
  "fx-merge",
  "fx-multi-a",
- "fx-multi-b",
+ "fx-multi-b 1.0.5",
+ "fx-multi-b 2.0.2",
  "fx-multi-introduced 0.2.1",
  "fx-multi-introduced 0.3.4",
  "fx-notice",
@@ -77,6 +78,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "fx-multi-b"
 version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "fx-multi-b"
+version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]

@@ -4,6 +4,7 @@
   "published": "2026-01-01T00:00:00Z",
   "aliases": [],
   "related": [],
+  "schema_version": "1.7.3",
   "summary": "fx-same-version panics on empty input",
   "details": "Synthetic record for shk tests. Not a real advisory.",
   "severity": [
@@ -38,7 +39,6 @@
           ]
         }
       ],
-      "versions": [],
       "ecosystem_specific": {
         "affects": {
           "arch": [],
