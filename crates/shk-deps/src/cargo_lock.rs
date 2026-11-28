@@ -78,23 +78,6 @@ pub fn discover(target: &Path, policy_root: &Path, policy: &Policy) -> Result<Di
         .map(|path| (path, false))
         .collect();
     let mut walk_errors = listing.walk_errors;
-    let direct = target.join(LOCKFILE_NAME);
-    // Where case is ignored, a listed `cargo.lock` is this same file.
-    let listed = paths
-        .iter()
-        .any(|(path, _)| path.parent() == Some(target.as_path()));
-    match fs::symlink_metadata(&direct) {
-        Ok(_) if listed => {}
-        Ok(metadata) if metadata.is_file() => paths.push((direct, false)),
-        Ok(metadata) if metadata.is_symlink() => {
-            if !follow_symlinks {
-                paths.push((direct, true));
-            } else if direct.is_file() {
-                paths.push((direct, false));
-            }
-        }
-        _ => {}
-    }
     if !follow_symlinks {
         let (links, errors) = unfollowed_symlinks(&target, is_lockfile);
         paths.extend(links.into_iter().map(|path| (path, true)));
@@ -105,6 +88,24 @@ pub fn discover(target: &Path, policy_root: &Path, policy: &Policy) -> Result<Di
             }
         }
     }
+    // A `Cargo.lock` directly in the target, which Git may ignore. Where
+    // letter case is ignored, a listed `cargo.lock` is this same file; a
+    // different file with such a name must not stand in for it.
+    let direct = target.join(LOCKFILE_NAME);
+    let unfollowed = match fs::symlink_metadata(&direct) {
+        Ok(metadata) if metadata.is_file() => Some(false),
+        Ok(metadata) if metadata.is_symlink() && !follow_symlinks => Some(true),
+        Ok(metadata) if metadata.is_symlink() && direct.is_file() => Some(false),
+        _ => None,
+    };
+    if let Some(unfollowed) = unfollowed {
+        let listed = paths
+            .iter()
+            .any(|(path, _)| path.parent() == Some(target.as_path()) && same_entry(path, &direct));
+        if !listed {
+            paths.push((direct, unfollowed));
+        }
+    }
 
     let mut seen = HashSet::new();
     let mut lockfiles = Vec::new();
@@ -112,7 +113,7 @@ pub fn discover(target: &Path, policy_root: &Path, policy: &Policy) -> Result<Di
         if in_always_excluded_dir(&path, &target) {
             continue;
         }
-        let display = relative_display(&path, &policy_root);
+        let display = relative_display(&path, &policy_root, &target);
         if scanner::path_matches_exclude(policy, &display)? || !seen.insert(display.clone()) {
             continue;
         }
@@ -129,9 +130,10 @@ pub fn discover(target: &Path, policy_root: &Path, policy: &Policy) -> Result<Di
     })
 }
 
-/// Symbolic links below `root` that `keep` accepts, found with the walker
-/// settings of [`scanner::list_files`], which leaves links out when they are
-/// not followed.
+/// Symbolic links below `root` that `keep` accepts. [`scanner::list_files`]
+/// leaves links out when they are not followed, so they are looked for the
+/// same way it looks for files: a walk with its settings, then the links Git
+/// tracks, which ignore rules may have hidden from the walk.
 fn unfollowed_symlinks(root: &Path, keep: impl Fn(&Path) -> bool) -> (Vec<PathBuf>, Vec<String>) {
     let mut walk = WalkBuilder::new(root);
     walk.standard_filters(true)
@@ -151,6 +153,15 @@ fn unfollowed_symlinks(root: &Path, keep: impl Fn(&Path) -> bool) -> (Vec<PathBu
             Err(error) => errors.push(error.to_string()),
         }
     }
+    for relative in shk_core::git::tracked_files_under(root) {
+        let path = root.join(relative);
+        if keep(&path)
+            && !links.contains(&path)
+            && fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_symlink())
+        {
+            links.push(path);
+        }
+    }
     (links, errors)
 }
 
@@ -168,11 +179,39 @@ fn in_always_excluded_dir(path: &Path, target: &Path) -> bool {
     })
 }
 
-fn relative_display(path: &Path, root: &Path) -> String {
-    path.strip_prefix(root)
+/// Whether two paths name the same directory entry (not the same content:
+/// hard links and the targets of links are told apart by their paths).
+#[cfg(unix)]
+fn same_entry(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let identity = |path: &Path| {
+        fs::symlink_metadata(path)
+            .ok()
+            .map(|metadata| (metadata.dev(), metadata.ino()))
+    };
+    a == b || identity(a).is_some_and(|id| Some(id) == identity(b))
+}
+
+/// Without inode numbers, names that differ only in letter case count as
+/// the same entry.
+#[cfg(not(unix))]
+fn same_entry(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+}
+
+/// `path` relative to the policy root, or to the audit target when that
+/// lies outside the root, with `/` separators.
+fn relative_display(path: &Path, root: &Path, target: &Path) -> String {
+    let relative = path
+        .strip_prefix(root)
+        .or_else(|_| path.strip_prefix(target))
         .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
+        .to_string_lossy();
+    if cfg!(windows) {
+        relative.replace('\\', "/")
+    } else {
+        relative.into_owned()
+    }
 }
 
 /// Where a locked package comes from, which decides whether it is audited.
@@ -657,6 +696,73 @@ mod tests {
         assert_eq!(flags(&policy), [("plain/Cargo.lock".to_string(), false)]);
         policy.scan.follow_symlinks = false;
         assert_eq!(flags(&policy).len(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tracked_symlink_under_an_ignore_rule_is_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]);
+        write_file(root, ".gitignore", b"sub/\n/Cargo.lock\n");
+        let real = write_file(root, "locks/deps.txt", b"");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&real, root.join("sub/Cargo.lock")).unwrap();
+        git(root, &["add", "-f", "sub/Cargo.lock"]);
+        // Ignored, untracked and a link, directly in the target.
+        std::os::unix::fs::symlink(&real, root.join("Cargo.lock")).unwrap();
+
+        let discovery = discover(root, root, &Policy::default()).unwrap();
+        let flags: Vec<(&str, bool)> = discovery
+            .lockfiles
+            .iter()
+            .map(|lockfile| (lockfile.display.as_str(), lockfile.unfollowed_symlink))
+            .collect();
+        assert_eq!(flags, [("Cargo.lock", true), ("sub/Cargo.lock", true)]);
+    }
+
+    /// Runs only where the file system tells `cargo.lock` from `Cargo.lock`.
+    #[test]
+    fn a_file_with_a_similar_name_does_not_stand_in_for_the_root_lockfile() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]);
+        write_file(root, ".gitignore", b"/Cargo.lock\n");
+        write_file(root, "cargo.lock", b"");
+        if root.join("Cargo.lock").exists() {
+            // Case is ignored here: the one file is listed once.
+            assert_eq!(discover_in(root, &Policy::default()).len(), 1);
+            return;
+        }
+        write_file(root, "Cargo.lock", b"");
+        assert_eq!(
+            discover_in(root, &Policy::default()),
+            ["Cargo.lock", "cargo.lock"]
+        );
+    }
+
+    #[test]
+    fn a_target_outside_the_policy_root_is_shown_relative_to_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        write_file(&project, "sub/Cargo.lock", b"");
+        let elsewhere = dir.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let discovery = discover(&project, &elsewhere, &Policy::default()).unwrap();
+        assert_eq!(displays(&discovery), ["sub/Cargo.lock"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_backslash_in_a_directory_name_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_file(root, "a/b/Cargo.lock", b"");
+        write_file(root, "a\\b/Cargo.lock", b"");
+        assert_eq!(
+            discover_in(root, &Policy::default()),
+            ["a/b/Cargo.lock", "a\\b/Cargo.lock"]
+        );
     }
 
     #[test]
