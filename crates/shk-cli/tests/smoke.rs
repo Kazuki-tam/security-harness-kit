@@ -367,7 +367,7 @@ fn deps_update_setting_errors_exit_two_without_output_or_network() {
         (
             "SHK_DEPS_OSV_URL",
             "http://mirror.example.invalid/osv",
-            "SHK_DEPS_OSV_URL must be an https:// URL",
+            "SHK_DEPS_OSV_URL must be an https:// base URL",
         ),
         (
             "SHK_DEPS_NOW",

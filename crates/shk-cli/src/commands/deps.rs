@@ -47,7 +47,7 @@ impl DepsEnv {
             None => deps_fetch::dump_url(None),
             Some(value) => match value.to_str() {
                 Some(text) => deps_fetch::dump_url(Some(text)),
-                None => bail!("SHK_DEPS_OSV_URL must be an https:// URL"),
+                None => bail!(deps_fetch::BAD_BASE_URL),
             },
         }
     }
@@ -191,7 +191,7 @@ mod tests {
         bad_url.osv_url = Some("http://mirror.example.invalid".into());
         assert_eq!(
             exit(&bad_url),
-            "shk deps update: SHK_DEPS_OSV_URL must be an https:// URL"
+            "shk deps update: SHK_DEPS_OSV_URL must be an https:// base URL without a query or fragment"
         );
 
         for now in ["tomorrow", "2026-11-28", "2026-11-28 12:00:00"] {

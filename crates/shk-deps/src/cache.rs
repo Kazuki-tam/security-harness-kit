@@ -72,7 +72,13 @@ pub struct SourceRecord {
     pub modified_at: Option<String>,
 }
 
+/// The content of a regular file of at most `limit` bytes. Anything else
+/// (a pipe would block, a device never ends) is not opened.
 fn read_limited(path: &Path, limit: u64) -> Option<Vec<u8>> {
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > limit {
+        return None;
+    }
     let mut bytes = Vec::new();
     fs::File::open(path)
         .ok()?
@@ -83,13 +89,16 @@ fn read_limited(path: &Path, limit: u64) -> Option<Vec<u8>> {
 }
 
 /// The index, or `None` when there is none to use: the file is missing, is
-/// not JSON of the expected shape, or was written by another version of the
-/// format.
+/// not JSON of the expected shape, was written by another version of the
+/// format, or lists no package. An update never writes an empty index, and
+/// one would pass every audit.
 pub fn load_index(dir: &Path) -> Option<Index> {
     let bytes = read_limited(&dir.join(INDEX_FILE), MAX_CACHE_FILE_BYTES)?;
     let index: Index = serde_json::from_slice(&bytes).ok()?;
-    (index.schema_version == INDEX_SCHEMA_VERSION && index.source == SOURCE_OSV_CRATES_IO)
-        .then_some(index)
+    (index.schema_version == INDEX_SCHEMA_VERSION
+        && index.source == SOURCE_OSV_CRATES_IO
+        && !index.packages.is_empty())
+    .then_some(index)
 }
 
 /// The freshness record, or `None` when it is missing or unreadable.
@@ -176,8 +185,10 @@ fn rfc3339(time: DateTime<Utc>) -> String {
 }
 
 /// Replaces the index and then the freshness record. Both are written out
-/// in full before either is put in place; when that fails, the existing
-/// files are left as they were.
+/// in full, and both destinations are checked, before either is put in
+/// place; when any of that fails, the existing files are left as they were.
+/// Only a failure of the second rename itself, after the first succeeded,
+/// leaves the new index beside the old record.
 pub fn store(
     dir: &Path,
     built: &BuiltIndex,
@@ -207,11 +218,14 @@ pub fn store(
     let mut manifest_file = temp_file(dir)?;
     serde_json::to_writer_pretty(manifest_file.as_file_mut(), &manifest)
         .context("write the advisory data manifest")?;
-    manifest_file
-        .as_file_mut()
-        .flush()
-        .context("write the advisory data manifest")?;
 
+    // A destination that cannot be replaced is found before the index is.
+    for name in [INDEX_FILE, MANIFEST_FILE] {
+        let path = dir.join(name);
+        if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+            bail!("write {}: a directory is in the way", path.display());
+        }
+    }
     let persist = |file: NamedTempFile, name: &str| {
         let path = dir.join(name);
         file.persist(&path)
@@ -357,6 +371,7 @@ mod tests {
             "[]".to_string(),
             good.replacen("\"schema_version\":1", "\"schema_version\":2", 1),
             good.replacen("osv:crates.io", "osv:npm", 1),
+            r#"{"schema_version":1,"source":"osv:crates.io","packages":{}}"#.to_string(),
         ] {
             fs::write(cache.join(INDEX_FILE), &broken).unwrap();
             assert!(load_index(cache).is_none(), "{:.40}", broken);
@@ -426,8 +441,25 @@ mod tests {
         assert_eq!(fs::read(cache.join(MANIFEST_FILE)).unwrap(), before);
         assert_eq!(names(cache), [MANIFEST_FILE, INDEX_FILE]);
 
-        // A cache directory that cannot be created.
-        let blocked = cache.join(MANIFEST_FILE).join("sub");
+        // The other way round: the record cannot be replaced, so the index
+        // is not replaced either.
+        fs::remove_dir_all(cache.join(INDEX_FILE)).unwrap();
+        store(cache, &built, time("2026-11-27T09:00:00Z"), None).unwrap();
+        let index_before = fs::read(cache.join(INDEX_FILE)).unwrap();
+        fs::remove_file(cache.join(MANIFEST_FILE)).unwrap();
+        fs::create_dir(cache.join(MANIFEST_FILE)).unwrap();
+        let mut smaller = crate::build_index(zip_of(&synthetic_files())).unwrap();
+        smaller.index.packages.remove("fx-simple");
+        let error = store(cache, &smaller, time("2026-11-28T09:00:00Z"), None).unwrap_err();
+        assert!(
+            error.to_string().ends_with("a directory is in the way"),
+            "{error}"
+        );
+        assert_eq!(fs::read(cache.join(INDEX_FILE)).unwrap(), index_before);
+        assert_eq!(names(cache), [MANIFEST_FILE, INDEX_FILE]);
+
+        // A cache directory that cannot be created: a file is in its path.
+        let blocked = cache.join(INDEX_FILE).join("sub");
         assert!(store(&blocked, &built, time("2026-11-28T09:00:00Z"), None).is_err());
         assert!(temp_file(&blocked).is_err());
     }
@@ -484,5 +516,7 @@ mod tests {
         assert_eq!(read_limited(&path, 5).unwrap(), b"12345");
         assert!(read_limited(&path, 4).is_none());
         assert!(read_limited(&dir.path().join("missing"), 4).is_none());
+        // A directory is not a file to read.
+        assert!(read_limited(dir.path(), 4096).is_none());
     }
 }

@@ -14,9 +14,12 @@ use std::time::{Duration, SystemTime};
 
 const DEFAULT_OSV_BASE_URL: &str = "https://storage.googleapis.com/osv-vulnerabilities";
 const DUMP_PATH: &str = "crates.io/all.zip";
+const USER_AGENT: &str = concat!("shk/", env!("CARGO_PKG_VERSION"));
 /// Largest dump that is downloaded. The real one is about 4 MiB.
 pub(crate) const MAX_DUMP_BYTES: u64 = 64 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const BAD_BASE_URL: &str =
+    "SHK_DEPS_OSV_URL must be an https:// base URL without a query or fragment";
 
 /// What a fetch returns besides the body it wrote.
 #[derive(Debug, Default)]
@@ -39,8 +42,9 @@ pub(crate) fn dump_url(base: Option<&str>) -> Result<String> {
     let is_https = base
         .get(..8)
         .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"));
-    if !is_https || base.len() == 8 {
-        bail!("SHK_DEPS_OSV_URL must be an https:// URL");
+    // A query or fragment would swallow the path that is appended.
+    if !is_https || base.len() == 8 || base.contains(['?', '#']) {
+        bail!(BAD_BASE_URL);
     }
     Ok(format!("{}/{DUMP_PATH}", base.trim_end_matches('/')))
 }
@@ -55,17 +59,23 @@ fn check_status(status: u16) -> Result<()> {
     Ok(())
 }
 
-/// The real [`Fetcher`].
-pub(crate) fn fetch_https(url: &str, out: &mut dyn Write) -> Result<Fetched> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+/// HTTPS only, and no redirect is followed: a 3xx comes back as the response
+/// for [`check_status`] to refuse.
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
         .https_only(true)
         .max_redirects(0)
         .max_redirects_will_error(false)
-        .user_agent(concat!("shk/", env!("CARGO_PKG_VERSION")))
+        .user_agent(USER_AGENT)
         .build()
-        .into();
-    let mut response = agent.get(url).call()?;
+        .into()
+}
+
+/// The real [`Fetcher`]. `url` must come from [`dump_url`]: for a URL that
+/// is not HTTPS, the error names the URL, which may carry a token.
+pub(crate) fn fetch_https(url: &str, out: &mut dyn Write) -> Result<Fetched> {
+    let mut response = agent().get(url).call()?;
     check_status(response.status().as_u16())?;
     let last_modified = response
         .headers()
@@ -120,9 +130,9 @@ fn update_with_limit(
     // Deleted when dropped, on success and on every early return.
     let mut dump = cache::temp_file(cache_dir)?;
     // The URL is left out of the message: a mirror URL may carry a token.
+    // (Nor do the fetcher's own errors name a URL that `dump_url` accepted.)
     let fetched = fetch(url, dump.as_file_mut()).context("could not download the advisory data")?;
     let file = dump.as_file_mut();
-    file.flush().context("write the advisory data")?;
     let size = file
         .seek(SeekFrom::End(0))
         .context("read the advisory data")?;
@@ -244,10 +254,12 @@ mod tests {
             "https://",
             "https:/",
             "é",
+            "https://mirror.example.invalid/osv?sig=abc",
+            "https://mirror.example.invalid/osv#part",
         ] {
             assert_eq!(
                 dump_url(Some(refused)).unwrap_err().to_string(),
-                "SHK_DEPS_OSV_URL must be an https:// URL",
+                BAD_BASE_URL,
                 "{refused}"
             );
         }
@@ -262,6 +274,23 @@ mod tests {
                 format!("unexpected HTTP status {status}")
             );
         }
+    }
+
+    #[test]
+    fn the_agent_is_https_only_and_follows_no_redirect() {
+        let agent = agent();
+        let config = agent.config();
+        assert!(config.https_only());
+        assert_eq!(config.max_redirects(), 0);
+        // With this off, a 3xx is returned as a response, not as an error
+        // some caller might treat as retryable.
+        assert!(!config.max_redirects_will_error());
+        assert_eq!(config.timeouts().global, Some(Duration::from_secs(60)));
+        assert!(matches!(
+            config.user_agent(),
+            ureq::config::AutoHeaderValue::Provided(value)
+                if value.as_str() == concat!("shk/", env!("CARGO_PKG_VERSION"))
+        ));
     }
 
     #[test]
