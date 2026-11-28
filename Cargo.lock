@@ -4490,11 +4490,14 @@ name = "shk-deps"
 version = "0.7.7"
 dependencies = [
  "anyhow",
+ "chrono",
  "cvss",
  "semver",
  "serde",
  "serde_json",
  "shk-core",
+ "tempfile",
+ "toml 1.1.3+spec-1.1.0",
  "zip",
 ]
 

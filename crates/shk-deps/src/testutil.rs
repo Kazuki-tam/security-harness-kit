@@ -2,7 +2,7 @@
 
 use crate::model::Index;
 use std::io::{Cursor, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/deps")
@@ -59,4 +59,18 @@ pub fn real_index() -> Index {
     crate::build_index(zip_of(&fixture_files("osv/real")))
         .unwrap()
         .index
+}
+
+/// The text of `fixtures/deps/lockfiles/<case>.lock`.
+pub fn lockfile_text(case: &str) -> String {
+    let path = fixtures_dir().join(format!("lockfiles/{case}.lock"));
+    std::fs::read_to_string(path).unwrap()
+}
+
+/// Writes a file below `root`, creating its directories.
+pub fn write_file(root: &Path, relative: &str, content: &[u8]) -> PathBuf {
+    let path = root.join(relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, content).unwrap();
+    path
 }
