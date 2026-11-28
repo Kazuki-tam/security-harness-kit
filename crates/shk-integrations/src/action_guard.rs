@@ -7243,14 +7243,36 @@ mod tests {
         );
     }
 
+    /// The time one guard run may take in the tests that pin its cost: five
+    /// seconds, or more on a machine that is slow right now.
+    ///
+    /// These tests guard against work that grows faster than the input,
+    /// which takes minutes where the bounded scan takes about a second. A
+    /// fixed number of seconds cannot tell that apart from a loaded CI
+    /// runner, where the same second becomes five. So the limit is six times
+    /// what the guard takes here, next to the other tests, for a megabyte of
+    /// plain words: a scan that reads its input once.
+    fn guard_time_limit() -> std::time::Duration {
+        static LIMIT: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+        *LIMIT.get_or_init(|| {
+            let stdin = bash_payload(&format!("env --zz {}", vec!["ab"; 349_000].join(" ")));
+            let started = std::time::Instant::now();
+            let matched = detect_dangerous_action(&stdin).unwrap();
+            let elapsed = started.elapsed();
+            assert_eq!(matched, None);
+            if std::env::var_os("SHK_PRINT_GUARD_TIMINGS").is_some() {
+                eprintln!("reference scan: {} bytes, {elapsed:?}", stdin.len());
+            }
+            (elapsed * 6).max(std::time::Duration::from_secs(5))
+        })
+    }
+
     fn assert_finishes_quickly<T>(label: &str, run: impl FnOnce() -> T) -> T {
+        let limit = guard_time_limit() * 2;
         let started = std::time::Instant::now();
         let out = run();
         let elapsed = started.elapsed();
-        assert!(
-            elapsed < std::time::Duration::from_secs(10),
-            "{label} took {elapsed:?}"
-        );
+        assert!(elapsed < limit, "{label} took {elapsed:?} of {limit:?}");
         out
     }
 
@@ -8762,23 +8784,21 @@ mod tests {
         assert_eq!(category_of(&commented), Some("opaque_execution"));
     }
 
-    /// Runs the guard on a payload, checks that it answers within five
-    /// seconds, and returns the answer.
-    fn guard_within_five_seconds(
+    /// Runs the guard on a payload, checks that it answers within
+    /// `guard_time_limit`, and returns the answer.
+    fn guard_within_time_limit(
         label: &str,
         payload: &serde_json::Value,
     ) -> Option<ActionGuardMatch> {
         let stdin = payload.to_string();
+        let limit = guard_time_limit();
         let started = std::time::Instant::now();
         let matched = detect_dangerous_action(&stdin).unwrap();
         let elapsed = started.elapsed();
         if std::env::var_os("SHK_PRINT_GUARD_TIMINGS").is_some() {
             eprintln!("{label}: {} bytes, {elapsed:?}", stdin.len());
         }
-        assert!(
-            elapsed < std::time::Duration::from_secs(5),
-            "{label} took {elapsed:?}"
-        );
+        assert!(elapsed < limit, "{label} took {elapsed:?} of {limit:?}");
         matched
     }
 
@@ -8839,7 +8859,7 @@ mod tests {
             ),
         ];
         for (label, payload) in &cases {
-            let matched = guard_within_five_seconds(label, payload)
+            let matched = guard_within_time_limit(label, payload)
                 .unwrap_or_else(|| panic!("{label} must fail closed"));
             assert_eq!(matched.category, "opaque_execution", "{label}");
             assert!(
@@ -8871,7 +8891,7 @@ mod tests {
         ];
         for (label, payload) in &plain {
             assert_eq!(
-                guard_within_five_seconds(label, payload).map(|matched| matched.reason),
+                guard_within_time_limit(label, payload).map(|matched| matched.reason),
                 None,
                 "{label}"
             );
@@ -8926,7 +8946,7 @@ mod tests {
         );
         for (label, text) in [("unclosed", unclosed), ("nested", nested)] {
             let payload = serde_json::json!({ "tool_input": { "command": text } });
-            let matched = guard_within_five_seconds(label, &payload);
+            let matched = guard_within_time_limit(label, &payload);
             assert_eq!(matched.map(|matched| matched.category), None, "{label}");
         }
     }
@@ -8957,23 +8977,32 @@ mod tests {
 
     #[test]
     fn policy_lists_do_not_multiply_the_cost_of_tiny_segments() {
-        // Without the lists these take one to two seconds each in a debug
+        // Without the lists these take about a second each in a debug
         // build, and as long with them. Every entry used to be normalised
         // again for every segment under every reading, which took minutes.
-        for count in [12, 50] {
-            let config = policy_lists(count);
-            for unit in ["a\n", "\\a;", "do *\n", "a=b<i |"] {
-                let stdin = bash_payload(&tiny_segments(unit));
-                let started = std::time::Instant::now();
-                let matched = detect_dangerous_action_with_config(&stdin, &config).unwrap();
-                let elapsed = started.elapsed();
+        // The run without lists is the measure, so that a slow machine does
+        // not read as a slow guard.
+        let timed = |stdin: &str, config: &ActionGuardConfig| {
+            let started = std::time::Instant::now();
+            let matched = detect_dangerous_action_with_config(stdin, config).unwrap();
+            (matched, started.elapsed())
+        };
+        for unit in ["a\n", "\\a;", "do *\n", "a=b<i |"] {
+            let stdin = bash_payload(&tiny_segments(unit));
+            let (matched, without_lists) = timed(&stdin, &ActionGuardConfig::default());
+            assert_eq!(matched, None, "no entries, {unit:?}");
+            let limit = without_lists * 3 + std::time::Duration::from_secs(1);
+            for count in [12, 50] {
+                let (matched, elapsed) = timed(&stdin, &policy_lists(count));
                 if std::env::var_os("SHK_PRINT_GUARD_TIMINGS").is_some() {
-                    eprintln!("{count}+{count} entries, {unit:?}: {elapsed:?}");
+                    eprintln!(
+                        "{count}+{count} entries, {unit:?}: {elapsed:?} ({without_lists:?} without)"
+                    );
                 }
                 assert_eq!(matched, None, "{count} entries, {unit:?}");
                 assert!(
-                    elapsed < std::time::Duration::from_secs(5),
-                    "{count}+{count} entries, {unit:?} took {elapsed:?}"
+                    elapsed < limit,
+                    "{count}+{count} entries, {unit:?} took {elapsed:?}, {without_lists:?} without the lists"
                 );
             }
         }
@@ -9094,6 +9123,7 @@ mod tests {
         let distinct = (0..60_000)
             .map(|tag| format!("a{tag};"))
             .collect::<String>();
+        let limit = guard_time_limit();
         let started = std::time::Instant::now();
         let matched = detect_dangerous_action_with_config(&bash_payload(&distinct), &config)
             .unwrap()
@@ -9105,10 +9135,7 @@ mod tests {
             "{}",
             matched.reason
         );
-        assert!(
-            elapsed < std::time::Duration::from_secs(5),
-            "took {elapsed:?}"
-        );
+        assert!(elapsed < limit, "took {elapsed:?} of {limit:?}");
 
         // Ordinary commands are far below the limit, with the same lists.
         let script = "cd repo && make test | tee out.log\n".repeat(500);
@@ -9438,7 +9465,7 @@ mod tests {
         ];
         for (label, command) in &cases {
             let payload = serde_json::json!({ "tool_input": { "command": command } });
-            if let Some(matched) = guard_within_five_seconds(label, &payload) {
+            if let Some(matched) = guard_within_time_limit(label, &payload) {
                 assert_eq!(matched.category, "opaque_execution", "{label}");
                 assert!(
                     matched.reason.contains("too many"),
