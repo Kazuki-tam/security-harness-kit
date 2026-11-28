@@ -14,12 +14,11 @@ shk-core = { path = "../shk-core" }
 anyhow.workspace = true
 chrono.workspace = true
 cvss.workspace = true
+dirs.workspace = true
 ignore.workspace = true
 semver.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+tempfile.workspace = true
 toml.workspace = true
 zip.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

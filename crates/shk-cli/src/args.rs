@@ -220,6 +220,11 @@ pub enum Commands {
         #[command(subcommand)]
         cmd: McpCmd,
     },
+    /// (experimental) Check dependencies against known vulnerabilities and malicious packages. Rule ids and settings may still change.
+    Deps {
+        #[command(subcommand)]
+        cmd: DepsCmd,
+    },
     /// Project diagnostics
     Doctor {
         #[command(subcommand)]
@@ -289,6 +294,12 @@ pub enum McpCmd {
         #[arg(long)]
         verbose: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum DepsCmd {
+    /// (experimental) Download the OSV crates.io advisory data and rebuild the local index. Rule ids and settings may still change.
+    Update,
 }
 
 #[derive(Subcommand)]

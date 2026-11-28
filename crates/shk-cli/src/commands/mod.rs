@@ -5,6 +5,7 @@ pub mod audit;
 pub mod ci;
 pub mod clipboard;
 pub mod completions;
+pub mod deps;
 pub mod env;
 pub mod init;
 pub mod mask;

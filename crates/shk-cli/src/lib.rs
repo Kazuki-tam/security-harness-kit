@@ -4,6 +4,7 @@ mod args;
 mod audit_log;
 mod color;
 mod commands;
+mod deps_fetch;
 pub mod desktop_api;
 mod doctor;
 mod env_store;
@@ -24,9 +25,9 @@ mod workflow_hardening;
 
 use anyhow::{Context, Result};
 use args::{
-    AllowlistCmd, CiCmd, CiInitProvider, Cli, ClipboardCmd, Commands, DoctorCmd, DotenvxCmd,
-    EnvCmd, EnvKeyCmd, HooksCmd, McpCmd, PolicyCmd, PseudonymizeCmd, PseudonymizeKeyCmd,
-    SecretsCmd, SkillToolArg, SkillsCmd,
+    AllowlistCmd, CiCmd, CiInitProvider, Cli, ClipboardCmd, Commands, DepsCmd, DoctorCmd,
+    DotenvxCmd, EnvCmd, EnvKeyCmd, HooksCmd, McpCmd, PolicyCmd, PseudonymizeCmd,
+    PseudonymizeKeyCmd, SecretsCmd, SkillToolArg, SkillsCmd,
 };
 use clap::Parser;
 use shk_core::policy::ColorMode;
@@ -312,6 +313,9 @@ pub fn run() -> Result<()> {
                 reason,
                 expires,
             })?,
+        },
+        Commands::Deps { cmd } => match cmd {
+            DepsCmd::Update => commands::deps::update()?,
         },
         Commands::Ci { cmd } => match cmd {
             CiCmd::Init { provider } => match provider {

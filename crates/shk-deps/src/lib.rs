@@ -4,6 +4,7 @@
 //! advisory dump someone else fetched, and matches packages against it.
 
 pub mod audit;
+pub mod cache;
 pub mod cargo_lock;
 pub mod config;
 pub mod index;

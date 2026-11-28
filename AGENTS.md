@@ -15,6 +15,7 @@ This repository is a **local-first security harness CLI for AI coding agents** (
     - **`src/commands/`** — `scan`, `mask`, `audit`, etc. (move `doctor` / others here if this layer grows).
     - Other modules: `color`, `doctor`, `hooks`, `hook_output`, `hook_audit_log`, `audit_log`, `output`, `policy_cmd`, `workflow_hardening` (GitHub Actions `persist-credentials` checks).
   - `crates/shk-integrations` — managed AI hook markers and hook payload parsing (`ai_hooks` body extraction, `hook_payload` argument decoding, `action_guard`).
+  - `crates/shk-deps` — experimental dependency audit (`shk deps`): OSV matching, the local advisory index and its cache, `Cargo.lock` reading. It never touches the network; downloads live in `crates/shk-cli/src/deps_fetch.rs`.
   - `xtask` — development-only generator tasks, including gitleaks rule import.
 
 ## Setup
@@ -43,9 +44,9 @@ cargo build --release
 
 | Code | Meaning | Commands |
 |------|---------|----------|
-| `0` | No findings above threshold / success | `shk scan`, `shk scan --staged`, `shk mcp audit`, `shk mask`, `shk clipboard scan`, `shk clipboard mask`, `shk doctor`, `shk audit`, `shk scan --audit` |
+| `0` | No findings above threshold / success | `shk scan`, `shk scan --staged`, `shk mcp audit`, `shk mask`, `shk clipboard scan`, `shk clipboard mask`, `shk doctor`, `shk audit`, `shk scan --audit`, `shk deps update` |
 | `1` | Findings at or above the fail threshold / strict doctor warnings | `shk scan`, `shk scan --staged`, `shk mcp audit`, `shk clipboard scan`, `shk doctor --strict`, `shk mask --pseudonymize --check-remaining` |
-| `2` | Blocking AI pre-hook triggered / runtime or config error | `shk scan --hook-mode <tool>` (block), `shk scan --staged` outside a Git repo, invalid `shk mcp audit` arguments/path, invalid `shk doctor --strict` usage, `shk clipboard …` when the OS clipboard is unavailable, any usage / I/O / key-store / policy error in `shk mask --pseudonymize` and `shk pseudonymize …` (exit 1 there means leftovers only) |
+| `2` | Blocking AI pre-hook triggered / runtime or config error | `shk scan --hook-mode <tool>` (block), `shk scan --staged` outside a Git repo, invalid `shk mcp audit` arguments/path, invalid `shk doctor --strict` usage, `shk clipboard …` when the OS clipboard is unavailable, any usage / I/O / key-store / policy error in `shk mask --pseudonymize` and `shk pseudonymize …` (exit 1 there means leftovers only), `shk deps update` when the download, its validation or the write fails (the existing index stays in use) |
 
 - `--audit` mode **always exits 0** (log-only; never blocks).
 - Plain `shk doctor` keeps advisory warnings non-blocking; `shk doctor --strict` exits 1 when one or more advisory warnings are reported.
