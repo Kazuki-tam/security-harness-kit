@@ -1,0 +1,976 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "runs": [
+    {
+      "properties": {
+        "data": {
+          "osv:crates.io": {
+            "checked_at": "2026-11-28T11:00:00Z",
+            "modified_at": "2026-11-28T10:30:15Z",
+            "stale": false
+          }
+        },
+        "exitThreshold": "medium",
+        "inventory": {
+          "packages": [
+            {
+              "audited": 22,
+              "ecosystem": "cargo",
+              "skipped": {
+                "git": 0,
+                "local": 1,
+                "registry": 0
+              },
+              "source_file": "Cargo.lock",
+              "total": 23
+            }
+          ]
+        },
+        "sources": [
+          "Cargo.lock"
+        ],
+        "suppressed": 1
+      },
+      "results": [
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 54
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-mal-alias 0.0.1: RUSTSEC-9999-0014 fx-mal-alias was removed for malware"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "12f4beea1a751fc00d0fdbeb36d72195cf8f93532fbb9bca432860ce6077e933"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "RUSTSEC-9999-0014",
+              "aliases": [
+                "MAL-9999-0002"
+              ],
+              "ecosystem": "crates.io",
+              "fixed": [],
+              "package": "fx-mal-alias",
+              "url": "https://osv.dev/vulnerability/RUSTSEC-9999-0014",
+              "version": "0.0.1"
+            },
+            "kind": "supply_chain",
+            "redactedValue": "[REDACTED]",
+            "severity": "critical"
+          },
+          "ruleId": "deps.malicious"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 59
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-malicious-category 1.0.0: RUSTSEC-9999-0013 fx-malicious-category steals credentials"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "6aef1959f20e653052d951523bf16d93e64e7e1abca7abc7490de1093fecaf43"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "RUSTSEC-9999-0013",
+              "aliases": [],
+              "ecosystem": "crates.io",
+              "fixed": [],
+              "package": "fx-malicious-category",
+              "url": "https://osv.dev/vulnerability/RUSTSEC-9999-0013",
+              "version": "1.0.0"
+            },
+            "kind": "supply_chain",
+            "redactedValue": "[REDACTED]",
+            "severity": "critical"
+          },
+          "ruleId": "deps.malicious"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 64
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-malware 0.1.1: MAL-9999-0001 Malicious code in fx-malware (crates.io)"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "d635aed101b29086651ea93e489c2772eab644cf38173a8ff6344b962cfa4322"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "MAL-9999-0001",
+              "aliases": [],
+              "ecosystem": "crates.io",
+              "fixed": [],
+              "package": "fx-malware",
+              "url": "https://osv.dev/vulnerability/MAL-9999-0001",
+              "version": "0.1.1"
+            },
+            "kind": "supply_chain",
+            "redactedValue": "[REDACTED]",
+            "severity": "critical"
+          },
+          "ruleId": "deps.malicious"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 69
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-merge 1.9.9: RUSTSEC-9999-0002 fx-merge accepts forged tokens (fixed: >=2.0.0)"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "a658083dbeaf3df586f2ad424e3b67fa788d1dbd403d6ac4a95b1493d005c18c"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "RUSTSEC-9999-0002",
+              "aliases": [
+                "GHSA-fx02-0002-bbbb"
+              ],
+              "ecosystem": "crates.io",
+              "fixed": [
+                "2.0.0"
+              ],
+              "package": "fx-merge",
+              "url": "https://osv.dev/vulnerability/RUSTSEC-9999-0002",
+              "version": "1.9.9"
+            },
+            "kind": "dependency",
+            "redactedValue": "[REDACTED]",
+            "severity": "critical"
+          },
+          "ruleId": "deps.vulnerable/critical"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 119
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-simple 1.1.9: RUSTSEC-9999-0001 Out-of-bounds read in fx-simple (fixed: >=1.2.0)"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "a1de38ae142c5a22f6fe8c833101142166ff0f9f99868537900fa2dd6c6aed92"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "RUSTSEC-9999-0001",
+              "aliases": [
+                "CVE-9999-0001",
+                "GHSA-fx01-0001-aaaa"
+              ],
+              "ecosystem": "crates.io",
+              "fixed": [
+                "1.2.0"
+              ],
+              "package": "fx-simple",
+              "url": "https://osv.dev/vulnerability/RUSTSEC-9999-0001",
+              "version": "1.1.9"
+            },
+            "kind": "dependency",
+            "redactedValue": "[REDACTED]",
+            "severity": "critical"
+          },
+          "ruleId": "deps.vulnerable/critical"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 39
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-bad-semver 0.3.1: GHSA-fx08-0008-dddd fx-bad-semver has an unusual range"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "86ef8c3aa18e04802c32fea03788daf653604e171e9c7d778b06407f75904059"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "GHSA-fx08-0008-dddd",
+              "aliases": [],
+              "ecosystem": "crates.io",
+              "fixed": [],
+              "package": "fx-bad-semver",
+              "url": "https://osv.dev/vulnerability/GHSA-fx08-0008-dddd",
+              "version": "0.3.1"
+            },
+            "kind": "dependency",
+            "redactedValue": "[REDACTED]",
+            "severity": "high"
+          },
+          "ruleId": "deps.vulnerable/high"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 44
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-last-affected 1.4.2: RUSTSEC-9999-0004 fx-last-affected leaks memory"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "9046574866ea80778e67e3c5096c0fcc8e839eb2f29ff2cdb84f0927c8e8a4f2"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "RUSTSEC-9999-0004",
+              "aliases": [],
+              "ecosystem": "crates.io",
+              "fixed": [],
+              "package": "fx-last-affected",
+              "url": "https://osv.dev/vulnerability/RUSTSEC-9999-0004",
+              "version": "1.4.2"
+            },
+            "kind": "dependency",
+            "redactedValue": "[REDACTED]",
+            "severity": "high"
+          },
+          "ruleId": "deps.vulnerable/high"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 109
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-prerelease 1.0.0-beta.1: RUSTSEC-9999-0007 fx-prerelease pre-release bug (fixed: >=1.0.0-rc.1)"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "4ebeccd651cdd29d3d782ad971173cc52e7c4e8c7f80926c80ccb37a3566ded5"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "RUSTSEC-9999-0007",
+              "aliases": [],
+              "ecosystem": "crates.io",
+              "fixed": [
+                "1.0.0-rc.1"
+              ],
+              "package": "fx-prerelease",
+              "url": "https://osv.dev/vulnerability/RUSTSEC-9999-0007",
+              "version": "1.0.0-beta.1"
+            },
+            "kind": "dependency",
+            "redactedValue": "[REDACTED]",
+            "severity": "high"
+          },
+          "ruleId": "deps.vulnerable/high"
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 34
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-affected-severity 0.4.9: RUSTSEC-9999-0015 fx-affected-severity overflows a buffer (fixed: >=0.5.0)"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "8a010f528dd13fb65838acb1bf479dedb2a41738be189a32bcfdbf9664ac742e"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "RUSTSEC-9999-0015",
+              "aliases": [],
+              "ecosystem": "crates.io",
+              "fixed": [
+                "0.5.0"
+              ],
+              "package": "fx-affected-severity",
+              "url": "https://osv.dev/vulnerability/RUSTSEC-9999-0015",
+              "version": "0.4.9"
+            },
+            "kind": "dependency",
+            "redactedValue": "[REDACTED]",
+            "severity": "medium"
+          },
+          "ruleId": "deps.vulnerable/medium"
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 89
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-multi-introduced 0.1.9: RUSTSEC-9999-0003 Segfault in fx-multi-introduced (fixed: >=0.3.5)"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "1cbb606444a3b4f09e9ef7cb947caf95388fdb692613bc93966306258d837c29"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "RUSTSEC-9999-0003",
+              "aliases": [],
+              "ecosystem": "crates.io",
+              "fixed": [
+                "0.2.0",
+                "0.2.1",
+                "0.2.2",
+                "0.3.5"
+              ],
+              "package": "fx-multi-introduced",
+              "url": "https://osv.dev/vulnerability/RUSTSEC-9999-0003",
+              "version": "0.1.9"
+            },
+            "kind": "dependency",
+            "redactedValue": "[REDACTED]",
+            "severity": "medium"
+          },
+          "ruleId": "deps.vulnerable/medium"
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 94
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-multi-introduced 0.3.4: RUSTSEC-9999-0003 Segfault in fx-multi-introduced (fixed: >=0.3.5)"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "1cbb606444a3b4f09e9ef7cb947caf95388fdb692613bc93966306258d837c29"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "RUSTSEC-9999-0003",
+              "aliases": [],
+              "ecosystem": "crates.io",
+              "fixed": [
+                "0.3.5"
+              ],
+              "package": "fx-multi-introduced",
+              "url": "https://osv.dev/vulnerability/RUSTSEC-9999-0003",
+              "version": "0.3.4"
+            },
+            "kind": "dependency",
+            "redactedValue": "[REDACTED]",
+            "severity": "medium"
+          },
+          "ruleId": "deps.vulnerable/medium"
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 104
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-orphan 0.9.0: CVE-9999-0009 fx-orphan (CVE entry) (fixed: >=1.0.0)"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "72cd1e38aaf93afbfa83585a6b43bd76dda41eb30f8cd86127800e002a461ad0"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "CVE-9999-0009",
+              "aliases": [
+                "OSV-9999-0002"
+              ],
+              "ecosystem": "crates.io",
+              "fixed": [
+                "1.0.0"
+              ],
+              "package": "fx-orphan",
+              "url": "https://osv.dev/vulnerability/CVE-9999-0009",
+              "version": "0.9.0"
+            },
+            "kind": "dependency",
+            "redactedValue": "[REDACTED]",
+            "severity": "medium"
+          },
+          "ruleId": "deps.vulnerable/medium"
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 134
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-unsound 0.8.0: RUSTSEC-9999-0010 fx-unsound exposes an unsound API (fixed: >=0.9.0)"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "9fd5dbc6b50ebcc61eadaa832edbd7416eca7dd2fb2aa26fcbc0e499b7c4f08b"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "RUSTSEC-9999-0010",
+              "aliases": [],
+              "ecosystem": "crates.io",
+              "fixed": [
+                "0.9.0"
+              ],
+              "package": "fx-unsound",
+              "url": "https://osv.dev/vulnerability/RUSTSEC-9999-0010",
+              "version": "0.8.0"
+            },
+            "kind": "dependency",
+            "redactedValue": "[REDACTED]",
+            "severity": "medium"
+          },
+          "ruleId": "deps.unsound"
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 49
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-long-summary 3.9.0: RUSTSEC-9999-0016 \\u{1b}[31m警告\\u{1b}[0m 長い要約のテスト。長い要約のテスト。長い要約のテスト。長い要約のテスト。長い要約のテスト。長い要約のテスト。長い要約のテスト。長い要約の (fixed: >=4.0.0)"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "3980b19e0e5a6826e87579ec208a667f43fb68d11f375c38fc8e1d0ab2f53e1f"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "RUSTSEC-9999-0016",
+              "aliases": [],
+              "ecosystem": "crates.io",
+              "fixed": [
+                "4.0.0"
+              ],
+              "package": "fx-long-summary",
+              "url": "https://osv.dev/vulnerability/RUSTSEC-9999-0016",
+              "version": "3.9.0"
+            },
+            "kind": "dependency",
+            "redactedValue": "[REDACTED]",
+            "severity": "low"
+          },
+          "ruleId": "deps.vulnerable/low"
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 74
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-multi-a 2.9.9: GHSA-fx03-0003-cccc Shared parser bug in fx-multi-a and fx-multi-b (fixed: >=3.0.0)"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "6e2becd86680c2d938cf5b884ef3f14ce3cbf28f7b8946f1c1d6a704d38a75f2"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "GHSA-fx03-0003-cccc",
+              "aliases": [],
+              "ecosystem": "crates.io",
+              "fixed": [
+                "3.0.0"
+              ],
+              "package": "fx-multi-a",
+              "url": "https://osv.dev/vulnerability/GHSA-fx03-0003-cccc",
+              "version": "2.9.9"
+            },
+            "kind": "dependency",
+            "redactedValue": "[REDACTED]",
+            "severity": "low"
+          },
+          "ruleId": "deps.vulnerable/low"
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 79
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-multi-b 1.0.5: GHSA-fx03-0003-cccc Shared parser bug in fx-multi-a and fx-multi-b (fixed: >=1.1.0)"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "1fca1e84fddaf3034249e92de4d126c9fe9777c746ff33a5e2a6cff1293c33dd"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "GHSA-fx03-0003-cccc",
+              "aliases": [],
+              "ecosystem": "crates.io",
+              "fixed": [
+                "1.1.0"
+              ],
+              "package": "fx-multi-b",
+              "url": "https://osv.dev/vulnerability/GHSA-fx03-0003-cccc",
+              "version": "1.0.5"
+            },
+            "kind": "dependency",
+            "redactedValue": "[REDACTED]",
+            "severity": "low"
+          },
+          "ruleId": "deps.vulnerable/low"
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 84
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-multi-b 2.0.2: GHSA-fx03-0003-cccc Shared parser bug in fx-multi-a and fx-multi-b (fixed: >=2.0.3)"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "1fca1e84fddaf3034249e92de4d126c9fe9777c746ff33a5e2a6cff1293c33dd"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "GHSA-fx03-0003-cccc",
+              "aliases": [],
+              "ecosystem": "crates.io",
+              "fixed": [
+                "2.0.3"
+              ],
+              "package": "fx-multi-b",
+              "url": "https://osv.dev/vulnerability/GHSA-fx03-0003-cccc",
+              "version": "2.0.2"
+            },
+            "kind": "dependency",
+            "redactedValue": "[REDACTED]",
+            "severity": "low"
+          },
+          "ruleId": "deps.vulnerable/low"
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 114
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-same-version 2.0.5: RUSTSEC-9999-0006 fx-same-version panics on empty input (fixed: >=2.1.0)"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "fd8e23870cdc12027e831e230b3d31cbe1649faa7490004e43829d75b6d847e0"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "RUSTSEC-9999-0006",
+              "aliases": [],
+              "ecosystem": "crates.io",
+              "fixed": [
+                "2.1.0"
+              ],
+              "package": "fx-same-version",
+              "url": "https://osv.dev/vulnerability/RUSTSEC-9999-0006",
+              "version": "2.0.5"
+            },
+            "kind": "dependency",
+            "redactedValue": "[REDACTED]",
+            "severity": "low"
+          },
+          "ruleId": "deps.vulnerable/low"
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 99
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-notice 1.0.0: RUSTSEC-9999-0012 fx-notice was renamed"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "3eca4c5385cfaad529a0731fc0e1b892f9b661ca84f548f7f246253b2125ffab"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "RUSTSEC-9999-0012",
+              "aliases": [],
+              "ecosystem": "crates.io",
+              "fixed": [],
+              "package": "fx-notice",
+              "url": "https://osv.dev/vulnerability/RUSTSEC-9999-0012",
+              "version": "1.0.0"
+            },
+            "kind": "dependency",
+            "redactedValue": "[REDACTED]",
+            "severity": "info"
+          },
+          "ruleId": "deps.notice"
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.lock"
+                },
+                "region": {
+                  "startColumn": 8,
+                  "startLine": 124
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "fx-two-ranges 2.2.0: RUSTSEC-9999-0005 fx-two-ranges mishandles input (fixed: >=2.3.0)"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "7557eb48dcf3568016c054a7d06eab8db56e8c18436951d7f551d7539392e578"
+          },
+          "properties": {
+            "confidence": 1.0,
+            "dependency": {
+              "advisory_id": "RUSTSEC-9999-0005",
+              "aliases": [],
+              "ecosystem": "crates.io",
+              "fixed": [
+                "2.3.0"
+              ],
+              "package": "fx-two-ranges",
+              "url": "https://osv.dev/vulnerability/RUSTSEC-9999-0005",
+              "version": "2.2.0"
+            },
+            "kind": "dependency",
+            "redactedValue": "[REDACTED]",
+            "severity": "info"
+          },
+          "ruleId": "deps.vulnerable/info"
+        }
+      ],
+      "tool": {
+        "driver": {
+          "informationUri": "https://github.com/Kazuki-tam/security-harness-kit",
+          "name": "shk",
+          "rules": [
+            {
+              "id": "deps.malicious",
+              "name": "deps.malicious",
+              "properties": {
+                "kind": "supply_chain",
+                "precision": "high",
+                "security-severity": "9.0",
+                "tags": [
+                  "security",
+                  "supply_chain"
+                ]
+              },
+              "shortDescription": {
+                "text": "Dependency reported as malicious"
+              }
+            },
+            {
+              "id": "deps.notice",
+              "name": "deps.notice",
+              "properties": {
+                "kind": "dependency",
+                "precision": "high",
+                "security-severity": "0.0",
+                "tags": [
+                  "security",
+                  "dependency"
+                ]
+              },
+              "shortDescription": {
+                "text": "Dependency with an informational advisory"
+              }
+            },
+            {
+              "id": "deps.unsound",
+              "name": "deps.unsound",
+              "properties": {
+                "kind": "dependency",
+                "precision": "high",
+                "security-severity": "5.0",
+                "tags": [
+                  "security",
+                  "dependency"
+                ]
+              },
+              "shortDescription": {
+                "text": "Dependency with a soundness advisory"
+              }
+            },
+            {
+              "id": "deps.vulnerable/critical",
+              "name": "deps.vulnerable",
+              "properties": {
+                "kind": "dependency",
+                "precision": "high",
+                "security-severity": "9.0",
+                "tags": [
+                  "security",
+                  "dependency"
+                ]
+              },
+              "shortDescription": {
+                "text": "Dependency with a known vulnerability"
+              }
+            },
+            {
+              "id": "deps.vulnerable/high",
+              "name": "deps.vulnerable",
+              "properties": {
+                "kind": "dependency",
+                "precision": "high",
+                "security-severity": "8.0",
+                "tags": [
+                  "security",
+                  "dependency"
+                ]
+              },
+              "shortDescription": {
+                "text": "Dependency with a known vulnerability"
+              }
+            },
+            {
+              "id": "deps.vulnerable/info",
+              "name": "deps.vulnerable",
+              "properties": {
+                "kind": "dependency",
+                "precision": "high",
+                "security-severity": "0.0",
+                "tags": [
+                  "security",
+                  "dependency"
+                ]
+              },
+              "shortDescription": {
+                "text": "Dependency with a known vulnerability"
+              }
+            },
+            {
+              "id": "deps.vulnerable/low",
+              "name": "deps.vulnerable",
+              "properties": {
+                "kind": "dependency",
+                "precision": "high",
+                "security-severity": "2.0",
+                "tags": [
+                  "security",
+                  "dependency"
+                ]
+              },
+              "shortDescription": {
+                "text": "Dependency with a known vulnerability"
+              }
+            },
+            {
+              "id": "deps.vulnerable/medium",
+              "name": "deps.vulnerable",
+              "properties": {
+                "kind": "dependency",
+                "precision": "high",
+                "security-severity": "5.0",
+                "tags": [
+                  "security",
+                  "dependency"
+                ]
+              },
+              "shortDescription": {
+                "text": "Dependency with a known vulnerability"
+              }
+            }
+          ],
+          "semanticVersion": "<version>"
+        }
+      }
+    }
+  ],
+  "version": "2.1.0"
+}

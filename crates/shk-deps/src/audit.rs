@@ -316,6 +316,10 @@ fn advisory_finding(
             context_before: vec![],
             context_after: vec![],
         },
+        alert_key: format!(
+            "{}:{ECOSYSTEM_CRATES_IO}:{}:{}",
+            lockfile.display, package.name, advisory.advisory_id
+        ),
         dependency: Some(DependencyInfo {
             ecosystem: ECOSYSTEM_CRATES_IO.to_string(),
             package: package.name.clone(),
@@ -352,7 +356,34 @@ fn plain_finding(
             context_after: vec![],
         },
         dependency: None,
+        alert_key: format!("{file}:{rule_id}"),
     }
+}
+
+/// A warning about one `[[deps.ignore]]` entry. Entries are told apart by
+/// their id in the alert key.
+fn ignore_warning(rule_id: &str, file: &str, entry_id: &str, message: String) -> DepsFinding {
+    let mut finding = plain_finding(rule_id, Severity::Low, "ignore", file, message);
+    finding.alert_key = format!("{file}:{rule_id}:{entry_id}");
+    finding
+}
+
+/// The fixed description of a rule, for SARIF rule metadata: the message of
+/// a `deps` finding differs per finding and cannot stand in for it.
+pub fn short_description(rule_id: &str) -> Option<&'static str> {
+    Some(match rule_id {
+        "deps.malicious" => "Dependency reported as malicious",
+        "deps.vulnerable" => "Dependency with a known vulnerability",
+        "deps.unsound" => "Dependency with a soundness advisory",
+        "deps.unmaintained" => "Unmaintained dependency",
+        "deps.notice" => "Dependency with an informational advisory",
+        RULE_SOURCE_UNREADABLE => "Lockfile could not be audited",
+        RULE_DATA_STALE => "Advisory data is stale",
+        RULE_IGNORE_EXPIRED => "Expired dependency ignore entry",
+        RULE_IGNORE_INVALID => "Ineffective dependency ignore entry",
+        RULE_UNKNOWN_KEY => "Unknown dependency policy key",
+        _ => return None,
+    })
 }
 
 /// Time since the data was last fetched; `None` without a record. A check
@@ -406,14 +437,14 @@ fn stale_message(request: &AuditRequest<'_>) -> Option<String> {
 }
 
 fn policy_findings(config: &DepsConfig, ignores: &Ignores<'_>, file: &str) -> Vec<DepsFinding> {
-    let warning = |rule_id: &str, message: String| {
-        plain_finding(rule_id, Severity::Low, "ignore", file, message)
-    };
     let mut findings = Vec::new();
     for unknown in &config.unknown_keys {
         // The key only: a value may be anything, a credential included.
-        findings.push(warning(
+        findings.push(plain_finding(
             RULE_UNKNOWN_KEY,
+            Severity::Low,
+            "ignore",
+            file,
             format!(
                 "Unknown key `{}` in {} is ignored",
                 escape_control(&unknown.key),
@@ -422,8 +453,10 @@ fn policy_findings(config: &DepsConfig, ignores: &Ignores<'_>, file: &str) -> Ve
         ));
     }
     for entry in ignores.expired() {
-        findings.push(warning(
+        findings.push(ignore_warning(
             RULE_IGNORE_EXPIRED,
+            file,
+            &entry.id,
             format!(
                 "Expired [[deps.ignore]] entry (id={}, expires={}) — remove or update",
                 escape_control(&entry.id),
@@ -432,8 +465,10 @@ fn policy_findings(config: &DepsConfig, ignores: &Ignores<'_>, file: &str) -> Ve
         ));
     }
     for entry in ignores.ineffective() {
-        findings.push(warning(
+        findings.push(ignore_warning(
             RULE_IGNORE_INVALID,
+            file,
+            &entry.id,
             format!(
                 "[[deps.ignore]] entry for {} has no expires; malicious-package findings are not suppressed",
                 escape_control(&entry.id)
@@ -1158,6 +1193,93 @@ mod tests {
                 "low policy.deps_unknown_key ignore shk.toml:1:1 Unknown key `owner` in [[deps.ignore]] entry 1 is ignored",
             ]
         );
+    }
+
+    #[test]
+    fn alert_keys_leave_out_line_and_version() {
+        let mut case = Case::with_lockfile("affected")
+            .ignore("RUSTSEC-9999-0001", None, Some("2026-11-27"))
+            .ignore("MAL-9999-0001", None, None);
+        case.has_policy_file = true;
+        case.data.checked_at = None;
+        case.config.unknown_keys.push(crate::config::UnknownKey {
+            table: "[deps]".into(),
+            key: "future".into(),
+        });
+        let case = case.lockfile("broken/Cargo.lock", "invalid-toml");
+        let report = case.run();
+        let key = |rule: &str, package: Option<&str>| -> Vec<&str> {
+            report
+                .findings
+                .iter()
+                .filter(|finding| {
+                    finding.finding.rule_id == rule
+                        && package.is_none_or(|package| {
+                            finding
+                                .dependency
+                                .as_ref()
+                                .is_some_and(|dependency| dependency.package == package)
+                        })
+                })
+                .map(|finding| finding.alert_key.as_str())
+                .collect()
+        };
+        assert_eq!(
+            key("deps.vulnerable", Some("fx-simple")),
+            ["Cargo.lock:crates.io:fx-simple:RUSTSEC-9999-0001"]
+        );
+        // Two versions of one crate under one advisory share an alert.
+        assert_eq!(
+            key("deps.vulnerable", Some("fx-multi-introduced")),
+            ["Cargo.lock:crates.io:fx-multi-introduced:RUSTSEC-9999-0003"; 2]
+        );
+        assert_eq!(
+            key(RULE_SOURCE_UNREADABLE, None),
+            ["broken/Cargo.lock:deps.source_unreadable"]
+        );
+        assert_eq!(key(RULE_DATA_STALE, None), ["shk.toml:deps.data_stale"]);
+        assert_eq!(
+            key(RULE_UNKNOWN_KEY, None),
+            ["shk.toml:policy.deps_unknown_key"]
+        );
+        assert_eq!(
+            key(RULE_IGNORE_EXPIRED, None),
+            ["shk.toml:policy.deps_ignore_expired:RUSTSEC-9999-0001"]
+        );
+        assert_eq!(
+            key(RULE_IGNORE_INVALID, None),
+            ["shk.toml:policy.deps_ignore_invalid:MAL-9999-0001"]
+        );
+        // Not part of the JSON report.
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("alert_key"));
+    }
+
+    #[test]
+    fn every_rule_has_a_fixed_description() {
+        for rule in [
+            Rule::Malicious,
+            Rule::Vulnerable,
+            Rule::Unsound,
+            Rule::Unmaintained,
+            Rule::Notice,
+        ] {
+            assert!(short_description(rule.id()).is_some(), "{}", rule.id());
+        }
+        for rule_id in [
+            RULE_SOURCE_UNREADABLE,
+            RULE_DATA_STALE,
+            RULE_IGNORE_EXPIRED,
+            RULE_IGNORE_INVALID,
+            RULE_UNKNOWN_KEY,
+        ] {
+            assert!(short_description(rule_id).is_some(), "{rule_id}");
+        }
+        assert_eq!(
+            short_description("deps.vulnerable"),
+            Some("Dependency with a known vulnerability")
+        );
+        assert_eq!(short_description("secret.generic_api_key"), None);
     }
 
     #[test]

@@ -1,4 +1,6 @@
+use sha2::{Digest, Sha256};
 use shk_core::finding::Finding;
+use shk_deps::DepsFinding;
 
 pub fn report(
     findings: &[Finding],
@@ -10,6 +12,70 @@ pub fn report(
         .iter()
         .map(|finding| result(finding, include_value_hash))
         .collect();
+    document(rules, results, run_properties)
+}
+
+/// SARIF for `shk deps audit`. It differs from [`report`] where a dependency
+/// finding differs from a scan finding:
+///
+/// - the rule description is fixed text, as the message names the package;
+/// - `deps.vulnerable` becomes one rule per severity
+///   (`deps.vulnerable/high`, …), because code scanning takes an alert's
+///   severity from its rule, not from the result;
+/// - every result carries a fingerprint made from the finding's alert key,
+///   so that code scanning keeps one alert while lockfile lines shift;
+/// - the advisory details are in `properties.dependency`.
+pub fn report_deps(
+    findings: &[DepsFinding],
+    run_properties: serde_json::Value,
+) -> serde_json::Value {
+    let mut by_rule = std::collections::BTreeMap::<String, &Finding>::new();
+    let mut results = Vec::with_capacity(findings.len());
+    for deps_finding in findings {
+        let finding = &deps_finding.finding;
+        let rule_id = deps_rule_id(finding);
+        let mut result = result(finding, false);
+        result["ruleId"] = serde_json::json!(rule_id);
+        result["partialFingerprints"] = serde_json::json!({
+            "primaryLocationLineHash": sha256_hex(&deps_finding.alert_key),
+        });
+        if let Some(dependency) = &deps_finding.dependency {
+            result["properties"]["dependency"] = serde_json::json!(dependency);
+        }
+        results.push(result);
+        by_rule.entry(rule_id).or_insert(finding);
+    }
+    let rules = by_rule
+        .into_iter()
+        .map(|(rule_id, finding)| {
+            let description = shk_deps::audit::short_description(&finding.rule_id)
+                .unwrap_or(finding.message.as_str());
+            rule(&rule_id, description, finding)
+        })
+        .collect();
+    document(rules, results, run_properties)
+}
+
+fn deps_rule_id(finding: &Finding) -> String {
+    if finding.rule_id == "deps.vulnerable" {
+        format!("{}/{}", finding.rule_id, finding.severity)
+    } else {
+        finding.rule_id.clone()
+    }
+}
+
+fn sha256_hex(text: &str) -> String {
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn document(
+    rules: Vec<serde_json::Value>,
+    results: Vec<serde_json::Value>,
+    run_properties: serde_json::Value,
+) -> serde_json::Value {
     serde_json::json!({
         "version": "2.1.0",
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
@@ -37,20 +103,23 @@ fn rules(findings: &[Finding]) -> Vec<serde_json::Value> {
     }
     by_rule
         .into_iter()
-        .map(|(rule_id, finding)| {
-            serde_json::json!({
-                "id": rule_id,
-                "name": finding.rule_id,
-                "shortDescription": { "text": finding.message },
-                "properties": {
-                    "kind": finding.kind,
-                    "security-severity": security_severity(&finding.severity),
-                    "precision": precision(finding.confidence),
-                    "tags": ["security", finding.kind]
-                }
-            })
-        })
+        .map(|(rule_id, finding)| rule(&rule_id, &finding.message, finding))
         .collect()
+}
+
+/// One rule, described by the first finding that uses it.
+fn rule(id: &str, description: &str, finding: &Finding) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "name": finding.rule_id,
+        "shortDescription": { "text": description },
+        "properties": {
+            "kind": finding.kind,
+            "security-severity": security_severity(&finding.severity),
+            "precision": precision(finding.confidence),
+            "tags": ["security", finding.kind]
+        }
+    })
 }
 
 fn result(finding: &Finding, include_value_hash: bool) -> serde_json::Value {
