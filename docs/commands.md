@@ -292,7 +292,7 @@ GitHub Actions, with SARIF uploaded to code scanning:
   run: exit 1
 ```
 
-The upload needs `security-events: write`. Keep the `category`: the SARIF tool name is `shk`, the same as for `shk scan --sarif`, and two uploads without distinct categories replace each other. In SARIF, `deps.vulnerable` is split into one rule per severity (`deps.vulnerable/high`, …) because code scanning takes an alert's severity from its rule. An alert is identified by the lockfile, the package and the advisory, not by line or version, so it stays the same alert when the lockfile shifts and closes when the package is fixed. Two versions of one package under the same advisory are therefore one alert, while the JSON and human output list both. A pull request from a fork cannot upload: its token has no `security-events: write`.
+The upload needs `security-events: write`. Keep the `category`: the SARIF tool name is `shk`, the same as for `shk scan --sarif`, and two uploads without distinct categories replace each other. In SARIF, `deps.vulnerable` is split into one rule per severity (`deps.vulnerable/high`, …) because code scanning takes an alert's severity from its rule. Each result carries a fingerprint (`partialFingerprints.primaryLocationLineHash`) made from the lockfile, the package and the advisory, without line or version, so that an alert can stay the same alert when the lockfile shifts. Two versions of one package under the same advisory share that fingerprint; GitHub still lists them as two alerts. A pull request from a fork cannot upload: its token has no `security-events: write`.
 
 Run the audit on a schedule as well as on pull requests: a new advisory can affect a lockfile that has not changed.
 
