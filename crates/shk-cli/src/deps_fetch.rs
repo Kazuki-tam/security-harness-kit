@@ -296,6 +296,7 @@ mod tests {
     #[test]
     fn the_real_fetcher_refuses_plain_http_without_connecting() {
         let mut out = Vec::new();
+        // shk-ignore-next-line pii.ipv4
         let error = fetch_https("http://127.0.0.1:9/crates.io/all.zip", &mut out).unwrap_err();
         assert!(
             error.to_string().to_lowercase().contains("https"),
@@ -307,7 +308,9 @@ mod tests {
     #[test]
     fn last_modified_is_read_as_an_http_date() {
         assert_eq!(
+            // shk-ignore-next-line pii.ipv6
             parse_last_modified("Fri, 27 Nov 2026 08:55:31 GMT"),
+            // shk-ignore-next-line pii.ipv6
             Some(time("2026-11-27T08:55:31Z"))
         );
         assert_eq!(parse_last_modified("yesterday"), None);
@@ -319,6 +322,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache_dir = dir.path().join("shk").join("deps");
         let seen_url = RefCell::new(String::new());
+        // shk-ignore-next-line pii.ipv6
         let serve = serving(fixture_dump(), Some("Fri, 27 Nov 2026 08:55:31 GMT"));
         let fetch = |url: &str, out: &mut dyn Write| {
             *seen_url.borrow_mut() = url.to_string();
@@ -414,6 +418,7 @@ mod tests {
         };
         let error = update(
             cache_dir,
+            // shk-ignore-next-line pii.email
             "https://user:token@example.invalid",
             &failing,
             later,

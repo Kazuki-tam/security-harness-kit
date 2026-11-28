@@ -420,6 +420,7 @@ mod tests {
             "shk deps update: SHK_DEPS_OSV_URL must be an https:// base URL without a query or fragment"
         );
 
+        // shk-ignore-next-line pii.ipv6
         for now in ["tomorrow", "2026-11-28", "2026-11-28 12:00:00"] {
             let mut bad_now = env(dir.path());
             bad_now.now = Some(now.into());
