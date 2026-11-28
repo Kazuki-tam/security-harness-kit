@@ -55,6 +55,9 @@ ai_context = true
 default_fail_on = "high"
 scan_fail_on = "high"
 pre_commit_fail_on = "high"
+# `shk deps audit` (experimental). CI's `cargo audit --deny unsound` fails on
+# soundness advisories, which `shk deps` reports as medium.
+deps_fail_on = "medium"
 
 [mask]
 mode = "strict"
@@ -101,6 +104,13 @@ required_patterns = [
   "*.log",
   "*.shk-map"
 ]
+
+# Exceptions for `shk deps audit` (experimental); the same entry is in deny.toml.
+[[deps.ignore]]
+id = "RUSTSEC-2026-0543"
+reason = "unmaintained notice only, no vulnerability reported; used for UTC timestamps and date parsing"
+package = "chrono"
+expires = "2027-05-31"
 
 # Allowlist / inline suppressions (spec §5.3). Prefer path-scoped rows; use value_hash only as an equality fingerprint.
 # Inline: # shk-ignore-next-line <rule_id>

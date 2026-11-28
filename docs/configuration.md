@@ -161,6 +161,7 @@ Valid severity values are `info`, `low`, `medium`, `high`, and `critical`.
 | `default_fail_on` | `high` | Fallback threshold. |
 | `scan_fail_on` | `high` | Threshold for normal scans. |
 | `pre_commit_fail_on` | `high` | Threshold for `shk scan --staged` and Cursor pre-hook scans. |
+| `deps_fail_on` | none | Threshold for the experimental `shk deps audit`; falls back to `default_fail_on`. See [Dependency Audit Settings](#dependency-audit-settings). |
 
 The `--fail-on` CLI option overrides the configured threshold for that command invocation.
 
@@ -349,6 +350,52 @@ Fields:
 | `enabled` | `true` | Enables or disables the rule. |
 
 Custom rules participate in scan, mask, hook mode, inline suppression, and `[[allowlist]]`.
+
+## Dependency Audit Settings
+
+> **Experimental.** These keys belong to [`shk deps`](commands.md#shk-deps) and may still change. `shk init` does not write them.
+
+```toml
+[thresholds]            # add the key to your existing [thresholds] table
+deps_fail_on = "high"
+
+[deps]
+stale_after_hours = 24
+
+[[deps.ignore]]
+id = "RUSTSEC-2026-0543"
+reason = "unmaintained notice only; used for UTC timestamps and date parsing"
+package = "chrono"
+expires = "2027-05-31"
+```
+
+| Key | Default | Behavior |
+|-----|---------|----------|
+| `[thresholds].deps_fail_on` | none | Threshold for `shk deps audit`. The order is `--fail-on`, `deps_fail_on`, `default_fail_on`. |
+| `[deps].stale_after_hours` | `24` | Integer of 1 or more. Advisory data fetched longer ago than this is reported as `deps.data_stale`. |
+| `[[deps.ignore]].id` | required | An advisory id or one of its aliases (`RUSTSEC-…`, `GHSA-…`, `CVE-…`). Letter case is ignored. |
+| `[[deps.ignore]].reason` | required | Why the exception exists. Must not be empty. |
+| `[[deps.ignore]].package` | none | Limit the entry to this package name (exact match). |
+| `[[deps.ignore]].expires` | none | `YYYY-MM-DD`. The entry still applies on that day (UTC) and stops suppressing the day after. Required to suppress `deps.malicious`. |
+
+An entry suppresses findings tied to an advisory (`deps.malicious`, `deps.vulnerable`, `deps.unsound`, `deps.unmaintained`, `deps.notice`). It matches when its `id` is the id the finding shows or one of the aliases listed in the finding's `dependency.aliases`. Suppressed findings are counted in `summary.suppressed` and in the last line of human output.
+
+False malicious-package reports are withdrawn upstream, so an exception to one must not be permanent: an entry without `expires` does not suppress a `deps.malicious` finding and is reported as `policy.deps_ignore_invalid`.
+
+`[[allowlist]]` does not apply to `deps.*` findings.
+
+How mistakes are handled:
+
+| Mistake | Result |
+|---------|--------|
+| `[deps]` is not a table, or `[[deps.ignore]]` is not an array of tables | `shk deps audit` exits `2` |
+| An entry without a non-empty string `id` or `reason`; `package` or `expires` that is not a string | exits `2` |
+| `stale_after_hours` that is not an integer of 1 or more | exits `2` |
+| `deps_fail_on` that is not a severity | exits `2` |
+| An unknown key in `[deps]` or `[[deps.ignore]]` | Ignored, reported as `policy.deps_unknown_key` (the key name only) |
+| `expires` in the past or not a date | The entry does not suppress; reported as `policy.deps_ignore_expired` |
+
+None of these affect other commands. `shk scan`, the Git hook and the AI hooks do not interpret `[deps]` or `deps_fail_on`, so a mistake there cannot stop a scan or make a hook deny, and `shk` 0.7.x ignores both.
 
 ## Suppression
 

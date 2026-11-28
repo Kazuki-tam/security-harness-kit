@@ -200,6 +200,16 @@ jobs:
       - name: cargo deny
         run: cargo deny check
 
+      # shk-deps does the matching for `shk deps` and must stay offline:
+      # downloads live in shk-cli.
+      - name: shk-deps does not depend on ureq
+        run: |
+          tree="$(cargo tree --locked -p shk-deps -e normal --target all --prefix none)"
+          if grep -q '^ureq ' <<<"$tree"; then
+            echo "shk-deps must not depend on ureq" >&2
+            exit 1
+          fi
+
       - name: verify gitleaks rules sync
         run: |
           cargo run -p xtask -- import-gitleaks-rules --check \

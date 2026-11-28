@@ -162,6 +162,140 @@ Exit codes:
 | `1` | At least one finding meets the active threshold. |
 | `2` | Runtime or argument error, such as an invalid audit path. |
 
+## `shk deps`
+
+> **Experimental.** Rule ids, setting names and output details may still change. Only Cargo (`Cargo.lock`) is supported.
+
+Check the packages pinned in `Cargo.lock` against known vulnerabilities, malicious-package reports and RustSec informational advisories. The audit itself is offline: it matches the lockfile against a local advisory index. Only `shk deps update` and `shk deps audit --update` use the network, and they download the whole public advisory dump, so nothing about your dependencies is sent anywhere.
+
+```bash
+shk deps update
+shk deps audit
+shk deps audit path/to/project
+shk deps audit --update --sarif
+shk deps audit --json --fail-on medium
+```
+
+### `shk deps update`
+
+Downloads the [OSV](https://osv.dev) crates.io dump (RustSec and GitHub advisories, and OpenSSF malicious-package reports), builds the index from it and replaces the existing one. It prints one line:
+
+```text
+osv:crates.io  updated  3,099 records
+```
+
+When records in the dump could not be read, the line ends with ` (N unreadable skipped)`; an update in which more than 1% are unreadable fails.
+
+The download is HTTPS only, does not follow redirects, is limited to 64 MiB and times out after 60 seconds. On any failure the command exits `2` and the existing index stays in use.
+
+The index lives in the user cache directory (`~/.cache/shk/deps` on Linux, `~/Library/Caches/shk/deps` on macOS, `%LOCALAPPDATA%\shk\deps` on Windows), not in the project.
+
+| Environment variable | Purpose |
+|----------------------|---------|
+| `SHK_DEPS_CACHE_DIR` | Use another cache directory, for example one a CI cache restores. |
+| `SHK_DEPS_OSV_URL` | Base URL of a mirror of the OSV dumps (HTTPS only, without a query or fragment). The dump is fetched from `<base>/crates.io/all.zip`. |
+| `SHK_DEPS_NOW` | Fix the current time (RFC 3339), for tests. |
+
+A value these variables do not accept is an error (exit `2`), also for `shk deps audit --update`.
+
+Whoever can write the cache directory decides what the audit sees: the index is not signed. Share `SHK_DEPS_CACHE_DIR` only between jobs you trust, or run `--update` in the job that audits.
+
+### `shk deps audit`
+
+| Option | Behavior |
+|--------|----------|
+| `PATH` | Directory to look for `Cargo.lock` files in. Default `.`. |
+| `--json` | Print the JSON report. |
+| `--sarif` | Print SARIF 2.1.0. Mutually exclusive with `--json`. |
+| `--fail-on <severity>` | Override the threshold: `info`, `low`, `medium`, `high`, `critical`. |
+| `--update` | Download the advisory data first. If that fails, the audit continues with the existing index and reports `deps.data_stale`. |
+| `--verbose` | Also show `info` findings in human output. |
+
+```text
+Dependency audit: 1 lockfile, 676 packages (8 skipped), data checked 2026-11-28 02:38 UTC
+
+8 findings
+
+LOW   deps.unmaintained  Cargo.lock:3617    proc-macro-error 1.0.4: RUSTSEC-2024-0370 proc-macro-error is unmaintained
+...
+0 critical, 0 high, 0 medium, 8 low, 0 info
+Suppressed 1 finding(s) by [[deps.ignore]].
+```
+
+Which lockfiles are audited:
+
+- Every `Cargo.lock` below `PATH` (the name is matched without regard to letter case), found the way `shk scan` lists files: `.ignore` files are not honoured and a tracked file is found even when a `.gitignore` rule matches it.
+- A `Cargo.lock` directly in `PATH` is audited even when Git ignores it, as libraries usually do. An ignored, untracked lockfile in a subdirectory is not found; name that directory as `PATH`.
+- `[scan].exclude` applies; `[scan].include` does not. `target/` and `node_modules/` are always skipped.
+- The policy (`shk.toml`) is read from the working directory when `PATH` is inside it, and from `PATH` otherwise, as for `shk scan`. A local `[[deps.ignore]]` never applies to another project.
+
+Which packages are audited:
+
+| `source` in `Cargo.lock` | Audited | Counted as |
+|--------------------------|---------|------------|
+| crates.io (`registry+https://github.com/rust-lang/crates.io-index`, `sparse+https://index.crates.io/`) | yes | `audited` |
+| `git+...` | no | `skipped.git` |
+| another registry | no | `skipped.registry` |
+| none (workspace member, path dependency, crate `[patch]`ed to a path) | no | `skipped.local` |
+
+A crate replaced by a path through `[patch]` is not reported even when the crates.io version has an advisory: the replacement is taken to carry the fix. `cargo audit` reports such a crate.
+
+Rules:
+
+| Rule | Severity | Detects |
+|------|----------|---------|
+| `deps.malicious` | critical | A version reported as malicious (an OpenSSF `MAL-` record or a RustSec advisory in the `malicious` category) |
+| `deps.vulnerable` | from CVSS | A version with a known vulnerability. Without a CVSS score in any record of the advisory, the severity is `high` |
+| `deps.source_unreadable` | high | A lockfile that could not be audited: not valid, an unsupported lockfile version, larger than 8 MiB, or a symbolic link while `[scan].follow_symlinks` is off |
+| `deps.unsound` | medium | RustSec `informational = "unsound"` |
+| `deps.unmaintained` | low | RustSec `informational = "unmaintained"` |
+| `deps.data_stale` | low | The advisory data was last fetched more than `[deps].stale_after_hours` ago, has no recorded fetch time, or `--update` failed |
+| `deps.notice` | info | RustSec `informational = "notice"` |
+| `policy.deps_ignore_expired` | low | A `[[deps.ignore]]` entry past its `expires` date, or with one that is not a date. It no longer suppresses |
+| `policy.deps_ignore_invalid` | low | A `[[deps.ignore]]` entry without `expires` matched a `deps.malicious` finding, which it does not suppress |
+| `policy.deps_unknown_key` | low | An unknown key in `[deps]` or `[[deps.ignore]]`, which is ignored |
+
+See [Dependency Audit](detection-model.md#dependency-audit) for how advisories are matched and merged, and [Dependency Audit Settings](configuration.md#dependency-audit-settings) for the threshold and exceptions.
+
+`--json` returns `findings`, `summary` (`total`, `by_severity`, `suppressed`), the `inventory` per lockfile and the `data` freshness. Findings tied to an advisory carry a `dependency` object (`package`, `version`, `advisory_id`, `aliases`, `fixed`, `url`). `--sarif` puts the same object in `properties.dependency`.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| `0` | No finding meets the threshold. Also when no `Cargo.lock` is found. |
+| `1` | At least one finding meets the threshold. |
+| `2` | The audit could not run: `PATH` is not a directory, `shk.toml` or an option is invalid, or there are crates.io packages to audit and no usable index (run `shk deps update`). Nothing is written to standard output. |
+
+Stale data does not fail a run by default: `deps.data_stale` is `low`. A CI job that must not pass on old data can use `--update` together with `--fail-on low`, or check `data` in the JSON report.
+
+GitHub Actions, with SARIF uploaded to code scanning:
+
+```yaml
+- name: shk deps audit
+  id: audit
+  shell: bash
+  run: |
+    set +e
+    shk deps audit --update --sarif > deps-audit.sarif
+    code=$?
+    set -e
+    echo "code=$code" >> "$GITHUB_OUTPUT"
+    if [ "$code" -gt 1 ]; then exit "$code"; fi
+
+- uses: github/codeql-action/upload-sarif@v4
+  with:
+    sarif_file: deps-audit.sarif
+    category: shk-deps
+
+- if: steps.audit.outputs.code != '0'
+  run: exit 1
+```
+
+The upload needs `security-events: write`. Keep the `category`: the SARIF tool name is `shk`, the same as for `shk scan --sarif`, and two uploads without distinct categories replace each other. In SARIF, `deps.vulnerable` is split into one rule per severity (`deps.vulnerable/high`, …) because code scanning takes an alert's severity from its rule. An alert is identified by the lockfile, the package and the advisory, not by line or version, so it stays the same alert when the lockfile shifts and closes when the package is fixed. Two versions of one package under the same advisory are therefore one alert, while the JSON and human output list both. A pull request from a fork cannot upload: its token has no `security-events: write`.
+
+Run the audit on a schedule as well as on pull requests: a new advisory can affect a lockfile that has not changed.
+
 ## `shk completions`
 
 Generate shell completion scripts.
