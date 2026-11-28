@@ -1,7 +1,7 @@
 //! Finding and reading `Cargo.lock` files.
 
-use crate::text::escape_control;
 use anyhow::{Context, Result, bail};
+use ignore::WalkBuilder;
 use serde::Deserialize;
 use shk_core::policy::Policy;
 use shk_core::scanner;
@@ -13,9 +13,10 @@ use std::path::{Path, PathBuf};
 
 pub const LOCKFILE_NAME: &str = "Cargo.lock";
 
-/// Largest lockfile that is read. Real lockfiles are a few hundred kilobytes;
-/// the limit only keeps a planted file from exhausting memory.
-pub const MAX_LOCKFILE_BYTES: u64 = 64 * 1024 * 1024;
+/// Largest lockfile that is read. Real lockfiles are a few hundred kilobytes,
+/// and parsing takes tens of times the file size in memory, so the limit
+/// stays far below what a planted file would need to exhaust it.
+pub const MAX_LOCKFILE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Directories whose lockfiles are never audited: build output and vendored
 /// JavaScript packages, which hold copies of other projects' lockfiles.
@@ -32,6 +33,10 @@ pub struct LockfileRef {
     pub path: PathBuf,
     /// Path relative to the policy root, with `/` separators.
     pub display: String,
+    /// A symbolic link that `[scan].follow_symlinks` does not allow
+    /// following. It is listed, not dropped, so that a link cannot take a
+    /// lockfile out of the audit unnoticed; it is never read.
+    pub unfollowed_symlink: bool,
 }
 
 #[derive(Debug, Default)]
@@ -50,6 +55,8 @@ pub struct Discovery {
 /// libraries usually do. Only `[scan].exclude` filters the result, matched
 /// against the path relative to `policy_root`; `[scan].include` does not
 /// apply. `target/` and `node_modules/` below `target` are always skipped.
+/// The name is matched without regard to ASCII case, as file systems that
+/// ignore case open `cargo.lock` for Cargo too.
 pub fn discover(target: &Path, policy_root: &Path, policy: &Policy) -> Result<Discovery> {
     if !target.is_dir() {
         bail!("{} is not a directory", target.display());
@@ -59,23 +66,49 @@ pub fn discover(target: &Path, policy_root: &Path, policy: &Policy) -> Result<Di
     let policy_root = fs::canonicalize(policy_root).unwrap_or_else(|_| policy_root.to_path_buf());
     let follow_symlinks = policy.scan.follow_symlinks;
 
-    let listing = scanner::list_files(&target, follow_symlinks, |path| {
-        path.file_name() == Some(OsStr::new(LOCKFILE_NAME))
-    });
-    let mut paths = listing.files;
-    let direct = target.join(LOCKFILE_NAME);
-    let metadata = if follow_symlinks {
-        fs::metadata(&direct)
-    } else {
-        fs::symlink_metadata(&direct)
+    let is_lockfile = |path: &Path| {
+        path.file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| name.eq_ignore_ascii_case(LOCKFILE_NAME))
     };
-    if metadata.is_ok_and(|m| m.is_file()) {
-        paths.push(direct);
+    let listing = scanner::list_files(&target, follow_symlinks, is_lockfile);
+    let mut paths: Vec<(PathBuf, bool)> = listing
+        .files
+        .into_iter()
+        .map(|path| (path, false))
+        .collect();
+    let mut walk_errors = listing.walk_errors;
+    let direct = target.join(LOCKFILE_NAME);
+    // Where case is ignored, a listed `cargo.lock` is this same file.
+    let listed = paths
+        .iter()
+        .any(|(path, _)| path.parent() == Some(target.as_path()));
+    match fs::symlink_metadata(&direct) {
+        Ok(_) if listed => {}
+        Ok(metadata) if metadata.is_file() => paths.push((direct, false)),
+        Ok(metadata) if metadata.is_symlink() => {
+            if !follow_symlinks {
+                paths.push((direct, true));
+            } else if direct.is_file() {
+                paths.push((direct, false));
+            }
+        }
+        _ => {}
+    }
+    if !follow_symlinks {
+        let (links, errors) = unfollowed_symlinks(&target, is_lockfile);
+        paths.extend(links.into_iter().map(|path| (path, true)));
+        // The same directories were walked twice; report each problem once.
+        for error in errors {
+            if !walk_errors.contains(&error) {
+                walk_errors.push(error);
+            }
+        }
     }
 
     let mut seen = HashSet::new();
     let mut lockfiles = Vec::new();
-    for path in paths {
+    for (path, unfollowed_symlink) in paths {
         if in_always_excluded_dir(&path, &target) {
             continue;
         }
@@ -83,13 +116,42 @@ pub fn discover(target: &Path, policy_root: &Path, policy: &Policy) -> Result<Di
         if scanner::path_matches_exclude(policy, &display)? || !seen.insert(display.clone()) {
             continue;
         }
-        lockfiles.push(LockfileRef { path, display });
+        lockfiles.push(LockfileRef {
+            path,
+            display,
+            unfollowed_symlink,
+        });
     }
     lockfiles.sort_by(|a, b| a.display.cmp(&b.display));
     Ok(Discovery {
         lockfiles,
-        walk_errors: listing.walk_errors,
+        walk_errors,
     })
+}
+
+/// Symbolic links below `root` that `keep` accepts, found with the walker
+/// settings of [`scanner::list_files`], which leaves links out when they are
+/// not followed.
+fn unfollowed_symlinks(root: &Path, keep: impl Fn(&Path) -> bool) -> (Vec<PathBuf>, Vec<String>) {
+    let mut walk = WalkBuilder::new(root);
+    walk.standard_filters(true)
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .ignore(false)
+        .filter_entry(|entry| entry.file_name() != OsStr::new(".git"));
+    let mut links = Vec::new();
+    let mut errors = Vec::new();
+    for entry in walk.build() {
+        match entry {
+            Ok(entry) if entry.path_is_symlink() && keep(entry.path()) => {
+                links.push(entry.into_path());
+            }
+            Ok(_) => {}
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+    (links, errors)
 }
 
 /// Whether a directory between `target` and the file is one of
@@ -164,7 +226,7 @@ struct RawPackage {
 }
 
 /// Reads and parses a lockfile. The error is the reason the file could not
-/// be audited, safe to show (no file content, no control characters).
+/// be audited. It never quotes the file.
 pub fn read(path: &Path) -> Result<Vec<LockedPackage>, String> {
     let file = fs::File::open(path).map_err(|err| format!("cannot open the file ({err})"))?;
     let mut bytes = Vec::new();
@@ -185,9 +247,15 @@ pub fn read(path: &Path) -> Result<Vec<LockedPackage>, String> {
 /// without a version (versions 1 and 2) list packages the same way; any
 /// other version is refused instead of guessed at.
 pub fn parse(text: &str) -> Result<Vec<LockedPackage>, String> {
-    let raw: RawLockfile = toml::from_str(text)
-        // `message()` leaves out the quoted source line that `Display` adds.
-        .map_err(|err| format!("invalid TOML ({})", escape_control(err.message())))?;
+    // The parser's own message quotes the offending value, which may be
+    // anything a file named `Cargo.lock` holds: only the line is reported.
+    let raw: RawLockfile = toml::from_str(text).map_err(|err| match err.span() {
+        Some(span) => format!(
+            "not a valid lockfile (line {})",
+            LinePositions::new(text).locate(span.start).0
+        ),
+        None => "not a valid lockfile".to_string(),
+    })?;
     match &raw.version {
         None => {}
         Some(toml::Value::Integer(3 | 4)) => {}
@@ -215,13 +283,14 @@ pub fn parse(text: &str) -> Result<Vec<LockedPackage>, String> {
 }
 
 /// Turns byte offsets into 1-based line and column (in characters).
-/// Offsets are expected in ascending order, as packages appear in the file;
-/// an earlier offset restarts the scan from the top.
+/// Offsets are expected in ascending order, as packages appear in the file,
+/// so that the text is walked once; an earlier offset restarts from the top.
 struct LinePositions<'a> {
     text: &'a str,
     offset: usize,
     line: usize,
-    line_start: usize,
+    /// Characters between the start of the line and `offset`.
+    column: usize,
 }
 
 impl<'a> LinePositions<'a> {
@@ -230,7 +299,7 @@ impl<'a> LinePositions<'a> {
             text,
             offset: 0,
             line: 1,
-            line_start: 0,
+            column: 0,
         }
     }
 
@@ -239,19 +308,17 @@ impl<'a> LinePositions<'a> {
         if offset < self.offset {
             *self = Self::new(self.text);
         }
-        let bytes = self.text.as_bytes();
-        for (index, byte) in bytes[self.offset..offset].iter().enumerate() {
+        for byte in &self.text.as_bytes()[self.offset..offset] {
             if *byte == b'\n' {
                 self.line += 1;
-                self.line_start = self.offset + index + 1;
+                self.column = 0;
+            } else if byte & 0xC0 != 0x80 {
+                // Not a UTF-8 continuation byte: a new character.
+                self.column += 1;
             }
         }
         self.offset = offset;
-        let column = String::from_utf8_lossy(&bytes[self.line_start..offset])
-            .chars()
-            .count()
-            + 1;
-        (self.line, column)
+        (self.line, self.column + 1)
     }
 }
 
@@ -340,21 +407,40 @@ mod tests {
 
     #[test]
     fn parse_errors_do_not_quote_the_file() {
-        let error = parse(&lockfile_text("invalid-toml")).unwrap_err();
-        assert!(error.starts_with("invalid TOML ("), "{error}");
-        assert!(!error.contains("fx-simple"), "{error}");
-        assert!(!error.contains('\n'), "{error}");
-
-        // A package without a version, and a name of the wrong type.
-        for text in [
-            "[[package]]\nname = \"a\"\n",
-            "[[package]]\nname = 1\nversion = \"1.0.0\"\n",
-            "package = 1\n",
+        assert_eq!(
+            parse(&lockfile_text("invalid-toml")).unwrap_err(),
+            "not a valid lockfile (line 5)"
+        );
+        // A package without a version, a name of the wrong type, and a
+        // value the parser would quote in its own message.
+        for (text, line) in [
+            ("[[package]]\nname = \"a\"\n", 1),
+            ("\n[[package]]\nname = 1\nversion = \"1.0.0\"\n", 3),
+            ("\n\npackage = \"quoted-by-the-parser\"\n", 3),
+            ("package = 123456789\n", 1),
         ] {
-            let error = parse(text).unwrap_err();
-            assert!(error.starts_with("invalid TOML ("), "{error}");
-            assert!(!error.contains('\n'), "{error}");
+            assert_eq!(
+                parse(text).unwrap_err(),
+                format!("not a valid lockfile (line {line})"),
+                "{text}"
+            );
         }
+    }
+
+    #[test]
+    fn many_packages_on_one_line_are_located_in_one_pass() {
+        let entries: Vec<String> = (0..50_000)
+            .map(|n| format!("{{name=\"p{n}\",version=\"1.0.0\"}}"))
+            .collect();
+        let text = format!("package = [{}]\n", entries.join(","));
+        let started = std::time::Instant::now();
+        let packages = parse(&text).unwrap();
+        assert_eq!(packages.len(), 50_000);
+        assert_eq!((packages[0].line, packages[0].column), (1, 18));
+        assert_eq!(packages[1].column, 18 + entries[0].len() + 1);
+        assert!(packages.iter().all(|package| package.line == 1));
+        // Recounting the line for every package took minutes here.
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
     }
 
     #[test]
@@ -364,7 +450,6 @@ mod tests {
         assert_eq!((packages[0].line, packages[0].column), (4, 8));
         assert_eq!((packages[1].line, packages[1].column), (9, 12));
 
-        // Windows line endings and multi-byte text before the value.
         // Windows line endings, multi-byte text before the value on its
         // line, and a key the lockfile format does not have.
         let text = "# é\r\n[[package]]\r\n\"名前\" = 1\r\n\"名\" = { name = \"x\" }\r\nname = \"a\"\r\nversion = \"1\"\r\n";
@@ -412,7 +497,7 @@ mod tests {
         let path = dir.path().join("Cargo.lock");
         let file = fs::File::create(&path).unwrap();
         file.set_len(MAX_LOCKFILE_BYTES + 1).unwrap();
-        assert_eq!(read(&path).unwrap_err(), "the file is larger than 64 MiB");
+        assert_eq!(read(&path).unwrap_err(), "the file is larger than 8 MiB");
     }
 
     fn displays(discovery: &Discovery) -> Vec<&str> {
@@ -432,8 +517,6 @@ mod tests {
         let status = Command::new("git")
             .args(args)
             .current_dir(root)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .output()
             .unwrap();
         assert!(status.status.success(), "git {args:?}: {status:?}");
@@ -450,13 +533,14 @@ mod tests {
             "crates/a/target/debug/Cargo.lock",
             "web/node_modules/pkg/Cargo.lock",
             "crates/b/cargo.lock.bak",
+            "crates/c/CARGO.LOCK",
             "crates/b/Cargo.lock.orig",
         ] {
             write_file(root, path, b"version = 4\n");
         }
         assert_eq!(
             discover_in(root, &Policy::default()),
-            ["Cargo.lock", "crates/a/Cargo.lock"]
+            ["Cargo.lock", "crates/a/Cargo.lock", "crates/c/CARGO.LOCK"]
         );
 
         // A directory inside build output can still be audited by naming it.
@@ -465,7 +549,10 @@ mod tests {
         assert_eq!(displays(&discovery), ["Cargo.lock"]);
         // Displayed relative to the policy root when the target lies below it.
         let discovery = discover(&root.join("crates"), root, &Policy::default()).unwrap();
-        assert_eq!(displays(&discovery), ["crates/a/Cargo.lock"]);
+        assert_eq!(
+            displays(&discovery),
+            ["crates/a/Cargo.lock", "crates/c/CARGO.LOCK"]
+        );
     }
 
     #[test]
@@ -485,6 +572,14 @@ mod tests {
 
         policy.scan.exclude = Some(vec!["vendor/**".into(), "Cargo.lock".into()]);
         assert_eq!(discover_in(root, &policy), ["tools/Cargo.lock"]);
+
+        // Patterns are matched from the policy root, whatever the target.
+        policy.scan.exclude = Some(vec!["vendor/**".into()]);
+        let discovery = discover(&root.join("vendor"), root, &policy).unwrap();
+        assert!(discovery.lockfiles.is_empty());
+        policy.scan.exclude = Some(vec!["x/**".into()]);
+        let discovery = discover(&root.join("vendor"), root, &policy).unwrap();
+        assert_eq!(displays(&discovery), ["vendor/x/Cargo.lock"]);
 
         policy.scan.exclude = Some(vec!["[".into()]);
         assert!(discover(root, root, &policy).is_err());
@@ -519,17 +614,49 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn symlinked_lockfiles_follow_the_scan_setting() {
+    fn symlinked_lockfiles_are_listed_and_read_only_when_followed() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("project");
-        fs::create_dir_all(&root).unwrap();
-        let outside = write_file(dir.path(), "elsewhere.lock", b"");
-        std::os::unix::fs::symlink(&outside, root.join("Cargo.lock")).unwrap();
+        let real = write_file(&root, "locks/deps.txt", b"version = 4\n");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&real, root.join("Cargo.lock")).unwrap();
+        std::os::unix::fs::symlink(&real, root.join("sub/Cargo.lock")).unwrap();
+        std::os::unix::fs::symlink(root.join("gone"), root.join("sub/cargo.lock.bak")).unwrap();
+        write_file(&root, "plain/Cargo.lock", b"");
 
+        let flags = |policy: &Policy| -> Vec<(String, bool)> {
+            discover(&root, &root, policy)
+                .unwrap()
+                .lockfiles
+                .into_iter()
+                .map(|lockfile| (lockfile.display, lockfile.unfollowed_symlink))
+                .collect()
+        };
         let mut policy = Policy::default();
-        assert!(discover_in(&root, &policy).is_empty());
+        assert_eq!(
+            flags(&policy),
+            [
+                ("Cargo.lock".to_string(), true),
+                ("plain/Cargo.lock".to_string(), false),
+                ("sub/Cargo.lock".to_string(), true),
+            ]
+        );
         policy.scan.follow_symlinks = true;
-        assert_eq!(discover_in(&root, &policy), ["Cargo.lock"]);
+        assert_eq!(
+            flags(&policy),
+            [
+                ("Cargo.lock".to_string(), false),
+                ("plain/Cargo.lock".to_string(), false),
+                ("sub/Cargo.lock".to_string(), false),
+            ]
+        );
+
+        // A dangling link is listed when links are not followed, and is not
+        // a file when they are.
+        fs::remove_file(&real).unwrap();
+        assert_eq!(flags(&policy), [("plain/Cargo.lock".to_string(), false)]);
+        policy.scan.follow_symlinks = false;
+        assert_eq!(flags(&policy).len(), 3);
     }
 
     #[test]

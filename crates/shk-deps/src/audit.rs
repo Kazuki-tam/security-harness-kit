@@ -149,7 +149,12 @@ pub fn audit(request: &AuditRequest<'_>) -> Result<DepsAuditReport> {
     let mut suppressed = 0;
 
     for lockfile in &discovery.lockfiles {
-        let packages = match cargo_lock::read(&lockfile.path) {
+        let read = if lockfile.unfollowed_symlink {
+            Err("the file is a symbolic link, and [scan].follow_symlinks is off".to_string())
+        } else {
+            cargo_lock::read(&lockfile.path)
+        };
+        let packages = match read {
             Ok(packages) => packages,
             Err(reason) => {
                 findings.push(plain_finding(
@@ -370,7 +375,9 @@ fn is_stale(request: &AuditRequest<'_>) -> bool {
 }
 
 fn data_status(request: &AuditRequest<'_>) -> DataStatus {
-    let recorded = request.db.is_some();
+    // Without an index or a check time there is no freshness record, and
+    // the dump's own date says nothing.
+    let recorded = request.db.is_some() && request.data.checked_at.is_some();
     let format = |time: Option<DateTime<Utc>>| {
         time.filter(|_| recorded)
             .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
@@ -761,7 +768,7 @@ mod tests {
         assert_eq!(unreadable.len(), 2);
         assert!(
             unreadable[0].starts_with(
-                "high deps.source_unreadable dependency a/Cargo.lock:1:1 lockfile could not be audited: invalid TOML ("
+                "high deps.source_unreadable dependency a/Cargo.lock:1:1 lockfile could not be audited: not a valid lockfile (line 5)"
             ),
             "{unreadable:?}"
         );
@@ -773,6 +780,30 @@ mod tests {
             finding.finding.file == "c/Cargo.lock" && finding.dependency.is_some()
         }));
         assert!(report.should_fail());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_lockfile_is_reported_not_skipped() {
+        let mut case = Case::new().lockfile("locks/deps.txt", "affected");
+        std::os::unix::fs::symlink(
+            case.dir.path().join("locks/deps.txt"),
+            case.dir.path().join("Cargo.lock"),
+        )
+        .unwrap();
+        let report = case.run();
+        assert_eq!(
+            lines(&report),
+            [
+                "high deps.source_unreadable dependency Cargo.lock:1:1 lockfile could not be audited: the file is a symbolic link, and [scan].follow_symlinks is off"
+            ]
+        );
+        assert!(report.sources.is_empty());
+
+        case.policy.scan.follow_symlinks = true;
+        let report = case.run();
+        assert_eq!(report.sources, ["Cargo.lock"]);
+        assert_eq!(report.summary.total, 21);
     }
 
     #[test]
@@ -966,7 +997,7 @@ mod tests {
         );
         let status = &case.run().data["osv:crates.io"];
         assert_eq!(status.checked_at, None);
-        assert_eq!(status.modified_at.as_deref(), Some("2026-11-28T10:30:15Z"));
+        assert_eq!(status.modified_at, None);
         assert!(status.stale);
 
         // A failed update is reported however fresh the data is.
@@ -1184,7 +1215,6 @@ mod tests {
     #[test]
     fn the_threshold_decides_failure() {
         let mut case = Case::with_lockfile("sources");
-        case.config.ignore.clear();
         for (threshold, fails) in [
             (Severity::Critical, true),
             (Severity::High, true),

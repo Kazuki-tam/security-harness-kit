@@ -46,8 +46,13 @@ pub struct IgnoreEntry {
 impl IgnoreEntry {
     /// `Some(date)` when `expires` is a `YYYY-MM-DD` date.
     fn expiry_date(&self) -> Option<NaiveDate> {
-        let expires = self.expires.as_deref()?;
-        NaiveDate::parse_from_str(expires.trim(), "%Y-%m-%d").ok()
+        let expires = self.expires.as_deref()?.trim();
+        // chrono also reads `2027-5-31` and `+2027-05-31`.
+        let shaped =
+            expires.len() == 10 && expires.bytes().all(|b| b.is_ascii_digit() || b == b'-');
+        NaiveDate::parse_from_str(expires, "%Y-%m-%d")
+            .ok()
+            .filter(|_| shaped)
     }
 
     /// Whether the entry no longer suppresses: its `expires` date has passed
@@ -458,6 +463,9 @@ mod tests {
             "2026-13-01",
             "28/11/2026",
             "2026-11-28T00:00:00Z",
+            "2099-1-01",
+            "+2099-01-01",
+            "99-01-01",
         ] {
             assert!(
                 entry("A", None, Some(unreadable)).is_expired(day("2000-01-01")),

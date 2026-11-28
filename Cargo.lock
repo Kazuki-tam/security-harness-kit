@@ -4492,6 +4492,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "cvss",
+ "ignore",
  "semver",
  "serde",
  "serde_json",
