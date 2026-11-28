@@ -315,6 +315,22 @@ pub fn run() -> Result<()> {
             })?,
         },
         Commands::Deps { cmd } => match cmd {
+            DepsCmd::Audit {
+                path,
+                json,
+                sarif,
+                fail_on,
+                update,
+                verbose,
+            } => commands::deps::audit(commands::deps::DepsAuditInvocation {
+                path,
+                json,
+                sarif,
+                fail_on,
+                update,
+                verbose,
+                color_enabled: color,
+            })?,
             DepsCmd::Update => commands::deps::update()?,
         },
         Commands::Ci { cmd } => match cmd {

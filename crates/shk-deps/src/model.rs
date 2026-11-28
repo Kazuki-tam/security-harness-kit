@@ -21,6 +21,12 @@ pub struct DepsFinding {
     pub finding: Finding,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dependency: Option<DependencyInfo>,
+    /// What makes this finding the same alert from one run to the next: the
+    /// file and what the finding is about, without line or version, so that
+    /// an alert survives the lockfile shifting and closes once it is fixed.
+    /// SARIF output hashes it into the result's fingerprint.
+    #[serde(skip)]
+    pub alert_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -267,6 +273,7 @@ mod tests {
         let plain = serde_json::to_value(DepsFinding {
             finding: finding.clone(),
             dependency: None,
+            alert_key: "shk.toml:deps.data_stale".into(),
         })
         .unwrap();
         assert_eq!(plain["rule_id"], "deps.data_stale");
@@ -284,6 +291,7 @@ mod tests {
                 fixed: vec!["1.2.0".into()],
                 url: "https://osv.dev/vulnerability/RUSTSEC-9999-0001".into(),
             }),
+            alert_key: String::new(),
         })
         .unwrap();
         assert_eq!(with_dependency["dependency"]["package"], "fx-simple");

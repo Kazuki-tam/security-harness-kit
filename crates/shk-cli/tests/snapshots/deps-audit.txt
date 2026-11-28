@@ -1,0 +1,26 @@
+Dependency audit: 1 lockfile, 23 packages (1 skipped), data checked 2026-11-28 11:00 UTC
+
+20 findings
+
+CRIT  deps.malicious  Cargo.lock:54    fx-mal-alias 0.0.1: RUSTSEC-9999-0014 fx-mal-alias was removed for malware
+CRIT  deps.malicious  Cargo.lock:59    fx-malicious-category 1.0.0: RUSTSEC-9999-0013 fx-malicious-category steals credentials
+CRIT  deps.malicious  Cargo.lock:64    fx-malware 0.1.1: MAL-9999-0001 Malicious code in fx-malware (crates.io)
+CRIT  deps.vulnerable  Cargo.lock:69    fx-merge 1.9.9: RUSTSEC-9999-0002 fx-merge accepts forged tokens (fixed: >=2.0.0)
+CRIT  deps.vulnerable  Cargo.lock:119    fx-simple 1.1.9: RUSTSEC-9999-0001 Out-of-bounds read in fx-simple (fixed: >=1.2.0)
+HIGH  deps.vulnerable  Cargo.lock:39    fx-bad-semver 0.3.1: GHSA-fx08-0008-dddd fx-bad-semver has an unusual range
+HIGH  deps.vulnerable  Cargo.lock:44    fx-last-affected 1.4.2: RUSTSEC-9999-0004 fx-last-affected leaks memory
+HIGH  deps.vulnerable  Cargo.lock:109    fx-prerelease 1.0.0-beta.1: RUSTSEC-9999-0007 fx-prerelease pre-release bug (fixed: >=1.0.0-rc.1)
+MED   deps.vulnerable  Cargo.lock:34    fx-affected-severity 0.4.9: RUSTSEC-9999-0015 fx-affected-severity overflows a buffer (fixed: >=0.5.0)
+MED   deps.vulnerable  Cargo.lock:89    fx-multi-introduced 0.1.9: RUSTSEC-9999-0003 Segfault in fx-multi-introduced (fixed: >=0.3.5)
+MED   deps.vulnerable  Cargo.lock:94    fx-multi-introduced 0.3.4: RUSTSEC-9999-0003 Segfault in fx-multi-introduced (fixed: >=0.3.5)
+MED   deps.vulnerable  Cargo.lock:104    fx-orphan 0.9.0: CVE-9999-0009 fx-orphan (CVE entry) (fixed: >=1.0.0)
+MED   deps.unsound  Cargo.lock:134    fx-unsound 0.8.0: RUSTSEC-9999-0010 fx-unsound exposes an unsound API (fixed: >=0.9.0)
+LOW   deps.vulnerable  Cargo.lock:49    fx-long-summary 3.9.0: RUSTSEC-9999-0016 \u{1b}[31m警告\u{1b}[0m 長い要約のテスト。長い要約のテスト。長い要約のテスト。長い要約のテスト。長い要約のテスト。長い要約のテスト。長い要約のテスト。長い要約の (fixed: >=4.0.0)
+LOW   deps.vulnerable  Cargo.lock:74    fx-multi-a 2.9.9: GHSA-fx03-0003-cccc Shared parser bug in fx-multi-a and fx-multi-b (fixed: >=3.0.0)
+LOW   deps.vulnerable  Cargo.lock:79    fx-multi-b 1.0.5: GHSA-fx03-0003-cccc Shared parser bug in fx-multi-a and fx-multi-b (fixed: >=1.1.0)
+LOW   deps.vulnerable  Cargo.lock:84    fx-multi-b 2.0.2: GHSA-fx03-0003-cccc Shared parser bug in fx-multi-a and fx-multi-b (fixed: >=2.0.3)
+LOW   deps.vulnerable  Cargo.lock:114    fx-same-version 2.0.5: RUSTSEC-9999-0006 fx-same-version panics on empty input (fixed: >=2.1.0)
+INFO  deps.notice  Cargo.lock:99    fx-notice 1.0.0: RUSTSEC-9999-0012 fx-notice was renamed
+INFO  deps.vulnerable  Cargo.lock:124    fx-two-ranges 2.2.0: RUSTSEC-9999-0005 fx-two-ranges mishandles input (fixed: >=2.3.0)
+5 critical, 3 high, 5 medium, 5 low, 2 info
+Suppressed 1 finding(s) by [[deps.ignore]].

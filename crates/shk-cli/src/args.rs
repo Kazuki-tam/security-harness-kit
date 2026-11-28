@@ -298,6 +298,26 @@ pub enum McpCmd {
 
 #[derive(Subcommand)]
 pub enum DepsCmd {
+    /// (experimental) Check the Cargo.lock files below PATH against the local advisory index. Rule ids and settings may still change.
+    Audit {
+        /// Directory to look for Cargo.lock files in
+        #[arg(value_name = "PATH", default_value = ".")]
+        path: PathBuf,
+        #[arg(long, conflicts_with = "sarif")]
+        json: bool,
+        /// Emit SARIF 2.1.0 for GitHub code scanning and compatible tools.
+        #[arg(long, conflicts_with = "json")]
+        sarif: bool,
+        /// Minimum severity that causes exit code 1 (default: [thresholds].deps_fail_on, then default_fail_on)
+        #[arg(long, value_enum, value_name = "SEVERITY")]
+        fail_on: Option<SeverityArg>,
+        /// Download the advisory data first; if that fails, audit with the existing index
+        #[arg(long)]
+        update: bool,
+        /// Show informational findings in human output
+        #[arg(long)]
+        verbose: bool,
+    },
     /// (experimental) Download the OSV crates.io advisory data and rebuild the local index. Rule ids and settings may still change.
     Update,
 }

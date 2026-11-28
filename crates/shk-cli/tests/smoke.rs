@@ -351,7 +351,11 @@ fn mcp_audit_parse_failure_is_a_nonfatal_finding() {
 
 #[test]
 fn deps_help_marks_the_commands_experimental() {
-    for args in [&["deps", "--help"][..], &["deps", "update", "--help"][..]] {
+    for args in [
+        &["deps", "--help"][..],
+        &["deps", "audit", "--help"][..],
+        &["deps", "update", "--help"][..],
+    ] {
         let out = shk_cmd().args(args).output().expect("run deps help");
         assert_eq!(out.status.code(), Some(0), "{}", output_log(&out));
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -8923,5 +8927,245 @@ fn scan_file_selection_is_unchanged() {
             "plain.txt",
             "shk.toml",
         ]
+    );
+}
+
+/// A project with the `affected` fixture lockfile, a policy that ignores one
+/// advisory, and a cache holding the synthetic advisories, fetched an hour
+/// before [`DEPS_NOW`].
+struct DepsProject {
+    dir: tempfile::TempDir,
+    cache: tempfile::TempDir,
+}
+
+const DEPS_NOW: &str = "2026-11-28T12:00:00Z";
+
+fn deps_fixtures() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/deps")
+}
+
+impl DepsProject {
+    fn new() -> Self {
+        let project = Self {
+            dir: tempfile::tempdir().unwrap(),
+            cache: tempfile::tempdir().unwrap(),
+        };
+        std::fs::copy(
+            deps_fixtures().join("lockfiles/affected.lock"),
+            project.dir.path().join("Cargo.lock"),
+        )
+        .unwrap();
+        project.policy(
+            "[thresholds]\ndeps_fail_on = \"medium\"\n\n[[deps.ignore]]\nid = \"RUSTSEC-9999-0011\"\nreason = \"unmaintained notice only\"\npackage = \"fx-unmaintained\"\nexpires = \"2027-05-31\"\n",
+        );
+        project.fill_cache("2026-11-28T11:00:00Z");
+        project
+    }
+
+    fn policy(&self, text: &str) {
+        std::fs::write(self.dir.path().join("shk.toml"), text).unwrap();
+    }
+
+    fn fill_cache(&self, checked_at: &str) {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let mut names: Vec<PathBuf> = std::fs::read_dir(deps_fixtures().join("osv/synthetic"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                !path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("BROKEN")
+            })
+            .collect();
+        names.sort();
+        for path in names {
+            writer
+                .start_file(
+                    path.file_name().unwrap().to_string_lossy(),
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+            writer.write_all(&std::fs::read(&path).unwrap()).unwrap();
+        }
+        let mut dump = writer.finish().unwrap();
+        dump.set_position(0);
+        let built = shk_deps::build_index(dump).unwrap();
+        let time = |text: &str| chrono::DateTime::parse_from_rfc3339(text).unwrap().to_utc();
+        shk_deps::cache::store(
+            self.cache.path(),
+            &built,
+            time(checked_at),
+            Some(time("2026-11-28T10:30:15Z")),
+        )
+        .unwrap();
+    }
+
+    fn audit(&self, args: &[&str]) -> std::process::Output {
+        shk_cmd()
+            .args(["deps", "audit"])
+            .args(args)
+            .current_dir(self.dir.path())
+            .env("SHK_DEPS_CACHE_DIR", self.cache.path())
+            .env("SHK_DEPS_NOW", DEPS_NOW)
+            // A base URL that is never contacted: no test passes `--update`
+            // with a setting that reaches the download.
+            .env("SHK_DEPS_OSV_URL", "https://example.invalid/osv")
+            .output()
+            .expect("run deps audit")
+    }
+}
+
+#[test]
+fn deps_audit_output_matches_snapshots() {
+    let project = DepsProject::new();
+    for (format, snapshot) in [
+        ("--json", "deps-audit.json"),
+        ("--sarif", "deps-audit.sarif.json"),
+    ] {
+        let out = project.audit(&[format]);
+        assert_eq!(out.status.code(), Some(1), "{}", output_log(&out));
+        assert!(out.stderr.is_empty(), "{}", output_log(&out));
+        assert_matches_snapshot(snapshot, &out);
+    }
+
+    let out = project.audit(&["--verbose"]);
+    assert_eq!(out.status.code(), Some(1), "{}", output_log(&out));
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots/deps-audit.txt");
+    let expected = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("\r\n", "\n");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
+}
+
+#[test]
+fn deps_audit_exit_codes() {
+    let project = DepsProject::new();
+    // Findings at or above the threshold.
+    assert_eq!(project.audit(&[]).status.code(), Some(1));
+    assert_eq!(
+        project.audit(&["--fail-on", "critical"]).status.code(),
+        Some(1)
+    );
+
+    // Nothing at or above it: only what the policy ignores is unmaintained.
+    std::fs::copy(
+        deps_fixtures().join("lockfiles/unaffected.lock"),
+        project.dir.path().join("Cargo.lock"),
+    )
+    .unwrap();
+    let out = project.audit(&["--fail-on", "info"]);
+    assert_eq!(out.status.code(), Some(0), "{}", output_log(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "Dependency audit: 1 lockfile, 18 packages (0 skipped), data checked 2026-11-28 11:00 UTC\n\n0 findings\n\n0 critical, 0 high, 0 medium, 0 low, 0 info\n"
+    );
+
+    // No lockfile at all.
+    std::fs::remove_file(project.dir.path().join("Cargo.lock")).unwrap();
+    let out = project.audit(&["--fail-on", "info"]);
+    assert_eq!(out.status.code(), Some(0), "{}", output_log(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "Dependency audit: no lockfiles found\n"
+    );
+}
+
+#[test]
+fn deps_audit_errors_exit_two_with_empty_stdout() {
+    let project = DepsProject::new();
+    let failing = |args: &[&str], message: &str| {
+        let out = project.audit(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {}", output_log(&out));
+        assert!(out.stdout.is_empty(), "{args:?}: {}", output_log(&out));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(message), "{args:?}: {stderr}");
+    };
+    failing(&["missing-dir"], "is not a directory");
+    failing(&["--json", "Cargo.lock"], "is not a directory");
+    failing(&["--fail-on", "loud"], "invalid value 'loud'");
+    failing(&["--json", "--sarif"], "cannot be used with");
+
+    project.policy("[thresholds]\ndeps_fail_on = 5\n");
+    failing(
+        &["--sarif"],
+        "[thresholds].deps_fail_on in shk.toml must be one of",
+    );
+    project.policy("[deps]\nignore = 1\n");
+    failing(
+        &["--json"],
+        "`deps.ignore` in shk.toml must be an array of tables",
+    );
+    project.policy("");
+
+    // Packages to audit, and no index to audit them against.
+    std::fs::remove_file(project.cache.path().join("osv-crates.io.json")).unwrap();
+    failing(&[], "run `shk deps update` first");
+    failing(&["--sarif"], "run `shk deps update` first");
+}
+
+#[test]
+fn deps_audit_reports_stale_data_at_the_boundary() {
+    let project = DepsProject::new();
+    project.policy("");
+    let stale = |project: &DepsProject| {
+        let out = project.audit(&["--json", "--fail-on", "critical"]);
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|err| panic!("{err}: {}", output_log(&out)));
+        let reported = json["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["rule_id"] == "deps.data_stale");
+        assert_eq!(json["data"]["osv:crates.io"]["stale"], reported);
+        reported
+    };
+    // Exactly 24 hours old is fresh; a second more is stale.
+    project.fill_cache("2026-11-27T12:00:00Z");
+    assert!(!stale(&project));
+    project.fill_cache("2026-11-27T11:59:59Z");
+    assert!(stale(&project));
+    project.policy("[deps]\nstale_after_hours = 48\n");
+    assert!(!stale(&project));
+
+    // An index without its freshness record.
+    std::fs::remove_file(project.cache.path().join("manifest.json")).unwrap();
+    assert!(stale(&project));
+    let out = project.audit(&[]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(", data checked: unknown\n"), "{stdout}");
+}
+
+#[test]
+fn deps_audit_applies_the_local_policy_only_inside_the_working_directory() {
+    let project = DepsProject::new();
+    // The same project audited from elsewhere uses its own policy too.
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::fs::write(
+        elsewhere.path().join("shk.toml"),
+        "[[deps.ignore]]\nid = \"RUSTSEC-9999-0001\"\nreason = \"local only\"\n",
+    )
+    .unwrap();
+    let out = shk_cmd()
+        .args(["deps", "audit", "--json"])
+        .arg(project.dir.path())
+        .current_dir(elsewhere.path())
+        .env("SHK_DEPS_CACHE_DIR", project.cache.path())
+        .env("SHK_DEPS_NOW", DEPS_NOW)
+        .output()
+        .expect("run deps audit");
+    assert_eq!(out.status.code(), Some(1), "{}", output_log(&out));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    // The ignore entry of the working directory did not apply.
+    assert_eq!(json["summary"]["suppressed"], 1);
+    assert_eq!(json["exit_threshold"], "medium");
+    assert_eq!(json["sources"], serde_json::json!(["Cargo.lock"]));
+    assert!(
+        json["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| { finding["dependency"]["advisory_id"] == "RUSTSEC-9999-0001" })
     );
 }
