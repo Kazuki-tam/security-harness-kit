@@ -710,9 +710,11 @@ describe("App", () => {
     });
 
     saveMock.mockResolvedValue("/tmp/demo/b.pseudo.xlsx");
-    const runButton = screen.getByRole("button", { name: "Pseudonymize and save…" });
-    await waitFor(() => expect(runButton).toBeEnabled());
-    fireEvent.click(runButton);
+    // The button moves from the input panel to the preview once the plan
+    // arrives, so look it up again rather than holding the first element.
+    const runName = { name: "Pseudonymize and save…" };
+    await waitFor(() => expect(screen.getByRole("button", runName)).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", runName));
     await screen.findByRole("heading", { name: "Pseudonymized" });
     fireEvent.click(screen.getByRole("button", { name: "Start over" }));
     expect(screen.queryByRole("heading", { name: "Pseudonymized" })).not.toBeInTheDocument();
