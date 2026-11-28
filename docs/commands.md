@@ -184,6 +184,8 @@ Downloads the [OSV](https://osv.dev) crates.io dump (RustSec and GitHub advisori
 osv:crates.io  updated  3,099 records
 ```
 
+When records in the dump could not be read, the line ends with ` (N unreadable skipped)`; an update in which more than 1% are unreadable fails.
+
 The download is HTTPS only, does not follow redirects, is limited to 64 MiB and times out after 60 seconds. On any failure the command exits `2` and the existing index stays in use.
 
 The index lives in the user cache directory (`~/.cache/shk/deps` on Linux, `~/Library/Caches/shk/deps` on macOS, `%LOCALAPPDATA%\shk\deps` on Windows), not in the project.
@@ -191,8 +193,10 @@ The index lives in the user cache directory (`~/.cache/shk/deps` on Linux, `~/Li
 | Environment variable | Purpose |
 |----------------------|---------|
 | `SHK_DEPS_CACHE_DIR` | Use another cache directory, for example one a CI cache restores. |
-| `SHK_DEPS_OSV_URL` | Base URL of a mirror of the OSV dumps (HTTPS only). The dump is fetched from `<base>/crates.io/all.zip`. |
+| `SHK_DEPS_OSV_URL` | Base URL of a mirror of the OSV dumps (HTTPS only, without a query or fragment). The dump is fetched from `<base>/crates.io/all.zip`. |
 | `SHK_DEPS_NOW` | Fix the current time (RFC 3339), for tests. |
+
+A value these variables do not accept is an error (exit `2`), also for `shk deps audit --update`.
 
 Whoever can write the cache directory decides what the audit sees: the index is not signed. Share `SHK_DEPS_CACHE_DIR` only between jobs you trust, or run `--update` in the job that audits.
 
@@ -220,7 +224,7 @@ Suppressed 1 finding(s) by [[deps.ignore]].
 
 Which lockfiles are audited:
 
-- Every `Cargo.lock` below `PATH`, found the way `shk scan` lists files: `.ignore` files are not honoured and a tracked file is found even when a `.gitignore` rule matches it.
+- Every `Cargo.lock` below `PATH` (the name is matched without regard to letter case), found the way `shk scan` lists files: `.ignore` files are not honoured and a tracked file is found even when a `.gitignore` rule matches it.
 - A `Cargo.lock` directly in `PATH` is audited even when Git ignores it, as libraries usually do. An ignored, untracked lockfile in a subdirectory is not found; name that directory as `PATH`.
 - `[scan].exclude` applies; `[scan].include` does not. `target/` and `node_modules/` are always skipped.
 - The policy (`shk.toml`) is read from the working directory when `PATH` is inside it, and from `PATH` otherwise, as for `shk scan`. A local `[[deps.ignore]]` never applies to another project.
@@ -288,7 +292,7 @@ GitHub Actions, with SARIF uploaded to code scanning:
   run: exit 1
 ```
 
-The upload needs `security-events: write`. Keep the `category`: the SARIF tool name is `shk`, the same as for `shk scan --sarif`, and two uploads without distinct categories replace each other. In SARIF, `deps.vulnerable` is split into one rule per severity (`deps.vulnerable/high`, …) because code scanning takes an alert's severity from its rule. An alert is identified by the lockfile, the package and the advisory, not by line or version, so it stays the same alert when the lockfile shifts and closes when the package is fixed.
+The upload needs `security-events: write`. Keep the `category`: the SARIF tool name is `shk`, the same as for `shk scan --sarif`, and two uploads without distinct categories replace each other. In SARIF, `deps.vulnerable` is split into one rule per severity (`deps.vulnerable/high`, …) because code scanning takes an alert's severity from its rule. An alert is identified by the lockfile, the package and the advisory, not by line or version, so it stays the same alert when the lockfile shifts and closes when the package is fixed. Two versions of one package under the same advisory are therefore one alert, while the JSON and human output list both. A pull request from a fork cannot upload: its token has no `security-events: write`.
 
 Run the audit on a schedule as well as on pull requests: a new advisory can affect a lockfile that has not changed.
 

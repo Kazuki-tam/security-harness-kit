@@ -18,8 +18,8 @@ to the user's cache directory. The data is not bundled with `shk`.
 as test fixtures. The records come from:
 
 - [RustSec Advisory Database](https://github.com/rustsec/advisory-db) (`RUSTSEC-*`): CC0-1.0
-- [GitHub Advisory Database](https://github.com/github/advisory-database) (`GHSA-*`): CC-BY-4.0, © GitHub, Inc.
-- [OpenSSF Malicious Packages](https://github.com/ossf/malicious-packages) (`MAL-*`): Apache-2.0
+- [GitHub Advisory Database](https://github.com/github/advisory-database) (`GHSA-*`): [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/), © GitHub, Inc.
+- [OpenSSF Malicious Packages](https://github.com/ossf/malicious-packages) (`MAL-*`): [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0)
 
 Finding messages quote an advisory's id and summary, and reports link to the
 advisory on osv.dev.

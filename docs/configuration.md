@@ -356,7 +356,7 @@ Custom rules participate in scan, mask, hook mode, inline suppression, and `[[al
 > **Experimental.** These keys belong to [`shk deps`](commands.md#shk-deps) and may still change. `shk init` does not write them.
 
 ```toml
-[thresholds]
+[thresholds]            # add the key to your existing [thresholds] table
 deps_fail_on = "high"
 
 [deps]
@@ -376,7 +376,7 @@ expires = "2027-05-31"
 | `[[deps.ignore]].id` | required | An advisory id or one of its aliases (`RUSTSEC-…`, `GHSA-…`, `CVE-…`). Letter case is ignored. |
 | `[[deps.ignore]].reason` | required | Why the exception exists. Must not be empty. |
 | `[[deps.ignore]].package` | none | Limit the entry to this package name (exact match). |
-| `[[deps.ignore]].expires` | none | `YYYY-MM-DD`. The entry still applies on that day and stops suppressing the day after. Required to suppress `deps.malicious`. |
+| `[[deps.ignore]].expires` | none | `YYYY-MM-DD`. The entry still applies on that day (UTC) and stops suppressing the day after. Required to suppress `deps.malicious`. |
 
 An entry suppresses findings tied to an advisory (`deps.malicious`, `deps.vulnerable`, `deps.unsound`, `deps.unmaintained`, `deps.notice`). It matches when its `id` is the id the finding shows or one of the aliases listed in the finding's `dependency.aliases`. Suppressed findings are counted in `summary.suppressed` and in the last line of human output.
 

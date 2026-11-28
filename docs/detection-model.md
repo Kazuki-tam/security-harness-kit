@@ -180,7 +180,7 @@ Reports contain no process-variable values, header values, or raw matches. See
 
 Findings tied to an advisory point at the `name` line of the package in the lockfile. `deps.source_unreadable` points at line 1 of the lockfile; `deps.data_stale` and the `policy.deps_*` warnings at line 1 of `shk.toml` (of the first lockfile when there is no `shk.toml`).
 
-**Matching.** A package version is affected by an advisory record when it is listed in the record's `versions`, or when it falls inside one of its `SEMVER` or `ECOSYSTEM` ranges. Range events are sorted in semver order and walked: `introduced` switches the range on, `fixed` (that version and later) and `last_affected` (later than that version) switch it off. Pre-releases compare as semver defines. A range holding a value that is not semver is not evaluated; `GIT` ranges are ignored. Withdrawn records are not used.
+**Matching.** A package version is affected by an advisory record when it is listed in the record's `versions`, or when it falls inside one of its `SEMVER` or `ECOSYSTEM` ranges. Range events are sorted in semver order and walked: `introduced` switches the range on, `fixed` (that version and later) and `last_affected` (later than that version) switch it off. Pre-releases compare as semver defines. A range holding a value that is not semver is not evaluated, and a locked version that is not semver can only match the `versions` list; `GIT` ranges are ignored. Withdrawn records are not used.
 
 **Classification.** Each record is classified in this order:
 
