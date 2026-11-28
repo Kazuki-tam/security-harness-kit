@@ -60,6 +60,15 @@ impl DepsEnv {
     }
 }
 
+/// The message of a failed command. An error may quote `shk.toml` or a path,
+/// which the audited project chooses, so control characters are escaped;
+/// line breaks stay, as a parse error spans several lines.
+fn failure(command: &str, error: &anyhow::Error) -> String {
+    let text = format!("{command}: {error:#}");
+    let lines: Vec<String> = text.lines().map(escape_control).collect();
+    lines.join("\n")
+}
+
 /// `1234567` as `1,234,567`.
 fn with_thousands(value: u64) -> String {
     let digits = value.to_string();
@@ -107,7 +116,7 @@ fn run_update(env: &DepsEnv, fetch: Fetcher<'_>) -> Result<()> {
             println!("{}", update_line(&outcome));
             Ok(())
         }
-        Err(error) => Err(CliExit::message(2, format!("shk deps update: {error:#}")).into()),
+        Err(error) => Err(CliExit::message(2, failure("shk deps update", &error)).into()),
     }
 }
 
@@ -150,7 +159,7 @@ fn run_audit(inv: &DepsAuditInvocation, env: &DepsEnv, fetch: Fetcher<'_>) -> Re
             Ok(())
         }
         // Nothing goes to standard output, whatever the format.
-        Err(error) => Err(CliExit::message(2, format!("shk deps audit: {error:#}")).into()),
+        Err(error) => Err(CliExit::message(2, failure("shk deps audit", &error)).into()),
     }
 }
 
@@ -269,7 +278,8 @@ fn human_report(report: &DepsAuditReport, verbose: bool, color: bool) -> String 
         .sum();
     let mut out = format!(
         "Dependency audit: {}, {} ({skipped} skipped), {}\n\n",
-        plural(report.sources.len(), "lockfile"),
+        // Counted with the ones that could not be read, which are findings.
+        plural(report.lockfiles_found, "lockfile"),
         plural(packages, "package"),
         checked_label(report)
     );
@@ -652,6 +662,19 @@ mod tests {
             "{stdout}"
         );
         assert!(stdout.contains("  sub/Cargo.lock:31  "), "{stdout}");
+        // One that cannot be read is still a lockfile that was found.
+        std::fs::write(sub.join("Cargo.lock"), "version = 9\n").unwrap();
+        let stdout = project.run(&project.inv()).stdout;
+        assert!(
+            stdout.starts_with(
+                "Dependency audit: 2 lockfiles, 8 packages (6 skipped), data checked "
+            ),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains("HIGH  deps.source_unreadable  sub/Cargo.lock:1    lockfile could not be audited: unsupported lockfile version 9\n"),
+            "{stdout}"
+        );
         assert_eq!(plural(1, "package"), "1 package");
         assert_eq!(plural(0, "package"), "0 packages");
     }
@@ -716,11 +739,18 @@ mod tests {
                 "[[deps.ignore]] entry 1 in shk.toml needs a non-empty string `reason`",
             ),
             ("[scan]\nexclude = [\"[\"]\n", "invalid exclude glob"),
+            // Text from the policy file cannot reach the terminal raw.
+            (
+                "[scan]\nexclude = [\"\\u001b[2J[\"]\n",
+                "invalid exclude glob \\u{1b}[2J[",
+            ),
+            ("[deps]\nx = \"\u{1b}[2J\n", "\\u{1b}[2J"),
         ] {
             std::fs::write(project.dir.path().join("shk.toml"), policy).unwrap();
             let error = project.error(&inv);
             assert!(error.starts_with("shk deps audit: "), "{error}");
-            assert!(error.contains(message), "{policy}: {error}");
+            assert!(error.contains(message), "{policy:?}: {error:?}");
+            assert!(!error.contains('\u{1b}'), "{error:?}");
         }
     }
 
@@ -804,18 +834,11 @@ mod tests {
         let project = Project::new(Some(SOURCES_LOCK), "");
         let mut bad_url = project.env();
         bad_url.osv_url = Some("http://mirror.example.invalid".into());
-        let error = run_audit(&inv_with_update(&project), &bad_url, &never).unwrap_err();
+        let error = run_audit(&inv, &bad_url, &never).unwrap_err();
         assert_eq!(crate::exit::code_for(&error), 2);
         assert!(error.to_string().contains("SHK_DEPS_OSV_URL"), "{error}");
         // Without `--update` the variable is not looked at.
         assert!(audit_with(&project.inv(), &bad_url, &never).is_ok());
-    }
-
-    fn inv_with_update(project: &Project) -> DepsAuditInvocation {
-        DepsAuditInvocation {
-            update: true,
-            ..project.inv()
-        }
     }
 
     #[test]

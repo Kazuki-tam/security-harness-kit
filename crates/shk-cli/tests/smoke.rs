@@ -9003,7 +9003,12 @@ impl DepsProject {
     }
 
     fn audit(&self, args: &[&str]) -> std::process::Output {
-        shk_cmd()
+        self.audit_command(args).output().expect("run deps audit")
+    }
+
+    fn audit_command(&self, args: &[&str]) -> Command {
+        let mut command = shk_cmd();
+        command
             .args(["deps", "audit"])
             .args(args)
             .current_dir(self.dir.path())
@@ -9011,9 +9016,8 @@ impl DepsProject {
             .env("SHK_DEPS_NOW", DEPS_NOW)
             // A base URL that is never contacted: no test passes `--update`
             // with a setting that reaches the download.
-            .env("SHK_DEPS_OSV_URL", "https://example.invalid/osv")
-            .output()
-            .expect("run deps audit")
+            .env("SHK_DEPS_OSV_URL", "https://example.invalid/osv");
+        command
     }
 }
 
@@ -9098,6 +9102,21 @@ fn deps_audit_errors_exit_two_with_empty_stdout() {
         "`deps.ignore` in shk.toml must be an array of tables",
     );
     project.policy("");
+
+    // `--update` reaches the update code: a setting it refuses stops the run
+    // before any download.
+    let out = project
+        .audit_command(&["--update"])
+        .env("SHK_DEPS_OSV_URL", "http://mirror.example.invalid/osv")
+        .output()
+        .expect("run deps audit --update");
+    assert_eq!(out.status.code(), Some(2), "{}", output_log(&out));
+    assert!(out.stdout.is_empty(), "{}", output_log(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("SHK_DEPS_OSV_URL must be an https://"),
+        "{}",
+        output_log(&out)
+    );
 
     // Packages to audit, and no index to audit them against.
     std::fs::remove_file(project.cache.path().join("osv-crates.io.json")).unwrap();
