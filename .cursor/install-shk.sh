@@ -6,7 +6,7 @@
 set -euo pipefail
 
 SHK_REPO="Kazuki-tam/security-harness-kit"
-SHK_VERSION="${SHK_VERSION:-v0.7.7}"
+SHK_VERSION="${SHK_VERSION:-v0.8.0}"
 INSTALL_DIR="${SHK_CLI_UNMANAGED_INSTALL:-/usr/local/bin}"
 
 if [[ ! "$SHK_VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
