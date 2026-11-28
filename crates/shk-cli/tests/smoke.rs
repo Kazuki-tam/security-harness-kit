@@ -350,6 +350,52 @@ fn mcp_audit_parse_failure_is_a_nonfatal_finding() {
 }
 
 #[test]
+fn deps_help_marks_the_commands_experimental() {
+    for args in [&["deps", "--help"][..], &["deps", "update", "--help"][..]] {
+        let out = shk_cmd().args(args).output().expect("run deps help");
+        assert_eq!(out.status.code(), Some(0), "{}", output_log(&out));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.starts_with("(experimental) "), "{args:?}: {stdout}");
+        assert!(stdout.contains("may still change"), "{args:?}: {stdout}");
+    }
+}
+
+#[test]
+fn deps_update_setting_errors_exit_two_without_output_or_network() {
+    let cache = tempfile::tempdir().expect("tempdir");
+    for (name, value, message) in [
+        (
+            "SHK_DEPS_OSV_URL",
+            "http://mirror.example.invalid/osv",
+            "SHK_DEPS_OSV_URL must be an https:// URL",
+        ),
+        (
+            "SHK_DEPS_NOW",
+            "tomorrow",
+            "SHK_DEPS_NOW must be an RFC 3339 time",
+        ),
+    ] {
+        let out = shk_cmd()
+            .args(["deps", "update"])
+            .env("SHK_DEPS_CACHE_DIR", cache.path())
+            .env(name, value)
+            .output()
+            .expect("run deps update");
+        assert_eq!(out.status.code(), Some(2), "{}", output_log(&out));
+        assert!(out.stdout.is_empty(), "{}", output_log(&out));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("shk deps update: "), "{stderr}");
+        assert!(stderr.contains(message), "{stderr}");
+    }
+    assert!(
+        std::fs::read_dir(cache.path())
+            .expect("read cache dir")
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
 fn mcp_audit_runtime_errors_exit_two() {
     let missing = tempfile::tempdir().expect("tempdir").path().join("missing");
     let out = shk_cmd()
