@@ -21,12 +21,12 @@ path = "src/main.rs"
 formula = "shk"
 
 [dependencies]
-shk-core = { version = "0.7.7", path = "../shk-core" }
-shk-rules = { version = "0.7.7", path = "../shk-rules" }
+shk-core = { version = "0.8.0", path = "../shk-core" }
+shk-rules = { version = "0.8.0", path = "../shk-rules" }
 # No version requirement: never published, and `xtask bump-version` does not
 # need to rewrite it.
 shk-deps = { path = "../shk-deps" }
-shk-integrations = { version = "0.7.7", path = "../shk-integrations" }
+shk-integrations = { version = "0.8.0", path = "../shk-integrations" }
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
