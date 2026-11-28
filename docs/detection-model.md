@@ -43,6 +43,8 @@ The rule engine supports these kinds:
 | `internal` | Default kind for `[[custom_rules]]` entries, gated by `[rules] internal_terms`. Custom rules may declare any other kind string. |
 | `git` | Reserved for Git-related findings. No built-in rule currently emits it. |
 | `mcp` | MCP server configuration findings produced by `shk mcp audit`. |
+| `dependency` | Findings of the experimental `shk deps audit` about a locked dependency, its lockfile or the advisory data. |
+| `supply_chain` | A dependency reported as malicious (`deps.malicious`), from `shk deps audit`. |
 
 Pure-digit values are ignored only for metadata names such as expiry, TTL, port, timeout,
 timestamp, or version. All-digit credentials remain reportable.
@@ -169,6 +171,43 @@ and can legitimately exceed the limits. A single unreadable file does not abort 
 
 Reports contain no process-variable values, header values, or raw matches. See
 [`shk mcp audit`](commands.md#shk-mcp-audit) for the audited file locations and exit codes.
+
+## Dependency Audit
+
+> **Experimental.** See [`shk deps`](commands.md#shk-deps).
+
+`shk deps audit` matches the crates.io packages in `Cargo.lock` against a local index built from the OSV crates.io dump. It does not read source code, resolve dependencies or contact a registry, and it reports what the lockfile pins, not whether the affected code is reachable.
+
+Findings tied to an advisory point at the `name` line of the package in the lockfile. `deps.source_unreadable` points at line 1 of the lockfile; `deps.data_stale` and the `policy.deps_*` warnings at line 1 of `shk.toml` (of the first lockfile when there is no `shk.toml`).
+
+**Matching.** A package version is affected by an advisory record when it is listed in the record's `versions`, or when it falls inside one of its `SEMVER` or `ECOSYSTEM` ranges. Range events are sorted in semver order and walked: `introduced` switches the range on, `fixed` (that version and later) and `last_affected` (later than that version) switch it off. Pre-releases compare as semver defines. A range holding a value that is not semver is not evaluated; `GIT` ranges are ignored. Withdrawn records are not used.
+
+**Classification.** Each record is classified in this order:
+
+| Condition | Rule |
+|-----------|------|
+| The id starts with `MAL-`, an alias does, or the RustSec categories include `malicious` | `deps.malicious` |
+| RustSec `informational` is `unsound` | `deps.unsound` |
+| RustSec `informational` is `unmaintained` | `deps.unmaintained` |
+| RustSec `informational` is `notice` | `deps.notice` |
+| otherwise | `deps.vulnerable` |
+
+**Merging.** RustSec and GitHub often publish the same advisory. Records linked through their `aliases`, including through a shared CVE id, form one group, and a package version gets one finding per group:
+
+- Only the records of the group that match this package version contribute.
+- The finding shows one id: a `RUSTSEC-` record if one matched, else a `GHSA-` record, else the smallest id. The other matching ids and their aliases are in `dependency.aliases`.
+- The rule is the highest-priority classification among them: malicious, vulnerable, unsound, unmaintained, notice.
+- Two versions of the same package under one advisory are two findings.
+
+**Severity of `deps.vulnerable`.** The highest CVSS base score among the matching records decides (CVSS v4 is preferred over v3 within a record): 9.0 and above is `critical`, 7.0 `high`, 4.0 `medium`, 0.1 `low`, 0.0 `info`. Only the base metrics of a vector are scored. When no record has a usable score, the severity is `high`: about half of the RustSec vulnerability advisories carry no CVSS, and `cargo audit` and `cargo deny` fail on all of them too.
+
+**Messages.** `<package> <version>: <id> <summary>`, with ` (fixed: >=X)` for `deps.vulnerable` and `deps.unsound` when the matched range ends in a fix. The summary is cut at 80 characters, and control characters in anything taken from the lockfile, the advisory or `shk.toml` are shown escaped.
+
+**Freshness.** The audit never fetches data on its own. The first line of human output and `data` in the JSON report say when the index was last fetched; `deps.data_stale` is reported when that is longer ago than `[deps].stale_after_hours`. An advisory reaches the OSV dump some time after RustSec or GitHub publish it, which no update interval can shorten.
+
+**Limits.** Git dependencies, other registries and local packages are counted but not audited. Yanked versions, typosquatting and recently published versions are not detected. The index is not signed: the audit trusts its cache directory.
+
+Findings use kind `dependency`, or `supply_chain` for `deps.malicious`; the `policy.deps_*` warnings use `ignore`.
 
 ## PII Coverage
 
