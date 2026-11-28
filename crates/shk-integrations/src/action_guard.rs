@@ -4486,6 +4486,8 @@ impl ActionPatterns {
                 if !budget.charge_policy_comparison(action.len()) {
                     return false;
                 }
+                #[cfg(test)]
+                policy_cost::compared();
                 if wildcard_match(&self.patterns[index], action) {
                     return true;
                 }
@@ -4556,10 +4558,62 @@ fn action_list_matches(action: &str, patterns: &[String]) -> bool {
     patterns
         .iter()
         .map(|pattern| normalize_action_pattern(pattern))
-        .any(|pattern| wildcard_match(&pattern, &action))
+        .any(|pattern| {
+            #[cfg(test)]
+            policy_cost::compared();
+            wildcard_match(&pattern, &action)
+        })
+}
+
+/// What matching against the policy lists has cost on the current thread.
+/// The tests that pin this cost count it: a count is the same on every
+/// machine, which a duration is not.
+#[cfg(test)]
+mod policy_cost {
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy, Debug, Default)]
+    pub(super) struct PolicyCost {
+        /// Actions and list entries normalised.
+        pub(super) normalised: usize,
+        /// The bytes of those.
+        pub(super) normalised_bytes: usize,
+        /// Actions compared with a list entry.
+        pub(super) compared: usize,
+    }
+
+    thread_local! {
+        static COST: Cell<PolicyCost> = const {
+            Cell::new(PolicyCost { normalised: 0, normalised_bytes: 0, compared: 0 })
+        };
+    }
+
+    pub(super) fn normalised(bytes: usize) {
+        COST.with(|cost| {
+            let mut seen = cost.get();
+            seen.normalised += 1;
+            seen.normalised_bytes += bytes;
+            cost.set(seen);
+        });
+    }
+
+    pub(super) fn compared() {
+        COST.with(|cost| {
+            let mut seen = cost.get();
+            seen.compared += 1;
+            cost.set(seen);
+        });
+    }
+
+    /// The cost since the last call, on this thread.
+    pub(super) fn take() -> PolicyCost {
+        COST.with(Cell::take)
+    }
 }
 
 fn normalize_action_pattern(raw: &str) -> String {
+    #[cfg(test)]
+    policy_cost::normalised(raw.len());
     let normalized = raw
         .trim()
         .trim_end_matches(":*")
@@ -8977,33 +9031,43 @@ mod tests {
 
     #[test]
     fn policy_lists_do_not_multiply_the_cost_of_tiny_segments() {
-        // Without the lists these take about a second each in a debug
-        // build, and as long with them. Every entry used to be normalised
-        // again for every segment under every reading, which took minutes.
-        // The run without lists is the measure, so that a slow machine does
-        // not read as a slow guard.
-        let timed = |stdin: &str, config: &ActionGuardConfig| {
-            let started = std::time::Instant::now();
-            let matched = detect_dangerous_action_with_config(stdin, config).unwrap();
-            (matched, started.elapsed())
+        // Every entry used to be normalised again, and compared, for every
+        // segment under every reading, which took minutes where the scan
+        // takes a second. The work is counted instead of timed: a count is
+        // the same on a loaded CI runner, where a second becomes five.
+        let cost = |stdin: &str, count: usize| {
+            policy_cost::take();
+            let matched = detect_dangerous_action_with_config(stdin, &policy_lists(count)).unwrap();
+            assert_eq!(matched, None, "{count}+{count} entries");
+            policy_cost::take()
         };
+        const FEW: usize = 12;
+        const MANY: usize = 50;
         for unit in ["a\n", "\\a;", "do *\n", "a=b<i |"] {
-            let stdin = bash_payload(&tiny_segments(unit));
-            let (matched, without_lists) = timed(&stdin, &ActionGuardConfig::default());
-            assert_eq!(matched, None, "no entries, {unit:?}");
-            let limit = without_lists * 3 + std::time::Duration::from_secs(1);
-            for count in [12, 50] {
-                let (matched, elapsed) = timed(&stdin, &policy_lists(count));
-                if std::env::var_os("SHK_PRINT_GUARD_TIMINGS").is_some() {
-                    eprintln!(
-                        "{count}+{count} entries, {unit:?}: {elapsed:?} ({without_lists:?} without)"
-                    );
-                }
-                assert_eq!(matched, None, "{count} entries, {unit:?}");
-                assert!(
-                    elapsed < limit,
-                    "{count}+{count} entries, {unit:?} took {elapsed:?}, {without_lists:?} without the lists"
-                );
+            let text = tiny_segments(unit);
+            let stdin = bash_payload(&text);
+            let (few, many) = (cost(&stdin, FEW), cost(&stdin, MANY));
+            let label =
+                format!("{unit:?}: {few:?} with {FEW}+{FEW} entries, {many:?} with {MANY}+{MANY}");
+
+            // An entry is normalised when its list is prepared, and never
+            // again: the entries added to the two lists cost a few
+            // normalisations each (one today), however many segments and
+            // readings there are.
+            let added_entries = 2 * (MANY - FEW);
+            assert!(
+                many.normalised.saturating_sub(few.normalised) <= 4 * added_entries,
+                "{label}"
+            );
+            // No entry starts like these commands, so the index finds none
+            // to compare them with.
+            assert_eq!((few.compared, many.compared), (0, 0), "{label}");
+            // What is left is normalising the commands themselves: the whole
+            // text once under each of its six readings, and a repeated
+            // segment once instead of once per repeat.
+            for seen in [few, many] {
+                assert!(seen.normalised <= 4 * 2 * MANY + 200, "{label}");
+                assert!(seen.normalised_bytes <= 8 * text.len(), "{label}");
             }
         }
     }
